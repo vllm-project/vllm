@@ -200,7 +200,15 @@ class A(nn.Module):
         return x
 
 
-def test_conditional_compile_enable_if():
+@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch):
+    # disable compile cache so that we run separately for different splitting_ops
+    # and get the expected number of cudagraphs captured.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
     vllm_config = VllmConfig(
         cache_config=CacheConfig(
             kv_sharing_fast_prefill=True,
@@ -210,6 +218,7 @@ def test_conditional_compile_enable_if():
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=use_inductor_graph_partition,
         ),
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -217,17 +226,26 @@ def test_conditional_compile_enable_if():
     with set_current_vllm_config(vllm_config):
         mod_A = A(vllm_config=vllm_config, prefix="").eval().cuda()
 
+    if use_inductor_graph_partition:
+        expected_num_piecewise_graphs_seen = 2
+        expected_num_piecewise_capturable_graphs_seen = 2
+        expected_num_backend_compilations = 2
+    else:
+        expected_num_piecewise_graphs_seen = 6
+        expected_num_piecewise_capturable_graphs_seen = 4
+        expected_num_backend_compilations = 4
+
     # A has support_torch_compile but enable_if fn returns False
     # enalbe_if will be True for B, so we expect mod1 and mod2
     # to be compiled
     with compilation_counter.expect(
         num_graphs_seen=2,
-        num_piecewise_graphs_seen=6,
+        num_piecewise_graphs_seen=expected_num_piecewise_graphs_seen,
         # 3 piecewise graphs per instance of B()
-        num_piecewise_capturable_graphs_seen=4,
-        num_backend_compilations=4,
+        num_piecewise_capturable_graphs_seen=expected_num_piecewise_capturable_graphs_seen,
+        num_backend_compilations=expected_num_backend_compilations,
         num_cudagraph_captured=8,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        # num_cudagraph_sizes * num cudagraphable graphs to capture
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
 
@@ -242,19 +260,30 @@ def test_conditional_compile_enable_if():
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=use_inductor_graph_partition,
         ),
     )
 
     with set_current_vllm_config(vllm_config):
         mod_A = A(vllm_config=vllm_config, prefix="").eval().cuda()
 
+    if use_inductor_graph_partition:
+        expected_num_piecewise_graphs_seen = 1
+        expected_num_piecewise_capturable_graphs_seen = 1
+        expected_num_backend_compilations = 1
+    else:
+        # 3 attn ops and 4 non-attn ops
+        expected_num_piecewise_graphs_seen = 7
+        expected_num_piecewise_capturable_graphs_seen = 4
+        expected_num_backend_compilations = 4
+
     with compilation_counter.expect(
         num_graphs_seen=1,
-        num_piecewise_graphs_seen=7,
+        num_piecewise_graphs_seen=expected_num_piecewise_graphs_seen,
         # 3 attn ops and 4 non-attn ops
-        num_piecewise_capturable_graphs_seen=4,
-        num_backend_compilations=4,
+        num_piecewise_capturable_graphs_seen=expected_num_piecewise_capturable_graphs_seen,
+        num_backend_compilations=expected_num_backend_compilations,
         num_cudagraph_captured=8,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        # num_cudagraph_sizes * num cudagraphable graphs to capture
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
