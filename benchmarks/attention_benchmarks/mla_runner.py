@@ -352,15 +352,17 @@ def _run_mla_benchmark_batched(
                 max_kv = max(kv_lens)
 
                 # Build query start locations
-                q_start_cpu = np.array(
+                q_start_cpu_np = np.array(
                     [0] + [sum(q_lens[: i + 1]) for i in range(len(q_lens))],
                     dtype=np.int32,
                 )
-                q_start_gpu = torch.from_numpy(q_start_cpu).to(device)
+                q_start_cpu = torch.from_numpy(q_start_cpu_np)
+                q_start_gpu = q_start_cpu.to(device)
 
                 # Build sequence lengths
-                seq_lens_cpu = np.array(kv_lens, dtype=np.int32)
-                seq_lens_gpu = torch.from_numpy(seq_lens_cpu).to(device)
+                seq_lens_cpu_np = np.array(kv_lens, dtype=np.int32)
+                seq_lens_cpu = torch.from_numpy(seq_lens_cpu_np)
+                seq_lens_gpu = seq_lens_cpu.to(device)
 
                 # Build num_computed_tokens (context length for each request)
                 context_lens = [
