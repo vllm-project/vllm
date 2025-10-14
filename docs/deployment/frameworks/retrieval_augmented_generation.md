@@ -40,7 +40,7 @@ pip install -U vllm \
 
 1. Run the script
 
-    ```python
+    ```bash
     python retrieval_augmented_generation_with_langchain.py
     ```
 
@@ -78,6 +78,6 @@ pip install vllm \
 
 1. Run the script:
 
-    ```python
+    ```bash
     python retrieval_augmented_generation_with_llamaindex.py
     ```

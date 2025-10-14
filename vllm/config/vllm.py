@@ -7,13 +7,13 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import field, replace
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -57,23 +57,23 @@ class VllmConfig:
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
     # try to download a model
-    model_config: ModelConfig = None  # type: ignore
+    model_config: ModelConfig = Field(default=None)
     """Model configuration."""
-    cache_config: CacheConfig = field(default_factory=CacheConfig)
+    cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
-    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    scheduler_config: SchedulerConfig = Field(default_factory=SchedulerConfig)
     """Scheduler configuration."""
-    device_config: DeviceConfig = field(default_factory=DeviceConfig)
+    device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
-    load_config: LoadConfig = field(default_factory=LoadConfig)
+    load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
-    structured_outputs_config: StructuredOutputsConfig = field(
+    structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
@@ -81,7 +81,7 @@ class VllmConfig:
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
-    compilation_config: CompilationConfig = field(default_factory=CompilationConfig)
+    compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
     As a shorthand, `-O<n>` can be used to directly specify the compilation
@@ -103,7 +103,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict | SupportsHash = field(default_factory=dict)
+    additional_config: dict | SupportsHash = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
