@@ -439,6 +439,9 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+RUN --mount=type=cache,target=/root/.cache/uv \
+    apt-get install -y git
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
