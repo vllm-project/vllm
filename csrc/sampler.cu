@@ -116,7 +116,7 @@ static __global__ void topKPerRow(const float* logits, const int* rowStarts,
   int rowLen = rowEnd - rowStart;
 
   // Shortcut if the length of the row is smaller than Top-K. Indices are not
-  // sorted by their cor- responding logit.
+  // sorted by their corresponding logit.
   if (rowLen <= kTopK) {
     for (int rowIt = threadIdx.x; rowIt < rowLen;
          rowIt += kNumThreadsPerBlock) {
