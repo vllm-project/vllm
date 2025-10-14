@@ -10,7 +10,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, PoolerConfig
+    from vllm.config import ModelConfig
 
 
 class PoolingParams(
@@ -30,6 +30,7 @@ class PoolingParams(
             if model support matryoshka representation.
         activation: Whether to apply activation function to
             the classification outputs.
+        softmax: Whether to apply softmax to the reward outputs.
     """
 
     # --8<-- [start:common-pooling-params]
@@ -47,19 +48,32 @@ class PoolingParams(
     activation: Optional[bool] = None
     # --8<-- [end:classification-pooling-params]
 
-    ## for step pooling models
+    ## for reward models
+    softmax: Optional[bool] = None
     step_tag_id: Optional[int] = None
     returned_token_ids: Optional[list[int]] = None
 
-    ## Internal use only
     task: Optional[PoolingTask] = None
+    """Internal use only."""
+
     requires_token_ids: bool = False
+    """Internal use only."""
+
     extra_kwargs: Optional[dict[str, Any]] = None
+    """Internal use only."""
+
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "normalize", "activation"]
+        return [
+            "dimensions",
+            "normalize",
+            "activation",
+            "softmax",
+            "step_tag_id",
+            "returned_token_ids",
+        ]
 
     @property
     def valid_parameters(self):
@@ -67,8 +81,7 @@ class PoolingParams(
             "embed": ["dimensions", "normalize"],
             "classify": ["activation"],
             "score": ["activation"],
-            "token_embed": ["dimensions", "normalize"],
-            "token_classify": ["activation"],
+            "encode": ["softmax", "step_tag_id", "returned_token_ids"],
         }
 
     def clone(self) -> "PoolingParams":
@@ -87,6 +100,7 @@ class PoolingParams(
         # NOTE: Task validation needs to done against the model instance,
         # which is not available in model config. So, it's not included
         # in this method
+
         self._merge_default_parameters(model_config)
         self._set_default_parameters(model_config)
         self._verify_valid_parameters()
@@ -111,34 +125,8 @@ class PoolingParams(
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
 
-        self._verify_step_pooling(pooler_config, valid_parameters)
-
-    def _verify_step_pooling(
-        self, pooler_config: "PoolerConfig", valid_parameters: list[str]
-    ):
-        step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
-        if pooler_config.pooling_type != "STEP":
-            invalid_parameters = []
-            for k in step_pooling_parameters:
-                if getattr(self, k, None) is not None:
-                    invalid_parameters.append(k)
-
-            if invalid_parameters:
-                raise ValueError(
-                    f"Task {self.task} only supports {valid_parameters} "
-                    f"parameters, does not support "
-                    f"{invalid_parameters} parameters"
-                )
-        else:
-            for k in step_pooling_parameters:
-                if getattr(pooler_config, k, None) is None:
-                    continue
-
-                if getattr(self, k, None) is None:
-                    setattr(self, k, getattr(pooler_config, k))
-
     def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
-        if self.task in ["embed", "token_embed"]:
+        if self.task == "embed":
             if self.normalize is None:
                 self.normalize = True
 
@@ -162,9 +150,13 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score", "token_classify"]:
+        elif self.task in ["classify", "score"]:
             if self.activation is None:
                 self.activation = True
+
+        elif self.task == "encode":
+            if self.softmax is None:
+                self.softmax = True
         else:
             raise ValueError(f"Unknown pooling task: {self.task}")
 
@@ -193,6 +185,7 @@ class PoolingParams(
             f"normalize={self.normalize}, "
             f"dimensions={self.dimensions}, "
             f"activation={self.activation}, "
+            f"softmax={self.softmax}, "
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
