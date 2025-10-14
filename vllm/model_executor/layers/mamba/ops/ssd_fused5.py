@@ -398,7 +398,7 @@ def _fused5_ssd_kernel(
 
     # advance ptrs up front to simplify and slightly reduce register pressure
     # does actually provide a small benefit vs the original separate ptrs per step
-    states_G_ptr += pid_h * stride_states_G_head + pid_c * stride_states_G_chunk
+    states_G_ptr += pid_h * stride_states_G_head + (pid_c - 1) * stride_states_G_chunk
     x_ptr += chunk_seqlen_start * stride_x_seqlen + pid_h * stride_x_head
     b_ptr += (
         chunk_seqlen_start * stride_b_seqlen
@@ -531,11 +531,6 @@ def _fused5_ssd_kernel(
         )
         seq_idx_new = tl.load(seq_idx_ptr + pid_c * stride_seq_idx_chunk)
 
-        if not HAS_INITSTATES:  # don't let previous chunk affect if new sequence
-            scale = tl.where(
-                seq_idx_new == seq_idx_prev, scale, 0.0
-            )  # TODO: can avoid load instead
-
         # sync
         # the atomic represents which pid_c is ready
         # therefore, wait for it to reach our pid_c
@@ -555,10 +550,15 @@ def _fused5_ssd_kernel(
                     + offs_ds[None, :] * stride_initial_states_dstate
                 )
 
-        if (not NEED_MASK_HD) and (not NEED_MASK_1_DS):
-            states_prev = tl.load(states_prev_ptrs)
+        if seq_idx_new != seq_idx_prev and not HAS_INITSTATES:
+            states_prev = tl.zeros(
+                states.shape, dtype=states_prev_ptrs.dtype.element_ty
+            )
         else:
-            states_prev = tl.load(states_prev_ptrs, mask=main_mask, other=0.0)
+            if (not NEED_MASK_HD) and (not NEED_MASK_1_DS):
+                states_prev = tl.load(states_prev_ptrs)
+            else:
+                states_prev = tl.load(states_prev_ptrs, mask=main_mask, other=0.0)
 
         states_mod = (
             scale * states_prev + states
@@ -589,7 +589,9 @@ def _fused5_ssd_kernel(
     prev_state_stride_hdim = stride_states_G_hdim
     prev_state_stride_dstate = stride_states_G_dstate
 
-    seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_chunk, mask=pid_c >= 1, other=0)
+    seq_idx_prev = tl.load(
+        seq_idx_ptr - stride_seq_idx_chunk, mask=pid_c >= 1, other=-1
+    )
     seq_idx_m = tl.load(seq_idx_ptr)  # current seq idx
     if HAS_INITSTATES:  # if new sequence, switch to initial states
         if seq_idx_prev != seq_idx_m:
@@ -639,7 +641,8 @@ def _fused5_ssd_kernel(
             + offs_k_dstate[:, None] * prev_state_stride_dstate
         )
 
-        if seq_idx_prev == seq_idx_m:  # if new sequence, add previous chunk affect
+        # add previous chunk affect if needed
+        if seq_idx_prev == seq_idx_m or HAS_INITSTATES:
             scale_m = tl.exp(dA_cs_m)
             if BLOCK_SIZE_DSTATE <= CS_WHOLEBLOCK_DS:
                 if (not NEED_MASK_HD) and (not NEED_MASK_CS_DS):
@@ -855,8 +858,8 @@ def _fused5_ssd(
     :param dt_limit: clamp for dt
     """
     # precision settings
-    cb_store_fp32 = False
-    cb_scale_fp32 = False
+    cb_store_fp32 = True
+    cb_scale_fp32 = True
     cs_acc_fp32 = False
     cb_comp_fp32 = True
 
@@ -894,9 +897,8 @@ def _fused5_ssd(
     assert dA_chunk_cumsum.shape == (nheads, nchunks)
     assert seq_idx is not None and seq_idx.shape == (nchunks,)
 
-    # +1 for the final states
     states_G = torch.empty(
-        (nchunks + 1, nheads, hdim, dstate), device=x.device, dtype=state_dtype
+        (nchunks, nheads, hdim, dstate), device=x.device, dtype=state_dtype
     )
     # setup from chunk scan
     assert C.shape == (seqlen, ngroups, dstate)
@@ -910,14 +912,7 @@ def _fused5_ssd(
     if initial_states is not None:
         num_varlen_seqs = initial_states.shape[0]
         assert initial_states.shape == (num_varlen_seqs, nheads, hdim, dstate)
-        # with initial states, we need to take care of how
-        # seq_idx crosses the boundaries
-
-        # TODO: try copying all init states here if it's cheaper
-        states_G[0, :, :, :] = initial_states[0, :, :, :]  # initialize to zero
-
-    else:
-        states_G[0, :, :, :] = 0  # initialize to zero
+        assert initial_states.dtype == states_G.dtype
 
     initial_states_strides = (
         (
@@ -1051,4 +1046,4 @@ def _fused5_ssd(
         CB_COMP_FP32=cb_comp_fp32,
     )
 
-    return out_x, states_G[1:], dA_cumsum, dt_out
+    return out_x, states_G, dA_cumsum, dt_out
