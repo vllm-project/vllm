@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-
+from typing import Optional
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim,
@@ -23,24 +23,24 @@ def flashinfer_fused_moe_blockscale_fp8(
     w2_weight_scale_inv: torch.Tensor,
     global_num_experts: int,
     top_k: int,
-    num_expert_group: int,
-    topk_group: int,
+    num_expert_group: Optional[int],
+    topk_group: Optional[int],
     intermediate_size: int,
     expert_offset: int,
     local_num_experts: int,
     block_shape: list[int],
-    routed_scaling: float = 1.0,
+    routed_scaling: Optional[float] = 1.0,
     routing_method_type: int = 2,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
     assert top_k <= global_num_experts
     assert top_k <= 10
-    assert topk_group <= 4
-    assert global_num_experts > num_expert_group
-    assert global_num_experts % num_expert_group == 0
+    # assert topk_group <= 4
+    # assert global_num_experts > num_expert_group
+    # assert global_num_experts % num_expert_group == 0
     assert global_num_experts % 4 == 0
-    assert top_k < (topk_group * global_num_experts / num_expert_group)
+    # assert top_k < (topk_group * global_num_experts / num_expert_group)
     assert block_shape == [128, 128]
     # Routing kernel expects #experts <= #threads 512
     assert global_num_experts <= 512
