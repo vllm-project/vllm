@@ -1409,7 +1409,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
 
 def __getattr__(name: str):
-    # lazy evaluation of environment variables
+    """
+    Gets environment variables lazily.
+
+    NOTE: After enable_envs_cache() invocation (which triggered after service
+    initialization), all environment variables will be cached.
+    """
     if name in environment_variables:
         return environment_variables[name]()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
