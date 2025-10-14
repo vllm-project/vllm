@@ -22,14 +22,10 @@ else()
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
   )
-  FetchContent_Populate(qutlass)
-  set(qutlass_SOURCE_DIR "${qutlass_SOURCE_DIR}")
 endif()
 
-if(NOT qutlass_SOURCE_DIR)
-  message(FATAL_ERROR "[QUTLASS] source directory could not be resolved.")
-endif()
-message(STATUS "[QUTLASS] QuTLASS is available at ${qutlass_SOURCE_DIR}")
+FetchContent_MakeAvailable(qutlass)
+message(STATUS "QuTLASS is available at ${qutlass_SOURCE_DIR}")
 
 cuda_archs_loose_intersection(QUTLASS_ARCHS "12.0a;10.0a" "${CUDA_ARCHS}")
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND QUTLASS_ARCHS)
