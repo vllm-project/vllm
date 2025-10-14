@@ -234,7 +234,8 @@ class LLMEngine:
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        prompt_text: str | None = None,
+        tier: float = 1,
+        prompt_text: str | None = None,,
     ) -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -258,6 +259,7 @@ class LLMEngine:
                 tokenization_kwargs,
                 trace_headers,
                 priority,
+                tier,
             )
             prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
 

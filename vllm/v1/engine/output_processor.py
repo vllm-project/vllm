@@ -306,6 +306,11 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates()
         self.tracer: Tracer | None = None
 
+    def get_num_pending_context_tokens(self) -> int:
+        return sum(
+            req.prompt_len for req in self.request_states.values() if req.is_prefilling
+        )
+
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 

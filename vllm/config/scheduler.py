@@ -37,6 +37,14 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
+    max_num_reqs: SkipValidation[int] = None
+    """Maximum number of requests that can live in the queue,
+    or None if no limit."""
+
+    max_pending_context_tokens: SkipValidation[int] = None
+    """ Maximum sum of context tokens in requests that are in the pending
+    state, or None if no limit. """
+
     max_num_seqs: SkipValidation[int] = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
 
@@ -279,6 +287,19 @@ class SchedulerConfig:
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
                 self.max_num_seqs * self.max_model_len,
+            )
+
+        if self.max_num_reqs is not None and self.max_num_reqs < 1:
+            raise ValueError(
+                f"max_num_reqs ({self.max_num_reqs}) must be greater than 0."
+            )
+
+        if self.max_pending_context_tokens is not None and (
+            self.max_pending_context_tokens < 1
+        ):
+            raise ValueError(
+                "max_pending_context_tokens "
+                f"({self.max_pending_context_tokens}) must be greater than 0."
             )
 
         if self.num_lookahead_slots < 0:
