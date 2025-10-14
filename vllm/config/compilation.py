@@ -34,8 +34,7 @@ class CompilationMode:
     """No torch.compile compilation is applied, model runs in fully eager pytorch mode."""
     The model runs as-is."""
     STOCK_TORCH_COMPILE = 1
-    """STOCK_TORCH_COMPILE (int): Uses the standard `torch.compile`
-    compilation pipeline."""
+    """The standard `torch.compile` compilation pipeline."""
     DYNAMO_TRACE_ONCE = 2
     """DYNAMO_TRACE_ONCE (int): Uses TorchDynamo to trace the model once for
     static graph optimization."""
