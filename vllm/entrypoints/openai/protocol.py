@@ -1197,6 +1197,10 @@ class CompletionRequest(OpenAIBaseModel):
             "Please pass `grammar` to `structured_outputs` instead."
         ),
     )
+    structural_tag: str | None = Field(
+        default=None,
+        description=("If specified, the output will follow the structural tag schema."),
+    )
     guided_decoding_backend: str | None = Field(
         default=None,
         description=(
@@ -1357,10 +1361,27 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        guided_json_object = None
+        if self.response_format is not None:
+            if self.response_format.type == "json_object":
+                guided_json_object = True
+            elif self.response_format.type == "json_schema":
+                json_schema = self.response_format.json_schema
+                assert json_schema is not None
+                self.guided_json = json_schema.json_schema
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat
+                )
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
+
         # Forward deprecated guided_* parameters to structured_outputs
         if self.structured_outputs is None:
             kwargs = dict[str, Any](
                 json=self.guided_json,
+                json_object=guided_json_object,
                 regex=self.guided_regex,
                 choice=self.guided_choice,
                 grammar=self.guided_grammar,
@@ -1369,13 +1390,6 @@ class CompletionRequest(OpenAIBaseModel):
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
             if len(kwargs) > 0:
                 self.structured_outputs = StructuredOutputsParams(**kwargs)
-
-        if (
-            self.structured_outputs is not None
-            and self.response_format is not None
-            and self.response_format.type == "json_object"
-        ):
-            self.structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
