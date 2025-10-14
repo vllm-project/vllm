@@ -870,6 +870,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        kv_connector_output = model_runner_output.kv_connector_output
         num_steps = model_runner_output.step_num
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)

@@ -151,7 +151,7 @@ class SchedulerOutput:
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
     # KV Cache Connector metadata.
-    kv_connector_metadata: Optional[KVConnectorMetadata] = None
+    kv_connector_metadata: KVConnectorMetadata | None = None
 
     # Number of steps to schedule
     step_num: Optional[int] = 1
