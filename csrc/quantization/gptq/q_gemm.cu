@@ -1038,13 +1038,13 @@ __global__ void reconstruct_exllama_3bit_kernel(
 
       half2 dq[4][16];
       dequant_3bit_32(load_int4[0].x, load_int4[1].x, load_int4[2].x, dq[0],
-                      size_n, zeros[0] + use_v2_format);
+                      size_n, zeros[0] + zero_offset);
       dequant_3bit_32(load_int4[0].y, load_int4[1].y, load_int4[2].y, dq[1],
-                      size_n, zeros[1] + use_v2_format);
+                      size_n, zeros[1] + zero_offset);
       dequant_3bit_32(load_int4[0].z, load_int4[1].z, load_int4[2].z, dq[2],
-                      size_n, zeros[2] + use_v2_format);
+                      size_n, zeros[2] + zero_offset);
       dequant_3bit_32(load_int4[0].w, load_int4[1].w, load_int4[2].w, dq[3],
-                      size_n, zeros[3] + use_v2_format);
+                      size_n, zeros[3] + zero_offset);
 
       if (b_q_perm) {
         for (int j = 0; j < 16; j++) {
