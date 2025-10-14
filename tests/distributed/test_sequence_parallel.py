@@ -234,7 +234,7 @@ def _compare_sp(
         common_args.append("--skip-tokenizer-init")
 
     compilation_config = {
-        "mode": 3,
+        "mode": CompilationMode.VLLM_COMPILE,
         "custom_ops": ["+rms_norm"],
         "compile_sizes": [4, 8],
         "pass_config": {
