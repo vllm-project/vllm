@@ -80,7 +80,7 @@ class KVConnectorRole(enum.Enum):
 
 class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """
-    Metadata used for out of band connector handshakeandshake between
+    Metadata used for out of band connector handshake between
     P/D workers. This needs to serializeable.
     """
 
@@ -281,7 +281,7 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def get_handshake_metadata(self) -> Optional[KVConnectorHandshakeMetadata]:
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
         Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake

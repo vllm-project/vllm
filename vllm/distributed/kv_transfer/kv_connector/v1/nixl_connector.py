@@ -287,7 +287,7 @@ class NixlConnector(KVConnectorBase_V1):
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
 
-    def get_handshake_metadata(self) -> Optional[KVConnectorHandshakeMetadata]:
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
         Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
@@ -314,7 +314,7 @@ class NixlConnectorScheduler:
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
         # Background thread for handling new handshake requests.
-        self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        self._nixl_handshake_listener_t: threading.Thread | None = None
         self._encoded_xfer_handshake_metadata: dict[int, dict[int, Any]] = {}
         self._stop_event = threading.Event()
 
@@ -1488,7 +1488,7 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
-        local_block_descs_ids: np.ndar621
+        local_block_descs_ids: np.ndarray
 
         remote_block_descs_ids: np.ndarray
         if not self.block_window_per_layer:

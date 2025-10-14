@@ -324,15 +324,14 @@ class Worker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
-    def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
 
         if not has_kv_transfer_group():
             return None
 
         connector = get_kv_transfer_group()
-        metadata = connector.get_handshake_metadata()
-        if metadata is None:
+        if (metadata := connector.get_handshake_metadata()) is None:
             logger.warning(
                 "KV connector metadata is not available. "
                 "This may happen if the KV connector is not initialized "
