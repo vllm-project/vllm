@@ -198,7 +198,6 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
-    VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
@@ -1303,12 +1302,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, allows GC to run during capture.
     "VLLM_ENABLE_CUDAGRAPH_GC": lambda: bool(
         int(os.getenv("VLLM_ENABLE_CUDAGRAPH_GC", "0"))
-    ),
-    # Disable padding to CUDA graph capture batch sizes.
-    # TODO(wentao): https://github.com/vllm-project/vllm/issues/23378
-    # After the issue is fixed, we can remove this flag.
-    "VLLM_DISABLE_PAD_FOR_CUDAGRAPH": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_PAD_FOR_CUDAGRAPH", "0"))
     ),
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP": lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
