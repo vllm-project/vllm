@@ -11,6 +11,7 @@ from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer
 
 
 @contextlib.contextmanager
@@ -56,14 +57,8 @@ def llm_pair(request):
         use_inductor_graph_partition
     )
 
-    # TODO(luka/boyuan): fix Inductor assert
-    if use_inductor_graph_partition:  # and not is_torch_equal_or_newer("2.9.0.dev"):
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition only supported in torch>=2.9")
-
-    # if use_inductor_graph_partition:
-    #     # TODO otherwise we reuse an unpartitioned graph
-    #     backend_config.comp_config["inductor_compile_config"] = \
-    #         {"force_disable_caches": True}
 
     # Dynamically skip test if GPU capability is not met
     if (
