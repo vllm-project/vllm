@@ -37,13 +37,11 @@ def _generate(
 class TestOneTokenBadWord:
     MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 
-    PROMPT = "Hi! How are"
-    TARGET_TOKEN = "you"
+    PROMPT = "How old are "
+    TARGET_TOKEN = "mn"
 
     def setup_method(self, method):
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.MODEL, add_prefix_space=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL)
 
         self.num_prompt_tokens = len(self._encode(self.PROMPT))
         self.target_token_id = self._encode(
