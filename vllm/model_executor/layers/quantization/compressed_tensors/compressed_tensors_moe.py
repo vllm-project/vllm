@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     is_valid_flashinfer_cutlass_fused_moe,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
@@ -462,7 +463,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         #
         if self.use_marlin:
             assert self.fused_experts is None
-            return torch.ops.vllm.fused_marlin_moe(
+            return fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1067,7 +1068,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         if self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."
             assert self.fused_experts is None
-            return torch.ops.vllm.fused_marlin_moe(
+            return fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1654,7 +1655,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             indices_type=self.topk_indices_dtype,
         )
 
-        return torch.ops.vllm.fused_marlin_moe(
+        return fused_marlin_moe(
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
