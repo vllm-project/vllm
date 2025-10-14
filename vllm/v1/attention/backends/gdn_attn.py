@@ -36,10 +36,9 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
 
-    has_initial_state: Optional[torch.Tensor] = None
-    block_size: Optional[int] = None
-    chunk_size: Optional[int] = None
     has_initial_state: torch.Tensor | None = None
+    block_size: int | None = None
+    chunk_size: int | None = None
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
     non_spec_query_start_loc: torch.Tensor | None = (
@@ -57,19 +56,19 @@ class GDNAttentionMetadata:
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
     # Decode-side APC metadata
-    state_indices_tensor_d: Optional[torch.Tensor] = None
-    state_indices_tensor_p: Optional[torch.Tensor] = None
-    block_idx_last_computed_token_d: Optional[torch.Tensor] = None
-    block_idx_last_scheduled_token_d: Optional[torch.Tensor] = None
+    state_indices_tensor_d: torch.Tensor | None = None
+    state_indices_tensor_p: torch.Tensor | None = None
+    block_idx_last_computed_token_d: torch.Tensor | None = None
+    block_idx_last_scheduled_token_d: torch.Tensor | None = None
 
     # Prefill-side APC metadata
-    block_idx_first_scheduled_token_p: Optional[torch.Tensor] = None
-    block_idx_last_computed_token_p: Optional[torch.Tensor] = None
-    block_idx_last_scheduled_token_p: Optional[torch.Tensor] = None
-    seq_idx_p: Optional[torch.Tensor] = None
-    cu_chunk_seqlen_p: Optional[torch.Tensor] = None
-    last_chunk_indices_p: Optional[torch.Tensor] = None
-    num_computed_tokens_p: Optional[torch.Tensor] = None
+    block_idx_first_scheduled_token_p: torch.Tensor | None = None
+    block_idx_last_computed_token_p: torch.Tensor | None = None
+    block_idx_last_scheduled_token_p: torch.Tensor | None = None
+    seq_idx_p: torch.Tensor | None = None
+    cu_chunk_seqlen_p: torch.Tensor | None = None
+    last_chunk_indices_p: torch.Tensor | None = None
+    num_computed_tokens_p: torch.Tensor | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -103,12 +102,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size() or 64
-        if self.vllm_config.cache_config.enable_prefix_caching:
-            if kv_cache_spec.block_size % self.chunk_size != 0:
-                raise ValueError(
-                    "GDN prefix caching requires the mamba block size to be a "
-                    "multiple of the kernel chunk size."
-                )
+        if self.vllm_config.cache_config.enable_prefix_caching and (
+            kv_cache_spec.block_size % self.chunk_size != 0
+        ):
+            raise ValueError(
+                "GDN prefix caching requires the mamba block size to be a "
+                "multiple of the kernel chunk size."
+            )
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -247,23 +247,23 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         enable_apc = self.vllm_config.cache_config.enable_prefix_caching
-        block_size_value: Optional[int] = None
-        chunk_size_value: Optional[int] = None
+        block_size_value: int | None = None
+        chunk_size_value: int | None = None
         if enable_apc:
             block_size_value = self.kv_cache_spec.block_size
             chunk_size_value = self.chunk_size
-        state_indices_tensor_d: Optional[torch.Tensor] = None
-        state_indices_tensor_p: Optional[torch.Tensor] = None
-        block_idx_last_computed_token_d: Optional[torch.Tensor] = None
-        block_idx_last_scheduled_token_d: Optional[torch.Tensor] = None
-        block_idx_first_scheduled_token_p: Optional[torch.Tensor] = None
-        block_idx_last_computed_token_p: Optional[torch.Tensor] = None
-        block_idx_last_scheduled_token_p: Optional[torch.Tensor] = None
-        num_computed_tokens_p: Optional[torch.Tensor] = None
-        seq_idx_p: Optional[torch.Tensor] = None
-        cu_chunk_seqlen_p: Optional[torch.Tensor] = None
-        last_chunk_indices_p: Optional[torch.Tensor] = None
-        non_spec_query_start_loc_cpu: Optional[torch.Tensor] = None
+        state_indices_tensor_d: torch.Tensor | None = None
+        state_indices_tensor_p: torch.Tensor | None = None
+        block_idx_last_computed_token_d: torch.Tensor | None = None
+        block_idx_last_scheduled_token_d: torch.Tensor | None = None
+        block_idx_first_scheduled_token_p: torch.Tensor | None = None
+        block_idx_last_computed_token_p: torch.Tensor | None = None
+        block_idx_last_scheduled_token_p: torch.Tensor | None = None
+        num_computed_tokens_p: torch.Tensor | None = None
+        seq_idx_p: torch.Tensor | None = None
+        cu_chunk_seqlen_p: torch.Tensor | None = None
+        last_chunk_indices_p: torch.Tensor | None = None
+        non_spec_query_start_loc_cpu: torch.Tensor | None = None
 
         if (
             not self.use_spec_decode
@@ -277,7 +277,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes = 0
         else:
             spec_sequence_masks = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = spec_sequence_masks.sum().item()
+            num_spec_decodes = int(spec_sequence_masks.sum().item())
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
             else:
