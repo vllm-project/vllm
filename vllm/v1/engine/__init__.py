@@ -18,7 +18,7 @@ from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
 
 
 class FinishReason(enum.IntEnum):
@@ -39,6 +39,9 @@ class FinishReason(enum.IntEnum):
     LENGTH = 1
     ABORT = 2
     ERROR = 3
+
+    def __str__(self):
+        return FINISH_REASON_STRINGS[self.value]
 
 
 class EngineCoreRequest(
