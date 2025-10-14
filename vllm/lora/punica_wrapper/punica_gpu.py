@@ -297,7 +297,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         block_size: int,
         num_experts: int,
         max_loras: int,
-        expert_map:torch.Tensor|None = None,
+        expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """

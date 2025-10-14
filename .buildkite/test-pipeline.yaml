@@ -385,6 +385,8 @@ steps:
       --ignore=lora/test_chatglm3_tp.py \
       --ignore=lora/test_llama_tp.py \
       --ignore=lora/test_llm_with_multi_loras.py
+      --gnore=lora/test_olmoe.py
+      
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests # 15min
@@ -1032,6 +1034,7 @@ steps:
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
+    - pytest -v -s -x lora/test_olmoe.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
