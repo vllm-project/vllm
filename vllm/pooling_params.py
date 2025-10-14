@@ -34,32 +34,32 @@ class PoolingParams(
     """
 
     # --8<-- [start:common-pooling-params]
-    truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=-1)]] = None
+    truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
     # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
     # --8<-- [start:embedding-pooling-params]
-    dimensions: Optional[int] = None
-    normalize: Optional[bool] = None
+    dimensions: int | None = None
+    normalize: bool | None = None
     # --8<-- [end:embedding-pooling-params]
 
     ## for classification, scoring and rerank
     # --8<-- [start:classification-pooling-params]
-    activation: Optional[bool] = None
+    activation: bool | None = None
     # --8<-- [end:classification-pooling-params]
 
     ## for reward models
-    softmax: Optional[bool] = None
-    step_tag_id: Optional[int] = None
-    returned_token_ids: Optional[list[int]] = None
+    softmax: bool | None = None
+    step_tag_id: int | None = None
+    returned_token_ids: list[int] | None = None
 
-    task: Optional[PoolingTask] = None
+    task: PoolingTask | None = None
     """Internal use only."""
 
     requires_token_ids: bool = False
     """Internal use only."""
 
-    extra_kwargs: Optional[dict[str, Any]] = None
+    extra_kwargs: dict[str, Any] | None = None
     """Internal use only."""
 
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY

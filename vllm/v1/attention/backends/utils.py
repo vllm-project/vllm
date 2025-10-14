@@ -11,10 +11,8 @@ from typing import (
     ClassVar,
     Generic,
     Literal,
-    Optional,
     Protocol,
     TypeVar,
-    Union,
     get_args,
 )
 
@@ -42,7 +40,7 @@ from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
-_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
+_KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 
@@ -87,11 +85,14 @@ class CommonAttentionMetadata:
     causal: bool = True
 
     # Needed by FastPrefillAttentionBuilder
-    logits_indices_padded: Optional[torch.Tensor] = None
-    num_logits_indices: Optional[int] = None
+    logits_indices_padded: torch.Tensor | None = None
+    num_logits_indices: int | None = None
 
     # Needed by CrossAttentionBuilder
-    encoder_seq_lens: Optional[np.ndarray] = None
+    encoder_seq_lens: np.ndarray | None = None
+
+    dcp_local_seq_lens: torch.Tensor | None = None
+    """Sequence lengths of the local rank in decode context parallelism world"""
 
 
 def slice_query_start_locs(
@@ -247,7 +248,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: Optional[int] = None
+    reorder_batch_threshold: int | None = None
 
     @abstractmethod
     def __init__(
@@ -344,6 +345,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         use_sliding_window: bool,
         use_local_attention: bool,
         num_sms: int,
+        dcp_world_size: int,
     ) -> bool:
         return False
 
@@ -392,12 +394,12 @@ class PerLayerParameters:
     """
 
     window_left: int
-    logits_soft_cap: Optional[float]
+    logits_soft_cap: float | None
     sm_scale: float
     has_sinks: bool = False
     # has same params for all layers
-    has_same_window_lefts: Optional[bool] = field(default=None, compare=False)
-    has_same_all_params: Optional[bool] = field(default=None, compare=False)
+    has_same_window_lefts: bool | None = field(default=None, compare=False)
+    has_same_all_params: bool | None = field(default=None, compare=False)
 
 
 def get_per_layer_parameters(
@@ -870,7 +872,7 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
 
 
 KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
-    ("logits_indices_padded", Optional[torch.Tensor], None),
+    ("logits_indices_padded", torch.Tensor | None, None),
     ("num_logits_indices", int, 0),
 ]
 
