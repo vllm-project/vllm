@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-from typing import Optional
 
 import uvloop
 
@@ -179,7 +178,7 @@ def run_multi_api_server(args: argparse.Namespace):
     hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
     assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
-    api_server_manager: Optional[APIServerProcessManager] = None
+    api_server_manager: APIServerProcessManager | None = None
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, num_api_servers

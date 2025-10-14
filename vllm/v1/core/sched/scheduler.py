@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Union
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -273,6 +271,9 @@ class Scheduler(SchedulerInterface):
                     self.running.remove(preempted_req)
                     if preempted_req in scheduled_running_reqs:
                         scheduled_running_reqs.remove(preempted_req)
+                        token_budget += num_scheduled_tokens[preempted_req.request_id]
+                        req_to_new_blocks.pop(preempted_req.request_id)
+                        num_scheduled_tokens.pop(preempted_req.request_id)
                 else:
                     preempted_req = self.running.pop()
 
@@ -923,6 +924,10 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
+        if kv_connector_stats and self.connector:
+            stats = self.connector.get_kv_connector_stats()
+            if stats:
+                kv_connector_stats = kv_connector_stats.aggregate(stats)
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1168,7 +1173,7 @@ class Scheduler(SchedulerInterface):
 
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: RequestStatus,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
@@ -1486,7 +1491,7 @@ class Scheduler(SchedulerInterface):
         total_tokens_to_reschedule += num_tokens_to_reschedule
 
         # Mark requests with async KV load failures; they will be rescheduled
-        # once loading completes
+        # once loading completes.
         self.failed_recving_kv_req_ids |= async_affected_req_ids
 
         # --- Handle sync KV loads (running requests) ---
