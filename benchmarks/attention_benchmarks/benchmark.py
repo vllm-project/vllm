@@ -15,15 +15,14 @@ Examples:
     # MLA backends
     python benchmark.py --backends cutlass_mla flashinfer_mla --batch-specs "64s1k"
 
-    # CUTLASS num-splits sweep
+    # Parameter sweep (CLI)
     python benchmark.py --backend cutlass_mla \
                         --batch-specs "64s1k" \
-                        --num-splits 1 4 8 16
+                        --sweep-param num_kv_splits \
+                        --sweep-values 1 4 8 16
 
-    # Speculative decode threshold tuning
-    python benchmark.py --backend flashmla \
-                        --batch-specs "spec4s1k" \
-                        --thresholds 1 4 16 64
+    # Parameter sweep (YAML config - recommended)
+    python benchmark.py --config configs/cutlass_numsplits.yaml
 """
 
 import argparse
@@ -38,7 +37,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from batch_spec import parse_batch_spec
-from common import BenchmarkConfig, BenchmarkResult, ResultsFormatter
+from common import BenchmarkConfig, BenchmarkResult, ParameterSweep, ResultsFormatter
 
 
 def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
@@ -62,6 +61,114 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
         max_time=result_dict["max"],
         throughput_tokens_per_sec=result_dict["throughput"],
     )
+
+
+def run_parameter_sweep(
+    backends: list[str],
+    batch_specs: list[str],
+    base_config_args: dict,
+    sweep: ParameterSweep,
+    console: Console,
+) -> list[BenchmarkResult]:
+    """
+    Run parameter sweep for given backends and batch specs.
+
+    Args:
+        backends: List of backend names
+        batch_specs: List of batch specifications
+        base_config_args: Base configuration arguments (num_layers, head_dim, etc.)
+        sweep: ParameterSweep configuration
+        console: Rich console for output
+
+    Returns:
+        List of BenchmarkResult objects
+    """
+    all_results = []
+
+    # Build list of values to sweep (including auto if requested)
+    sweep_values = list(sweep.values)
+    if sweep.include_auto:
+        sweep_values.append("auto")
+
+    console.print(f"[yellow]Sweep mode: testing {sweep.param_name} = {sweep_values}[/]")
+
+    total = len(backends) * len(batch_specs) * len(sweep_values)
+
+    with tqdm(total=total, desc="Benchmarking") as pbar:
+        for backend in backends:
+            for spec in batch_specs:
+                for value in sweep_values:
+                    # Create config with descriptive backend name
+                    backend_label = sweep.get_label(backend, value)
+                    config = BenchmarkConfig(
+                        backend=backend_label, batch_spec=spec, **base_config_args
+                    )
+
+                    try:
+                        # Create clean config with original backend name for actual run
+                        clean_config = replace(config, backend=backend)
+
+                        # Prepare kwargs for benchmark runner
+                        kwargs = {}
+                        if value != "auto":
+                            kwargs[sweep.param_name] = value
+
+                        # Determine if MLA backend
+                        if backend in [
+                            "cutlass_mla",
+                            "flashinfer_mla",
+                            "flashattn_mla",
+                            "flashmla",
+                        ]:
+                            result = run_mla_benchmark(clean_config, **kwargs)
+                        else:
+                            result = run_standard_attention_benchmark(clean_config)
+
+                        # Replace result's config with labeled version
+                        result = replace(result, config=config)
+                        all_results.append(result)
+
+                    except Exception as e:
+                        console.print(
+                            f"[red]Error {backend} {spec} {sweep.param_name}="
+                            f"{value}: {e}[/]"
+                        )
+                        result = BenchmarkResult(
+                            config=config,
+                            mean_time=float("inf"),
+                            std_time=0,
+                            min_time=float("inf"),
+                            max_time=float("inf"),
+                            error=str(e),
+                        )
+                        all_results.append(result)
+
+                    pbar.update(1)
+
+    # Display sweep results
+    console.print("\n[bold green]Sweep Results:[/]")
+    backend_labels = [sweep.get_label(b, v) for b in backends for v in sweep_values]
+    formatter = ResultsFormatter(console)
+    formatter.print_table(all_results, backend_labels)
+
+    # Show optimal values
+    console.print(f"\n[bold cyan]Optimal {sweep.param_name} per batch spec:[/]")
+    by_spec = {}
+    for r in all_results:
+        if r.success:
+            spec = r.config.batch_spec
+            if spec not in by_spec:
+                by_spec[spec] = []
+            by_spec[spec].append(r)
+
+    for spec in sorted(by_spec.keys()):
+        results = by_spec[spec]
+        best = min(results, key=lambda r: r.mean_time)
+        console.print(
+            f"  {spec}: [bold green]{best.config.backend}[/] ({best.mean_time:.6f}s)"
+        )
+
+    return all_results
 
 
 def load_config_from_yaml(config_path: str) -> dict:
@@ -190,23 +297,16 @@ def main():
     parser.add_argument("--warmup-iters", type=int, default=3, help="Warmup iterations")
     parser.add_argument("--profile-memory", action="store_true", help="Profile memory")
 
-    # MLA-specific options
+    # Parameter sweep (use YAML config for advanced sweeps)
     parser.add_argument(
-        "--num-splits",
-        type=int,
-        nargs="+",
-        help="CUTLASS MLA: Test multiple num_kv_splits values",
+        "--sweep-param",
+        help="Parameter name to sweep (e.g., num_kv_splits, reorder_batch_threshold)",
     )
     parser.add_argument(
-        "--thresholds",
+        "--sweep-values",
         type=int,
         nargs="+",
-        help="FlashMLA/FlashAttn MLA: Test multiple reorder_batch_threshold values",
-    )
-    parser.add_argument(
-        "--compare-auto",
-        action="store_true",
-        help="CUTLASS MLA: Also test auto num_kv_splits",
+        help="Values to sweep for the parameter",
     )
 
     # Output
@@ -283,13 +383,19 @@ def main():
             args.warmup_iters = bench.get("warmup_iters", args.warmup_iters)
             args.profile_memory = bench.get("profile_memory", args.profile_memory)
 
-        # MLA-specific sweeps
-        if "num_splits" in yaml_config:
-            args.num_splits = yaml_config["num_splits"]
-        if "thresholds" in yaml_config:
-            args.thresholds = yaml_config["thresholds"]
-        if "compare_auto" in yaml_config:
-            args.compare_auto = yaml_config["compare_auto"]
+        # Parameter sweep configuration
+        if "parameter_sweep" in yaml_config:
+            sweep_config = yaml_config["parameter_sweep"]
+            args.parameter_sweep = ParameterSweep(
+                param_name=sweep_config["param_name"],
+                values=sweep_config["values"],
+                include_auto=sweep_config.get("include_auto", False),
+                label_format=sweep_config.get(
+                    "label_format", "{backend}_{param_name}_{value}"
+                ),
+            )
+        else:
+            args.parameter_sweep = None
 
         # Output
         if "output" in yaml_config:
@@ -300,6 +406,19 @@ def main():
                 args.output_json = output["json"]
 
         console.print()
+
+    # Handle CLI-based parameter sweep (if not from YAML)
+    if (
+        (not hasattr(args, "parameter_sweep") or args.parameter_sweep is None)
+        and args.sweep_param
+        and args.sweep_values
+    ):
+        args.parameter_sweep = ParameterSweep(
+            param_name=args.sweep_param,
+            values=args.sweep_values,
+            include_auto=False,
+            label_format="{backend}_{param_name}_{value}",
+        )
 
     # Determine backends
     backends = args.backends or ([args.backend] if args.backend else ["flash"])
@@ -404,6 +523,7 @@ def main():
 
                 except Exception as e:
                     import traceback
+
                     console.print(
                         f"[red]Error running batched benchmarks for "
                         f"batch_size={batch_size}: {e}[/]"
@@ -497,102 +617,23 @@ def main():
                     f"\n  [yellow]Prefill always faster for batch_size={bs}[/]"
                 )
 
-    # Handle special cases: num-splits sweep or threshold sweep
-    elif args.num_splits or args.thresholds:
-        # Sweep mode
-        sweep_param = "num_splits" if args.num_splits else "thresholds"
-        sweep_values = args.num_splits or args.thresholds
-
-        if args.compare_auto and args.num_splits:
-            sweep_values = list(sweep_values) + ["auto"]
-
-        console.print(f"[yellow]Sweep mode: testing {sweep_param} = {sweep_values}[/]")
-
-        total = len(backends) * len(args.batch_specs) * len(sweep_values)
-
-        with tqdm(total=total, desc="Benchmarking") as pbar:
-            for backend in backends:
-                for spec in args.batch_specs:
-                    for value in sweep_values:
-                        # Create config
-                        config = BenchmarkConfig(
-                            backend=f"{backend}_{sweep_param}_{value}",
-                            batch_spec=spec,
-                            num_layers=args.num_layers,
-                            head_dim=args.head_dim,
-                            num_q_heads=args.num_q_heads,
-                            num_kv_heads=args.num_kv_heads,
-                            block_size=args.block_size,
-                            device=args.device,
-                            repeats=args.repeats,
-                            warmup_iters=args.warmup_iters,
-                            profile_memory=args.profile_memory,
-                        )
-
-                        try:
-                            # Create a clean config with just the backend name
-                            # for the actual benchmark but keep the full name
-                            # with sweep params in the result
-                            clean_config = replace(config, backend=backend)
-
-                            if args.num_splits:
-                                # CUTLASS num_kv_splits
-                                num_splits = None if value == "auto" else value
-                                result = run_mla_benchmark(
-                                    clean_config, num_kv_splits=num_splits
-                                )
-                            else:
-                                # Threshold sweep
-                                result = run_mla_benchmark(
-                                    clean_config, reorder_batch_threshold=value
-                                )
-
-                            # Replace the result's config with the one that has
-                            # the sweep params in the name
-                            result = replace(result, config=config)
-                            all_results.append(result)
-                        except Exception as e:
-                            console.print(
-                                f"[red]Error {backend} {spec} {sweep_param}="
-                                f"{value}: {e}[/]"
-                            )
-                            result = BenchmarkResult(
-                                config=config,
-                                mean_time=float("inf"),
-                                std_time=0,
-                                min_time=float("inf"),
-                                max_time=float("inf"),
-                                error=str(e),
-                            )
-                            all_results.append(result)
-
-                        pbar.update(1)
-
-        # Display sweep results
-        console.print("\n[bold green]Sweep Results:[/]")
-        backend_names = [
-            f"{b}_{sweep_param}_{v}" for b in backends for v in sweep_values
-        ]
-        formatter = ResultsFormatter(console)
-        formatter.print_table(all_results, backend_names)
-
-        # Show optimal
-        console.print(f"\n[bold cyan]Optimal {sweep_param} per batch spec:[/]")
-        by_spec = {}
-        for r in all_results:
-            if r.success:
-                spec = r.config.batch_spec
-                if spec not in by_spec:
-                    by_spec[spec] = []
-                by_spec[spec].append(r)
-
-        for spec in sorted(by_spec.keys()):
-            results = by_spec[spec]
-            best = min(results, key=lambda r: r.mean_time)
-            console.print(
-                f"  {spec}: [bold green]{best.config.backend}[/] "
-                f"({best.mean_time:.6f}s)"
-            )
+    # Handle parameter sweep mode (unified)
+    elif hasattr(args, "parameter_sweep") and args.parameter_sweep:
+        # Unified parameter sweep
+        base_config_args = {
+            "num_layers": args.num_layers,
+            "head_dim": args.head_dim,
+            "num_q_heads": args.num_q_heads,
+            "num_kv_heads": args.num_kv_heads,
+            "block_size": args.block_size,
+            "device": args.device,
+            "repeats": args.repeats,
+            "warmup_iters": args.warmup_iters,
+            "profile_memory": args.profile_memory,
+        }
+        all_results = run_parameter_sweep(
+            backends, args.batch_specs, base_config_args, args.parameter_sweep, console
+        )
 
     else:
         # Normal mode: compare backends
