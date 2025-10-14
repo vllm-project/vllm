@@ -245,8 +245,8 @@ class EagleProposer:
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
         # dispatcher planning for drafter
-        cudagraph_runtime_mode, batch_descriptor, num_input_tokens, _ = (
-            self.cudagraph_dispatcher.plan(
+        cudagraph_runtime_mode, batch_descriptor, num_input_tokens = (
+            self.cudagraph_dispatcher.fast_plan(
                 num_scheduled_tokens=num_tokens,
                 num_reqs=batch_size,
                 max_query_len=max_query_len,
@@ -334,8 +334,8 @@ class EagleProposer:
         draft_token_ids_list = [draft_token_ids]
 
         # dispatcher plans only once for the remaining loop
-        cudagraph_runtime_mode, batch_descriptor, input_batch_size, _ = (
-            self.cudagraph_dispatcher.plan(
+        cudagraph_runtime_mode, batch_descriptor, input_batch_size = (
+            self.cudagraph_dispatcher.fast_plan(
                 num_scheduled_tokens=batch_size, num_reqs=batch_size, max_query_len=1
             )
         )
@@ -748,8 +748,8 @@ class EagleProposer:
             # unique uniform decode query length (1 for the root level and
             # total_num_drafts for subsequent levels). Here we may support
             # this situation once full cudagraph of TreeAttention is supported.
-            cudagraph_runtime_mode, batch_descriptor, num_input_tokens, _ = (
-                self.cudagraph_dispatcher.plan(
+            cudagraph_runtime_mode, batch_descriptor, num_input_tokens = (
+                self.cudagraph_dispatcher.fast_plan(
                     num_scheduled_tokens=num_tokens,
                     num_reqs=batch_size,
                     max_query_len=attn_metadata.max_query_len,

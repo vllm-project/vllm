@@ -39,16 +39,20 @@ def _run_ar(
     should_dp_pad: bool,
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
+    disable_padding_extend: bool,
+    num_tokens_padded_extended: int,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
+    tensor = torch.zeros(6, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = 1 if should_dp_pad else 0
+    tensor[4][dp_rank] = 1 if disable_padding_extend else 0
+    tensor[5][dp_rank] = num_tokens_padded_extended
     dist.all_reduce(tensor, group=group)
     return tensor
 
@@ -76,6 +80,11 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
 def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch.Tensor:
     num_tokens_across_dp = tensor[1, :]
     if should_dp_pad:
+        # replace num_tokens_across_dp with the extended version when exists one dp rank
+        # do not disable it.
+        disable_padding_extend = bool(torch.all(tensor[4] == 1).item())
+        if not disable_padding_extend:
+            num_tokens_across_dp = tensor[5, :]
         # If DP padding is enabled, ensure that each rank is processing the same number
         # of tokens
         max_num_tokens = int(num_tokens_across_dp.max().item())
@@ -93,6 +102,8 @@ def _synchronize_dp_ranks(
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
     should_attempt_dp_padding: bool,
+    disable_padding_extend: bool,
+    num_tokens_padded_extended: int,
     parallel_config: ParallelConfig,
 ) -> tuple[bool, torch.Tensor | None]:
     """
@@ -120,6 +131,8 @@ def _synchronize_dp_ranks(
         should_dp_pad=should_attempt_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
+        disable_padding_extend=disable_padding_extend,
+        num_tokens_padded_extended=num_tokens_padded_extended,
         parallel_config=parallel_config,
     )
 
@@ -157,6 +170,8 @@ def coordinate_batch_across_dp(
     parallel_config: ParallelConfig,
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
+    disable_padding_extend: bool = True,
+    num_tokens_padded_extended: int | None = None,
     num_scheduled_tokens_per_request: np.ndarray | None = None,
 ) -> tuple[UBatchSlices | None, torch.Tensor | None]:
     """
@@ -170,8 +185,11 @@ def coordinate_batch_across_dp(
         parallel_config: The parallel config
         num_tokens_padded: Number of tokens including any non-DP padding (CUDA graphs,
             TP, etc)
-        uniform_decode: Only used if allow_microbatching is True. True if the batch
-            only contains single token decodes
+        uniform_decode: Used when allow_microbatching is True and/or when it is uniform
+            decoding for spec-decode.
+        disable_padding_extend: If it is True across all dp rank, we do not extend the
+            padding from uniform-decode batch to non-uniform batch.
+        num_tokens_padded_extended: the number of tokens after extending the padding.
         num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
             number of tokens per request.
 
@@ -203,11 +221,16 @@ def coordinate_batch_across_dp(
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
 
+    if num_tokens_padded_extended is None:
+        num_tokens_padded_extended = num_tokens_padded
+
     (should_ubatch, num_tokens_after_padding) = _synchronize_dp_ranks(
         num_tokens_unpadded,
         num_tokens_padded,
         should_attempt_ubatching,
         allow_dp_padding,
+        disable_padding_extend,
+        num_tokens_padded_extended,
         parallel_config,
     )
 

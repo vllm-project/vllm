@@ -466,7 +466,7 @@ class Worker(WorkerBase):
             if num_scheduled_tokens > 0
             else 0
         )
-        num_input_tokens = self.model_runner._get_num_input_tokens(
+        num_input_tokens, _, _ = self.model_runner._get_local_batch_description(
             num_scheduled_tokens, num_reqs, max_query_len
         )
         all_gather_tensors = {
