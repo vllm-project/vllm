@@ -2876,7 +2876,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
-            logger.info("Loading model from scratch...")
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.model_config
             )

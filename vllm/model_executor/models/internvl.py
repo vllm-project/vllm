@@ -1232,8 +1232,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             )
 
         image_token_id = kwargs["image_token_id"]
-        assert isinstance(image_token_id, torch.Tensor)
-        self.img_context_token_id = image_token_id.flatten().unique().item()
+        if isinstance(image_token_id, torch.Tensor):
+            image_token_id = image_token_id.flatten().unique().item()
+
+        assert isinstance(image_token_id, int)
+        self.img_context_token_id = image_token_id
 
         if pixel_values_flat is not None:
             expected_h = expected_w = self.config.vision_config.image_size
@@ -1265,8 +1268,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             )
 
         video_token_id = kwargs["video_token_id"]
-        assert isinstance(video_token_id, torch.Tensor)
-        self.video_context_token_id = video_token_id.flatten().unique().item()
+        if isinstance(video_token_id, torch.Tensor):
+            video_token_id = video_token_id.flatten().unique().item()
+
+        assert isinstance(video_token_id, int)
+        self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
             expected_h = expected_w = self.config.vision_config.image_size

@@ -3,6 +3,7 @@
 import functools
 import operator
 import time
+import weakref
 from typing import ClassVar
 
 import regex as re
@@ -28,6 +29,7 @@ class VllmInductorPass(InductorPass):
     """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):
+        self.compilation_config = weakref.proxy(config.compilation_config)
         self.pass_config = config.compilation_config.pass_config
         self.model_dtype = config.model_config.dtype if config.model_config else None
         self.device = config.device_config.device if config.device_config else None

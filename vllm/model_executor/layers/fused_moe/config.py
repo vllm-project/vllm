@@ -641,6 +641,7 @@ class FusedMoEParallelConfig:
     ep_rank: int
 
     use_ep: bool  # whether to use EP or not
+    all2all_backend: str  # all2all backend for MoE communication
 
     @property
     def use_all2all_kernels(self):
@@ -648,21 +649,18 @@ class FusedMoEParallelConfig:
 
     @property
     def use_pplx_kernels(self):
-        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "pplx"
+        return self.use_all2all_kernels and self.all2all_backend == "pplx"
 
     @property
     def use_deepep_ht_kernels(self):
         return (
             self.use_all2all_kernels
-            and envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            and self.all2all_backend == "deepep_high_throughput"
         )
 
     @property
     def use_deepep_ll_kernels(self):
-        return (
-            self.use_all2all_kernels
-            and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
-        )
+        return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @staticmethod
     def make(
@@ -762,6 +760,7 @@ class FusedMoEParallelConfig:
                 ep_size=1,
                 ep_rank=0,
                 use_ep=False,
+                all2all_backend=vllm_parallel_config.all2all_backend,
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -777,6 +776,7 @@ class FusedMoEParallelConfig:
             ep_size=ep_size,
             ep_rank=ep_rank,
             use_ep=True,
+            all2all_backend=vllm_parallel_config.all2all_backend,
         )
 
 

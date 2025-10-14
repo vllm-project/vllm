@@ -258,13 +258,13 @@ def tractable_computation(
 
 @torch.inference_mode
 def run_model(
-    llama_config, use_compile: bool, use_inductor: bool, split_attn: bool = False
+    llama_config, use_compile: bool, backend: str, split_attn: bool = False
 ) -> torch.Tensor:
     if use_compile:
         compilation_config = CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
-            use_inductor=use_inductor,
+            backend=backend,
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
@@ -338,8 +338,8 @@ def run_model(
             return output.cpu()
 
 
-@pytest.mark.parametrize("use_inductor", [True, False])
-def test_toy_llama(use_inductor: bool):
+@pytest.mark.parametrize("backend", ["inductor", "eager"])
+def test_toy_llama(backend: str):
     # compare output with and without piecewise compilation
 
     llama_config = LlamaConfig(
@@ -358,10 +358,10 @@ def test_toy_llama(use_inductor: bool):
         num_backend_compilations=0,
         num_cudagraph_captured=0,
     ):
-        outputs.append(run_model(llama_config, use_inductor=False, use_compile=False))
-    run_model(tractable_config, use_inductor=False, use_compile=False)
+        outputs.append(run_model(llama_config, backend="eager", use_compile=False))
+    run_model(tractable_config, backend="eager", use_compile=False)
 
-    if use_inductor:
+    if backend == "inductor":
         kwargs = {"num_inductor_compiles": 1, "num_eager_compiles": 0}
     else:
         kwargs = {"num_eager_compiles": 1, "num_inductor_compiles": 0}
@@ -377,10 +377,8 @@ def test_toy_llama(use_inductor: bool):
         num_cudagraph_captured=2,
         **kwargs,
     ):
-        outputs.append(
-            run_model(llama_config, use_inductor=use_inductor, use_compile=True)
-        )
-    run_model(tractable_config, use_inductor=use_inductor, use_compile=True)
+        outputs.append(run_model(llama_config, backend=backend, use_compile=True))
+    run_model(tractable_config, backend=backend, use_compile=True)
 
     with compilation_counter.expect(
         num_graphs_seen=1,  # one graph for the model
@@ -395,16 +393,9 @@ def test_toy_llama(use_inductor: bool):
         ),  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
         outputs.append(
-            run_model(
-                llama_config,
-                use_inductor=use_inductor,
-                use_compile=True,
-                split_attn=True,
-            )
+            run_model(llama_config, backend=backend, use_compile=True, split_attn=True)
         )
-    run_model(
-        tractable_config, use_inductor=use_inductor, use_compile=True, split_attn=True
-    )
+    run_model(tractable_config, backend=backend, use_compile=True, split_attn=True)
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])

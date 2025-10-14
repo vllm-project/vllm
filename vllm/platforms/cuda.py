@@ -192,7 +192,7 @@ class CudaPlatformBase(Platform):
 
         compilation_config = vllm_config.compilation_config
         if (
-            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            parallel_config.all2all_backend == "deepep_high_throughput"
             and parallel_config.data_parallel_size > 1
             and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
@@ -204,7 +204,7 @@ class CudaPlatformBase(Platform):
                 "kernels are optimized for prefill and are incompatible with "
                 "CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
-                "set VLLM_ALL2ALL_BACKEND to another option, such as "
+                "use --all2all-backend with another option, such as "
                 "deepep_low_latency, pplx, or allgather_reducescatter."
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE

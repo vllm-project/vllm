@@ -371,6 +371,7 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    all2all_backend: str | None = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
@@ -410,6 +411,7 @@ class EngineArgs:
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
+    aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
     rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
@@ -762,6 +764,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
         )
+        parallel_group.add_argument(
+            "--all2all-backend", **parallel_kwargs["all2all_backend"]
+        )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -1043,6 +1048,12 @@ class EngineArgs:
             help="Disable logging statistics.",
         )
 
+        parser.add_argument(
+            "--aggregate-engine-logging",
+            action="store_true",
+            help="Log aggregate rather than per-engine statistics "
+            "when using data parallelism.",
+        )
         return parser
 
     @classmethod
@@ -1454,6 +1465,7 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
+            all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
