@@ -492,6 +492,7 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
+
 class Qwen2_5_VLDynamicConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:

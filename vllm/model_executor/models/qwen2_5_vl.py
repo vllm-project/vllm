@@ -70,11 +70,7 @@ from vllm.multimodal.evs import (
 )
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
-    InputProcessingContext,
-    PromptReplacement,
-    PromptUpdate,
-)
+from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
