@@ -3,7 +3,7 @@
 
 import random
 from collections.abc import Callable
-from typing import NamedTuple, Optional, Union
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pytest
@@ -48,7 +48,7 @@ REQS_PER_LOGITPROC = 50
 STR_NO_LOGITPROC = "none"
 
 # LogitsProcessor subclass or "none"
-LogitprocType = Union[type[LogitsProcessor], str]
+LogitprocType: TypeAlias = type[LogitsProcessor] | str
 
 
 class LogitsProcsRequestParams:
@@ -435,7 +435,7 @@ class LogitsprocTestHelpers(NamedTuple):
     """Supports setting up and validating logitsprocs unit tests."""
 
     eval_fxn: Callable
-    gen_request_fxn: Optional[Callable] = None
+    gen_request_fxn: Callable | None = None
 
 
 logitsprocs_test_mapping = {
@@ -471,7 +471,7 @@ def _generate_fake_step_update(
     workload_params: list[LogitsProcsRequestParams],
     wdx: int,
     batch_update_builder: BatchUpdateBuilder,
-) -> tuple[Optional[BatchUpdate], int, int]:
+) -> tuple[BatchUpdate | None, int, int]:
     batch_size = len(persistent_batch)
     workload_size = len(workload_params)
     workload_reqs_remaining = workload_size - wdx
@@ -581,7 +581,7 @@ def _generate_fake_step_update(
     persistent_batch[:] = persistent_batch[0:condensed_batch_size]
 
     if condensed_batch_size > 1:
-        # Simulate arbitrary reorder_batch() in the kernel backend
+        # Simulate arbitrary batch ordering in the kernel backend
         # Generate a random number k of non-overlapping swap tuples
         k = random.randint(0, condensed_batch_size // 2)
         idxs = list(range(condensed_batch_size))

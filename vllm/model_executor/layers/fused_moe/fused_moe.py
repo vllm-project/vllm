@@ -5,7 +5,8 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -39,9 +40,12 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     activation_without_mul,
+    disable_inplace,
     moe_kernel_quantize_input,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
@@ -536,10 +540,10 @@ def invoke_fused_moe_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    B_scale: Optional[torch.Tensor],
-    B_zp: Optional[torch.Tensor],
-    topk_weights: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
+    B_scale: torch.Tensor | None,
+    B_zp: torch.Tensor | None,
+    topk_weights: torch.Tensor | None,
     sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
@@ -552,8 +556,8 @@ def invoke_fused_moe_kernel(
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     per_channel_quant: bool,
-    block_shape: Optional[list[int]] = None,
-    B_bias: Optional[torch.Tensor] = None,
+    block_shape: list[int] | None = None,
+    B_bias: torch.Tensor | None = None,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -805,7 +809,7 @@ def zero_experts_compute_triton(
 
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
 def get_config_file_name(
-    E: int, N: int, dtype: Optional[str], block_shape: Optional[list[int]] = None
+    E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
 ) -> str:
     device_name = current_platform.get_device_name().replace(" ", "_")
     dtype_selector = "" if not dtype else f",dtype={dtype}"
@@ -820,10 +824,10 @@ def get_config_file_name(
 def get_moe_configs(
     E: int,
     N: int,
-    dtype: Optional[str],
-    block_n: Optional[int] = None,
-    block_k: Optional[int] = None,
-) -> Optional[dict[int, Any]]:
+    dtype: str | None,
+    block_n: int | None = None,
+    block_k: int | None = None,
+) -> dict[int, Any] | None:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -962,8 +966,8 @@ def get_default_config(
     N: int,
     K: int,
     topk: int,
-    dtype: Optional[str],
-    block_shape: Optional[list[int]] = None,
+    dtype: str | None,
+    block_shape: list[int] | None = None,
 ) -> dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
@@ -1013,9 +1017,9 @@ def try_get_optimal_moe_config(
     w1_shape: tuple[int, ...],
     w2_shape: tuple[int, ...],
     top_k: int,
-    dtype: Optional[str],
+    dtype: str | None,
     M: int,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> dict[str, int]:
     from vllm.model_executor.layers.fused_moe import get_config
 
@@ -1073,7 +1077,7 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    indices_type: Optional[torch.dtype] = None,
+    indices_type: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
@@ -1132,7 +1136,7 @@ def grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
@@ -1208,7 +1212,7 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
-    indices_type: Optional[torch.dtype] = None,
+    indices_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1323,19 +1327,19 @@ def inplace_fused_experts(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    w1_zp: Optional[torch.Tensor] = None,
-    w2_zp: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-    w1_bias: Optional[torch.Tensor] = None,
-    w2_bias: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1350,7 +1354,7 @@ def inplace_fused_experts(
         use_int8_w8a8,
         use_int8_w8a16,
         use_int4_w4a16,
-        use_mxfp4_w4a4,
+        ocp_mx_scheme,
         per_channel_quant,
         global_num_experts,
         expert_map,
@@ -1378,19 +1382,19 @@ def inplace_fused_experts_fake(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    w1_zp: Optional[torch.Tensor] = None,
-    w2_zp: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-    w1_bias: Optional[torch.Tensor] = None,
-    w2_bias: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> None:
     pass
 
@@ -1420,19 +1424,19 @@ def outplace_fused_experts(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    w1_zp: Optional[torch.Tensor] = None,
-    w2_zp: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-    w1_bias: Optional[torch.Tensor] = None,
-    w2_bias: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1447,7 +1451,7 @@ def outplace_fused_experts(
         use_int8_w8a8,
         use_int8_w8a16,
         use_int4_w4a16,
-        use_mxfp4_w4a4,
+        ocp_mx_scheme,
         per_channel_quant,
         global_num_experts,
         expert_map,
@@ -1474,19 +1478,19 @@ def outplace_fused_experts_fake(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    w1_zp: Optional[torch.Tensor] = None,
-    w2_zp: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-    w1_bias: Optional[torch.Tensor] = None,
-    w2_bias: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -1514,7 +1518,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if inplace:
+    if inplace and not disable_inplace():
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
 
@@ -1531,8 +1535,8 @@ def fused_experts(
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    quant_config: Optional[FusedMoEQuantConfig] = None,
+    expert_map: torch.Tensor | None = None,
+    quant_config: FusedMoEQuantConfig | None = None,
     allow_deep_gemm: bool = False,
     allow_cutlass_block_scaled_grouped_gemm: bool = False,
 ) -> torch.Tensor:
@@ -1599,7 +1603,7 @@ def fused_experts(
             use_int8_w8a8=quant_config.use_int8_w8a8,
             use_int8_w8a16=quant_config.use_int8_w8a16,
             use_int4_w4a16=quant_config.use_int4_w4a16,
-            use_mxfp4_w4a4=quant_config.use_mxfp4_w4a4,
+            ocp_mx_scheme=quant_config.ocp_mx_scheme,
             per_channel_quant=quant_config.per_act_token_quant,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
@@ -1622,8 +1626,8 @@ GELU_NO_MUL: str = activation_without_mul("gelu")
 def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
-    use_mxfp4_w4a4: bool,
-) -> Union[None, torch.dtype, str]:
+    ocp_mx_scheme: str | None,
+) -> None | torch.dtype | str:
     """
     Get the quantization type based on the quantization strategy flags.
     We don't have a quant_config at this point so we need to work backwards.
@@ -1635,8 +1639,12 @@ def _get_config_quant_dtype(
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
         return torch.int8
-    elif use_mxfp4_w4a4:
+    elif ocp_mx_scheme == "w_mxfp4_a_mxfp4":
         return "mxfp4"
+    elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e3m2", "w_mxfp6_e3m2_a_mxfp6_e3m2"}:
+        return "mxfp6_e3m2"
+    elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e2m3", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
+        return "mxfp6_e2m3"
     return None
 
 
@@ -1653,26 +1661,40 @@ def fused_experts_impl(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    w1_zp: Optional[torch.Tensor] = None,
-    w2_zp: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-    w1_bias: Optional[torch.Tensor] = None,
-    w2_bias: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Check constraints.
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
-    elif use_mxfp4_w4a4:
-        # 16bit activation and fp4x2 packed weight
-        assert hidden_states.size(1) // 2 == w1.size(2), "hidden size mismatch"
+    elif ocp_mx_scheme is not None:
+        if ocp_mx_scheme in {
+            "w_mxfp4_a_mxfp4",
+            "w_mxfp4_a_mxfp6_e3m2",
+            "w_mxfp4_a_mxfp6_e2m3",
+        }:
+            # 16bit activation and fp4x2 packed weight
+            assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
+        elif ocp_mx_scheme in {
+            "w_mxfp6_e3m2_a_mxfp6_e3m2",
+            "w_mxfp6_e2m3_a_mxfp6_e2m3",
+        }:
+            assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
+                "hidden size mismatch"
+            )
+        else:
+            raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}"
@@ -1699,7 +1721,7 @@ def fused_experts_impl(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
-        use_mxfp4_w4a4=use_mxfp4_w4a4,
+        ocp_mx_scheme=ocp_mx_scheme,
         dtype=hidden_states.dtype,
     )
 
@@ -1708,7 +1730,7 @@ def fused_experts_impl(
     quant_dtype = _get_config_quant_dtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
-        use_mxfp4_w4a4=use_mxfp4_w4a4,
+        ocp_mx_scheme=ocp_mx_scheme,
     )
 
     get_config_func = functools.partial(
@@ -1746,14 +1768,45 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
+    if inplace and not disable_inplace():
+        out_hidden_states = hidden_states
+    else:
+        out_hidden_states = torch.empty_like(hidden_states)
 
-    if use_mxfp4_w4a4:
-        # Weight has to be dequantized for mxfp4 emulation.
-        w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
-        w1_scale = None
-        w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
-        w2_scale = None
+    if ocp_mx_scheme is not None:
+        # TODO: On platforms for which `current_platform.supports_mx()` is True
+        # and for which we have a native OCP mx fused MOE kernel,
+        # this dequantization step should not be done.
+        if ocp_mx_scheme in {
+            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+        }:
+            # Weight has to be dequantized for mxfp4 emulation.
+            w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
+            w1_scale = None
+            w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
+            w2_scale = None
+        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+            w1 = dequant_mxfp6(
+                w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
+            )
+            w1_scale = None
+            w2 = dequant_mxfp6(
+                w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
+            )
+            w2_scale = None
+        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+            w1 = dequant_mxfp6(
+                w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
+            )
+            w1_scale = None
+            w2 = dequant_mxfp6(
+                w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
+            )
+            w2_scale = None
+        else:
+            raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (
@@ -1906,20 +1959,18 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         workspace1 = (M, topk, max(N // 2, K))
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
@@ -1931,12 +1982,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         # Check constraints.
@@ -2024,7 +2075,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
-        a2q_scale: Optional[torch.Tensor] = None
+        a2q_scale: torch.Tensor | None = None
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             intermediate_cache2,

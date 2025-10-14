@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 
@@ -82,7 +82,7 @@ class CudagraphDispatcher:
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(
-        self, cudagraph_mode: CUDAGraphMode, uniform_query_lens: Union[int, list[int]]
+        self, cudagraph_mode: CUDAGraphMode, uniform_query_lens: int | list[int]
     ):
         # This should be called only after attention backend is initialized.
 
@@ -212,7 +212,7 @@ class CudagraphDispatcher:
             and uniform_query_len > 1
             and num_tokens <= self.compilation_config.max_uniform_capture_size
         ):
-            # this is particular for uniform-decode alignment for vaildation
+            # this is particular for uniform-decode alignment for validation
             # phase of spec-decode, or for the first iteration of drafter when
             # support padded speculation
             return self.vllm_config.pad_for_cudagraph(
@@ -271,7 +271,7 @@ class CudagraphDispatcher:
 
     def maybe_pad_for_dp(
         self, num_input_tokens: int
-    ) -> tuple[int, Optional[torch.Tensor]]:
+    ) -> tuple[int, torch.Tensor | None]:
         if self.runner and hasattr(self.runner, "get_dp_padding"):
             assert not self.is_drafter
             return self.runner.get_dp_padding(num_input_tokens)
@@ -283,7 +283,7 @@ class CudagraphDispatcher:
         num_reqs: int,
         max_query_len: int,
         use_cascade_attn: bool = False,
-    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor], int, Optional[torch.Tensor]]:
+    ) -> tuple[CUDAGraphMode, BatchDescriptor | None, int, torch.Tensor | None]:
         """Plan cudagraph execution in a single call.
 
         Returns (runtime_mode, batch_descriptor, num_input_tokens,
@@ -308,7 +308,7 @@ class CudagraphDispatcher:
 
     def dispatch(
         self, batch_descriptor: BatchDescriptor, use_cascade_attn: bool = False
-    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
+    ) -> tuple[CUDAGraphMode, BatchDescriptor | None]:
         """
         Given conditions(e.g.,batch descriptor and if using cascade attention),
         dispatch to a cudagraph runtime mode and the valid batch descriptor.
