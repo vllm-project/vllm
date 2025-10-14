@@ -849,7 +849,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 block_size = attn_metadata.block_size
                 chunk_stride = block_size // chunk_size
                 last_chunk_indices = attn_metadata.last_chunk_indices_p
-                last_chunk_indices_long = last_chunk_indices.to(torch.long())
+                last_chunk_indices_long = last_chunk_indices.to(torch.long)
                 num_computed_tokens_p = attn_metadata.num_computed_tokens_p
 
                 for seq_idx in range(attn_metadata.num_prefills):
