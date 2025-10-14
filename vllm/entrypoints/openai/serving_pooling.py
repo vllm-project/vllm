@@ -5,7 +5,7 @@ import asyncio
 import base64
 import time
 from collections.abc import AsyncGenerator
-from typing import Final, Literal, Optional, Union, cast
+from typing import Final, Literal, cast
 
 import jinja2
 import numpy as np
@@ -13,11 +13,11 @@ import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
-from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    EMBED_DTYPE_TO_TORCH_DTYPE,
     ErrorResponse,
     IOProcessorRequest,
     IOProcessorResponse,
@@ -30,11 +30,11 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.utils import encoding_pooling_output
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.plugins.io_processors import get_io_processor
 from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
@@ -43,7 +43,7 @@ logger = init_logger(__name__)
 def _get_data(
     output: PoolingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[list[float], str]:
+) -> list[float] | str:
     if encoding_format == "float":
         return output.data.tolist()
     elif encoding_format == "base64":
@@ -60,18 +60,16 @@ class OpenAIServingPooling(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        vllm_config: VllmConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=vllm_config.model_config,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,
@@ -80,14 +78,12 @@ class OpenAIServingPooling(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
-        io_processor_plugin = self.model_config.io_processor_plugin
-        self.io_processor = get_io_processor(vllm_config, io_processor_plugin)
 
     async def create_pooling(
         self,
         request: PoolingRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[PoolingResponse, IOProcessorResponse, ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> PoolingResponse | IOProcessorResponse | ErrorResponse:
         """
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
@@ -95,6 +91,12 @@ class OpenAIServingPooling(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
+            return self.create_error_response(
+                f"embed_dtype={request.embed_dtype!r} is not supported. "
+                f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
+            )
 
         model_name = self.models.model_name()
 
@@ -225,7 +227,7 @@ class OpenAIServingPooling(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: list[Optional[PoolingRequestOutput]]
+        final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -241,6 +243,7 @@ class OpenAIServingPooling(OpenAIServing):
                 created_time,
                 model_name,
                 request.encoding_format,
+                request.embed_dtype,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -257,6 +260,7 @@ class OpenAIServingPooling(OpenAIServing):
         created_time: int,
         model_name: str,
         encoding_format: Literal["float", "base64"],
+        embed_dtype: str,
     ) -> PoolingResponse:
         items: list[PoolingResponseData] = []
         num_prompt_tokens = 0
@@ -264,7 +268,7 @@ class OpenAIServingPooling(OpenAIServing):
         for idx, final_res in enumerate(final_res_batch):
             item = PoolingResponseData(
                 index=idx,
-                data=_get_data(final_res.outputs, encoding_format),
+                data=encoding_pooling_output(final_res, encoding_format, embed_dtype),
             )
             prompt_token_ids = final_res.prompt_token_ids
 

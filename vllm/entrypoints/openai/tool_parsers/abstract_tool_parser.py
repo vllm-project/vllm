@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import Callable, Optional, Union
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -69,7 +68,7 @@ class ToolParser:
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Instance method that should be implemented for extracting tool calls
         from an incomplete response; for use when handling tool calls and
@@ -101,7 +100,7 @@ class ToolParserManager:
     def _register_module(
         cls,
         module: type,
-        module_name: Optional[Union[str, list[str]]] = None,
+        module_name: str | list[str] | None = None,
         force: bool = True,
     ) -> None:
         if not issubclass(module, ToolParser):
@@ -123,10 +122,10 @@ class ToolParserManager:
     @classmethod
     def register_module(
         cls,
-        name: Optional[Union[str, list[str]]] = None,
+        name: str | list[str] | None = None,
         force: bool = True,
-        module: Union[type, None] = None,
-    ) -> Union[type, Callable]:
+        module: type | None = None,
+    ) -> type | Callable:
         """
         Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not
