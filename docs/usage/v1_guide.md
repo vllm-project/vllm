@@ -88,10 +88,6 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟢 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
-!!! tip
-
-    This corresponds to the V1 column in our [list of supported models](../models/supported_models.md).
-
 See below for the status of models that are not yet supported or have more features planned in V1.
 
 #### Embedding Models
