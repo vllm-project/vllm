@@ -14,13 +14,16 @@ Before using EP, you need to install the necessary dependencies. We are actively
 
 ### Backend Selection Guide
 
-vLLM provides three communication backends for EP:
+vLLM provides multiple communication backends for EP. Use `--all2all-backend` to select one:
 
 | Backend | Use Case | Features | Best For |
 |---------|----------|----------|----------|
-| `pplx` | Single node | Chunked prefill support | Development, best for intra-node deployments |
-| `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout | High-throughput scenarios, prefill-dominated workloads |
-| `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout | Low-latency scenarios, decode-dominated workloads |
+| `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
+| `pplx` | Single node | Chunked prefill support, efficient intra-node communication | Single-node deployments, development |
+| `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
+| `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
+| `flashinfer_all2allv` | MNNVL systems | FlashInfer alltoallv kernels for multi-node NVLink | Systems with NVLink across nodes |
+| `naive` | Testing/debugging | Simple broadcast-based implementation | Debugging, not recommended for production |
 
 ## Single Node Deployment
 
@@ -47,11 +50,11 @@ The following command serves a `DeepSeek-V3-0324` model with 1-way tensor parall
 
 ```bash
 # Single node EP deployment with pplx backend
-VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 \
-    vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --tensor-parallel-size 1 \      # Tensor parallelism across 1 GPU
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --tensor-parallel-size 1 \       # Tensor parallelism across 1 GPU
     --data-parallel-size 8 \         # Data parallelism across 8 processes
-    --enable-expert-parallel         # Enable expert parallelism
+    --enable-expert-parallel \       # Enable expert parallelism
+    --all2all-backend pplx           # Use pplx communication backend
 ```
 
 ## Multi-Node Deployment
@@ -70,8 +73,8 @@ The following example deploys `DeepSeek-V3-0324` across 2 nodes using `deepep_lo
 
 ```bash
 # Node 1 (Primary - handles incoming requests)
-VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 \
-    vllm serve deepseek-ai/DeepSeek-V3-0324 \
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --all2all-backend deepep_low_latency \
     --tensor-parallel-size 1 \               # TP size per node
     --enable-expert-parallel \               # Enable EP
     --data-parallel-size 16 \                # Total DP size across all nodes
@@ -81,8 +84,8 @@ VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 \
     --api-server-count=8                     # Number of API servers for load handling (scaling this out to total ranks are recommended)
 
 # Node 2 (Secondary - headless mode, no API server)
-VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 \
-    vllm serve deepseek-ai/DeepSeek-V3-0324 \
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --all2all-backend deepep_low_latency \
     --tensor-parallel-size 1 \               # TP size per node
     --enable-expert-parallel \               # Enable EP
     --data-parallel-size 16 \                # Total DP size across all nodes
@@ -169,11 +172,12 @@ Single node deployment with EPLB enabled:
 
 ```bash
 # Single node with EPLB load balancing
-VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --tensor-parallel-size 1 \     # Tensor parallelism
-    --data-parallel-size 8 \        # Data parallelism  
-    --enable-expert-parallel \      # Enable EP
-    --enable-eplb \                 # Enable load balancer
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --tensor-parallel-size 1 \       # Tensor parallelism
+    --data-parallel-size 8 \         # Data parallelism
+    --enable-expert-parallel \       # Enable EP
+    --all2all-backend pplx \         # Use pplx communication backend
+    --enable-eplb \                  # Enable load balancer
     --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
 
