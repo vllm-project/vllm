@@ -262,7 +262,6 @@ def make_routing_data(
         dtype=BIT,
         shape=bitmatrix_shape,
         shape_max=bitmatrix_shape_max,
-        scratchpad=None,
     )
 
     # matmul_ogs expects invalid topk_weights to be -1s
