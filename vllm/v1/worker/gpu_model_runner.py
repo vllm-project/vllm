@@ -1089,6 +1089,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for x in range(num_reqs):
                 self.input_batch.token_ids_cpu[x, start_index[x]:end_token_index[x]] = \
                         draft_token_ids[x]
+                self.input_batch.spec_tokenids[x] = draft_token_ids[x]
+            # NOTE(woosuk): `num_tokens` here may include spec tokens.
+            self.input_batch.num_tokens[:num_reqs] += num_draft_tokens
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -1282,6 +1285,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_draft_tokens = None
             spec_decode_metadata = None
         else:
+            if self.curr_step > 0:
+                num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
+                for req_idx in range(num_reqs):
+                    num_decode_draft_tokens[req_idx] = (
+                        len(draft_token_ids)
+                        if (
+                            self.input_batch.num_computed_tokens_cpu[req_idx]
+                            >= self.input_batch.num_prompt_tokens[req_idx]
+                        )
+                        else -1
+                    )
+            else:
                 # Get the number of draft tokens for each request.
                 # Iterate over the dictionary rather than all requests since not all
                 # requests have draft tokens.
@@ -2545,6 +2560,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         final_kv_connector_output.finished_sending = set()
         final_kv_connector_output.finished_receving = set()
         for self.curr_step in range(self.total_step):
+            if self.curr_step > 0:
+                # Prepare the decoder inputs.
+                (
+                    attn_metadata,
+                    logits_indices,
+                    spec_decode_metadata,
+                    num_scheduled_tokens_np,
+                    spec_decode_common_attn_metadata,
+                    max_query_len,
+                    ubatch_slices,
+                    num_tokens_across_dp,
+                    use_cascade_attn,
+                ) = self._prepare_inputs(scheduler_output,
+                    cached_valid_sampled_token_ids[-1])
+                (
+                    num_scheduled_tokens,
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                ) = self._preprocess(
+                    scheduler_output, num_input_tokens, intermediate_tensors
+                )
             # Set cudagraph mode to none if calc_kv_scales is true.
             if attn_metadata is not None:
                 metadata_list = (
@@ -2714,17 +2753,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             with record_function_or_nullcontext("EPLB"):
                 self.eplb_step()
-
+            
+            cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
+            if kv_connector_output is not None:
+                final_kv_connector_output.finished_sending.update(
+                        kv_connector_output.finished_sending)
+                final_kv_connector_output.finished_receving.update(
+                        kv_connector_output.finished_receving)
+        
+        final_token_ids = None
+        for each_token_ids in cached_valid_sampled_token_ids:
+            if final_token_ids is None:
+                final_token_ids = each_token_ids
+            else:
+                _ = [x.extend(y) for x, y in zip(final_token_ids, each_token_ids)]
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=valid_sampled_token_ids,
+            sampled_token_ids=final_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            kv_connector_output=kv_connector_output,
+            kv_connector_output=final_kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            step_num=self.curr_step + 1,
         )
+        self.curr_step = 0
 
         if not self.use_async_scheduling:
             return output
