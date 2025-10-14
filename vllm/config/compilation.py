@@ -36,8 +36,7 @@ class CompilationMode:
     STOCK_TORCH_COMPILE = 1
     """The standard `torch.compile` compilation pipeline."""
     DYNAMO_TRACE_ONCE = 2
-    """DYNAMO_TRACE_ONCE (int): Uses TorchDynamo to trace the model once for
-    static graph optimization."""
+    """Single Dynamo trace through the model, avoiding recompilation."""
     VLLM_COMPILE = 3
     """VLLM_COMPILE (int): Uses piecewise compilation backend for optimized
     inference workloads."""
