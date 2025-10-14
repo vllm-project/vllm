@@ -47,20 +47,16 @@ backends:
 # FlashInfer-MLA also supports uniform spec-as-decode but with different mechanism
 # - flashinfer_mla
 
-device: "cuda:0"
-repeats: 10  # More repeats for statistical significance
-warmup_iters: 5
-profile_memory: false
+# Benchmark settings
+benchmark:
+  device: "cuda:0"
+  repeats: 10  # More repeats for statistical significance
+  warmup_iters: 5
+  profile_memory: false
 
 # Test these threshold values for optimization
-reorder_batch_thresholds:
-  - 1
-  - 2
-  - 4
-  - 8
-  - 16
-  - 32
-  - 64
-  - 128
-  - 256
-  - 512
+parameter_sweep:
+  param_name: "reorder_batch_threshold"
+  values: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+  include_auto: false
+  label_format: "{backend}_threshold_{value}"

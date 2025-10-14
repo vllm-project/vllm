@@ -193,6 +193,22 @@ class MockRunner:
 
 
 @dataclass
+class ParameterSweep:
+    """Configuration for sweeping a backend parameter."""
+
+    param_name: str  # Name of the backend parameter to sweep
+    values: list[Any]  # List of values to test
+    include_auto: bool = False  # Also test with param unset (auto mode)
+    label_format: str = "{backend}_{param_name}_{value}"  # Result label template
+
+    def get_label(self, backend: str, value: Any) -> str:
+        """Generate a label for a specific parameter value."""
+        return self.label_format.format(
+            backend=backend, param_name=self.param_name, value=value
+        )
+
+
+@dataclass
 class BenchmarkConfig:
     """Configuration for a single benchmark run."""
 
@@ -349,7 +365,7 @@ class ResultsFormatter:
             name = name.replace("flashinfer_mla", "fimla")
             name = name.replace("flashmla", "fmla")
             name = name.replace("cutlass_mla", "cmla")
-            name = name.replace("num_splits", "ns")
+            name = name.replace("numsplits", "ns")
             return name
 
         table = Table(title="Attention Benchmark Results")
