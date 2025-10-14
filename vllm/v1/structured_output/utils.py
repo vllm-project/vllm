@@ -55,7 +55,6 @@ def apply_grammar_bitmask(
         scheduler_output (SchedulerOutput): The result of engine scheduling.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
-        device (torch.device): The device that model runner running on.
     """
     grammar_bitmask = scheduler_output.grammar_bitmask
     if grammar_bitmask is None:

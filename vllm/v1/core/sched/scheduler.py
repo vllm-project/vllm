@@ -5,10 +5,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any
-
-import numpy as np
-from pandas._typing import npt
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -36,6 +33,10 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
 
 logger = init_logger(__name__)
 
@@ -880,7 +881,7 @@ class Scheduler(SchedulerInterface):
         self,
         scheduled_request_ids: Iterable[str],
         scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> tuple[list[str], npt.NDArray[np.int32] | None]:
+    ) -> tuple[list[str], "npt.NDArray[np.int32] | None"]:
         # Collect list of scheduled request ids that use structured output.
         # The corresponding rows of the bitmask will be in this order.
         # PERF: in case of chunked prefill,
