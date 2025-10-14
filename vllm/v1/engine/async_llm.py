@@ -472,7 +472,9 @@ class AsyncLLM(EngineClient):
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
 
-                    iteration_stats = IterationStats() if log_stats else None
+                    iteration_stats = (
+                        IterationStats() if (log_stats and num_outputs) else None
+                    )
 
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
@@ -487,7 +489,7 @@ class AsyncLLM(EngineClient):
 
                     for i, outputs_slice in enumerate(slices):
                         # 2) Process EngineCoreOutputs.
-                        processed_outputs = output_processor.process_outputs_slice(
+                        processed_outputs = output_processor.process_outputs(
                             outputs_slice, outputs.timestamp, iteration_stats
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
@@ -502,7 +504,7 @@ class AsyncLLM(EngineClient):
                             processed_outputs.reqs_to_abort
                         )
 
-                    output_processor.update_iteration_stats(iteration_stats)
+                    output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in

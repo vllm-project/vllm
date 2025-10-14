@@ -22,7 +22,12 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.metrics.stats import IterationStats, LoRARequestStates, RequestStateStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    LoRARequestStates,
+    RequestStateStats,
+    SchedulerStats,
+)
 
 
 class RequestOutputCollector:
@@ -378,7 +383,7 @@ class OutputProcessor:
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
-    def process_outputs_slice(
+    def process_outputs(
         self,
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
@@ -482,20 +487,8 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
-    def update_iteration_stats(self, iteration_stats: IterationStats | None):
-        self.lora_states.update_iteration_stats(iteration_stats)
-
-    def process_outputs(
-        self,
-        engine_core_outputs: list[EngineCoreOutput],
-        engine_core_timestamp: float | None = None,
-        iteration_stats: IterationStats | None = None,
-    ) -> OutputProcessorOutput:
-        ret = self.process_outputs_slice(
-            engine_core_outputs, engine_core_timestamp, iteration_stats
-        )
-        self.lora_states.update_iteration_stats(iteration_stats)
-        return ret
+    def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+        self.lora_states.update_scheduler_stats(scheduler_stats)
 
     def do_tracing(
         self,
