@@ -64,7 +64,8 @@ class MockKVBProj:
             x: Input tensor [num_tokens, kv_lora_rank]
 
         Returns:
-            Tuple containing output tensor [num_tokens, num_heads, qk_nope_head_dim + v_head_dim]
+            Tuple containing output tensor
+                [num_tokens, num_heads, qk_nope_head_dim + v_head_dim]
         """
         num_tokens = x.shape[0]
         result = torch.randn(
@@ -340,18 +341,30 @@ class ResultsFormatter:
                 by_spec[spec] = {}
             by_spec[spec][r.config.backend] = r
 
+        # Create shortened backend names for display
+        def shorten_backend_name(name: str) -> str:
+            """Shorten long backend names for table display."""
+            # Remove common prefixes
+            name = name.replace("flashattn_mla", "famla")
+            name = name.replace("flashinfer_mla", "fimla")
+            name = name.replace("flashmla", "fmla")
+            name = name.replace("cutlass_mla", "cmla")
+            name = name.replace("num_splits", "ns")
+            return name
+
         table = Table(title="Attention Benchmark Results")
-        table.add_column("Batch Spec", no_wrap=True)
+        table.add_column("Batch\nSpec", no_wrap=True)
 
         multi = len(backends) > 1
         for backend in backends:
+            short_name = shorten_backend_name(backend)
             # Time column
-            col_time = f"{backend} Time (s)"
-            table.add_column(col_time, justify="right", no_wrap=True)
+            col_time = f"{short_name}\nTime (s)"
+            table.add_column(col_time, justify="right", no_wrap=False)
             if multi and compare_to_fastest:
                 # Relative performance column
-                col_rel = f"{backend} vs Fastest"
-                table.add_column(col_rel, justify="right", no_wrap=True)
+                col_rel = f"{short_name}\nvs Best"
+                table.add_column(col_rel, justify="right", no_wrap=False)
 
         # Add rows
         for spec in sorted(by_spec.keys()):
