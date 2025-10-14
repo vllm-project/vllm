@@ -144,8 +144,9 @@ def _convert_req_index_to_global_index_kernel(
     out_stride1,
     prefill_mask_ptr,  # int32 [num_tokens]
     prefill_unique_out_ptr,  # int32 [num_kv_cache_tokens]
-    prefill_seen_ptr,  # int32 [num_kv_cache_tokens] (must be initialized to 0)
+    prefill_seen_ptr,  # int32 [prefill_seen_size] (must be initialized to 0)
     prefill_unique_count_ptr,  # int32 [1]
+    prefill_seen_size,  # int32: size of prefill_seen buffer
     HAS_PREFILL: tl.constexpr,
 ):
     # program_id(0) -> token_id (row)
@@ -197,7 +198,8 @@ def _convert_req_index_to_global_index_kernel(
             )
             for i in tl.static_range(0, BLOCK_N):
                 val = tl.load(out_tile_base + i * out_stride1)
-                if val >= 0:
+                # Only track valid indices that are within bounds
+                if val >= 0 and val < prefill_seen_size:
                     seen_ptr_i = prefill_seen_ptr + val
                     old = tl.atomic_cas(seen_ptr_i, 0, 1)
                     if old == 0:
@@ -286,6 +288,7 @@ def triton_convert_req_index_to_global_index(
         prefill_unique_out,
         prefill_seen,
         prefill_unique_count,
+        prefill_seen.size(0) if prefill_seen is not None else 0,
         HAS_PREFILL=has_prefill,
     )
 
