@@ -770,7 +770,7 @@ class ModelConfig:
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
         # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
-        cls += "Multimodal" if self.hf_config != self.hf_text_config else ""
+        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
         cls += "MoE" if self.get_num_experts() > 1 else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
