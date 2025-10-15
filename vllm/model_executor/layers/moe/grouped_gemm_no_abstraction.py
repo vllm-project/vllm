@@ -9,10 +9,12 @@ import random
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size,
+)
+from vllm.model_executor.layers.moe.fused_moe import invoke_fused_moe_kernel
+from vllm.triton_utils import tl
 from vllm.utils import deep_gemm as vllm_deep_gemm
-
-BLOCK_SIZE = (128, 128)
-BLOCK_N, BLOCK_K = BLOCK_SIZE
 
 
 def generate_bf16_and_downcast_to_fp8(shape, device="cuda"):
@@ -21,12 +23,14 @@ def generate_bf16_and_downcast_to_fp8(shape, device="cuda"):
     return fp8_weight
 
 
-def run_batched_deepgemm_fp8(
+def run_batched_deepgemm_masked_fp8(
     expected_group_batch_size: int,
     num_groups: int,
     output_size: int,
     input_size: int,
 ):
+    BLOCK_SIZE = (128, 128)
+    BLOCK_N, BLOCK_K = BLOCK_SIZE
     weight = generate_bf16_and_downcast_to_fp8((num_groups, output_size, input_size))
     output_tiles = math.ceil(output_size / BLOCK_N)
     input_tiles = math.ceil(input_size / BLOCK_K)
@@ -73,7 +77,7 @@ def run_batched_deepgemm_fp8(
     print(output)
 
 
-def run_batched_deepgemm_bf16(
+def run_batched_deepgemm_masked_bf16(
     expected_group_batch_size: int,
     num_groups: int,
     output_size: int,
@@ -103,7 +107,7 @@ def run_batched_deepgemm_bf16(
         dtype=torch.bfloat16,
         device="cuda",
     )
-    ground_truth_output = torch.einsum("bnk, bmk -> bnm", x, weight)
+    ground_truth_output = torch.einsum("gmk, gnk -> gmn", x, weight)
     output = torch.zeros(
         num_groups,
         batch_size,
@@ -123,15 +127,84 @@ def run_batched_deepgemm_bf16(
             output[i, : group_batch_size[i]],
             ground_truth_output[i, : group_batch_size[i]],
         )
-        print(
-            (
-                output[i, : group_batch_size[i]]
-                - ground_truth_output[i, : group_batch_size[i]]
-            )
-            .abs()
-            .max()
-        )
+        # print(
+        #     (
+        #         output[i, : group_batch_size[i]]
+        #         - ground_truth_output[i, : group_batch_size[i]]
+        #     )
+        #     .abs()
+        #     .max()
+        # )
 
 
-run_batched_deepgemm_fp8(512, 8, 1024, 512)
-run_batched_deepgemm_bf16(512, 8, 1024, 512)
+def run_triton_group_gemm_contiguous_bf16(
+    batch_size: int,
+    num_groups: int,
+    output_size: int,
+    input_size: int,
+    topk: int = 4,
+):
+    weight = torch.randn(
+        num_groups,
+        output_size,
+        input_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    x = torch.randn(
+        batch_size,
+        input_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    topk_ids = torch.randint(
+        num_groups,
+        (batch_size, topk),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    reference_output = torch.einsum("mk, mtnk -> mtn", x, weight[topk_ids])
+    output = torch.zeros(
+        batch_size,
+        topk,
+        output_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    config = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 8,
+    }
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids, config["BLOCK_SIZE_M"], num_groups, expert_map=None
+    )
+    invoke_fused_moe_kernel(
+        A=x,
+        B=weight,
+        C=output,
+        A_scale=None,
+        B_scale=None,
+        B_zp=None,
+        topk_weights=None,
+        sorted_token_ids=sorted_token_ids,
+        expert_ids=expert_ids,
+        num_tokens_post_padded=num_tokens_post_padded,
+        mul_routed_weight=False,
+        top_k=topk,
+        config=config,
+        compute_type=tl.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+    )
+    torch.testing.assert_close(output, reference_output)
+
+
+# run_batched_deepgemm_masked_fp8(512, 8, 1024, 512)
+run_batched_deepgemm_masked_bf16(512, 8, 1024, 512)
+run_triton_group_gemm_contiguous_bf16(512, 8, 1024, 512, 4)

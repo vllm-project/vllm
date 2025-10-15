@@ -34,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_moe_enabled,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -50,8 +53,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
-
-from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
 
