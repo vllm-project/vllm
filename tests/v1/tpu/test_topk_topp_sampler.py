@@ -8,10 +8,7 @@ import torch_xla
 
 from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-
-# isort: off
 from vllm.v1.sample.tpu.sampler import apply_top_k_top_p as apply_top_k_top_p_tpu
-# isort: on
 
 if not current_platform.is_tpu():
     pytest.skip("This test needs a TPU.", allow_module_level=True)
