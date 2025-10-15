@@ -209,7 +209,7 @@ class TritonAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
-        return ["auto", "fp16", "bf16"]
+        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3", "fp8_e5m2"]
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[BlockSize]:
