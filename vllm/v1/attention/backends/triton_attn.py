@@ -216,6 +216,10 @@ class TritonAttentionBackend(AttentionBackend):
         return []
 
     @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
+    @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
         return None
 

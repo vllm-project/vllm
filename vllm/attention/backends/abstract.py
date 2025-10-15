@@ -152,7 +152,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        return True
+        return False
 
     @classmethod
     def is_sparse(cls) -> bool:
