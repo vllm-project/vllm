@@ -10,7 +10,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
     ExtractedToolCallInformation,
-    ResponsesRequest,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import get_json_schema_from_tools
 from vllm.logger import init_logger
@@ -65,7 +64,7 @@ class ToolParser:
         return request
 
     def extract_tool_calls(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """
         Static method that should be implemented for extracting tool calls from

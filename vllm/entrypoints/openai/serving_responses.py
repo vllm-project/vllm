@@ -914,7 +914,8 @@ class OpenAIServingResponses(OpenAIServing):
                 logger.exception("Error in tool parser creation.")
                 raise e
             tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "", request=request
+                content if content is not None else "",
+                request=request,  # type: ignore
             )
             if tool_call_info is not None and tool_call_info.tools_called:
                 # extract_tool_calls() returns a list of tool calls.
