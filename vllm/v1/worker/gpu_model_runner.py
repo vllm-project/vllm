@@ -510,7 +510,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         )
         # multi step
-        self.total_step = 1
         self.curr_step = 0
 
     def reset_mm_cache(self) -> None:
@@ -2545,25 +2544,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         if uniform_decode:
-            self.total_step = scheduler_output.step_num
+            total_step = scheduler_output.step_num
             # some cases that ms doesn't support
             if self.uses_mrope:
-                self.total_step = 1
+                total_step = 1
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
-                self.total_step = 1
+                total_step = 1
             if (
                 self.model_config.is_encoder_decoder
                 and scheduler_output.scheduled_encoder_inputs
             ):
-                self.total_step = 1
+                total_step = 1
         else:
-            self.total_step = 1
+            total_step = 1
 
         cached_valid_sampled_token_ids: list[list[list[int]]] = []
         final_kv_connector_output = KVConnectorOutput()
         final_kv_connector_output.finished_sending = set()
         final_kv_connector_output.finished_recving = set()
-        for self.curr_step in range(self.total_step):
+        for curr_step in range(total_step):
+            self.curr_step = curr_step
             if self.curr_step > 0:
                 # Prepare the decoder inputs.
                 (
@@ -2692,7 +2692,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             with record_function_or_nullcontext("Sample"):
                 sampler_output = self._sample(logits, spec_decode_metadata)
 
-            def propose_draft_token_ids(sampled_token_ids):
+            def propose_draft_token_ids(
+                    spec_decode_common_attn_metadata,
+                    sampled_token_ids
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    spec_decode_metadata,
+                ):
                 assert spec_decode_common_attn_metadata is not None
                 with record_function_or_nullcontext("Draft"):
                     self._draft_token_ids = self.propose_draft_token_ids(
