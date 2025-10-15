@@ -8,7 +8,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, Optional, TypeAlias, TypeVar
 
 import torch
 from fastapi import Request
@@ -1297,6 +1297,21 @@ class OpenAIServing:
             return default
 
         return raw_request.headers.get("X-Request-Id", default)
+
+    @staticmethod
+    def _get_data_parallel_rank(raw_request: Optional[Request]) -> Optional[int]:
+        """Pulls the data parallel rank from a header, if provided"""
+        if raw_request is None:
+            return None
+
+        rank_str = raw_request.headers.get("X-data-parallel-rank")
+        if rank_str is None:
+            return None
+
+        try:
+            return int(rank_str)
+        except ValueError:
+            return None
 
     @staticmethod
     def _get_decoded_token(
