@@ -2694,7 +2694,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             def propose_draft_token_ids(
                     spec_decode_common_attn_metadata,
-                    sampled_token_ids
+                    sampled_token_ids,
                     hidden_states,
                     sample_hidden_states,
                     aux_hidden_states,
