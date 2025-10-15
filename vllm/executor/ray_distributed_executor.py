@@ -24,8 +24,8 @@ from vllm.utils import (
     get_distributed_init_method,
     get_ip,
     get_open_port,
-    make_async,
 )
+from vllm.utils.func import make_async
 from vllm.v1.outputs import SamplerOutput
 
 if ray is not None:
