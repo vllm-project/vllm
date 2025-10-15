@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -2580,40 +2580,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
                 )
 
-            dp_rank = self.parallel_config.data_parallel_rank
-            if ubatch_slices:
-                assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-            elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            else:
-                num_input_tokens = self._pad_for_sequence_parallelism(
-                    scheduler_output.total_num_scheduled_tokens
+                dp_rank = self.parallel_config.data_parallel_rank
+                if ubatch_slices:
+                    assert num_tokens_across_dp is not None
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                    self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+                elif num_tokens_across_dp is not None:
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                else:
+                    num_input_tokens = self._pad_for_sequence_parallelism(
+                        scheduler_output.total_num_scheduled_tokens
+                    )
+
+                (
+                    num_scheduled_tokens,
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                ) = self._preprocess(
+                    scheduler_output, num_input_tokens, intermediate_tensors
                 )
 
-            (
-                num_scheduled_tokens,
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
-            ) = self._preprocess(
-                scheduler_output, num_input_tokens, intermediate_tensors
-            )
-
-            uniform_decode = (
-                max_num_scheduled_tokens == self.uniform_decode_query_len
-            ) and (num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-            batch_descriptor = BatchDescriptor(
-                num_tokens=num_input_tokens, uniform_decode=uniform_decode
-            )
-            cudagraph_runtime_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
-                    batch_descriptor, use_cascade_attn=common_prefix_lens is not None
+                uniform_decode = (
+                    max_num_scheduled_tokens == self.uniform_decode_query_len
+                ) and (num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+                batch_descriptor = BatchDescriptor(
+                    num_tokens=num_input_tokens, uniform_decode=uniform_decode
                 )
-            )
+                cudagraph_runtime_mode, batch_descriptor = (
+                    self.cudagraph_dispatcher.dispatch(
+                        batch_descriptor, use_cascade_attn=common_prefix_lens is not None
+                    )
+                )
+            except Exception:
+                raise
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         if attn_metadata is not None:
