@@ -66,15 +66,13 @@ class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
 
 
 # Multimodal models
-DYNAMIC_ARG_DIMS = (
-    {
-        "input_ids": 0,
-        # set `positions` to last dim to support Qwen-mrope
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    },
-)
+DYNAMIC_ARG_DIMS = {
+    "input_ids": 0,
+    # set `positions` to last dim to support Qwen-mrope
+    "positions": -1,
+    "intermediate_tensors": 0,
+    "inputs_embeds": 0,
+}
 
 
 @MULTIMODAL_REGISTRY.register_processor(
