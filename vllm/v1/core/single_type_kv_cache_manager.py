@@ -429,7 +429,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                     self.block_pool._null_block.is_null = True
                     # Cache it in the manager as well
                     self._null_block = self.block_pool._null_block
-                    blocks[i] = self._null_block
+                blocks[i] = self._null_block
             else:
                 # Normal case: call the null_block property to allocate from free queue
                 blocks[i] = self.null_block
@@ -588,7 +588,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                     self.block_pool._null_block.is_null = True
                     # Cache it in the manager as well
                     self._null_block = self.block_pool._null_block
-                    blocks[i] = self._null_block
+                blocks[i] = self._null_block
             else:
                 # Normal case: call the null_block property to allocate from free queue
                 blocks[i] = self.null_block
