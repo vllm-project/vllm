@@ -297,8 +297,9 @@ class KimiK2ToolParser(ToolParser):
         
         try:
             # Use a comprehensive regex that handles both formats
+            # Support both "function." and "functions." prefixes
             tool_call_pattern = re.compile(
-                r"<\|tool_call_begin\|>\s*functions\.([^:]+):(\d+)\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*<\|tool_call_end\|>",
+                r"<\|tool_call_begin\|>\s*functions?\.([^:]+):(\d+)\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*<\|tool_call_end\|>",
                 re.DOTALL
             )
             matches = tool_call_pattern.findall(model_output)
