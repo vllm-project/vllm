@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, ClassVar, Literal
 
-import cv2
 import numpy as np
 import numpy.typing as npt
 from huggingface_hub import hf_hub_download
@@ -43,6 +42,8 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -78,6 +79,8 @@ def video_to_pil_images_list(path: str, num_frames: int = -1) -> list[Image.Imag
 
 
 def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
