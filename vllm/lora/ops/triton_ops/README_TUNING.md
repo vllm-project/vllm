@@ -10,30 +10,27 @@ Multi-lora shrink/expand Triton kernel tuning follows a similar methodology from
 Define the searching space. An example searching space:
 
 ```python
-
-    block_m_range = [16, 32, 64, 128, 256]
-    block_n_range = [32, 64, 128, 256]
-    block_k_range = [32, 64, 128, 256]
-    num_warps_range = [4, 8]
-    num_stage_range = [2, 3, 4, 5]
-    num_ctas_range = [1]
-    split_k_range = [4, 8, 16, 32, 64]
-
+block_m_range = [16, 32, 64, 128, 256]
+block_n_range = [32, 64, 128, 256]
+block_k_range = [32, 64, 128, 256]
+num_warps_range = [4, 8]
+num_stage_range = [2, 3, 4, 5]
+num_ctas_range = [1]
+split_k_range = [4, 8, 16, 32, 64]
 ```
+
 **Step 2**
 Get all hidden_state sizes and num_slices that the target model uses for a specific TP size.
 
 For example, we can aquire those info by simply checking [add_lora_linear](https://github.com/li2haipeng/vllm/blob/multi_lora_v01011/vllm/lora/punica_wrapper/punica_gpu.py#L192):
 
 ```python
-
 print(f"x_shape: {x.view(-1, x.shape[-1]).shape}")
 print(f"num_sclises: {len(output_slices)}")
 for i in range(len(output_slices)):
     print(f"a{i} shape: {lora_a_stacked[i].shape}")
     print(f"b{i} shape: {lora_b_stacked[i].shape}")
 print("y_shape", y.shape)
-
 ```
 
 **Step 3**
