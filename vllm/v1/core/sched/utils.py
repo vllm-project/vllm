@@ -78,7 +78,7 @@ def add_token_and_check_stop(
 ):
     remain_len = min(
         max_model_len - request.num_tokens,
-        request.max_tokens - request.num_output_tokens
+        request.max_tokens - request.num_output_tokens,
     )
     if remain_len <= 0:
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
