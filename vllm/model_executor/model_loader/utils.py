@@ -22,7 +22,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.models.adapters import (
     as_embedding_model,
-    as_reward_model,
     as_seq_cls_model,
     try_create_mm_pooling_model_cls,
 )
@@ -209,9 +208,6 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
     elif convert_type == "classify":
         logger.debug_once("Converting to sequence classification model.")
         model_cls = as_seq_cls_model(model_cls)
-    elif convert_type == "reward":
-        logger.debug_once("Converting to reward model.")
-        model_cls = as_reward_model(model_cls)
     else:
         assert_never(convert_type)
 
