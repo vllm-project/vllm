@@ -55,16 +55,11 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig, PreTrainedModel
+    from transformers import PreTrainedModel
 
-    from vllm.config import (
-        CacheConfig,
-        DeviceConfig,
-        ModelConfig,
-        ParallelConfig,
-        VllmConfig,
-    )
-    from vllm.model_executor.layers.quantization import QuantizationConfig
+    from vllm.config import VllmConfig
+else:
+    PreTrainedModel = object
 
 logger = init_logger(__name__)
 
@@ -98,17 +93,17 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__()
         logger.info("Using Transformers backend.")
 
-        self.config: PretrainedConfig = vllm_config.model_config.hf_config
-        self.text_config: PretrainedConfig = self.config.get_text_config()
-        self.cache_config: CacheConfig = vllm_config.cache_config
-        self.device_config: DeviceConfig = vllm_config.device_config
-        self.model_config: ModelConfig = vllm_config.model_config
-        self.parallel_config: ParallelConfig = vllm_config.parallel_config
-        self.quant_config: QuantizationConfig | None = vllm_config.quant_config
+        self.config = vllm_config.model_config.hf_config
+        self.text_config = self.config.get_text_config()
+        self.cache_config = vllm_config.cache_config
+        self.device_config = vllm_config.device_config
+        self.model_config = vllm_config.model_config
+        self.parallel_config = vllm_config.parallel_config
+        self.quant_config = vllm_config.quant_config
 
         self.pp_group = get_pp_group()
         self.tp_group = get_tp_group()

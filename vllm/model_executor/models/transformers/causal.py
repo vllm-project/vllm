@@ -61,6 +61,6 @@ class CausalMixin(VllmModelForTextGeneration):
         else:
             self.lm_head = PPMissingLayer()
 
-    def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor" | None:
+    def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
