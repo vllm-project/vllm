@@ -66,7 +66,7 @@ def _write_log_entry(name: str, elapsed_ns: int) -> None:
         if directory:
             os.makedirs(directory, exist_ok=True)
         # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
-        _log_file = open(_LOG_PATH, "a", buffering=50000)
+        _log_file = open(_LOG_PATH, "a", buffering=1)
         atexit.register(_log_file.close)
 
     _log_file.write(log_line)
@@ -114,7 +114,6 @@ def maybe_emit_lite_profiler_report() -> None:
     # Ensure the log file is flushed and closed before generating report
     global _log_file
     if _log_file is not None:
-        _log_file.flush()
         _log_file.close()
         _log_file = None
 
