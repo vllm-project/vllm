@@ -422,7 +422,8 @@ class CoreEngineActorManager:
                 "need multiple nodes per dp group"
             )
 
-        # fill placement group bundles until placement group can be created
+        # we might have to fill pg bundle over multiple nodes
+        # with placement_strategy == "PACK"
         pg_bundles = []
         for node_resources in nodes:
             node_ip_keys = [
