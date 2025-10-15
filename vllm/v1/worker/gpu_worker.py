@@ -20,12 +20,7 @@ from vllm.distributed import (
     set_custom_all_reduce,
 )
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-from vllm.distributed.parallel_state import (
-    get_dp_group,
-    get_ep_group,
-    get_pp_group,
-    get_tp_group,
-)
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -554,6 +549,8 @@ class Worker(WorkerBase):
         return
 
     def _eplb_before_scale_down(self, old_ep_size: int, new_ep_size: int) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
         if get_ep_group().rank == 0:
             logger.info(
                 "[Elastic EP] Starting expert resharding before scaling down..."
@@ -579,6 +576,8 @@ class Worker(WorkerBase):
         new_ep_size: int,
         global_expert_load: torch.Tensor | None,
     ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding after scaling up...")
         rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
@@ -629,6 +628,8 @@ class Worker(WorkerBase):
         otherwise None
         """
         from vllm.distributed.parallel_state import (
+            get_dp_group,
+            get_ep_group,
             prepare_communication_buffer_for_model,
         )
         from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
@@ -696,6 +697,7 @@ class Worker(WorkerBase):
         from vllm.config import set_current_vllm_config
         from vllm.distributed.parallel_state import (
             cleanup_dist_env_and_memory,
+            get_ep_group,
         )
 
         old_ep_size = get_ep_group().world_size
