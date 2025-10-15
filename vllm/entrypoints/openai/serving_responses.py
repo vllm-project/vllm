@@ -190,7 +190,7 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
-
+        self.enable_auto_tools = enable_auto_tools
         # set up tool use
         self.tool_parser = self._get_tool_parser(
             tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
