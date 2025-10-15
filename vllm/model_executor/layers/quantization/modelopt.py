@@ -1170,6 +1170,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
                 " for ModelOptNvFp4FusedMoE."
             )
+        else:
+            logger.info_once("Not using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin or (
