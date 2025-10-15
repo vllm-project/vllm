@@ -558,6 +558,13 @@ class FusedMoE(CustomOp):
             else:
                 self.routing_method_type = RoutingMethodType.TopK
 
+
+        # TODO(bnell): total hack
+        if envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid":
+            max_num_tokens = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+        else:
+            max_num_tokens = envs.VLLM_MOE_DP_CHUNK_SIZE
+
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
@@ -565,7 +572,7 @@ class FusedMoE(CustomOp):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+            max_num_tokens=max_num_tokens,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
@@ -751,6 +758,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_parallel_config.use_deepep_hybrid_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
@@ -1776,7 +1784,12 @@ class FusedMoE(CustomOp):
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        def process_chunk(chunk_start, chunk_end, skip_result_store=False):
+        def process_chunk(
+            chunk_start,
+            chunk_end,
+            skip_result_store=False,
+            max_tokens_across_dispatchers=0,
+        ):
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
@@ -1821,9 +1834,11 @@ class FusedMoE(CustomOp):
                 shared_output = self.shared_experts(staged_hidden_states)
 
                 final_hidden_states = (
-                    shared_output,
-                    final_hidden_states,
+                    shared_output[:num_tokens],
+                    final_hidden_states[:num_tokens],
                 )
+            else:
+                final_hidden_states = final_hidden_states[:num_tokens]
 
             if self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(final_hidden_states, tuple)
@@ -1858,6 +1873,21 @@ class FusedMoE(CustomOp):
             )
 
         num_tokens = full_hidden_states.size(0)
+
+        print(
+            f"MAX_TOKENS_ACROSS_DISPATCHERS = {num_tokens} {max_tokens_across_dispatchers}"
+        )
+
+        if False and num_tokens < max_tokens_across_dispatchers:
+            pad = max_tokens_across_dispatchers - num_tokens
+            full_hidden_states = F.pad(
+                full_hidden_states,
+                (0, pad),
+                mode="constant",
+                value=0.0,
+            )
+            print(f"PADDING {num_tokens} {pad}")
+
         for chunk_idx, chunk_start_ in enumerate(
             range(0, max_tokens_across_dispatchers, moe_dp_chunk_size_per_rank)
         ):
@@ -1872,7 +1902,10 @@ class FusedMoE(CustomOp):
                 self.sp_size, moe_dp_chunk_size_per_rank, chunk_idx
             ):
                 process_chunk(
-                    chunk_start, chunk_end, skip_result_store=chunk_start_ >= num_tokens
+                    chunk_start,
+                    chunk_end,
+                    skip_result_store=chunk_start_ >= num_tokens,
+                    max_tokens_across_dispatchers=max_tokens_across_dispatchers,
                 )
 
         if self.shared_experts is None:

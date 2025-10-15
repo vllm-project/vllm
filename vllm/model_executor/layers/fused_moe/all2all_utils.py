@@ -56,10 +56,13 @@ def maybe_roundup_layer_hidden_size(
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
-
-    if moe_parallel_config.use_deepep_ll_kernels:
+    elif moe_parallel_config.use_deepep_ll_kernels:
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
+        )
+    elif moe_parallel_config.use_deepep_hybrid_kernels:
+        hidden_size = DeepEPHybridPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype
         )
 
     return hidden_size
@@ -171,13 +174,17 @@ def maybe_make_prepare_finalize(
     elif moe.use_deepep_hybrid_kernels:
         assert moe.dp_size == all2all_manager.dp_world_size
 
-        use_fp8 = quant_config.use_fp8_w8a8 if quant_config is not None else False
+        use_fp8 = (
+            quant_config is not None
+            and quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+        )
 
         all_to_all_args = dict(
             hidden_dim=moe.hidden_dim,
             max_num_of_tokens_per_rank=moe.max_num_tokens,
             num_local_experts=(moe.num_experts // all2all_manager.world_size),
-            num_of_experts=moe.num_experts,
+            # num_of_experts=moe.num_experts,
             use_fp8=use_fp8,
         )
 
@@ -187,6 +194,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+            num_local_experts=moe.num_local_experts,
         )
 
     return prepare_finalize

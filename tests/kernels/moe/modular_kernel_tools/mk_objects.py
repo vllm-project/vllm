@@ -273,7 +273,7 @@ if False and (
 else:
     FlashInferCutlassMoEPrepareAndFinalize = None
 
-if has_deep_gemm() and is_deep_gemm_supported():
+if False and has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
         BatchedDeepGemmExperts,
         batched_format,
@@ -457,7 +457,7 @@ def make_fused_experts(
         experts = BatchedTritonExperts(**kwargs)
     elif fused_experts_type == DeepGemmExperts:
         print(f"Making DeepGemmExperts {quant_config} ...")
-        experts = DeepGemmExperts(quant_config)
+        experts = DeepGemmExperts(quant_config)  # , skip_permute_unpermute=True)
     elif fused_experts_type == TritonExperts:
         kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")

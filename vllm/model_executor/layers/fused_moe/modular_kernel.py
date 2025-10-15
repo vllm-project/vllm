@@ -1050,6 +1050,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             topk_weights if _expert_topk_weights is None else _expert_topk_weights
         )
 
+        assert topk_ids.shape == topk_weights.shape, f"{topk_ids.shape} == {topk_weights.shape}"
+
         return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 
     def _fused_experts(
