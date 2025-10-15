@@ -1265,7 +1265,11 @@ def check_answers(
 
 
 def flat_product(*iterables: Iterable[Any]):
-    """Flatten lists of tuples into cartesian product."""
+    """
+    Flatten lists of tuples of the cartesian product.
+    Useful when we want to avoid nested tuples to allow
+    test params to be unpacked directly from the decorator.
+    """
     for element in itertools.product(*iterables):
-        normalized = (e if isinstance(e, tuple) else [e] for e in element)
-        yield list(itertools.chain(*normalized))
+        normalized = (e if isinstance(e, tuple) else (e,) for e in element)
+        yield tuple(itertools.chain(*normalized))
