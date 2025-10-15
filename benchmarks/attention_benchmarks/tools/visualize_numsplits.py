@@ -10,6 +10,7 @@ Usage:
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -34,9 +35,15 @@ def load_results(json_path: str) -> list:
         return json.load(f)
 
 
-def extract_optimal_splits(results: list) -> dict[tuple[int, int], int]:
+def extract_optimal_splits(
+    results: list, exclude_auto: bool = False
+) -> dict[tuple[int, int], int]:
     """
     Extract optimal num_kv_splits for each (batch_size, seq_length) pair.
+
+    Args:
+        results: List of benchmark results
+        exclude_auto: If True, exclude "auto" backend from consideration
 
     Returns:
         Dict mapping (batch_size, seq_length_k) -> optimal_num_kv_splits
@@ -45,6 +52,12 @@ def extract_optimal_splits(results: list) -> dict[tuple[int, int], int]:
     by_batch_spec = {}
     for result in results:
         batch_spec = result["config"]["batch_spec"]
+        backend_name = result["config"]["backend"]
+
+        # Skip auto if requested
+        if exclude_auto and "auto" in backend_name:
+            continue
+
         if batch_spec not in by_batch_spec:
             by_batch_spec[batch_spec] = []
         by_batch_spec[batch_spec].append(result)
@@ -74,70 +87,65 @@ def extract_optimal_splits(results: list) -> dict[tuple[int, int], int]:
     return optimal_splits
 
 
-def create_heatmap(optimal_splits: dict[tuple[int, int], int], output_path: str):
-    """Create heatmap showing optimal num_kv_splits."""
-    # Extract unique batch sizes and sequence lengths
-    batch_sizes = sorted(set(b for b, _ in optimal_splits))
-    seq_lengths = sorted(
-        set(s for _, s in optimal_splits), reverse=True
-    )  # Reverse for bottom-to-top
+def _get_axes_from_splits_dict(
+    splits_dict: Mapping[tuple[int, int], int | float],
+) -> tuple[list[int], list[int]]:
+    """Extract sorted batch sizes and sequence lengths from splits dictionary."""
+    batch_sizes = sorted(set(b for b, _ in splits_dict))
+    seq_lengths = sorted(set(s for _, s in splits_dict), reverse=True)
+    return batch_sizes, seq_lengths
 
-    # Create matrix
+
+def _create_splits_matrix(
+    splits_dict: Mapping[tuple[int, int], int | float],
+    batch_sizes: list[int],
+    seq_lengths: list[int],
+) -> np.ndarray:
+    """Create matrix from splits dictionary."""
     matrix = np.zeros((len(seq_lengths), len(batch_sizes)))
     for i, seq_len in enumerate(seq_lengths):
         for j, batch_size in enumerate(batch_sizes):
-            matrix[i, j] = optimal_splits.get((batch_size, seq_len), np.nan)
+            matrix[i, j] = splits_dict.get((batch_size, seq_len), np.nan)
+    return matrix
 
-    # Create figure
-    fig, ax = plt.subplots(figsize=(12, 8))
 
-    # Convert to log2 scale for coloring
-    matrix_log2 = np.log2(matrix)
-
-    # Get min/max values from actual data
-    valid_values = matrix_log2[~np.isnan(matrix_log2)]
-    min_log2 = np.floor(valid_values.min())
-    max_log2 = np.ceil(valid_values.max())
-
-    # Extend bounds by 0.5 on each side to center the discrete colors
-    # e.g., value 1 (log2=0) spans -0.5 to 0.5
-    #       value 2 (log2=1) spans 0.5 to 1.5, etc.
-    vmin = min_log2 - 0.5
-    vmax = max_log2 + 0.5
-
-    # Create discrete colormap - one color per power of 2
-    # Powers of 2: 1, 2, 4, 8, 16, 32 -> log2: 0, 1, 2, 3, 4, 5
-    n_colors = int(max_log2 - min_log2 + 1)
-
-    # Use viridis colormap (no value judgment on num_kv_splits)
-    # Sample evenly across the colormap
-    viridis = plt.cm.viridis
-    indices = np.linspace(0, 1, n_colors)
-    colors_to_use = [viridis(i) for i in indices]
-
-    cmap = ListedColormap(colors_to_use)
-
-    # Create heatmap with log2 scaled data
-    im = ax.imshow(matrix_log2, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
-
-    # Set ticks
+def _setup_heatmap_axes(ax, batch_sizes: list[int], seq_lengths: list[int], title: str):
+    """Setup common axes properties for heatmaps."""
     ax.set_xticks(np.arange(len(batch_sizes)))
     ax.set_yticks(np.arange(len(seq_lengths)))
     ax.set_xticklabels(batch_sizes)
     ax.set_yticklabels([f"{s}k" for s in seq_lengths])
-
-    # Labels
     ax.set_xlabel("Batch Size", fontsize=12, fontweight="bold")
     ax.set_ylabel("Sequence Length", fontsize=12, fontweight="bold")
-    ax.set_title(
-        "Optimal num_kv_splits for CUTLASS MLA\n(Lower is simpler, higher is more"
-        " parallelism)",
-        fontsize=14,
-        fontweight="bold",
-        pad=20,
-    )
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
 
-    # Add text annotations
+
+def _create_log2_colormap(min_log2: float, max_log2: float) -> tuple:
+    """Create discrete log2 colormap and bounds."""
+    n_colors = int(max_log2 - min_log2 + 1)
+    viridis = plt.cm.viridis
+    indices = np.linspace(0, 1, n_colors)
+    colors = [viridis(i) for i in indices]
+    cmap = ListedColormap(colors)
+    vmin = min_log2 - 0.5
+    vmax = max_log2 + 0.5
+    return cmap, vmin, vmax
+
+
+def _add_log2_colorbar(im, ax, label: str, min_log2: float, max_log2: float):
+    """Add colorbar with power-of-2 labels."""
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label(label, rotation=270, labelpad=20, fontsize=12)
+    tick_positions = np.arange(min_log2, max_log2 + 1)
+    tick_labels = [str(int(2**i)) for i in tick_positions]
+    cbar.set_ticks(tick_positions)
+    cbar.set_ticklabels(tick_labels)
+
+
+def _annotate_splits_matrix(
+    ax, matrix: np.ndarray, batch_sizes: list[int], seq_lengths: list[int]
+):
+    """Add text annotations showing split values."""
     for i in range(len(seq_lengths)):
         for j in range(len(batch_sizes)):
             value = matrix[i, j]
@@ -153,17 +161,32 @@ def create_heatmap(optimal_splits: dict[tuple[int, int], int], output_path: str)
                     fontweight="bold",
                 )
 
-    # Colorbar with power-of-2 labels
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Optimal num_kv_splits", rotation=270, labelpad=20, fontsize=12)
 
-    # Set colorbar ticks at the center of each discrete segment
-    # Ticks should be at integer log2 values (0, 1, 2, 3...) which are centered in each
-    # color band
-    tick_positions = np.arange(min_log2, max_log2 + 1)
-    tick_labels = [str(int(2**i)) for i in tick_positions]
-    cbar.set_ticks(tick_positions)
-    cbar.set_ticklabels(tick_labels)
+def create_heatmap(optimal_splits: dict[tuple[int, int], int], output_path: str):
+    """Create heatmap showing optimal num_kv_splits."""
+    batch_sizes, seq_lengths = _get_axes_from_splits_dict(optimal_splits)
+    matrix = _create_splits_matrix(optimal_splits, batch_sizes, seq_lengths)
+
+    _fig, ax = plt.subplots(figsize=(12, 8))
+
+    # Convert to log2 scale for coloring
+    matrix_log2 = np.log2(matrix)
+    valid_values = matrix_log2[~np.isnan(matrix_log2)]
+    min_log2 = np.floor(valid_values.min())
+    max_log2 = np.ceil(valid_values.max())
+
+    cmap, vmin, vmax = _create_log2_colormap(min_log2, max_log2)
+    im = ax.imshow(matrix_log2, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
+
+    _setup_heatmap_axes(
+        ax,
+        batch_sizes,
+        seq_lengths,
+        "Optimal num_kv_splits for CUTLASS MLA\n"
+        "(Lower is simpler, higher is more parallelism)",
+    )
+    _annotate_splits_matrix(ax, matrix, batch_sizes, seq_lengths)
+    _add_log2_colorbar(im, ax, "Optimal num_kv_splits", min_log2, max_log2)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -171,88 +194,20 @@ def create_heatmap(optimal_splits: dict[tuple[int, int], int], output_path: str)
     plt.close()
 
 
-def create_performance_heatmap(results: list, output_path: str):
-    """Create heatmap showing speedup from optimal splits vs splits=1."""
-    # Group results by batch_spec
-    by_batch_spec = {}
-    for result in results:
-        batch_spec = result["config"]["batch_spec"]
-        if batch_spec not in by_batch_spec:
-            by_batch_spec[batch_spec] = []
-        by_batch_spec[batch_spec].append(result)
-
-    speedup_matrix = {}
-
-    for batch_spec, batch_results in by_batch_spec.items():
-        batch_size, seq_length_k = parse_batch_spec(batch_spec)
-
-        # Get time for splits=1
-        baseline_time = None
-        min_time = float("inf")
-
-        for result in batch_results:
-            if result["error"] is None and "mean_time" in result:
-                time = result["mean_time"]
-                backend_name = result["config"]["backend"]
-                # Match exactly numsplits_1 (not numsplits_16, etc.)
-                if backend_name.endswith("numsplits_1"):
-                    baseline_time = time
-                if time < min_time:
-                    min_time = time
-
-        if baseline_time:
-            speedup = baseline_time / min_time
-            speedup_matrix[(batch_size, seq_length_k)] = speedup
-
-    # Extract unique batch sizes and sequence lengths
-    batch_sizes = sorted(set(b for b, _ in speedup_matrix))
-    seq_lengths = sorted(
-        set(s for _, s in speedup_matrix), reverse=True
-    )  # Reverse for bottom-to-top
-
-    # Create matrix
-    matrix = np.zeros((len(seq_lengths), len(batch_sizes)))
-    for i, seq_len in enumerate(seq_lengths):
-        for j, batch_size in enumerate(batch_sizes):
-            matrix[i, j] = speedup_matrix.get((batch_size, seq_len), np.nan)
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=(12, 8))
-
-    # Create heatmap with colormap: 1.0x = white (neutral), higher = green (good)
-
-    # Create colormap: 1.0 = white, higher = green
-    max_speedup = np.nanmax(matrix)
+def _create_speedup_colormap():
+    """Create colormap for speedup: 1.0 = white, higher = green."""
     colors_dict = {
-        "red": [
-            (0.0, 1.0, 1.0),  # At 1.0x (vmin): white
-            (1.0, 0.0, 0.0),
-        ],  # At max speedup: green
+        "red": [(0.0, 1.0, 1.0), (1.0, 0.0, 0.0)],
         "green": [(0.0, 1.0, 1.0), (1.0, 0.5, 0.5)],
         "blue": [(0.0, 1.0, 1.0), (1.0, 0.0, 0.0)],
     }
-    speedup_cmap = LinearSegmentedColormap("Speedup", colors_dict)
+    return LinearSegmentedColormap("Speedup", colors_dict)
 
-    im = ax.imshow(matrix, cmap=speedup_cmap, aspect="auto", vmin=1.0, vmax=max_speedup)
 
-    # Set ticks
-    ax.set_xticks(np.arange(len(batch_sizes)))
-    ax.set_yticks(np.arange(len(seq_lengths)))
-    ax.set_xticklabels(batch_sizes)
-    ax.set_yticklabels([f"{s}k" for s in seq_lengths])
-
-    # Labels
-    ax.set_xlabel("Batch Size", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Sequence Length", fontsize=12, fontweight="bold")
-    ax.set_title(
-        "Speedup from Optimal num_kv_splits vs. splits=1\n(Green = better with splits, "
-        "Red = same)",
-        fontsize=14,
-        fontweight="bold",
-        pad=20,
-    )
-
-    # Add text annotations
+def _annotate_speedup_matrix(
+    ax, matrix: np.ndarray, batch_sizes: list[int], seq_lengths: list[int]
+):
+    """Add text annotations showing speedup values."""
     for i in range(len(seq_lengths)):
         for j in range(len(batch_sizes)):
             value = matrix[i, j]
@@ -268,7 +223,69 @@ def create_performance_heatmap(results: list, output_path: str):
                     fontweight="bold",
                 )
 
-    # Colorbar
+
+def _compute_speedup_matrix(
+    results: list, exclude_auto: bool = False
+) -> dict[tuple[int, int], float]:
+    """Compute speedup matrix from results (optimal vs splits=1)."""
+    by_batch_spec = {}
+    for result in results:
+        batch_spec = result["config"]["batch_spec"]
+        backend_name = result["config"]["backend"]
+
+        if exclude_auto and "auto" in backend_name:
+            continue
+
+        if batch_spec not in by_batch_spec:
+            by_batch_spec[batch_spec] = []
+        by_batch_spec[batch_spec].append(result)
+
+    speedup_matrix = {}
+    for batch_spec, batch_results in by_batch_spec.items():
+        batch_size, seq_length_k = parse_batch_spec(batch_spec)
+
+        baseline_time = None
+        min_time = float("inf")
+
+        for result in batch_results:
+            if result["error"] is None and "mean_time" in result:
+                time = result["mean_time"]
+                backend_name = result["config"]["backend"]
+                if backend_name.endswith("numsplits_1"):
+                    baseline_time = time
+                if time < min_time:
+                    min_time = time
+
+        if baseline_time:
+            speedup = baseline_time / min_time
+            speedup_matrix[(batch_size, seq_length_k)] = speedup
+
+    return speedup_matrix
+
+
+def create_performance_heatmap(
+    results: list, output_path: str, exclude_auto: bool = False
+):
+    """Create heatmap showing speedup from optimal splits vs splits=1."""
+    speedup_dict = _compute_speedup_matrix(results, exclude_auto)
+    batch_sizes, seq_lengths = _get_axes_from_splits_dict(speedup_dict)
+    matrix = _create_splits_matrix(speedup_dict, batch_sizes, seq_lengths)
+
+    _fig, ax = plt.subplots(figsize=(12, 8))
+
+    max_speedup = np.nanmax(matrix)
+    speedup_cmap = _create_speedup_colormap()
+    im = ax.imshow(matrix, cmap=speedup_cmap, aspect="auto", vmin=1.0, vmax=max_speedup)
+
+    _setup_heatmap_axes(
+        ax,
+        batch_sizes,
+        seq_lengths,
+        "Speedup from Optimal num_kv_splits vs. splits=1\n"
+        "(Green = better with splits, White = same)",
+    )
+    _annotate_speedup_matrix(ax, matrix, batch_sizes, seq_lengths)
+
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("Speedup Factor", rotation=270, labelpad=20, fontsize=12)
 
@@ -299,111 +316,119 @@ def heuristic_constant(batch_size: int, seq_length_k: int) -> int:
         return 1
 
 
+def heuristic_batch_based(batch_size: int, seq_length_k: int) -> int:
+    """
+    Improved batch-size-based heuristic with zero slowdowns.
+
+    This policy avoids all slowdowns by never splitting large batches,
+    while still achieving significant speedups for small batches.
+    """
+    if batch_size <= 4:
+        # Very small batch: aggressive splitting
+        if seq_length_k >= 16:
+            return 8
+        elif seq_length_k >= 4:
+            return 4
+        elif seq_length_k >= 2:
+            return 2
+        else:
+            return 1
+    elif batch_size <= 8:
+        # Small batch: moderate splitting
+        if seq_length_k >= 16:
+            return 8
+        elif seq_length_k >= 4:
+            return 4
+        else:
+            return 1
+    elif batch_size <= 16:
+        # Medium batch: conservative splitting
+        if seq_length_k >= 16:
+            return 2
+        else:
+            return 1
+    else:
+        # Large batch: never split (avoids slowdowns)
+        return 1
+
+
+def _annotate_heuristic_matrix(
+    ax,
+    matrix: np.ndarray,
+    batch_sizes: list[int],
+    seq_lengths: list[int],
+    optimal_splits: dict[tuple[int, int], int],
+):
+    """Add text annotations showing heuristic values and mismatches."""
+    for i in range(len(seq_lengths)):
+        for j in range(len(batch_sizes)):
+            value = matrix[i, j]
+            seq_len = seq_lengths[i]
+            batch_size = batch_sizes[j]
+            optimal = optimal_splits.get((batch_size, seq_len), None)
+
+            if not np.isnan(value):
+                # Mark mismatches with red text
+                if optimal is not None and int(value) != optimal:
+                    color = "red"
+                    text = f"{int(value)}\n✗"
+                else:
+                    color = "black"
+                    text = str(int(value))
+
+                ax.text(
+                    j,
+                    i,
+                    text,
+                    ha="center",
+                    va="center",
+                    color=color,
+                    fontsize=10,
+                    fontweight="bold",
+                )
+
+
 def create_heuristic_policy_heatmaps(
     optimal_splits: dict[tuple[int, int], int], output_dir: Path
 ):
     """Create heatmaps showing num_splits chosen by each heuristic policy."""
-    # Define heuristics to compare
     heuristics = {
         "Ratio-based": heuristic_ratio_based,
+        "Batch-based (improved)": heuristic_batch_based,
         "Constant (batch<=32)": heuristic_constant,
     }
 
-    # Extract unique batch sizes and sequence lengths
-    batch_sizes = sorted(set(b for b, _ in optimal_splits))
-    seq_lengths = sorted(set(s for _, s in optimal_splits), reverse=True)
+    batch_sizes, seq_lengths = _get_axes_from_splits_dict(optimal_splits)
 
-    # Create a separate heatmap for each heuristic
     for heuristic_name, heuristic_func in heuristics.items():
         # Build matrix of chosen num_splits
         matrix = np.zeros((len(seq_lengths), len(batch_sizes)))
-
         for i, seq_len in enumerate(seq_lengths):
             for j, batch_size in enumerate(batch_sizes):
-                predicted_splits = heuristic_func(batch_size, seq_len)
-                matrix[i, j] = predicted_splits
+                matrix[i, j] = heuristic_func(batch_size, seq_len)
 
-        # Create heatmap
         _fig, ax = plt.subplots(figsize=(12, 8))
 
-        # Convert to log2 scale for coloring (same as optimal heatmap)
+        # Convert to log2 scale for coloring
         matrix_log2 = np.log2(matrix)
-
-        # Get min/max values
         valid_values = matrix_log2[~np.isnan(matrix_log2)]
         min_log2 = np.floor(valid_values.min())
         max_log2 = np.ceil(valid_values.max())
 
-        vmin = min_log2 - 0.5
-        vmax = max_log2 + 0.5
-
-        # Create discrete colormap
-        n_colors = int(max_log2 - min_log2 + 1)
-        from matplotlib import cm
-
-        viridis = cm.viridis
-        indices = np.linspace(0, 1, n_colors)
-        colors_to_use = [viridis(i) for i in indices]
-        cmap = ListedColormap(colors_to_use)
-
-        # Create heatmap with log2 scaled data
+        cmap, vmin, vmax = _create_log2_colormap(min_log2, max_log2)
         im = ax.imshow(matrix_log2, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
 
-        # Set ticks
-        ax.set_xticks(np.arange(len(batch_sizes)))
-        ax.set_yticks(np.arange(len(seq_lengths)))
-        ax.set_xticklabels(batch_sizes)
-        ax.set_yticklabels([f"{s}k" for s in seq_lengths])
-
-        # Labels
-        ax.set_xlabel("Batch Size", fontsize=12, fontweight="bold")
-        ax.set_ylabel("Sequence Length", fontsize=12, fontweight="bold")
-        ax.set_title(
+        _setup_heatmap_axes(
+            ax,
+            batch_sizes,
+            seq_lengths,
             f"num_kv_splits Chosen by {heuristic_name} Policy",
-            fontsize=14,
-            fontweight="bold",
-            pad=20,
         )
-
-        # Add text annotations (show actual value and mark mismatches)
-        for i in range(len(seq_lengths)):
-            for j in range(len(batch_sizes)):
-                value = matrix[i, j]
-                seq_len = seq_lengths[i]
-                batch_size = batch_sizes[j]
-                optimal = optimal_splits.get((batch_size, seq_len), None)
-
-                if not np.isnan(value):
-                    # Mark mismatches with red text
-                    if optimal is not None and int(value) != optimal:
-                        color = "red"
-                        text = f"{int(value)}\n✗"
-                    else:
-                        color = "black"
-                        text = str(int(value))
-
-                    ax.text(
-                        j,
-                        i,
-                        text,
-                        ha="center",
-                        va="center",
-                        color=color,
-                        fontsize=10,
-                        fontweight="bold",
-                    )
-
-        # Colorbar with power-of-2 labels
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label("num_kv_splits", rotation=270, labelpad=20, fontsize=12)
-        tick_positions = np.arange(min_log2, max_log2 + 1)
-        tick_labels = [str(int(2**i)) for i in tick_positions]
-        cbar.set_ticks(tick_positions)
-        cbar.set_ticklabels(tick_labels)
+        _annotate_heuristic_matrix(ax, matrix, batch_sizes, seq_lengths, optimal_splits)
+        _add_log2_colorbar(im, ax, "num_kv_splits", min_log2, max_log2)
 
         plt.tight_layout()
 
-        # Save with sanitized filename
         safe_name = (
             heuristic_name.lower().replace(" ", "_").replace("(", "").replace(")", "")
         )
@@ -413,17 +438,8 @@ def create_heuristic_policy_heatmaps(
         plt.close()
 
 
-def create_heuristic_speedup_heatmaps(
-    results: list, optimal_splits: dict[tuple[int, int], int], output_dir: Path
-):
-    """Create speedup heatmaps for each heuristic policy."""
-    # Define heuristics to compare
-    heuristics = {
-        "Ratio-based (Original)": heuristic_ratio_based,
-        "Constant (batch<=32)": heuristic_constant,
-    }
-
-    # Group results by batch_spec for performance lookup
+def _build_timings_lookup(results: list) -> dict[str, dict[int, float]]:
+    """Build lookup table of timings by batch_spec and num_splits."""
     by_batch_spec = {}
     for result in results:
         batch_spec = result["config"]["batch_spec"]
@@ -436,14 +452,23 @@ def create_heuristic_speedup_heatmaps(
             if match:
                 num_splits = int(match.group(1))
                 by_batch_spec[batch_spec][num_splits] = result["mean_time"]
+    return by_batch_spec
 
-    # Extract unique batch sizes and sequence lengths
-    batch_sizes = sorted(set(b for b, _ in optimal_splits))
-    seq_lengths = sorted(set(s for _, s in optimal_splits), reverse=True)
 
-    # Create a separate heatmap for each heuristic
+def create_heuristic_speedup_heatmaps(
+    results: list, optimal_splits: dict[tuple[int, int], int], output_dir: Path
+):
+    """Create speedup heatmaps for each heuristic policy."""
+    heuristics = {
+        "Ratio-based (Original)": heuristic_ratio_based,
+        "Batch-based (improved)": heuristic_batch_based,
+        "Constant (batch<=32)": heuristic_constant,
+    }
+
+    by_batch_spec = _build_timings_lookup(results)
+    batch_sizes, seq_lengths = _get_axes_from_splits_dict(optimal_splits)
+
     for heuristic_name, heuristic_func in heuristics.items():
-        # Build speedup matrix for this heuristic
         speedup_matrix = np.zeros((len(seq_lengths), len(batch_sizes)))
         total_speedup = 0.0
         count = 0
@@ -451,40 +476,25 @@ def create_heuristic_speedup_heatmaps(
         for i, seq_len in enumerate(seq_lengths):
             for j, batch_size in enumerate(batch_sizes):
                 batch_spec = f"{batch_size}q1s{seq_len}k"
-                if batch_spec not in by_batch_spec:
+                timings = by_batch_spec.get(batch_spec, {})
+                baseline_time = timings.get(1)
+
+                if baseline_time:
+                    predicted_splits = heuristic_func(batch_size, seq_len)
+                    predicted_time = timings.get(predicted_splits, baseline_time)
+                    speedup = baseline_time / predicted_time
+                    speedup_matrix[i, j] = speedup
+                    total_speedup += speedup
+                    count += 1
+                else:
                     speedup_matrix[i, j] = np.nan
-                    continue
-
-                timings = by_batch_spec[batch_spec]
-                baseline_time = timings.get(1, None)
-
-                if not baseline_time:
-                    speedup_matrix[i, j] = np.nan
-                    continue
-
-                # Get the num_splits predicted by this heuristic
-                predicted_splits = heuristic_func(batch_size, seq_len)
-                predicted_time = timings.get(predicted_splits, baseline_time)
-                speedup = baseline_time / predicted_time
-
-                speedup_matrix[i, j] = speedup
-                total_speedup += speedup
-                count += 1
 
         avg_speedup = total_speedup / count if count > 0 else 1.0
 
-        # Create heatmap
         _fig, ax = plt.subplots(figsize=(12, 8))
 
-        # Colormap: 1.0 = white (neutral), higher = green (good)
         max_speedup = np.nanmax(speedup_matrix)
-        colors_dict = {
-            "red": [(0.0, 1.0, 1.0), (1.0, 0.0, 0.0)],
-            "green": [(0.0, 1.0, 1.0), (1.0, 0.5, 0.5)],
-            "blue": [(0.0, 1.0, 1.0), (1.0, 0.0, 0.0)],
-        }
-        speedup_cmap = LinearSegmentedColormap("Speedup", colors_dict)
-
+        speedup_cmap = _create_speedup_colormap()
         im = ax.imshow(
             speedup_matrix,
             cmap=speedup_cmap,
@@ -493,46 +503,20 @@ def create_heuristic_speedup_heatmaps(
             vmax=max_speedup,
         )
 
-        # Set ticks
-        ax.set_xticks(np.arange(len(batch_sizes)))
-        ax.set_yticks(np.arange(len(seq_lengths)))
-        ax.set_xticklabels(batch_sizes)
-        ax.set_yticklabels([f"{s}k" for s in seq_lengths])
-
-        # Labels
-        ax.set_xlabel("Batch Size", fontsize=12, fontweight="bold")
-        ax.set_ylabel("Sequence Length", fontsize=12, fontweight="bold")
-        ax.set_title(
+        _setup_heatmap_axes(
+            ax,
+            batch_sizes,
+            seq_lengths,
             f"Speedup with {heuristic_name} Policy\n"
             f"(Average speedup: {avg_speedup:.3f}x vs. splits=1)",
-            fontsize=14,
-            fontweight="bold",
-            pad=20,
         )
+        _annotate_speedup_matrix(ax, speedup_matrix, batch_sizes, seq_lengths)
 
-        # Add text annotations
-        for i in range(len(seq_lengths)):
-            for j in range(len(batch_sizes)):
-                value = speedup_matrix[i, j]
-                if not np.isnan(value):
-                    ax.text(
-                        j,
-                        i,
-                        f"{value:.2f}x",
-                        ha="center",
-                        va="center",
-                        color="black",
-                        fontsize=9,
-                        fontweight="bold",
-                    )
-
-        # Colorbar
         cbar = plt.colorbar(im, ax=ax)
         cbar.set_label("Speedup Factor", rotation=270, labelpad=20, fontsize=12)
 
         plt.tight_layout()
 
-        # Save with sanitized filename
         safe_name = (
             heuristic_name.lower().replace(" ", "_").replace("(", "").replace(")", "")
         )
@@ -540,6 +524,113 @@ def create_heuristic_speedup_heatmaps(
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
         print(f"Saved {heuristic_name} speedup heatmap to {output_path}")
         plt.close()
+
+
+def create_auto_heatmap(results: list, output_path: str):
+    """Create heatmap showing num_kv_splits chosen by auto policy."""
+    # Find all configs with auto results
+    auto_configs = set()
+    for result in results:
+        if "auto" in result["config"]["backend"] and result["error"] is None:
+            batch_spec = result["config"]["batch_spec"]
+            batch_size, seq_length_k = parse_batch_spec(batch_spec)
+            auto_configs.add((batch_size, seq_length_k))
+
+    if not auto_configs:
+        print("Skipping auto heatmap (no auto results found)")
+        return
+
+    batch_sizes, seq_lengths = _get_axes_from_splits_dict({k: 1 for k in auto_configs})
+    matrix = np.zeros((len(seq_lengths), len(batch_sizes)))
+    for i, seq_len in enumerate(seq_lengths):
+        for j, batch_size in enumerate(batch_sizes):
+            matrix[i, j] = 1 if (batch_size, seq_len) in auto_configs else np.nan
+
+    _fig, ax = plt.subplots(figsize=(12, 8))
+
+    cmap = ListedColormap(["#2ca02c"])  # Green for auto
+    _im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=0, vmax=1)
+
+    _setup_heatmap_axes(
+        ax, batch_sizes, seq_lengths, "Auto num_kv_splits Policy Coverage"
+    )
+
+    # Add "AUTO" text annotations
+    for i in range(len(seq_lengths)):
+        for j in range(len(batch_sizes)):
+            if not np.isnan(matrix[i, j]):
+                ax.text(
+                    j,
+                    i,
+                    "AUTO",
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontsize=10,
+                    fontweight="bold",
+                )
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    print(f"Saved auto heatmap to {output_path}")
+    plt.close()
+
+
+def create_auto_speedup_heatmap(results: list, output_path: str):
+    """Create heatmap showing speedup from auto vs splits=1."""
+    # Build speedup dictionary
+    speedup_dict = {}
+    timings_by_spec = {}
+
+    for result in results:
+        if result["error"] is not None or "mean_time" not in result:
+            continue
+
+        batch_spec = result["config"]["batch_spec"]
+        backend_name = result["config"]["backend"]
+
+        if batch_spec not in timings_by_spec:
+            timings_by_spec[batch_spec] = {}
+
+        if "auto" in backend_name:
+            timings_by_spec[batch_spec]["auto"] = result["mean_time"]
+        elif backend_name.endswith("numsplits_1"):
+            timings_by_spec[batch_spec]["baseline"] = result["mean_time"]
+
+    for batch_spec, timings in timings_by_spec.items():
+        if "baseline" in timings and "auto" in timings:
+            batch_size, seq_length_k = parse_batch_spec(batch_spec)
+            speedup = timings["baseline"] / timings["auto"]
+            speedup_dict[(batch_size, seq_length_k)] = speedup
+
+    if not speedup_dict:
+        print("Skipping auto speedup heatmap (no auto results found)")
+        return
+
+    batch_sizes, seq_lengths = _get_axes_from_splits_dict(speedup_dict)
+    matrix = _create_splits_matrix(speedup_dict, batch_sizes, seq_lengths)
+
+    _fig, ax = plt.subplots(figsize=(12, 8))
+
+    max_speedup = np.nanmax(matrix)
+    speedup_cmap = _create_speedup_colormap()
+    im = ax.imshow(matrix, cmap=speedup_cmap, aspect="auto", vmin=1.0, vmax=max_speedup)
+
+    _setup_heatmap_axes(
+        ax,
+        batch_sizes,
+        seq_lengths,
+        "Speedup from Auto Policy vs. splits=1\n(Green = better with auto)",
+    )
+    _annotate_speedup_matrix(ax, matrix, batch_sizes, seq_lengths)
+
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Speedup Factor", rotation=270, labelpad=20, fontsize=12)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    print(f"Saved auto speedup heatmap to {output_path}")
+    plt.close()
 
 
 def analyze_pattern(optimal_splits: dict[tuple[int, int], int]):
@@ -591,6 +682,7 @@ def analyze_pattern(optimal_splits: dict[tuple[int, int], int]):
 
     heuristics = {
         "Ratio-based": heuristic_ratio_based,
+        "Batch-based (improved)": heuristic_batch_based,
         "Constant (batch<=32)": heuristic_constant,
     }
 
@@ -640,18 +732,25 @@ def main():
     print(f"Loading results from {json_path}...")
     results = load_results(json_path)
 
-    print("Extracting optimal splits...")
-    optimal_splits = extract_optimal_splits(results)
+    print("Extracting optimal splits (excluding auto)...")
+    optimal_splits = extract_optimal_splits(results, exclude_auto=True)
 
     print(f"Found {len(optimal_splits)} configurations")
 
     # Create visualizations
     print("\nGenerating visualizations...")
 
-    create_heatmap(optimal_splits, output_dir / "numsplits_heatmap.png")
-    create_performance_heatmap(results, output_dir / "numsplits_speedup.png")
+    print("\n--- Manual Configuration Plots (excluding auto) ---")
+    create_heatmap(optimal_splits, str(output_dir / "numsplits_heatmap.png"))
+    create_performance_heatmap(
+        results, str(output_dir / "numsplits_speedup.png"), exclude_auto=True
+    )
     create_heuristic_policy_heatmaps(optimal_splits, output_dir)
     create_heuristic_speedup_heatmaps(results, optimal_splits, output_dir)
+
+    print("\n--- Auto Policy Plots ---")
+    create_auto_heatmap(results, str(output_dir / "numsplits_heatmap_auto.png"))
+    create_auto_speedup_heatmap(results, str(output_dir / "numsplits_speedup_auto.png"))
 
     # Analyze pattern
     analyze_pattern(optimal_splits)

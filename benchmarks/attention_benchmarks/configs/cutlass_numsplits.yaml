@@ -11,6 +11,36 @@ backend: cutlass_mla
 # Batch sizes: 8, 16, 24, 32, 48, 64, 96, 128
 # Sequence lengths: 1k, 2k, 4k, 8k, 16k, 32k, 64k
 batch_specs:
+  # Batch size: 1
+  - "1q1s1k"
+  - "1q1s2k"
+  - "1q1s4k"
+  - "1q1s8k"
+  - "1q1s16k"
+  - "1q1s32k"
+  - "1q1s64k"
+  - "1q1s128k"
+
+  # Batch size: 2
+  - "2q1s1k"
+  - "2q1s2k"
+  - "2q1s4k"
+  - "2q1s8k"
+  - "2q1s16k"
+  - "2q1s32k"
+  - "2q1s64k"
+  - "2q1s128k"
+
+  # Batch size: 4
+  - "4q1s1k"
+  - "4q1s2k"
+  - "4q1s4k"
+  - "4q1s8k"
+  - "4q1s16k"
+  - "4q1s32k"
+  - "4q1s64k"
+  - "4q1s128k"
+
   # Batch size: 8
   - "8q1s1k"
   - "8q1s2k"
@@ -19,6 +49,7 @@ batch_specs:
   - "8q1s16k"
   - "8q1s32k"
   - "8q1s64k"
+  - "8q1s128k"
 
   # Batch size: 16
   - "16q1s1k"
@@ -28,6 +59,7 @@ batch_specs:
   - "16q1s16k"
   - "16q1s32k"
   - "16q1s64k"
+  - "16q1s128k"
 
   # Batch size: 24
   - "24q1s1k"
@@ -37,6 +69,7 @@ batch_specs:
   - "24q1s16k"
   - "24q1s32k"
   - "24q1s64k"
+  - "24q1s128k"
 
   # Batch size: 32
   - "32q1s1k"
@@ -46,6 +79,7 @@ batch_specs:
   - "32q1s16k"
   - "32q1s32k"
   - "32q1s64k"
+  - "32q1s128k"
 
   # Batch size: 48
   - "48q1s1k"
@@ -55,6 +89,7 @@ batch_specs:
   - "48q1s16k"
   - "48q1s32k"
   - "48q1s64k"
+  - "48q1s128k"
 
   # Batch size: 64
   - "64q1s1k"
@@ -64,6 +99,7 @@ batch_specs:
   - "64q1s16k"
   - "64q1s32k"
   - "64q1s64k"
+  - "64q1s128k"
 
   # Batch size: 96
   - "96q1s1k"
@@ -73,6 +109,7 @@ batch_specs:
   - "96q1s16k"
   - "96q1s32k"
   - "96q1s64k"
+  - "96q1s128k"
 
   # Batch size: 128
   - "128q1s1k"
@@ -82,12 +119,13 @@ batch_specs:
   - "128q1s16k"
   - "128q1s32k"
   - "128q1s64k"
+  - "128q1s128k"
 
 # Unified parameter sweep configuration
 parameter_sweep:
   param_name: "num_kv_splits"
-  values: [1, 2, 4, 8, 16, 32]
-  include_auto: false
+  values: [1, 2, 4, 8, 16]
+  include_auto: true
   label_format: "{backend}_numsplits_{value}"
 
 # Model configuration (DeepSeek V2/V3 defaults)
@@ -101,7 +139,7 @@ model:
 # Benchmark settings
 benchmark:
   device: "cuda:0"
-  repeats: 10          # More repeats for statistical significance
+  repeats: 20
   warmup_iters: 5
   profile_memory: false
 
