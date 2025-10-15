@@ -18,6 +18,8 @@ from vllm.config import (
     ModelConfig,
     PassConfig,
     VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
 )
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -42,9 +44,7 @@ prompts = [
 
 
 class TestModel(torch.nn.Module):
-    def __init__(
-        self, hidden_size=16, intermediate_size=32, vllm_config: VllmConfig = None
-    ):
+    def __init__(self, hidden_size=16, intermediate_size=32):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -95,13 +95,10 @@ class TestModel(torch.nn.Module):
 
 
 class TestQuantModel(torch.nn.Module):
-    def __init__(
-        self, hidden_size=16, intermediate_size=32, vllm_config: VllmConfig = None
-    ):
+    def __init__(self, hidden_size=16, intermediate_size=32):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.vllm_config = vllm_config
         self.gate_proj = torch.nn.Parameter(
             torch.empty((intermediate_size, hidden_size)), requires_grad=False
         )
@@ -154,16 +151,12 @@ class TestQuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         ops_to_remove = [torch.ops.vllm.all_reduce.default]  # Always removed by SP
         # The following are only removed if fusion happens
-        if (
-            self.vllm_config
-            and self.vllm_config.compilation_config.pass_config.enable_fusion
-        ):
-            ops_to_remove.extend(
-                [
-                    torch.ops._C.fused_add_rms_norm.default,
-                    torch.ops._C.static_scaled_fp8_quant.default,
-                ]
-            )
+        config = get_current_vllm_config()
+        if config.compilation_config.pass_config.enable_fusion:
+            ops_to_remove.append(torch.ops._C.fused_add_rms_norm.default)
+            # Only check for static_scaled_fp8_quant if custom quant_fp8 is enabled
+            if "+quant_fp8" in config.compilation_config.custom_ops:
+                ops_to_remove.append(torch.ops._C.static_scaled_fp8_quant.default)
         return ops_to_remove
 
     def ops_in_model_after(self):
@@ -171,24 +164,23 @@ class TestQuantModel(torch.nn.Module):
             torch.ops.vllm.reduce_scatter.default,
             torch.ops.vllm.all_gather.default,
         ]
-        # The following is only added if fusion happens
+        # The following is only added if fusion happens and custom quant_fp8 is enabled
+        config = get_current_vllm_config()
         if (
-            self.vllm_config
-            and self.vllm_config.compilation_config.pass_config.enable_fusion
+            config.compilation_config.pass_config.enable_fusion
+            and "+quant_fp8" in config.compilation_config.custom_ops
         ):
             ops_to_add.append(torch.ops._C.fused_add_rms_norm_static_fp8_quant.default)
         return ops_to_add
 
     def ops_in_model(self):
-        if (
-            self.vllm_config
-            and self.vllm_config.compilation_config.pass_config.enable_fusion
-        ):
-            # If fusion happens, the fused op is the one
+        config = get_current_vllm_config()
+        if config.compilation_config.pass_config.enable_fusion:
+            # If fusion happens with custom quant_fp8, the fused op is the one
             # we check for (de)functionalization
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         else:
-            # If no fusion, the original ops are checked
+            # If no fusion or using native quant, the original ops are checked
             return [
                 torch.ops._C.fused_add_rms_norm.default,
                 # TODO  functionalization pass does not handle this yet
@@ -197,7 +189,14 @@ class TestQuantModel(torch.nn.Module):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("test_model_cls", [TestModel, TestQuantModel])
+@pytest.mark.parametrize(
+    "test_model_cls, custom_ops",
+    [
+        (TestModel, ""),
+        (TestQuantModel, "+quant_fp8"),
+        (TestQuantModel, "-quant_fp8"),
+    ],
+)
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
@@ -206,6 +205,7 @@ class TestQuantModel(torch.nn.Module):
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_pass(
     test_model_cls: type[torch.nn.Module],
+    custom_ops: str,
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -222,6 +222,7 @@ def test_sequence_parallelism_pass(
             args=(
                 num_processes,
                 test_model_cls,
+                custom_ops,
                 batch_size,
                 seq_len,
                 hidden_size,
@@ -238,6 +239,7 @@ def sequence_parallelism_pass_on_test_model(
     local_rank: int,
     world_size: int,
     test_model_cls: type[torch.nn.Module],
+    custom_ops: str,
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -266,68 +268,79 @@ def sequence_parallelism_pass_on_test_model(
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # configure vllm config for SequenceParallelismPass
-    vllm_config = VllmConfig()
-    vllm_config.compilation_config = CompilationConfig(
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+    compilation_config = CompilationConfig(
+        custom_ops=custom_ops_list,
         pass_config=PassConfig(
             enable_sequence_parallelism=True,
             enable_fusion=enable_fusion,
             enable_noop=True,
-        )
+        ),
     )  # NoOp needed for fusion
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
     model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
-    vllm_config.model_config = ModelConfig(
+    model_config = ModelConfig(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
 
-    noop_pass = NoOpEliminationPass(vllm_config)
-    sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
-    func_pass = FixFunctionalizationPass(vllm_config)
-    cleanup_pass = PostCleanupPass(vllm_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        device_config=device_config,
+        compilation_config=compilation_config,
+    )
 
-    passes_for_backend: list[VllmInductorPass] = [noop_pass, sequence_parallelism_pass]
+    with set_current_vllm_config(vllm_config):
+        noop_pass = NoOpEliminationPass(vllm_config)
+        sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
+        func_pass = FixFunctionalizationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
 
-    if enable_fusion:
-        fusion_pass = RMSNormQuantFusionPass(vllm_config)
-        passes_for_backend.append(fusion_pass)
+        passes_for_backend: list[VllmInductorPass] = [
+            noop_pass,
+            sequence_parallelism_pass,
+        ]
 
-    passes_for_backend.append(cleanup_pass)
+        if enable_fusion:
+            fusion_pass = RMSNormQuantFusionPass(vllm_config)
+            passes_for_backend.append(fusion_pass)
 
-    backend_no_func = TestBackend(*passes_for_backend)
-    backend_func = TestBackend(*passes_for_backend, func_pass)
+        passes_for_backend.append(cleanup_pass)
 
-    model = test_model_cls(hidden_size, hidden_size * 2, vllm_config=vllm_config)
+        backend_no_func = TestBackend(*passes_for_backend)
+        backend_func = TestBackend(*passes_for_backend, func_pass)
 
-    hidden_states = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
-    residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
+        model = test_model_cls(hidden_size, hidden_size * 2)
 
-    compiled_model_no_func = torch.compile(model, backend=backend_no_func)
-    compiled_model_no_func(hidden_states, residual)
-    compiled_model_func = torch.compile(model, backend=backend_func)
-    compiled_model_func(hidden_states, residual)
+        hidden_states = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
+        residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
 
-    assert sequence_parallelism_pass.matched_count == 1
+        compiled_model_no_func = torch.compile(model, backend=backend_no_func)
+        compiled_model_no_func(hidden_states, residual)
+        compiled_model_func = torch.compile(model, backend=backend_func)
+        compiled_model_func(hidden_states, residual)
 
-    # In pre-nodes, all reduce should be there,
-    # reduce scatter and all gather should not
-    backend_no_func.check_before_ops(model.ops_in_model_before())
+        assert sequence_parallelism_pass.matched_count == 1
 
-    # In post-nodes, reduce scatter and all gather should be there,
-    # all reduce should not
-    backend_no_func.check_after_ops(model.ops_in_model_after())
+        # In pre-nodes, all reduce should be there,
+        # reduce scatter and all gather should not
+        backend_no_func.check_before_ops(model.ops_in_model_before())
 
-    # check if the functionalization pass is applied
-    for op in model.ops_in_model():
-        find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
-        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
+        # In post-nodes, reduce scatter and all gather should be there,
+        # all reduce should not
+        backend_no_func.check_after_ops(model.ops_in_model_after())
 
-    # make sure the ops were all de-functionalized
-    found = dict()
-    for node in backend_func.graph_post_pass.nodes:
+        # check if the functionalization pass is applied
         for op in model.ops_in_model():
-            if is_func(node, op):
-                found[op] = True
-    assert all(found[op] for op in model.ops_in_model())
+            find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
+            assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
+
+        # make sure the ops were all de-functionalized
+        found = dict()
+        for node in backend_func.graph_post_pass.nodes:
+            for op in model.ops_in_model():
+                if is_func(node, op):
+                    found[op] = True
+        assert all(found[op] for op in model.ops_in_model())
