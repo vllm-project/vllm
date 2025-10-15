@@ -168,12 +168,26 @@ class Worker(WorkerBase):
         if self.device_config.device.type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            if self.vllm_config.parallel_config.data_parallel_size > 1:
-                self.local_rank = (
+            if (
+                self.vllm_config.parallel_config.data_parallel_size > 1
+                and self.parallel_config.data_parallel_size_local > 0
+            ):
+                # Use local DP rank if available, otherwise use global DP rank.
+                data_parallel_local_rank: int = (
                     self.parallel_config.data_parallel_rank_local
-                    * self.parallel_config.world_size
-                    + self.local_rank % self.parallel_config.world_size
-                ) % torch.cuda.device_count()  # type: ignore[has-type]
+                    if self.parallel_config.data_parallel_rank_local is not None
+                    else self.parallel_config.data_parallel_rank
+                ) % self.parallel_config.data_parallel_size_local
+                tp_pp_world_size = (
+                    self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.tensor_parallel_size
+                )
+                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_RANK % TP_PP_WORLD_SIZE
+
+                self.local_rank = (
+                    data_parallel_local_rank * tp_pp_world_size
+                    + self.local_rank % tp_pp_world_size  # type: ignore[has-type]
+                ) % torch.cuda.device_count()
 
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
