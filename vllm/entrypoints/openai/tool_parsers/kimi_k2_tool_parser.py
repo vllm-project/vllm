@@ -204,19 +204,22 @@ class KimiK2ToolParser(ToolParser):
         try:
             # Use a comprehensive regex that handles both formats
             # Support both "function." and "functions." prefixes
+            # Capture the prefix to preserve it in the output
             tool_call_pattern = re.compile(
-                r"<\|tool_call_begin\|>\s*functions?\.([^:]+):(\d+)\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*<\|tool_call_end\|>",
+                r"<\|tool_call_begin\|>\s*(functions?)\.([^:]+):(\d+)\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*<\|tool_call_end\|>",
                 re.DOTALL
             )
             matches = tool_call_pattern.findall(model_output)
             
             if matches:
                 tool_calls = []
-                for function_name, call_id, function_args in matches:
+                for prefix, function_name, call_id, function_args in matches:
+                    # # Normalize quotes in function arguments to ensure valid JSON
+                    # normalized_args = normalize_quotes_for_json(function_args)
                     normalized_args = function_args
                     tool_calls.append(
                         ToolCall(
-                            id=f"functions.{function_name}:{call_id}",
+                            id=f"{prefix}.{function_name}:{call_id}",
                             type='function',
                             function=FunctionCall(name=function_name,
                                                   arguments=normalized_args),
