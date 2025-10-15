@@ -58,7 +58,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_l
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -101,7 +101,6 @@ class OpenAIServingChat(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
             log_error_stack=log_error_stack,
         )
 
@@ -352,7 +351,6 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
-                enable_force_include_usage=self.enable_force_include_usage,
             )
 
         try:
@@ -518,7 +516,6 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        enable_force_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -596,13 +593,9 @@ class OpenAIServingChat(OpenAIServing):
             return
 
         stream_options = request.stream_options
-        if stream_options:
-            include_usage = stream_options.include_usage or enable_force_include_usage
-            include_continuous_usage = (
-                include_usage and stream_options.continuous_usage_stats
-            )
-        else:
-            include_usage, include_continuous_usage = False, False
+        include_usage, include_continuous_usage = should_include_usage(
+            stream_options, self.enable_force_include_usage
+        )
 
         try:
             async for res in result_generator:
