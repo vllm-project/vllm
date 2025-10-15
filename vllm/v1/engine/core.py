@@ -150,6 +150,7 @@ class EngineCore:
             * vllm_config.parallel_config.decode_context_parallel_size
         )
 
+        additional_config = vllm_config.additional_config
         self.step_num = int(additional_config.get("multi_step", 1))
         if self.step_num > 1:
             logger.info(
@@ -205,7 +206,6 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
-        additional_config = vllm_config.additional_config
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -334,13 +334,6 @@ class EngineCore:
             self.model_executor.execute_model,  # type: ignore
             scheduler_output,
         )
-        for (
-            req_id,
-            num_scheduled_token,
-        ) in scheduler_output.num_scheduled_tokens.items():
-            self.scheduler.requests[req_id].num_computed_tokens += (
-                num_scheduled_token * (model_output.step_num - 1)
-            )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
