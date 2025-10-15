@@ -129,10 +129,15 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
-
+        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
-            for proc in self.processes:
-                proc.start()
+            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                with (
+                    set_device_control_env_var(vllm_config, local_dp_rank)
+                    if (data_parallel and not current_platform.is_cuda_alike())
+                    else contextlib.nullcontext()
+                ):
+                    proc.start()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():

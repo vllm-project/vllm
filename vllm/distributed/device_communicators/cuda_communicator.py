@@ -55,7 +55,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
-            print(f"Creating PyNcclCommunicator for unique_name: {self.unique_name}")
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
