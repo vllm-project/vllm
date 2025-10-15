@@ -16,8 +16,8 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.skipif(
-    current_platform.has_device_capability(100),
-    reason="Batch invariance tests not yet supported on B200 (SM100)",
+    not current_platform.has_device_capability(90),
+    reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires CUDA for RMS norm kernels"
@@ -71,8 +71,8 @@ def test_rms_norm_batch_invariant_vs_standard(
 
 
 @pytest.mark.skipif(
-    current_platform.has_device_capability(100),
-    reason="Batch invariance tests not yet supported on B200 (SM100)",
+    not current_platform.has_device_capability(90),
+    reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires CUDA for RMS norm kernels"
@@ -119,8 +119,8 @@ def test_rms_norm_3d_input(batch_size: int, seq_len: int, hidden_size: int):
 
 
 @pytest.mark.skipif(
-    current_platform.has_device_capability(100),
-    reason="Batch invariance tests not yet supported on B200 (SM100)",
+    not current_platform.has_device_capability(90),
+    reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires CUDA for RMS norm kernels"
@@ -185,8 +185,8 @@ def test_rms_norm_numerical_stability():
 
 
 @pytest.mark.skipif(
-    current_platform.has_device_capability(100),
-    reason="Batch invariance tests not yet supported on B200 (SM100)",
+    not current_platform.has_device_capability(90),
+    reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires CUDA for RMS norm kernels"
@@ -224,8 +224,8 @@ def test_rms_norm_formula():
 
 
 @pytest.mark.skipif(
-    current_platform.has_device_capability(100),
-    reason="Batch invariance tests not yet supported on B200 (SM100)",
+    not current_platform.has_device_capability(90),
+    reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires CUDA for RMS norm kernels"
@@ -268,8 +268,8 @@ def test_rms_norm_different_hidden_sizes(hidden_size: int):
 
 
 @pytest.mark.skipif(
-    current_platform.has_device_capability(100),
-    reason="Batch invariance tests not yet supported on B200 (SM100)",
+    not current_platform.has_device_capability(90),
+    reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires CUDA for RMS norm kernels"
