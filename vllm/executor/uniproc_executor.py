@@ -57,6 +57,7 @@ class UniProcExecutor(ExecutorBase):
             self.vllm_config.parallel_config.data_parallel_size > 1
             and len(device_info) > 1
         ):
+            assert self.vllm_config.parallel_config.data_parallel_rank_local is not None
             local_rank = self.vllm_config.parallel_config.data_parallel_rank_local
         return distributed_init_method, 0, local_rank
 
