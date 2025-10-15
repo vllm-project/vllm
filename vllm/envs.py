@@ -191,6 +191,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: str | None = None
+    VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
@@ -1292,11 +1293,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
     "VLLM_HAS_FLASHINFER_CUBIN": lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
-    # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
-    # Otherwise, uses the first available of: flashinfer cutlass GEMM,
-    # vllm cutlass GEMM, marlin GEMM.
-    "VLLM_USE_TRTLLM_FP4_GEMM": lambda: bool(
-        int(os.getenv("VLLM_USE_TRTLLM_FP4_GEMM", "0"))
+    # Supported options:
+    # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
+    # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
+    # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
+    # - <none>: automatically pick an available backend
+    "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
+        "VLLM_NVFP4_GEMM_BACKEND",
+        None,
+        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass"],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
@@ -1492,7 +1497,6 @@ def compute_hash() -> str:
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
-        "VLLM_USE_TRTLLM_FP4_GEMM",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP16",
         "VLLM_USE_FLASHINFER_MOE_FP8",
@@ -1524,6 +1528,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
         "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE",
         "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
+        "VLLM_NVFP4_GEMM_BACKEND",
         "VLLM_USE_FBGEMM",
     ]
     for key in environment_variables_to_hash:
