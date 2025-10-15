@@ -342,7 +342,7 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
     - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
     - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
 
-![Load Pattern Examples](load_pattern_examples.png)
+![Load Pattern Examples](../assets/load_pattern_examples.png)
 
 *Figure: Load pattern examples for each use case. Top row: Request arrival timelines showing cumulative requests over time. Bottom row: Inter-arrival time distributions showing traffic variability patterns. Each column represents a different use case with its specific parameter settings and resulting traffic characteristics.*
 
