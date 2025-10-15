@@ -336,7 +336,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         dbo_yield_and_switch_from_compute_to_comm()
+        assert fused_expert_output.dtype == torch.bfloat16, (
+            f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
+        )
         combined_x, _, event = self.buffer.combine(
+            # HT combine only supports BF16
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,

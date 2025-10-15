@@ -1144,7 +1144,7 @@ def find_nccl_library() -> str:
             so_file = "librccl.so.1"
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.info("Found nccl from library %s", so_file)
+        logger.debug_once("Found nccl from library %s", so_file)
     return so_file
 
 
@@ -1686,16 +1686,16 @@ class FlexibleArgumentParser(ArgumentParser):
             elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # -O.<...> handled later
-                # also handle -O=<level> here
-                level = arg[3:] if arg[2] == "=" else arg[2:]
-                processed_args.append(f"-O.level={level}")
+                # also handle -O=<mode> here
+                mode = arg[3:] if arg[2] == "=" else arg[2:]
+                processed_args.append(f"-O.mode={mode}")
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
                 and args[i + 1] in {"0", "1", "2", "3"}
             ):
-                # Convert -O <n> to -O.level <n>
-                processed_args.append("-O.level")
+                # Convert -O <n> to -O.mode <n>
+                processed_args.append("-O.mode")
             else:
                 processed_args.append(arg)
 
