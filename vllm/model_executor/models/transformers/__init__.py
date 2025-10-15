@@ -19,7 +19,6 @@
 from typing import TYPE_CHECKING
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
@@ -38,8 +37,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
 
 
 def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
