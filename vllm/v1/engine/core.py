@@ -77,10 +77,112 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
-class EngineCoreGuard:
-    def __init__(self):
+class EngineCoreGuard(threading.Thread):  # changed
+    """
+    A watchdog thread that monitors EngineCore execution.
+
+    - Listens for exceptions raised in `run_busy_loop`.
+    - Reports exceptions to the client via ZMQ sockets.
+    - Waits for client instructions (e.g., RESUME) and dispatches them.
+    """
+
+    def __init__(
+        self,
+        engine_index: int,
+        fault_report_addr,
+        client_cmd_addr,
+        worker_cmd_addr,
+        fault_signal_q,
+        cmd_q,
+        fault_report_inentity,
+        client_cmd_inentity
+    ):
+        super().__init__(daemon=True, name=f"EngineCoreGuard_{engine_index}")
+        self.engine_index = engine_index
+        self.fault_signal_q = fault_signal_q
+        self.cmd_q = cmd_q
+        self.fault_report_addr = fault_report_addr
+        self.client_cmd_addr = client_cmd_addr
+        self.worker_cmd_addr = worker_cmd_addr
+
+        ctx = zmq.Context()
+        # Client <-> EngineCoreGuard sockets
+        self.fault_report_socket = make_zmq_socket(
+            ctx,
+            fault_report_addr,
+            zmq.DEALER,
+            bind=False,
+            identity=fault_report_inentity
+        )
+
+        self.client_cmd_socket = make_zmq_socket(
+            ctx,
+            client_cmd_addr,
+            zmq.DEALER,
+            bind=False,
+            identity=client_cmd_inentity
+        )
+        # EngineCoreGuard <-> WorkerGuard sockets
+        self.worker_cmd_socket = make_zmq_socket(ctx, worker_cmd_addr, zmq.ROUTER, bind=True)
+
+    def run(self):
         pass
 
+    def stop_engine_core_loop(self):
+        pass
+
+    def _recv_cmd(self, poll_timeout=1000):
+        try:
+            # Use Poller for non-blocking reception
+            poller = zmq.Poller()
+            poller.register(self.client_cmd_socket, zmq.POLLIN)
+            socks = dict(poller.poll(poll_timeout))
+
+            # Check if a message has arrived
+            if self.client_cmd_socket in socks and socks[self.client_cmd_socket] == zmq.POLLIN:
+                # DEALER message format: [empty frame, message content]
+                parts = self.client_cmd_socket.recv_multipart()
+
+                # Validate message format
+                if len(parts) != 2:
+                    print(f"Warning: Invalid message format, expected 2 parts, received {len(parts)} parts")
+                    return (False, None)
+
+                empty_frame, message_bytes = parts
+
+                # Validate empty frame
+                if empty_frame != b'':
+                    print(f"Warning: Empty frame format error, actual value: {empty_frame}")
+                    return (False, None)
+
+                # Decode message content
+                message = message_bytes.decode('utf-8')
+                return (True, message)
+
+            # No message received within timeout
+            return (False, None)
+
+        except zmq.ZMQError as e:
+            print(f"ZMQ error: {e}")
+            return (False, None)
+        except UnicodeDecodeError:
+            print("Error: Message decoding failed, not in UTF-8 format")
+            return (False, None)
+        except Exception as e:
+            print(f"Unknown error occurred while receiving message: {e}")
+            return (False, None)
+
+    def _stop_worker_execution(self):
+        pass
+
+    def _notify_client_execption(self):
+        pass
+
+    def _execute_dispatch_cmd(self):
+        pass
+
+    def _notify_client_execution_result(self):
+        pass
 
 def busy_loop_wrapper(busy_loop_func):
     """
@@ -533,6 +635,8 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        self.fault_signal_q = queue.Queue[str]()
+        self.cmd_q = queue.Queue[str]()
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -609,6 +713,21 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
+
+            if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                # Start a thread to monitor the execution of run_busy_loop,
+                # and perform fault tolerance.
+                guard_thread = EngineCoreGuard(
+                    engine_index=engine_index,
+                    fault_report_addr=addresses.fault_report_addr,
+                    client_cmd_addr=addresses.client_cmd_addr,
+                    worker_cmd_addr=addresses.engine_core_cmd_addr,
+                    fault_signal_q=self.fault_signal_q,
+                    cmd_q=self.cmd_q,
+                    fault_report_inentity=addresses.engine_core_identitys['fault_report_identitys'][self.engine_index],
+                    client_cmd_inentity=addresses.engine_core_identitys['client_cmd_identitys'][self.engine_index]
+                )
+                guard_thread.start()
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
