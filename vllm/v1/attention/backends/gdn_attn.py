@@ -47,9 +47,6 @@ class GDNAttentionMetadata:
         None  # shape: [batch - num_spec_decodes,]
     )
     spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
-    spec_token_masks: torch.Tensor | None = (
-        None  # shape: [num_prefill_tokens + num_decode_tokens,]
-    )
     spec_token_indx: torch.Tensor | None = None
     non_spec_token_indx: torch.Tensor | None = None
 
@@ -105,11 +102,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
         self.spec_sequence_masks = torch.empty(
             (self.decode_cudagraph_max_bs,),
-            dtype=torch.bool,
-            device=device,
-        )
-        self.spec_token_masks = torch.empty(
-            (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
             dtype=torch.bool,
             device=device,
         )
@@ -179,7 +171,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 split_decodes_and_prefills(m, decode_threshold=1)
             )
             num_spec_decode_tokens = 0
-            spec_token_masks = None
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
@@ -200,18 +191,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
 
             if num_prefills == 0 and num_decodes == 0:
-                spec_token_masks = torch.ones(
-                    (
-                        min(
-                            num_spec_decodes * (self.num_spec + 1),
-                            query_start_loc[-1].item(),
-                        )
-                    ),
-                    dtype=torch.bool,
-                    device=query_start_loc.device,
+                spec_token_size = min(
+                    num_spec_decodes * (self.num_spec + 1),
+                    query_start_loc[-1].item(),
                 )
                 spec_token_indx = torch.arange(
-                    spec_token_masks.size(0),
+                    spec_token_size,
                     dtype=torch.int32,
                     device=query_start_loc.device,
                 )
@@ -302,13 +287,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_sequence_masks = self.spec_sequence_masks[:batch_size]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
-            assert spec_token_masks is not None
-            self.spec_token_masks[: spec_token_masks.size(0)].copy_(
-                spec_token_masks, non_blocking=True
-            )
-            spec_token_masks = self.spec_token_masks[:num_actual_tokens]
-            spec_token_masks[spec_token_masks.size(0) :].fill_(False)
-
             assert non_spec_token_indx is not None and spec_token_indx is not None
             self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
                 non_spec_token_indx, non_blocking=True
@@ -373,7 +351,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
             spec_sequence_masks=spec_sequence_masks,
-            spec_token_masks=spec_token_masks,
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
