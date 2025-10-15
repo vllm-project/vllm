@@ -673,10 +673,10 @@ class AllReduceRMSNormPattern(BasePattern):
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self):
-        input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
-        weight = torch.empty([4], device=self.device, dtype=self.dtype)
+        input, weight = self.rmsnorm_matcher.inputs()
 
-        return [input, weight]
+        # input goes through allreduce first, always 16-bit
+        return [input.to(self.dtype), weight]
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(input: torch.Tensor, weight: torch.Tensor):
@@ -728,14 +728,10 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def get_inputs(self):
-        input = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        return [
-            residual,
-            input,
-            weight,
-        ]
+        input, residual, weight = self.rmsnorm_matcher.inputs()
+
+        # input goes through allreduce first, always 16-bit
+        return [residual, input.to(self.dtype), weight]
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor):
@@ -802,10 +798,11 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
 
     def register(self, pm_pass: PatternMatcherPass):
         def get_inputs():
-            input = torch.zeros([1, 8, 4], device=self.device, dtype=self.dtype)
-            weight = torch.empty([4], device=self.device, dtype=self.dtype)
-            scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-            return [input, weight, scale]
+            input, weight = self.rmsnorm_matcher.inputs()
+            _, scale = self.quant_matcher.inputs()
+
+            # input goes through allreduce first, always 16-bit
+            return [input.to(self.dtype), weight, scale]
 
         def pattern(
             input: torch.Tensor,
@@ -871,18 +868,11 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
 
     def register(self, pm_pass: PatternMatcherPass):
         def get_inputs():
-            input = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+            input, residual, weight = self.rmsnorm_matcher.inputs()
+            _, scale = self.quant_matcher.inputs()
 
-            residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-            weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-            scale = torch.empty([1, 1], device=self.device, dtype=torch.float32)
-
-            return [
-                residual,
-                input,
-                weight,
-                scale,
-            ]
+            # input goes through allreduce first, always 16-bit
+            return [residual, input.to(self.dtype), weight, scale]
 
         def pattern(
             residual: torch.Tensor,

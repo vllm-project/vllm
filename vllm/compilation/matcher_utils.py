@@ -73,9 +73,7 @@ class MatcherRMSNorm(MatcherCustomOp):
 
     def inputs(self):
         input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
-        weight = self.empty(
-            16,
-        )
+        weight = self.empty(16)
         return [input, weight]
 
     def forward_custom(

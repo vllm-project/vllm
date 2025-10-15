@@ -182,7 +182,6 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
-            residual = residual.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(
@@ -292,7 +291,6 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
-            residual = residual.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(input)
