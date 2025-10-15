@@ -320,7 +320,6 @@ ALL_DECODER_LAYER_TYPES = {
 
 @support_torch_compile
 class GraniteMoeHybridModel(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -332,8 +331,11 @@ class GraniteMoeHybridModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
@@ -346,8 +348,7 @@ class GraniteMoeHybridModel(nn.Module):
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
-            layer_class = ALL_DECODER_LAYER_TYPES[
-                config.layer_types[layer_idx]]
+            layer_class = ALL_DECODER_LAYER_TYPES[config.layer_types[layer_idx]]
             return layer_class(
                 config,
                 layer_idx,
@@ -358,10 +359,11 @@ class GraniteMoeHybridModel(nn.Module):
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
+        )
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -375,7 +377,6 @@ class GraniteMoeHybridModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -385,7 +386,7 @@ class GraniteMoeHybridModel(nn.Module):
             residual = None
         else:
             if intermediate_tensors is None:
-                raise RuntimeError('Intermediate tensors may not be None!')
+                raise RuntimeError("Intermediate tensors may not be None!")
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
@@ -393,15 +394,14 @@ class GraniteMoeHybridModel(nn.Module):
         for i, layer in enumerate(self.layers):
             if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
                 num_attn += 1
-            hidden_states, residual = layer(positions=positions,
-                                            hidden_states=hidden_states,
-                                            residual=residual)
+            hidden_states, residual = layer(
+                positions=positions, hidden_states=hidden_states, residual=residual
+            )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -410,18 +410,23 @@ class GraniteMoeHybridModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         # layers.0.block_sparse_moe.expert_0.input_linear.input_scale
-        ckpt_gate_proj_name="gate_proj"
-        ckpt_down_proj_name="down_proj"
-        ckpt_up_proj_name="up_proj"
-        num_experts=self.config.num_local_experts
-        num_redundant_experts=0
+        ckpt_gate_proj_name = "gate_proj"
+        ckpt_down_proj_name = "down_proj"
+        ckpt_up_proj_name = "up_proj"
+        num_experts = self.config.num_local_experts
+        num_redundant_experts = 0
 
         return [
             # (param_name, weight_name, expert_id, shard_id)
-            ("block_sparse_moe.experts.w13_" if weight_name
-             in [ckpt_gate_proj_name, ckpt_up_proj_name] else "block_sparse_moe.experts.w2_",
-             f"block_sparse_moe.experts.{expert_id}.{weight_name}.",
-             expert_id, shard_id) for expert_id in range(num_experts)
+            (
+                "block_sparse_moe.experts.w13_"
+                if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
+                else "block_sparse_moe.experts.w2_",
+                f"block_sparse_moe.experts.{expert_id}.{weight_name}.",
+                expert_id,
+                shard_id,
+            )
+            for expert_id in range(num_experts)
             for shard_id, weight_name in [
                 ("w1", ckpt_gate_proj_name),
                 ("w2", ckpt_down_proj_name),
@@ -429,8 +434,7 @@ class GraniteMoeHybridModel(nn.Module):
             ]
         ]
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -443,8 +447,7 @@ class GraniteMoeHybridModel(nn.Module):
 
         def _load(n, p):
             param = params_dict[n]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, p)
             loaded_params.add(n)
 
@@ -452,20 +455,14 @@ class GraniteMoeHybridModel(nn.Module):
             # Skip layers on other devices.
             if not is_pp_missing_parameter(n, self):
                 param = params_dict[n]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, p, shard_id)
                 loaded_params.add(n)
 
         def _load_expert(n, p, name, shard_id, expert_id):
             param = params_dict[n]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param,
-                          p,
-                          name,
-                          shard_id=shard_id,
-                          expert_id=expert_id)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
             loaded_params.add(n)
 
         def _load_quant_expert(name, loaded_weight):
@@ -481,23 +478,19 @@ class GraniteMoeHybridModel(nn.Module):
                 if is_pp_missing_parameter(name_mapped, self):
                     continue
 
-                if ((name_mapped.endswith(".bias")
-                        or name_mapped.endswith("_bias"))
-                        and name_mapped not in params_dict):
-                    # Skip bias which shouldn't be in the quantized parameters.
-                    return name_mapped
-
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
-                success= False
+                success = False
 
                 if weight_loader is not None:
-                   success = weight_loader(param,
-                                            loaded_weight,
-                                            name_mapped,
-                                            shard_id=shard_id,
-                                            expert_id=expert_id,
-                                            return_success=True)
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
 
                 if success:
                     return name_mapped
@@ -507,16 +500,16 @@ class GraniteMoeHybridModel(nn.Module):
             if "A_log" in n:
                 n = n.replace("A_log", "A")
 
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(n))):
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(n)
+            ):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 loaded_weight = p
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
-                #weight_loader(p, loaded_weight)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
                 _load(scale_name, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -530,54 +523,68 @@ class GraniteMoeHybridModel(nn.Module):
             #  to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
             # The renaming and parameter loading logic is the same for weight
             # and weight_scale tensors so we can reuse them without issues.
-            if (n.endswith('.block_sparse_moe.input_linear.weight') or
-                    n.endswith('.block_sparse_moe.input_linear.weight_scale')):
+            if n.endswith(".block_sparse_moe.input_linear.weight") or n.endswith(
+                ".block_sparse_moe.input_linear.weight_scale"
+            ):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w1.weight")
+                        ".block_sparse_moe.input_linear.weight",
+                        f".block_sparse_moe.experts.{e}.w1.weight",
+                    )
                     w3_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w3.weight")
+                        ".block_sparse_moe.input_linear.weight",
+                        f".block_sparse_moe.experts.{e}.w3.weight",
+                    )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
-                    _load_expert(n.replace('.input_linear.', '.experts.w13_'),
-                                 w1_param,
-                                 w1_name,
-                                 shard_id='w1',
-                                 expert_id=e)
-                    _load_expert(n.replace('.input_linear.', '.experts.w13_'),
-                                 w3_param,
-                                 w3_name,
-                                 shard_id='w3',
-                                 expert_id=e)
-            elif (n.endswith('.block_sparse_moe.output_linear.weight') or
-                  n.endswith('.block_sparse_moe.output_linear.weight_scale')):
+                    _load_expert(
+                        n.replace(".input_linear.", ".experts.w13_"),
+                        w1_param,
+                        w1_name,
+                        shard_id="w1",
+                        expert_id=e,
+                    )
+                    _load_expert(
+                        n.replace(".input_linear.", ".experts.w13_"),
+                        w3_param,
+                        w3_name,
+                        shard_id="w3",
+                        expert_id=e,
+                    )
+            elif n.endswith(".block_sparse_moe.output_linear.weight") or n.endswith(
+                ".block_sparse_moe.output_linear.weight_scale"
+            ):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
-                        '.block_sparse_moe.output_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w2.weight")
+                        ".block_sparse_moe.output_linear.weight",
+                        f".block_sparse_moe.experts.{e}.w2.weight",
+                    )
                     w2_param = p[e]
-                    _load_expert(n.replace('.output_linear.', '.experts.w2_'),
-                                 w2_param,
-                                 w2_name,
-                                 shard_id='w2',
-                                 expert_id=e)
-            elif n.endswith('.block_sparse_moe.router.layer.weight'):
-                gate_name = n.replace('.block_sparse_moe.router.layer.weight',
-                                      ".block_sparse_moe.gate.weight")
+                    _load_expert(
+                        n.replace(".output_linear.", ".experts.w2_"),
+                        w2_param,
+                        w2_name,
+                        shard_id="w2",
+                        expert_id=e,
+                    )
+            elif n.endswith(".block_sparse_moe.router.layer.weight"):
+                gate_name = n.replace(
+                    ".block_sparse_moe.router.layer.weight",
+                    ".block_sparse_moe.gate.weight",
+                )
                 _load(gate_name, p)
             else:
                 loaded = False
                 for param_name, weight_name, shard_id in stacked_params_mapping:
                     if weight_name in n:
-                        _load_shard(n.replace(weight_name, param_name),
-                                    p,
-                                    shard_id=shard_id)
+                        _load_shard(
+                            n.replace(weight_name, param_name), p, shard_id=shard_id
+                        )
                         loaded = True
                 if not loaded:
                     _load(n, p)
 
         return loaded_params
+
 
 class GraniteMoeHybridForCausalLM(
     nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
