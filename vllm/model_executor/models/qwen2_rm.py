@@ -107,7 +107,7 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {"encode": Pooler.for_encode(pooler_config)},
+            {"token_classify": Pooler.for_token_classify(pooler_config)}
         )
 
 
@@ -120,4 +120,6 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler({"encode": Pooler.for_encode(pooler_config)})
+        self.pooler = DispatchPooler(
+            {"token_classify": Pooler.for_token_classify(pooler_config)}
+        )

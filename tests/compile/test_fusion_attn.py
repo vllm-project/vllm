@@ -19,7 +19,7 @@ from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     ModelConfig,
     PassConfig,
     SchedulerConfig,
@@ -321,7 +321,7 @@ def test_attention_quant_pattern(
         ),
         scheduler_config=SchedulerConfig(max_num_seqs=1024),
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["+quant_fp8"],
             use_inductor_graph_partition=use_inductor_graph_partition,
         ),
