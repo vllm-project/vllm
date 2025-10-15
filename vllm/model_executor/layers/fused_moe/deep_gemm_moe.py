@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 from tqdm import tqdm
@@ -28,8 +27,9 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.utils import has_deep_gemm, run_once
+from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
+from vllm.utils.func import run_once
 
 logger = init_logger(__name__)
 
@@ -198,16 +198,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
         block_m = self.block_shape[0]
         M_sum = compute_aligned_M(
@@ -218,7 +216,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace1 = (M_sum, max(N, K))
         workspace2 = (M_sum, max(N // 2, K))
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
@@ -230,12 +228,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         assert a1q_scale is not None
@@ -286,7 +284,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
-        a2q_scale: Optional[torch.Tensor] = None
+        a2q_scale: torch.Tensor | None = None
         a2q, a2q_scale = per_token_group_quant_fp8(
             act_out, self.block_shape[1], column_major_scales=True, out_q=quant_out
         )
@@ -319,9 +317,9 @@ def deep_gemm_moe_fp8(
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
     apply_router_weight_on_input=False,
 ) -> torch.Tensor:
     """

@@ -8,15 +8,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.v1.engine.async_llm import AsyncLLM
 
 
-def test_mp_reducer(monkeypatch):
+def test_mp_reducer():
     """
     Test that _reduce_config reducer is registered when AsyncLLM is instantiated
     without transformers_modules. This is a regression test for
     https://github.com/vllm-project/vllm/pull/18640.
     """
-
-    # Use V1 AsyncLLM which calls maybe_register_config_serialize_by_value
-    monkeypatch.setenv("VLLM_USE_V1", "1")
 
     # Ensure transformers_modules is not in sys.modules
     if "transformers_modules" in sys.modules:

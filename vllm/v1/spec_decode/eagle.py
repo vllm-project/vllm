@@ -3,17 +3,21 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_layers_from_vllm_config,
+)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -36,7 +40,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -75,17 +78,30 @@ class EagleProposer:
             vllm_config.model_config
         )
 
-        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
-        self.draft_indexer_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.attn_metadata_builder: AttentionMetadataBuilder | None = None
+        self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
-        self.use_cuda_graph = (
-            not current_platform.is_xpu()
-            and self.vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
-            and not self.vllm_config.model_config.enforce_eager
-            and not self.speculative_config.enforce_eager
-        )
+        self.use_cuda_graph = False
+
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            cudagraph_mode = compilation_config.cudagraph_mode
+            if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
+                CUDAGraphMode.PIECEWISE
+            ):
+                logger.warning(
+                    "Currently the eagle proposer only supports cudagraph_mode "
+                    "PIECEWISE, if you want the drafter to use cuda graphs, "
+                    "please set compilation_config.cudagraph_mode to PIECEWISE "
+                    "or FULL_AND_PIECEWISE"
+                )
+            self.use_cuda_graph = (
+                cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE)
+                and not self.speculative_config.enforce_eager
+            )
+
         self.cudagraph_batch_sizes = (
             list(reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
             if self.use_cuda_graph
@@ -132,7 +148,7 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: Optional[tuple] = None
+        self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -190,10 +206,10 @@ class EagleProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: Optional[torch.Tensor],
+        last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -216,11 +232,11 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        # FIXME: need to consider multiple kv_cache_groups
-        ubatch_id = dbo_current_ubatch_id()
-        attn_metadata_builder = self.runner.attn_groups[0][0].metadata_builders[
-            ubatch_id
-        ]
+        if self.attn_metadata_builder is None:
+            attn_metadata_builder = self._get_attention_metadata_builder()
+        else:
+            attn_metadata_builder = self.attn_metadata_builder
+
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
@@ -239,12 +255,15 @@ class EagleProposer:
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
+
         for layer_name in self.indexer_layer_names:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
+        cudagraph_runtime_mode = CUDAGraphMode.NONE
         if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
@@ -267,7 +286,10 @@ class EagleProposer:
             inputs_embeds = None
 
         with set_forward_context(
-            per_layer_attn_metadata, self.vllm_config, num_tokens=num_input_tokens
+            per_layer_attn_metadata,
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
@@ -326,8 +348,10 @@ class EagleProposer:
 
         if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             input_batch_size = batch_size
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -424,7 +448,10 @@ class EagleProposer:
 
             # Run the model.
             with set_forward_context(
-                per_layer_attn_metadata, self.vllm_config, num_tokens=input_batch_size
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=input_batch_size,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
@@ -522,13 +549,9 @@ class EagleProposer:
         )
 
         # Generate a mask for all valid tokens within those requests
-        max_gen_len = sampled_token_ids.shape[-1]
-        if max_gen_len == 1:
-            valid_mask = torch.ones_like(valid_sampled_token_ids_gpu, dtype=torch.bool)
-        else:
-            valid_mask = (valid_sampled_token_ids_gpu != -1) & (
-                valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
-            )
+        valid_mask = (valid_sampled_token_ids_gpu != -1) & (
+            valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
+        )
 
         # Count the number of valid tokens in each request
         valid_sampled_tokens_count = valid_mask.sum(dim=1)
@@ -601,6 +624,7 @@ class EagleProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
         token_indices_to_sample = (
@@ -734,11 +758,16 @@ class EagleProposer:
 
             if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+                cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
                 num_input_tokens = num_tokens
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
             # Run the model.
             with set_forward_context(
-                per_layer_attn_metadata, self.vllm_config, num_tokens=num_input_tokens
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -872,6 +901,7 @@ class EagleProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
         return spec_common_attn_metadata, token_indices
@@ -884,7 +914,7 @@ class EagleProposer:
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
         )
         # FIXME: support hybrid kv for draft model
         target_indexer_layer_names = set(
@@ -901,7 +931,7 @@ class EagleProposer:
             )
 
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
             - target_attn_layer_names
         )
         indexer_layers = get_layers_from_vllm_config(
@@ -1017,8 +1047,19 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        use_cudagraphs=True,
     ) -> None:
-        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
+        if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+
+        with set_forward_context(
+            None,
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+            if use_cudagraphs
+            else CUDAGraphMode.NONE,
+        ):
             if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -1033,7 +1074,7 @@ class EagleProposer:
                 inputs_embeds=inputs_embeds,
             )
 
-    def _get_attention_metadata_builder(self) -> list[AttentionMetadataBuilder]:
+    def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
 
         Returns:

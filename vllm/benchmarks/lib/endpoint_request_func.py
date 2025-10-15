@@ -10,9 +10,10 @@ import time
 import traceback
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, Union
+from typing import Any, Literal, Protocol
 
 import aiohttp
+import regex as re
 from tqdm.asyncio import tqdm
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
@@ -63,19 +64,19 @@ class StreamedResponseHandler:
 class RequestFuncInput:
     """The input for the request function."""
 
-    prompt: str
+    prompt: str | list[str]
     api_url: str
     prompt_len: int
     output_len: int
     model: str
-    model_name: Optional[str] = None
-    logprobs: Optional[int] = None
-    extra_headers: Optional[dict] = None
-    extra_body: Optional[dict] = None
-    multi_modal_content: Optional[Union[dict, list[dict]]] = None
+    model_name: str | None = None
+    logprobs: int | None = None
+    extra_headers: dict | None = None
+    extra_body: dict | None = None
+    multi_modal_content: dict | list[dict] | None = None
     ignore_eos: bool = False
-    language: Optional[str] = None
-    request_id: Optional[str] = None
+    language: str | None = None
+    request_id: str | None = None
 
 
 @dataclass
@@ -99,14 +100,48 @@ class RequestFunc(Protocol):
         self,
         request_func_input: RequestFuncInput,
         session: aiohttp.ClientSession,
-        pbar: Optional[tqdm] = None,
+        pbar: tqdm | None = None,
     ) -> Awaitable[RequestFuncOutput]: ...
+
+
+def _validate_api_url(
+    api_url: str,
+    api_name: str,
+    expected_suffixes: str | set[str],
+) -> None:
+    if isinstance(expected_suffixes, str):
+        expected_suffixes = {expected_suffixes}
+
+    expected_suffixes = {*expected_suffixes, "profile"}
+
+    if not api_url.endswith(tuple(expected_suffixes)):
+        raise ValueError(f"{api_name} URL must end with one of: {expected_suffixes}.")
+
+
+def _update_payload_common(
+    payload: dict[str, Any],
+    request_func_input: RequestFuncInput,
+) -> None:
+    if request_func_input.ignore_eos:
+        payload["ignore_eos"] = request_func_input.ignore_eos
+    if request_func_input.extra_body:
+        payload.update(request_func_input.extra_body)
+
+
+def _update_headers_common(
+    headers: dict[str, Any],
+    request_func_input: RequestFuncInput,
+) -> None:
+    if request_func_input.extra_headers:
+        headers |= request_func_input.extra_headers
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
 
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     """The async request function for the OpenAI Completions API.
 
@@ -118,9 +153,7 @@ async def async_request_openai_completions(
         The output of the request function.
     """
     api_url = request_func_input.api_url
-    assert api_url.endswith(("completions", "profile")), (
-        "OpenAI Completions API URL must end with 'completions' or 'profile'."
-    )
+    _validate_api_url(api_url, "OpenAI Completions API", "completions")
 
     payload = {
         "model": request_func_input.model_name
@@ -136,15 +169,12 @@ async def async_request_openai_completions(
             "include_usage": True,
         },
     }
-    if request_func_input.ignore_eos:
-        payload["ignore_eos"] = request_func_input.ignore_eos
-    if request_func_input.extra_body:
-        payload.update(request_func_input.extra_body)
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
-    if request_func_input.extra_headers:
-        headers |= request_func_input.extra_headers
-    if request_func_input.request_id:
-        headers["x-request-id"] = request_func_input.request_id
+    _update_payload_common(payload, request_func_input)
+
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -222,27 +252,41 @@ async def async_request_openai_completions(
     return output
 
 
-async def async_request_openai_chat_completions(
+def _get_chat_content(
     request_func_input: RequestFuncInput,
-    session: aiohttp.ClientSession,
-    pbar: Optional[tqdm] = None,
-) -> RequestFuncOutput:
-    api_url = request_func_input.api_url
-    assert api_url.endswith(("chat/completions", "profile")), (
-        "OpenAI Chat Completions API URL must end with 'chat/completions'."
-    )
+    mm_position: Literal["first", "last"] = "last",
+) -> list[dict[str, Any]]:
+    text_contents = [{"type": "text", "text": request_func_input.prompt}]
 
-    content = [{"type": "text", "text": request_func_input.prompt}]
+    mm_contents = []
     if request_func_input.multi_modal_content:
         mm_content = request_func_input.multi_modal_content
         if isinstance(mm_content, list):
-            content.extend(mm_content)
+            mm_contents.extend(request_func_input.multi_modal_content)
         elif isinstance(mm_content, dict):
-            content.append(mm_content)
+            mm_contents.append(request_func_input.multi_modal_content)
         else:
             raise TypeError(
                 "multi_modal_content must be a dict or list[dict] for openai-chat"
             )
+
+    if mm_position == "first":
+        return mm_contents + text_contents
+
+    return text_contents + mm_contents
+
+
+async def async_request_openai_chat_completions(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+    mm_position: Literal["first", "last"] = "last",
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")
+
+    content = _get_chat_content(request_func_input, mm_position=mm_position)
+
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
@@ -257,18 +301,13 @@ async def async_request_openai_chat_completions(
             "include_usage": True,
         },
     }
-    if request_func_input.ignore_eos:
-        payload["ignore_eos"] = request_func_input.ignore_eos
-    if request_func_input.extra_body:
-        payload.update(request_func_input.extra_body)
+    _update_payload_common(payload, request_func_input)
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
-    if request_func_input.extra_headers:
-        headers |= request_func_input.extra_headers
-    if request_func_input.request_id:
-        headers["x-request-id"] = request_func_input.request_id
+    _update_headers_common(headers, request_func_input)
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -337,16 +376,13 @@ async def async_request_openai_chat_completions(
 async def async_request_openai_audio(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     # Lazy import without PlaceholderModule to avoid vllm dep.
     import soundfile
 
     api_url = request_func_input.api_url
-    assert api_url.endswith(("transcriptions", "translations")), (
-        "OpenAI Chat Completions API URL must end with 'transcriptions' "
-    )
-    "or `translations`."
+    _validate_api_url(api_url, "OpenAI Audio API", {"transcriptions", "translations"})
 
     content = [{"type": "text", "text": request_func_input.prompt}]
     payload = {
@@ -361,15 +397,12 @@ async def async_request_openai_audio(
         "stream_include_usage": True,
         "stream_continuous_usage_stats": True,
     }
-    if request_func_input.extra_body:
-        payload.update(request_func_input.extra_body)
+    _update_payload_common(payload, request_func_input)
+
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
-    if request_func_input.extra_headers:
-        headers |= request_func_input.extra_headers
-    if request_func_input.request_id:
-        headers["x-request-id"] = request_func_input.request_id
+    _update_headers_common(headers, request_func_input)
 
     # Send audio file
     def to_bytes(y, sr):
@@ -451,33 +484,20 @@ async def async_request_openai_audio(
     return output
 
 
-async def async_request_openai_embeddings(
-    request_func_input: RequestFuncInput,
+async def _run_pooling_request(
     session: aiohttp.ClientSession,
-    pbar: Optional[tqdm] = None,
-):
-    api_url = request_func_input.api_url
-    assert api_url.endswith("embeddings"), (
-        "OpenAI Embeddings API URL must end with 'embeddings'."
-    )
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
-
-    payload = {
-        "model": request_func_input.model,
-        "input": request_func_input.prompt,
-    }
-
+    api_url: str,
+    payload: dict[str, Any],
+    headers: dict[str, Any],
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
     output = RequestFuncOutput()
     st = time.perf_counter()
     output.start_time = st
     try:
         async with session.post(url=api_url, headers=headers, json=payload) as response:
             if response.status == 200:
-                output.latency = time.perf_counter() - st
+                output.ttft = output.latency = time.perf_counter() - st
                 data = await response.json()
                 output.success = True
                 output.generated_text = ""
@@ -494,6 +514,236 @@ async def async_request_openai_embeddings(
     return output
 
 
+async def async_request_openai_embeddings(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "OpenAI Embeddings API", "embeddings")
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "input": request_func_input.prompt,
+    }
+    _update_payload_common(payload, request_func_input)
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
+async def async_request_vllm_rerank(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "vLLM score API", "rerank")
+
+    assert (
+        isinstance(request_func_input.prompt, list)
+        and len(request_func_input.prompt) > 1
+    )
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "query": request_func_input.prompt[0],
+        "documents": request_func_input.prompt[1:],
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
+async def async_request_openai_embeddings_chat(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+    mm_position: Literal["first", "last"] = "last",
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "OpenAI Embeddings API", "embeddings")
+
+    content = _get_chat_content(request_func_input, mm_position=mm_position)
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "messages": [
+            {"role": "user", "content": content},
+        ],
+    }
+    _update_payload_common(payload, request_func_input)
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
+def _try_extract_request_idx(request_func_input: RequestFuncInput):
+    if request_func_input.request_id:
+        match = re.search(r"(\d+)$", request_func_input.request_id)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+
+    return None
+
+
+def _preprocess_clip(request_func_input: RequestFuncInput):
+    if request_func_input.multi_modal_content:
+        # Image input
+        request_func_input.prompt = ""
+
+    # max_model_len=77 is too short for most datasets,
+    # so by default we truncate the prompt to max_model_len
+    if request_func_input.extra_body is None:
+        request_func_input.extra_body = {}
+    if "truncate_prompt_tokens" not in request_func_input.extra_body:
+        request_func_input.extra_body["truncate_prompt_tokens"] = -1
+
+
+def _preprocess_vlm2vec(request_func_input: RequestFuncInput):
+    if request_func_input.multi_modal_content:
+        request_idx = _try_extract_request_idx(request_func_input)
+
+        # Adjust the ratio manually if needed.
+        use_image_only_prompt = request_idx is None or request_idx % 2 == 0
+
+        if use_image_only_prompt:
+            # Image input
+            request_func_input.prompt = "Represent the given image."
+        else:
+            # Text+Image input
+            request_func_input.prompt = (
+                f"Represent the given image with the following question: "
+                f"{request_func_input.prompt}"
+            )
+
+
+async def async_request_openai_embeddings_clip(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    _preprocess_clip(request_func_input)
+
+    return await async_request_openai_embeddings_chat(
+        request_func_input,
+        session,
+        pbar=pbar,
+    )
+
+
+async def async_request_openai_embeddings_vlm2vec(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    _preprocess_vlm2vec(request_func_input)
+
+    return await async_request_openai_embeddings_chat(
+        request_func_input,
+        session,
+        pbar=pbar,
+        mm_position="first",
+    )
+
+
+async def async_request_infinity_embeddings(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "Infinity Embeddings API", "embeddings")
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+    }
+
+    if request_func_input.prompt:
+        payload["input"] = request_func_input.prompt
+    else:
+        mm_content = request_func_input.multi_modal_content
+        assert isinstance(mm_content, dict)
+
+        mm_type = mm_content["type"]
+        payload["input"] = mm_content[mm_type]["url"]
+        payload["modality"] = mm_type.split("_", 1)[0]
+
+    _update_payload_common(payload, request_func_input)
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
+async def async_request_infinity_embeddings_clip(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    _preprocess_clip(request_func_input)
+
+    return await async_request_infinity_embeddings(
+        request_func_input,
+        session,
+        pbar=pbar,
+    )
+
+
 # TODO: Add more request functions for different API protocols.
 ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm": async_request_openai_completions,
@@ -501,6 +751,14 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "openai-chat": async_request_openai_chat_completions,
     "openai-audio": async_request_openai_audio,
     "openai-embeddings": async_request_openai_embeddings,
+    "openai-embeddings-chat": async_request_openai_embeddings_chat,
+    "openai-embeddings-clip": async_request_openai_embeddings_clip,
+    "openai-embeddings-vlm2vec": async_request_openai_embeddings_vlm2vec,
+    # Infinity embedding server: https://github.com/michaelfeil/infinity
+    "infinity-embeddings": async_request_infinity_embeddings,
+    "infinity-embeddings-clip": async_request_infinity_embeddings_clip,
+    # (Infinity embedding server does not support vlm2vec)
+    "vllm-rerank": async_request_vllm_rerank,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

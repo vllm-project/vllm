@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Optional
+from collections.abc import Sequence
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
@@ -52,7 +52,7 @@ class KVCacheCoordinator(ABC):
         self,
         request_id: str,
         num_tokens: int,
-        new_computed_blocks: tuple[list[KVCacheBlock], ...],
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
     ) -> int:
         """
@@ -85,7 +85,7 @@ class KVCacheCoordinator(ABC):
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: tuple[list[KVCacheBlock], ...]
+        self, request_id: str, new_computed_blocks: tuple[Sequence[KVCacheBlock], ...]
     ) -> None:
         """
         Add the new computed blocks to the request.
@@ -148,27 +148,22 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.free(request_id)
 
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> list[int]:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """
-        Get the number of common prefix blocks for all requests in the RUNNING
-        state for each kv cache group.
+        Get the number of common prefix blocks for all requests with allocated
+        KV cache for each kv cache group.
 
         Args:
-            request_id: The request ID.
-            num_running_requests: The total number of requests in the RUNNING
-                state.
+            running_request_id: The request ID of any running request, used to
+                identify the common prefix blocks.
 
         Returns:
-            list[int]: The number of common prefix blocks for all requests in
-                the RUNNING state for each kv cache group.
+            list[int]: The number of common prefix blocks for each kv cache group.
         """
-        num_blocks_per_group = [
-            manager.get_num_common_prefix_blocks(request_id, num_running_requests)
+        return [
+            manager.get_num_common_prefix_blocks(running_request_id)
             for manager in self.single_type_managers
         ]
-        return num_blocks_per_group
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         """
@@ -226,9 +221,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> list[int]:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         return [0] * self.num_single_type_manager
 
     def find_longest_cache_hit(
@@ -327,8 +320,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         one of them is full attention. Then, split the kv cache groups into full
         attention groups and other groups.
         """
-        full_attention_spec: Optional[FullAttentionSpec] = None
-        other_spec: Optional[KVCacheSpec] = None
+        full_attention_spec: FullAttentionSpec | None = None
+        other_spec: KVCacheSpec | None = None
         self.full_attention_group_ids: list[int] = []
         self.other_group_ids: list[int] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):

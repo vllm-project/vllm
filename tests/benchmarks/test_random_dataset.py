@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
-from typing import Any, NamedTuple, Optional, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import pytest
@@ -185,8 +185,8 @@ def _collect_mm_samples(
     output_len: int = 5,
     base_items_per_request: int = 2,
     num_mm_items_range_ratio: float = 0.0,
-    limit_mm_per_prompt: Optional[dict[str, int]] = None,
-    bucket_config: Optional[dict[tuple[int, int, int], float]] = None,
+    limit_mm_per_prompt: dict[str, int] | None = None,
+    bucket_config: dict[tuple[int, int, int], float] | None = None,
     enable_multimodal_chat: bool = False,
 ) -> list[SampleRequest]:
     if limit_mm_per_prompt is None:

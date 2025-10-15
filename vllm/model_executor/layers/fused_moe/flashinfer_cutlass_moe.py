@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -90,16 +89,14 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
         """
@@ -118,14 +115,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        aq_m, aq_n = aq.shape
+        workspace1 = (M, K)
         workspace2 = (0,)
-        output_shape = (aq_m, aq_n * 2) if self.quant_dtype == "nvfp4" else (aq_m, aq_n)
-        workspace_dtype = a.dtype
-        workspace1 = output_shape
+        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
-        return (workspace1, workspace2, output_shape, workspace_dtype)
+        return (workspace1, workspace2, output_shape)
 
     def apply(
         self,
@@ -137,13 +132,13 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: Optional[torch.Tensor],
-        workspace2: Optional[torch.Tensor],
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        apply_router_weight_on_input: Optional[bool],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor | None,
+        workspace2: torch.Tensor | None,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool | None,
     ):
         assert activation == "silu", (
             "Only activation silu is supported in FlashInferExperts"
@@ -211,7 +206,7 @@ def flashinfer_cutlass_moe_fp4(
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
     fused_experts = mk.FusedMoEModularKernel(
@@ -246,7 +241,7 @@ def flashinfer_cutlass_moe(
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     tp_rank: int = 0,
     tp_size: int = 1,

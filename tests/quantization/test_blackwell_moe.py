@@ -3,7 +3,6 @@
 
 import json
 import os
-from typing import Optional
 
 import pytest
 
@@ -15,14 +14,22 @@ if not current_platform.is_device_capability(100):
         "This test only runs on Blackwell GPUs (SM100).", allow_module_level=True
     )
 
-os.environ["FLASHINFER_NVCC_THREADS"] = "16"
+
+@pytest.fixture(scope="module", autouse=True)
+def set_test_environment():
+    """Sets environment variables required for this test module."""
+    # Make sure TRTLLM attention is available
+    os.environ["VLLM_HAS_FLASHINFER_CUBIN"] = "1"
+    # Set compilation threads to 16 to speed up startup
+    os.environ["FLASHINFER_NVCC_THREADS"] = "16"
+
 
 # dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4,
 # "text_config": {"num_layers": 4, "num_hidden_layers": 4}}
 dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4}
 
 
-def can_initialize(model: str, extra_args: Optional[list[str]] = None):
+def can_initialize(model: str, extra_args: list[str] | None = None):
     # Server arguments
     extra_args = extra_args if extra_args is not None else []
     server_args = [
@@ -42,7 +49,7 @@ def can_initialize(model: str, extra_args: Optional[list[str]] = None):
     with RemoteOpenAIServer(
         model,
         server_args,
-        max_wait_seconds=1000,  # Due to FlashInfer compile
+        max_wait_seconds=1500,  # Due to FlashInfer compile
         override_hf_configs=dummy_hf_overrides,
     ) as server:
         client = server.get_client()

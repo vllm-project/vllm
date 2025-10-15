@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.nn import Module
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     is_valid_flashinfer_cutlass_fused_moe,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -92,8 +94,8 @@ class ModelOptFp8Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_fp8_serialized: bool = False,
-        kv_cache_quant_method: Optional[str] = None,
-        exclude_modules: Optional[list[str]] = None,
+        kv_cache_quant_method: str | None = None,
+        exclude_modules: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
@@ -128,7 +130,7 @@ class ModelOptFp8Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> QuantizationMethods | None:
         """Detect if this ModelOpt config should be used based on
         quantization config."""
 
@@ -319,7 +321,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply(
             input=x,
@@ -351,7 +353,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
         self.cutlass_fp8_supported = cutlass_fp8_supported()
-        self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
+        self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
@@ -360,7 +362,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
         self,
-    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
         # TRT LLM not supported with all2all yet.
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
@@ -541,7 +543,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
 
@@ -561,21 +563,21 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet."
@@ -674,7 +676,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_nvfp4_serialized: bool,
-        kv_cache_quant_algo: Optional[str],
+        kv_cache_quant_algo: str | None,
         exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
@@ -713,7 +715,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> QuantizationMethods | None:
         """Detect if this ModelOpt FP4 config should be used based on
         quantization config."""
         if hf_quant_cfg is None:
@@ -884,8 +886,9 @@ class ModelOptNvFp4Config(QuantizationConfig):
     ) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
+        skip_layer = self.is_layer_excluded(prefix)
         if isinstance(layer, LinearBase):
-            if self.is_layer_excluded(prefix):
+            if skip_layer:
                 return UnquantizedLinearMethod()
             # Check if this is a vision model layer that should not be quantized
             if "vision_tower" in prefix or "vision_model" in prefix:
@@ -894,6 +897,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
+            if skip_layer:
+                return None
             return ModelOptNvFp4FusedMoE(self, layer.moe_config, layer)
         return None
 
@@ -903,7 +908,7 @@ class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
-    def __init__(self, quant_config: Union[ModelOptFp8Config, ModelOptNvFp4Config]):
+    def __init__(self, quant_config: ModelOptFp8Config | ModelOptNvFp4Config):
         super().__init__(quant_config)
 
 
@@ -1068,7 +1073,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.backend == "marlin":
             return apply_fp4_marlin_linear(
@@ -1159,7 +1164,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 " for ModelOptNvFp4FusedMoE."
             )
 
-    def maybe_make_prepare_finalize(self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin or (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
@@ -1562,7 +1567,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         if (
             self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
@@ -1586,21 +1591,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
@@ -1697,7 +1702,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         #
         if self.use_marlin:
             assert self.fused_experts is None
-            return torch.ops.vllm.fused_marlin_moe(
+            return fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,

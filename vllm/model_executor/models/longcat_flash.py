@@ -35,7 +35,7 @@
 
 import typing
 from collections.abc import Callable, Iterable
-from typing import Optional, Union
+from itertools import islice
 
 import torch
 from torch import nn
@@ -114,7 +114,7 @@ class FlashConfig(PretrainedConfig):
         attention_dropout=0.0,
         mla_scale_q_lora=False,
         mla_scale_kv_lora=False,
-        torch_dtype="bfloat16",
+        dtype="bfloat16",
         params_dtype="bfloat16",
         router_dtype="float32",
         router_bias=False,
@@ -130,7 +130,7 @@ class FlashConfig(PretrainedConfig):
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             params_dtype=params_dtype,
             router_dtype=router_dtype,
             topk_method=topk_method,
@@ -193,7 +193,7 @@ class FlashMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
@@ -269,8 +269,8 @@ class LongcatMoe(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ):
@@ -328,8 +328,8 @@ class FlashDecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         config: FlashConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
@@ -414,7 +414,7 @@ class FlashDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -505,9 +505,9 @@ class FlashModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -519,8 +519,7 @@ class FlashModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -592,9 +591,9 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -603,7 +602,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

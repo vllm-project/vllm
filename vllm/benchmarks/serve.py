@@ -18,6 +18,7 @@ On the client side, run:
 
 import argparse
 import asyncio
+import contextlib
 import gc
 import importlib.util
 import json
@@ -30,7 +31,7 @@ from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import aiohttp
 import numpy as np
@@ -106,9 +107,9 @@ class EmbedBenchmarkMetrics:
 
 
 def _get_current_request_rate(
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
-    ramp_up_start_rps: Optional[int],
-    ramp_up_end_rps: Optional[int],
+    ramp_up_strategy: Literal["linear", "exponential"] | None,
+    ramp_up_start_rps: int | None,
+    ramp_up_end_rps: int | None,
     request_index: int,
     total_requests: int,
     request_rate: float,
@@ -134,9 +135,9 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -465,6 +466,7 @@ def calculate_metrics(
 
 
 async def benchmark(
+    task_type: TaskType,
     endpoint_type: str,
     api_url: str,
     base_url: str,
@@ -472,7 +474,7 @@ async def benchmark(
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: list[SampleRequest],
-    logprobs: Optional[int],
+    logprobs: int | None,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
@@ -481,27 +483,19 @@ async def benchmark(
     selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
-    max_concurrency: Optional[int],
-    lora_modules: Optional[Iterable[str]],
-    extra_headers: Optional[dict],
-    extra_body: Optional[dict],
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    max_concurrency: int | None,
+    lora_modules: Iterable[str] | None,
+    extra_headers: dict | None,
+    extra_body: dict | None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
 ):
-    task_type = (
-        TaskType.EMBEDDING
-        if api_url.endswith("/v1/embeddings")
-        else TaskType.GENERATION
-    )
-    if endpoint_type in ASYNC_REQUEST_FUNCS:
-        if task_type == TaskType.EMBEDDING:
-            request_func = ASYNC_REQUEST_FUNCS["openai-embeddings"]
-        else:
-            request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
-    else:
-        raise ValueError(f"Unknown backend: {endpoint_type}")
+    try:
+        request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
+    except KeyError:
+        raise ValueError(f"Unknown backend: {endpoint_type}") from None
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     connector = aiohttp.TCPConnector(
@@ -612,17 +606,13 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (
+        asyncio.Semaphore(max_concurrency)
+        if max_concurrency
+        else contextlib.nullcontext()
+    )
 
     async def limited_request_func(request_func_input, session, pbar):
-        if semaphore is None:
-            return await request_func(
-                request_func_input=request_func_input, session=session, pbar=pbar
-            )
         async with semaphore:
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
@@ -1240,6 +1230,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "the ready check will be skipped.",
     )
 
+    parser.add_argument(
+        "--extra-body",
+        help="A JSON string representing extra body parameters to include "
+        "in each request."
+        'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
+        type=json.loads,
+        default=None,
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1310,36 +1309,46 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
+    backend = args.backend
+    task_type = TaskType.EMBEDDING if "embeddings" in backend else TaskType.GENERATION
+
     # Collect the sampling parameters.
-    sampling_params = {
-        k: v
-        for k, v in {
-            "top_p": args.top_p,
-            "top_k": args.top_k,
-            "min_p": args.min_p,
-            "temperature": args.temperature,
-            "frequency_penalty": args.frequency_penalty,
-            "presence_penalty": args.presence_penalty,
-            "repetition_penalty": args.repetition_penalty,
-        }.items()
-        if v is not None
-    }
+    if task_type == TaskType.GENERATION:
+        sampling_params = {
+            k: v
+            for k, v in {
+                "top_p": args.top_p,
+                "top_k": args.top_k,
+                "min_p": args.min_p,
+                "temperature": args.temperature,
+                "frequency_penalty": args.frequency_penalty,
+                "presence_penalty": args.presence_penalty,
+                "repetition_penalty": args.repetition_penalty,
+            }.items()
+            if v is not None
+        }
 
-    # Sampling parameters are only supported by openai-compatible backend.
-    if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
-        raise ValueError(
-            "Sampling parameters are only supported by openai-compatible backends."
-        )
+        # Sampling parameters are only supported by openai-compatible backend.
+        if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+            raise ValueError(
+                "Sampling parameters are only supported by openai-compatible backends."
+            )
 
-    if "temperature" not in sampling_params:
-        sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+        if "temperature" not in sampling_params:
+            sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+    else:
+        sampling_params = {}
+
+    extra_body = args.extra_body or {}
+    extra_body = {**sampling_params, **extra_body}
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
 
     benchmark_result = await benchmark(
-        endpoint_type=args.backend,
+        task_type=task_type,
+        endpoint_type=backend,
         api_url=api_url,
         base_url=base_url,
         model_id=model_id,
@@ -1358,7 +1367,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
         extra_headers=headers,
-        extra_body=sampling_params,
+        extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
