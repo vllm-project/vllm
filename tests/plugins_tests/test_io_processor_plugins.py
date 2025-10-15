@@ -108,9 +108,7 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
         io_processor_plugin="prithvi_to_tiff",
     ) as llm_runner:
         pooler_output = llm_runner.get_llm().encode(
-            img_prompt,
-            pooling_params=pooling_params,
-            pooling_task="token_classify"
+            img_prompt, pooling_params=pooling_params, pooling_task="token_classify"
         )
     output = pooler_output[0].outputs
 
