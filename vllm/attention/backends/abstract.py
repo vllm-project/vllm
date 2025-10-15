@@ -237,6 +237,14 @@ class AttentionBackend(ABC):
             invalid_reasons.append(combination_reason)
         return invalid_reasons
 
+    @classmethod
+    def get_required_kv_cache_layout(cls, capability: DeviceCapability) -> str | None:
+        """
+        Some backends require a specific kv cache layout.
+        This function returns the required layout if any.
+        """
+        return None
+
 
 class AttentionMetadata:
     pass

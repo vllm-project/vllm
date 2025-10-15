@@ -64,6 +64,10 @@ class FlashInferMLABackend(MLACommonBackend):
     def get_max_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(10, 3)
 
+    @classmethod
+    def get_required_kv_cache_layout(cls, capability: DeviceCapability) -> str | None:
+        return "HND"
+
 
 g_fi_workspace = torch.zeros(
     FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,

@@ -271,7 +271,7 @@ class CudaPlatformBase(Platform):
                 "to select a supported backend."
             )
 
-        from vllm.attention.backends.registry import _Backend, backend_to_class_str
+        from vllm.attention.backends.registry import backend_to_class_str
 
         device_capability = cls.get_device_capability()
 
@@ -341,31 +341,36 @@ class CudaPlatformBase(Platform):
         logger.info(
             "Valid backends: %s", [b[0].name for b in valid_backends_priorities]
         )
-
-        valid_backends_classes_str = [
-            backend_to_class_str(b[0]) for b in valid_backends_priorities
-        ]
         sorted_indices = sorted(
             range(len(valid_backends_priorities)),
             key=lambda i: valid_backends_priorities[i][1],
         )
         selected_index = sorted_indices[0]
-
+        selected_backend = valid_backends_priorities[selected_index][0]
+        selected_backend_class_str = backend_to_class_str(selected_backend)
+        selected_backend_class = resolve_obj_by_qualname(selected_backend_class_str)
         engine_version = "V1" if use_v1 else "V0"
         logger.info(
             "Using %s backend on %s engine.",
-            valid_backends_priorities[selected_index][0].name,
+            selected_backend.name,
             engine_version,
         )
 
-        # Post-selection modifications
-        if valid_backends_priorities[selected_index][0] == _Backend.FLASHINFER_MLA:
+        # Set required kv cache layout if any
+        required_layout = selected_backend_class.get_required_kv_cache_layout(
+            device_capability
+        )
+        if required_layout is not None:
             from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
-            set_kv_cache_layout("HND")
-            logger.info("Using HND KV cache layout for FlashInferMLA.")
+            set_kv_cache_layout(required_layout)
+            logger.info(
+                "Using %s KV cache layout for %s backend.",
+                required_layout,
+                selected_backend.name,
+            )
 
-        return valid_backends_classes_str[selected_index]
+        return selected_backend_class_str
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
