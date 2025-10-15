@@ -100,7 +100,7 @@ tools = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("tool_choice", ["auto",])
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
 async def test_function_tool_use(
     client: openai.AsyncOpenAI, model_name: str, tool_choice: str
 ):
