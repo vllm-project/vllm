@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,27 +22,21 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
         ("facebook/opt-125m", {}),
         (
             "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
-            {
-                "dtype": torch.float16,
-            },
+            {"dtype": torch.float16},
         ),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
     if all:
-        if not current_platform.has_device_capability((10, 0)):
-            # int8 removed on Blackwell
-            TEST_MODELS.extend(
-                [
-                    ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
-                    (
-                        "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-                        {
-                            "dtype": torch.float16,
-                        },
-                    ),
-                ]
-            )
+        TEST_MODELS.extend(
+            [
+                ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
+                (
+                    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
+                    {"dtype": torch.float16},
+                ),
+            ]
+        )
 
         # TODO: figure out why this fails.
         if False and is_quant_method_supported("gguf"):  # noqa: SIM223
@@ -95,6 +90,14 @@ def test_full_graph(
     model_kwargs: dict[str, Any],
     compilation_mode: int,
 ):
+    if (
+        "w8a8" in model
+        or "w8w8" in model
+        and current_platform.has_device_capability((10, 0))
+    ):
+        # int8 removed on Blackwell:
+        pytest.skip("int8 support removed on Blackwell")
+
     with monkeypatch.context():
         print(f"MODEL={model}")
 
@@ -103,14 +106,14 @@ def test_full_graph(
 
 # TODO(luka) add other supported compilation config scenarios here
 @pytest.mark.parametrize(
-    "compilation_config, model_info",
+    "compilation_config, model, model_kwargs",
     [
         # additional compile sizes, only some of the models
         (
             CompilationConfig(mode=CompilationMode.VLLM_COMPILE, compile_sizes=[1, 2]),
-            model,
+            *model_info,
         )
-        for model in models_list(all=False)
+        for model_info in models_list(all=False)
     ]
     + [
         # RMSNorm + quant fusion, only 8-bit quant models
@@ -120,18 +123,19 @@ def test_full_graph(
                 custom_ops=["+rms_norm"],
                 pass_config=PassConfig(enable_fusion=True, enable_noop=True),
             ),
-            model,
+            *model_info,
         )
-        for model in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+        for model_info in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
     ]
     + [
         # Test depyf integration works
         (
             CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                debug_dump_path=tempfile.gettempdir(),
+                debug_dump_path=Path(tempfile.gettempdir()),
             ),
-            ("facebook/opt-125m", {}),
+            "facebook/opt-125m",
+            {},
         ),
     ]
     + [
@@ -145,9 +149,9 @@ def test_full_graph(
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 compile_sizes=[1, 2],
             ),
-            model,
+            *model_info,
         )
-        for model in models_list(all=False)
+        for model_info in models_list(all=False)
         if is_torch_equal_or_newer("2.9.0.dev")
     ],
 )
@@ -155,14 +159,22 @@ def test_full_graph(
 @create_new_process_for_each_test()
 def test_custom_compile_config(
     compilation_config: CompilationConfig,
-    model_info: tuple[str, dict[str, Any]],
+    model: str,
+    model_kwargs: dict[str, Any],
 ):
+    if (
+        "w8a8" in model
+        or "w8w8" in model
+        and current_platform.has_device_capability((10, 0))
+    ):
+        # int8 removed on Blackwell:
+        pytest.skip("int8 support removed on Blackwell")
+
     if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
         "2.9.0.dev"
     ):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
-    model, model_kwargs = model_info
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
 
