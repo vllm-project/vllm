@@ -495,6 +495,7 @@ def cp_gather_indexer_k_quant_cache(
     num_blocks, block_size, _ = kv_cache.shape
     head_dim = dst_value.shape[-1]
     kv_cache = kv_cache.view(num_blocks, -1)
+    fp8_dtype = current_platform.fp8_dtype()
 
     expected_value = []
     expected_scale = []
@@ -540,7 +541,7 @@ def cp_gather_indexer_k_quant_cache(
 
     gather_value = torch.cat(expected_value, dim=0).view(-1, head_dim)
     gather_scale = torch.cat(expected_scale, dim=0).view(-1, 4)
-    gather_value = gather_value.view(torch.float8_e4m3fn)
+    gather_value = gather_value.view(fp8_dtype)
     gather_scale = gather_scale.view(torch.float32)
     dst_value.copy_(gather_value)
     dst_scale.copy_(gather_scale)
@@ -737,10 +738,12 @@ def sparse_attn_indexer_fake(
     # profile run
     # NOTE(Chen): create the max possible flattened_kv. So that
     # profile_run can get correct memory usage.
-    _flattened_kv = torch.empty(
-        [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
-    )
-    _k_fp8 = _flattened_kv[..., :head_dim].view(torch.float8_e4m3fn).contiguous()
+    _flattened_kv = torch.empty([total_seq_lens, head_dim + 4],
+                                device=k.device,
+                                dtype=torch.uint8)
+    fp8_dtype = current_platform.fp8_dtype()
+    _k_fp8 = _flattened_kv[..., :head_dim].view(
+        fp8_dtype).contiguous()
     _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
