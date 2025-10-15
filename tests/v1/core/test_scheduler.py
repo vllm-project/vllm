@@ -2012,11 +2012,7 @@ def test_kv_connector_finished_sending_race_condition():
         kv_connector_output=kv_connector_output,
     )
 
-    # This should NOT crash with AssertionError
-    # Before the fix, this would fail at _free_blocks with:
-    # AssertionError at line 1228: assert request.is_finished()
-    #
-    # After the fix, it should handle the race condition gracefully
+    # This should handle the race condition gracefully
     # by logging a warning and skipping block freeing.
     _ = scheduler.update_from_output(scheduler_output2, model_runner_output2)
 
