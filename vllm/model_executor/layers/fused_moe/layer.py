@@ -239,13 +239,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         elif moe.use_deepep_hybrid_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
 
-            use_fp8 = quant_config.use_fp8_w8a8 if quant_config is not None else False
+            use_fp8 = (
+                quant_config is not None
+                and quant_config.quant_dtype == current_platform.fp8_dtype()
+                and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+            )
 
             all_to_all_args = dict(
                 hidden_dim=moe.hidden_dim,
                 max_num_of_tokens_per_rank=moe.max_num_tokens,
                 num_local_experts=(moe.num_experts // all2all_manager.world_size),
-                num_of_experts=moe.num_experts,
+                # num_of_experts=moe.num_experts,
                 use_fp8=use_fp8,
             )
 
@@ -255,6 +259,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_dispatchers=all2all_manager.world_size,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+                num_local_experts=moe.num_local_experts,
             )
 
         return prepare_finalize
@@ -276,7 +281,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # completely initialized, i.e. all weights loaded and post
         # processed.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        logger.debug("FusedMoE quant_config=%s", self.moe_quant_config)
+        # logger.debug("FusedMoE quant_config=%s", self.moe_quant_config)
 
         prepare_finalize = self.maybe_make_prepare_finalize()
 
@@ -1029,6 +1034,10 @@ def maybe_roundup_hidden_size(
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
+    elif moe_parallel_config.use_deepep_hybrid_kernels:
+        hidden_size = DeepEPHybridPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype
+        )
 
     if moe_parallel_config.use_deepep_ll_kernels:
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
@@ -1292,22 +1301,27 @@ class FusedMoE(CustomOp):
                 "Only softmax scoring function is supported for non-grouped topk."
             )
 
-        moe = FusedMoEConfig(
+        # TODO(bnell): total hack
+        if envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid":
+            max_num_tokens = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+        else:
+            max_num_tokens = envs.VLLM_MOE_DP_CHUNK_SIZE
+
+        self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+            max_num_tokens=max_num_tokens,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
         )
 
-        logger.debug("FusedMoE config=%s", moe)
+        logger.debug("FusedMoE config=%s", self.moe_config)
 
-        self.moe_config: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
@@ -1315,12 +1329,12 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         quant_method: QuantizeMethodBase | None = None
         quant_method = (
-            UnquantizedFusedMoEMethod(moe)
+            UnquantizedFusedMoEMethod(self.moe_config)
             if quant_config is None
             else quant_config.get_quant_method(self, prefix)
         )
         if quant_method is None:
-            quant_method = UnquantizedFusedMoEMethod(moe)
+            quant_method = UnquantizedFusedMoEMethod(self.moe_config)
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
@@ -1446,6 +1460,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_parallel_config.use_deepep_hybrid_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         )
 
@@ -2280,7 +2295,12 @@ class FusedMoE(CustomOp):
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        def process_chunk(chunk_start, chunk_end, skip_result_store=False):
+        def process_chunk(
+            chunk_start,
+            chunk_end,
+            skip_result_store=False,
+            max_tokens_across_dispatchers=0,
+        ):
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
@@ -2310,6 +2330,23 @@ class FusedMoE(CustomOp):
             staged_router_logits = batched_router_logits[:chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
+
+            num_tokens = staged_hidden_states.shape[0]
+            if num_tokens < max_tokens_across_dispatchers:
+                pad = max_tokens_across_dispatchers - num_tokens
+                staged_hidden_states = F.pad(
+                    staged_hidden_states,
+                    (0, 0, 0, pad),
+                    mode="constant",
+                    value=0.0,
+                )
+                staged_router_logits = F.pad(
+                    staged_router_logits,
+                    (0, 0, 0, pad),
+                    mode="constant",
+                    value=0.0,
+                )
+                print(f"PADDING {num_tokens} {pad} {staged_hidden_states.shape}")
 
             # If there are shared experts but we are not using a modular kernel,
             # the shared experts must be called here
@@ -2367,9 +2404,11 @@ class FusedMoE(CustomOp):
                     current_stream().wait_stream(self.shared_experts_stream)
 
                 final_hidden_states = (
-                    shared_output,
-                    final_hidden_states,
+                    shared_output[:num_tokens],
+                    final_hidden_states[:num_tokens],
                 )
+            else:
+                final_hidden_states = final_hidden_states[:num_tokens]
 
             if self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(final_hidden_states, tuple)
@@ -2404,6 +2443,21 @@ class FusedMoE(CustomOp):
             )
 
         num_tokens = full_hidden_states.size(0)
+
+        print(
+            f"MAX_TOKENS_ACROSS_DISPATCHERS = {num_tokens} {max_tokens_across_dispatchers}"
+        )
+
+        if False and num_tokens < max_tokens_across_dispatchers:
+            pad = max_tokens_across_dispatchers - num_tokens
+            full_hidden_states = F.pad(
+                full_hidden_states,
+                (0, pad),
+                mode="constant",
+                value=0.0,
+            )
+            print(f"PADDING {num_tokens} {pad}")
+
         for chunk_idx, chunk_start_ in enumerate(
             range(0, max_tokens_across_dispatchers, moe_dp_chunk_size_per_rank)
         ):
@@ -2418,7 +2472,10 @@ class FusedMoE(CustomOp):
                 self.sp_size, moe_dp_chunk_size_per_rank, chunk_idx
             ):
                 process_chunk(
-                    chunk_start, chunk_end, skip_result_store=chunk_start_ >= num_tokens
+                    chunk_start,
+                    chunk_end,
+                    skip_result_store=chunk_start_ >= num_tokens,
+                    max_tokens_across_dispatchers=max_tokens_across_dispatchers,
                 )
 
         if self.shared_experts is None:
@@ -2463,6 +2520,8 @@ class FusedMoE(CustomOp):
             return self.forward_impl_chunked(
                 hidden_states, router_logits, has_separate_shared_experts
             )
+
+        print("NON-CHUNKED")
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1 and not self.quant_method.using_modular_kernel
