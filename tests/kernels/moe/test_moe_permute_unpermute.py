@@ -217,7 +217,7 @@ def test_moe_permute_unpermute(
     expert_map = None
     n_local_expert = n_expert
     if ep_size != 1:
-        n_local_expert, expert_map = determine_expert_map(ep_size, ep_rank, n_expert)
+        n_local_expert, expert_map, _ = determine_expert_map(ep_size, ep_rank, n_expert)
         expert_map = expert_map.cuda()
     start_expert = n_local_expert * ep_rank
     current_platform.seed_everything(0)
