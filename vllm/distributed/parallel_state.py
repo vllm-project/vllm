@@ -1322,7 +1322,7 @@ def initialize_model_parallel(
         group_ranks, get_world_group().local_rank, backend, group_name="ep"
     )
 
-    logger.debug(
+    logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, TP rank %s, EP rank %s",
         rank,
