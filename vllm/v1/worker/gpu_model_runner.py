@@ -2763,12 +2763,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
             if kv_connector_output is not None:
-                final_kv_connector_output.finished_sending.update(
-                    kv_connector_output.finished_sending
-                )
-                final_kv_connector_output.finished_recving.update(
-                    kv_connector_output.finished_recving
-                )
+                if kv_connector_output.finished_sending is not None:
+                    final_kv_connector_output.finished_sending.update(
+                        kv_connector_output.finished_sending
+                    )
+                if kv_connector_output.finished_recving is not None:
+                    final_kv_connector_output.finished_recving.update(
+                        kv_connector_output.finished_recving
+                    )
 
         final_token_ids = None
         for each_token_ids in cached_valid_sampled_token_ids:
