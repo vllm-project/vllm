@@ -53,12 +53,6 @@ class UniProcExecutor(ExecutorBase):
         # set local rank as the device index if specified
         device_info = self.vllm_config.device_config.device.__str__().split(":")
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
-        if (
-            self.vllm_config.parallel_config.data_parallel_size > 1
-            and len(device_info) > 1
-        ):
-            assert self.vllm_config.parallel_config.data_parallel_rank_local is not None
-            local_rank = self.vllm_config.parallel_config.data_parallel_rank_local
         return distributed_init_method, 0, local_rank
 
     @cached_property
