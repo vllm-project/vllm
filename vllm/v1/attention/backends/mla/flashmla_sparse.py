@@ -92,6 +92,10 @@ class FlashMLASparseBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
 
+    @classmethod
+    def enable_dsa_topk_indices_buffer(cls) -> bool:
+        return True
+
 
 @dataclass
 class FlashMLASparseMetadata:

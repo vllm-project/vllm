@@ -19,7 +19,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import DeepseekV2DecoderLayer, get_spec_layer_idx_from_weight_name
+from .deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    enable_dsa_topk_indices_buffer,
+    get_spec_layer_idx_from_weight_name,
+)
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
@@ -57,7 +61,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
 
         self.is_v32 = hasattr(config, "index_topk")
-        if self.is_v32:
+        if self.is_v32 and enable_dsa_topk_indices_buffer():
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
