@@ -230,10 +230,6 @@ class FlashInferBackend(AttentionBackend):
         return []
 
     @classmethod
-    def is_mla(cls) -> bool:
-        return False
-
-    @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(7, 5)
 

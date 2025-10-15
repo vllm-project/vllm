@@ -123,10 +123,6 @@ class FlashAttentionBackend(AttentionBackend):
         return block_size % 16 == 0
 
     @classmethod
-    def is_mla(cls) -> bool:
-        return False
-
-    @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(8, 0)
 

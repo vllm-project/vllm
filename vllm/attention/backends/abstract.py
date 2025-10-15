@@ -148,7 +148,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def is_mla(cls) -> bool:
-        raise NotImplementedError
+        return False
 
     @classmethod
     def supports_sink(cls) -> bool:

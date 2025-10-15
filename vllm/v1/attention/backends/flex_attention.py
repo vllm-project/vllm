@@ -118,10 +118,6 @@ class FlexAttentionBackend(AttentionBackend):
     def get_supported_block_sizes(cls) -> list[BlockSize]:
         return []
 
-    @classmethod
-    def is_mla(cls) -> bool:
-        return False
-
 
 # @torch.compile(fullgraph=True, mode="reduce-overhead")
 def physical_to_logical_mapping(
