@@ -150,6 +150,12 @@ class EngineCore:
             * vllm_config.parallel_config.decode_context_parallel_size
         )
 
+        self.step_num = int(additional_config.get("multi_step", 1))
+        if self.step_num > 1:
+            logger.info(
+                ("multi step is enabled. step num is %d"),
+                self.step_num,
+            )
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -157,6 +163,7 @@ class EngineCore:
             include_finished_set=vllm_config.parallel_config.data_parallel_size > 1,
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
+            step_num=self.step_num,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
@@ -199,12 +206,6 @@ class EngineCore:
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
         additional_config = vllm_config.additional_config
-        self.step_num = int(additional_config.get("multi_step", 1))
-        if self.step_num > 1:
-            logger.info(f"multi step is enabled. step num is {self.step_num}")
-        self.scheduler.num_lookahead_tokens = (self.step_num - 1) * (
-            1 + self.scheduler.num_spec_tokens
-        )
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig

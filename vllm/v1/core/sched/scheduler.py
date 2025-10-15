@@ -51,6 +51,7 @@ class Scheduler(SchedulerInterface):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        step_num: int = 1,
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -159,7 +160,8 @@ class Scheduler(SchedulerInterface):
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
                 self.use_eagle = True
-                self.num_lookahead_tokens = self.num_spec_tokens
+                self.num_lookahead_tokens = self.num_spec_tokens + \
+                    (self.step_num - 1) * (1 + self.num_spec_tokens)
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
