@@ -33,6 +33,7 @@ from vllm.model_executor.layers.linear import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -190,3 +191,17 @@ def get_feature_request_tip(
     doc_url = "https://docs.vllm.ai/en/latest/models/supported_models.html#writing-custom-models"
     tip = f"See {doc_url} for instructions on how to add support yourself."
     return f"{prefix}{tip}"
+
+
+def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
+    """
+    Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
+
+    Defaults to `True` but is disabled in the following situations:
+
+    - The model uses dynamic rope scaling.
+    """
+    text_config = vllm_config.model_config.hf_config.get_text_config()
+    # Dynamic rope scaling is not compatible with torch.compile
+    rope_scaling: dict = getattr(text_config, "rope_scaling", None) or {}
+    return rope_scaling.get("rope_type") != "dynamic"

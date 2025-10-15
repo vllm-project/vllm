@@ -16,8 +16,6 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 
-from typing import TYPE_CHECKING
-
 from vllm.compilation.decorators import support_torch_compile
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
@@ -34,24 +32,8 @@ from vllm.model_executor.models.transformers.pooling import (
     EmbeddingMixin,
     SequenceClassificationMixin,
 )
+from vllm.model_executor.models.transformers.utils import can_enable_torch_compile
 from vllm.multimodal import MULTIMODAL_REGISTRY
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-
-
-def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
-    """
-    Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
-
-    Defaults to `True` but is disabled in the following situations:
-
-    - The model uses dynamic rope scaling.
-    """
-    text_config = vllm_config.model_config.hf_config.get_text_config()
-    # Dynamic rope scaling is not compatible with torch.compile
-    rope_scaling: dict = getattr(text_config, "rope_scaling", None) or {}
-    return rope_scaling.get("rope_type") != "dynamic"
 
 
 # Text only models
