@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
+import zmq
 import copy
 import gc
 import os
@@ -28,7 +29,7 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
+from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling, make_zmq_socket
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -50,9 +51,12 @@ if TYPE_CHECKING:
 
 
 class WorkerGuard:
-    def __init__(self):
+    def __init__(self, tp_rank, worker_cmd_addr):
+        zmq_ctx = zmq.Context()
+        identity = tp_rank.tobytes().decode("utf8")
+        self.cmd_socket = make_zmq_socket(ctx=zmq_ctx, path=worker_cmd_addr, socket_type=zmq.DEALER, bind=False, identity=identity)
+    def run(self):
         pass
-
 
 class Worker(WorkerBase):
     def __init__(
