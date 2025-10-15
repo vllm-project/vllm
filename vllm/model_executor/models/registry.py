@@ -626,8 +626,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             with open(model_path, "rb") as f:
                 module_hash = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
 
-            # mi = self._load_modelinfo_from_cache(module_hash)
-            mi = None
+            mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
                 logger.debug(
                     ("Loaded model info for class %s.%s from cache"),
