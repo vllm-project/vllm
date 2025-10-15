@@ -1165,6 +1165,7 @@ class DeepseekV2Model(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.device = current_platform.device_type
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
@@ -1174,7 +1175,7 @@ class DeepseekV2Model(nn.Module):
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 topk_tokens,
                 dtype=torch.int32,
-                device="cuda",
+                device=self.device,
             )
         else:
             topk_indices_buffer = None
