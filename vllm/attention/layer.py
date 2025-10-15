@@ -587,6 +587,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
+        **extra_impl_args,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -639,6 +640,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
+            **extra_impl_args,
         )
 
         self.use_direct_call = not current_platform.opaque_attention_op()
