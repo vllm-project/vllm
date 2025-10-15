@@ -806,7 +806,7 @@ def create_kv_caches_with_random_flash(
 
     current_platform.seed_everything(seed)
 
-    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     assert cache_layout in ("NHD", "HND")
     stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
@@ -819,7 +819,7 @@ def create_kv_caches_with_random_flash(
 
     for _ in range(num_layers):
         key_value_cache = torch.empty(
-            size=kv_cache_allocation_shape, dtype=torch_dtype, device=device
+            size=kv_cache_allocation_shape, dtype=dtype, device=device
         ).permute(*stride_order)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_value_cache.uniform_(-scale, scale)
@@ -851,14 +851,14 @@ def create_kv_caches_with_random(
 
     current_platform.seed_everything(seed)
 
-    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
     scale = head_size**-0.5
-    x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
+    x = 16 // torch.tensor([], dtype=dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
     key_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
-        key_cache = torch.empty(size=key_cache_shape, dtype=torch_dtype, device=device)
+        key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_cache.uniform_(-scale, scale)
         elif cache_dtype == "fp8":
@@ -870,9 +870,7 @@ def create_kv_caches_with_random(
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
     value_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
-        value_cache = torch.empty(
-            size=value_cache_shape, dtype=torch_dtype, device=device
-        )
+        value_cache = torch.empty(size=value_cache_shape, dtype=dtype, device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             value_cache.uniform_(-scale, scale)
         elif cache_dtype == "fp8":

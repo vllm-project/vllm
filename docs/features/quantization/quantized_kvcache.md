@@ -82,7 +82,7 @@ Here's a complete example using `meta-llama/Llama-3.1-8B-Instruct` (most models 
 
     # Select model and load it
     MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", dtype="auto")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
     # Select calibration dataset

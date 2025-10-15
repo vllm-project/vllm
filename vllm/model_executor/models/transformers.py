@@ -530,7 +530,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
-                torch_dtype=self.model_config.dtype,
+                dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 

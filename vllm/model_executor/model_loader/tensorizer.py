@@ -518,7 +518,7 @@ def init_tensorizer_model(
 ) -> nn.Module:
     assert tensorizer_config.hf_config is not None
     model_args = tensorizer_config.hf_config
-    model_args.torch_dtype = tensorizer_config.dtype
+    model_args.dtype = tensorizer_config.dtype
     assert tensorizer_config.model_class is not None
     # TODO: Do we need to consider old-style model class?
     with meta_tensor_mode(), set_current_vllm_config(vllm_config, check_compile=True):

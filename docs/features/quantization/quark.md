@@ -50,7 +50,7 @@ to fetch model and tokenizer.
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         device_map="auto",
-        torch_dtype="auto",
+        dtype="auto",
     )
     model.eval()
 
