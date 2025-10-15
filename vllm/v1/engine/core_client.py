@@ -29,6 +29,7 @@ from vllm.utils import (
     get_open_zmq_inproc_path,
     in_loop,
     make_zmq_socket,
+    generate_identitys,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -417,9 +418,72 @@ class BackgroundResources:
             raise EngineDeadError()
 
 
-class ClientGuard:
-    def __init__(self):
+class ClientGuard():
+    def __init__(self, fault_receiver_addr, cmd_addr, engine_registry):
+        self.engine_registry = engine_registry
+        self.zmq_ctx = zmq.Context()
+        self.fault_receiver_socket = make_zmq_socket(ctx=self.zmq_ctx, path=fault_receiver_addr, socket_type=zmq.ROUTER, bind=True)
+        self.cmd_socket = make_zmq_socket(ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True)
+
+    def recv_fault_msg(self, poll_timeout=1000):
+        """
+            Receive fault messages from fault_receiver_socket
+
+            Parameters:
+                poll_timeout: Poll timeout in milliseconds, default 1000ms
+            Returns:
+                Tuple (sender_identity, message), both string types
+                Returns (None, None) if timeout or no message
+        """
+        try:
+            # Use poll mechanism to wait for messages non-blocking
+            poller = zmq.Poller()
+            poller.register(self.fault_receiver_socket, zmq.POLLIN)
+            socks = dict(poller.poll(poll_timeout))
+
+            # Check if there is a message
+            if self.fault_receiver_socket in socks and socks[self.fault_receiver_socket] == zmq.POLLIN:
+                # Message format received by ROUTER: [identity, empty frame, message content]
+                parts = self.fault_receiver_socket.recv_multipart()
+
+                # Verify message format
+                if len(parts) != 3:
+                    print(f"Warning: Received message with invalid format, number of parts: {len(parts)}")
+                    return (None, None)
+
+                identity_bytes, empty_frame, message_bytes = parts
+
+                # Verify empty frame
+                if empty_frame != b'':
+                    print(f"Warning: Message empty frame format error, actual value: {empty_frame}")
+                    return (None, None)
+
+                # Convert to string
+                sender_identity = identity_bytes.decode('utf-8')
+                message = message_bytes.decode('utf-8')
+
+                return (sender_identity, message)
+
+            # No message received within timeout
+            return (None, None)
+
+        except zmq.ZMQError as e:
+            print(f"ZMQ error: {e}")
+            return (None, None)
+        except UnicodeDecodeError:
+            print("Error: Message decoding failed, not in UTF-8 format")
+            return (None, None)
+        except Exception as e:
+            print(f"Unknown error occurred while receiving message: {e}")
+            return (None, None)
+
+    def handle_fault(self, instruction):
         pass
+    def shutdown_guard(self):
+        self.fault_receiver_socket.close()
+        self.cmd_socket.close()
+        self.zmq_ctx.term()
+
 
 
 class MPClient(EngineCoreClient):
@@ -541,7 +605,16 @@ class MPClient(EngineCoreClient):
 
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
-
+            self.engine_registry = {}
+            engine_indexs = [i for i in range(dp_size)]
+            fault_report_identitys = generate_identitys(peer1="client", peer2="engine_core_guard",use='report',n=dp_size)
+            client_cmd_identitys = generate_identitys(peer1="client", peer2="engine_core_guard", use="cmd", n=dp_size)
+            fault_report_registry = dict(zip(engine_indexs, fault_report_identitys))
+            client_cmd_registry = dict(zip(engine_indexs, client_cmd_identitys))
+            self.engine_registry["fault_report_identitys"] = fault_report_registry
+            self.engine_registry["client_cmd_identitys"] = client_cmd_registry
+            addresses.engine_core_identitys = self.engine_registry
+            # todo 拉起ClientGuard
             success = True
         finally:
             if not success:
