@@ -9,7 +9,7 @@ from vllm.compilation.decorators import ignore_torch_compile, support_torch_comp
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
@@ -79,7 +79,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     # piecewise
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
@@ -214,7 +214,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
             kv_sharing_fast_prefill=True,
         ),
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
@@ -256,7 +256,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
             kv_sharing_fast_prefill=False,
         ),
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
