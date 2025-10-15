@@ -1093,8 +1093,9 @@ class Scheduler(SchedulerInterface):
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
-        stopped, num_new = add_token_and_check_stop(new_token_ids, request,
-                                                    self.max_model_len)
+        stopped, num_new = add_token_and_check_stop(
+            new_token_ids, request, self.max_model_len
+        )
         if stopped:
             del new_token_ids[num_new:]  # Trim new tokens if needed.
         return new_token_ids, stopped
