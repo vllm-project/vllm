@@ -138,7 +138,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
-    VLLM_RAY_DP_PACK_STRATEGY: str = "strict"
+    VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "spread"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
