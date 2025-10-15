@@ -45,7 +45,7 @@ def run_radio_test(
     hf_model = AutoModel.from_pretrained(
         model_id,
         config=config,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         trust_remote_code=True,
     ).to("cuda")
     hf_model.eval()

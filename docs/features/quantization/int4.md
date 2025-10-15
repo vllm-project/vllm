@@ -41,7 +41,7 @@ MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     device_map="auto",
-    torch_dtype="auto",
+    dtype="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
