@@ -1118,8 +1118,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             last_step_computed_tokens = np.array(
                 [len(x) for x in last_step_valid_sampled_token_ids], dtype=np.int32
             )
-            self.input_batch.num_computed_tokens_cpu[req_indices] += (
-                last_step_computed_tokens[req_indices]
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] += (
+                last_step_computed_tokens[:num_reqs]
             )
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
