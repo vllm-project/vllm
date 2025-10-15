@@ -430,6 +430,8 @@ class CoreEngineActorManager:
                 )
                 placement_groups.append(pg)
                 local_dp_ranks.append(i)
+                if len(placement_groups) >= dp_size:
+                    return placement_groups, local_dp_ranks
 
         if len(placement_groups) < dp_size:
             raise ValueError(
