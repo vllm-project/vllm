@@ -334,11 +334,13 @@ async def run_request(
 
 def validate_run_batch_args(args):
     valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-    if ((reasoning_parser := args.structured_outputs_config.reasoning_parser)
-            and reasoning_parser not in valid_reasoning_parses):
+    if (
+        reasoning_parser := args.structured_outputs_config.reasoning_parser
+    ) and reasoning_parser not in valid_reasoning_parses:
         raise KeyError(
             f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parses)} }})")
+            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+        )
 
 
 async def run_batch(
@@ -385,7 +387,7 @@ async def run_batch(
         if "generate" in supported_tasks
         else None
     )
-    
+
     openai_serving_embedding = (
         OpenAIServingEmbedding(
             engine_client,
