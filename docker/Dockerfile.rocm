@@ -12,7 +12,7 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl
-# Remove sccache    
+# Remove sccache
 RUN python3 -m pip install --upgrade pip
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 ARG COMMON_WORKDIR
@@ -62,7 +62,8 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 # Install vLLM
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
-    && pip install -U -r requirements/rocm.txt \
+    # We need to ignore blinker due to Dockerfile.rocm_base is using an older version: rocm/dev-ubuntu-22.04:7.0-complete
+    && pip install -U --ignore-installed blinker -r requirements/rocm-test.txt \
     && pip install -U -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
     && pip install *.whl
