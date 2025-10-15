@@ -231,12 +231,16 @@ To run Hugging Face processors on the GPU, you can pass the `device` argument
 
 ```python
 # Fast image processor requires use_fast=True
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_kwargs={"use_fast": True, "device": "cuda"})
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_kwargs={"use_fast": True, "device": "cuda"},
+)
 
 # Whisper feature extractor does not require use_fast
-llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
-          mm_processor_kwargs={"device": "cuda"})
+llm = LLM(
+    model="Qwen/Qwen2-Audio-7B-Instruct",
+    mm_processor_kwargs={"device": "cuda"},
+)
 ```
 
 !!! note
