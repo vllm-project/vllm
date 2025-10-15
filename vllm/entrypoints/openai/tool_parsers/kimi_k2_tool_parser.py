@@ -130,7 +130,7 @@ def normalize_quotes_for_json(text: str) -> str:
         try:
             json.loads(text)
             return text  # Already valid JSON
-        except:
+        except json.JSONDecodeError:
             # Invalid JSON, normalize quotes
             return normalize_json_quotes(text)
     
