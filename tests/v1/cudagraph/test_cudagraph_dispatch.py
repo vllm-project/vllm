@@ -11,7 +11,7 @@ from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     ParallelConfig,
     SchedulerConfig,
@@ -42,7 +42,7 @@ def _create_vllm_config(
     mock_config.parallel_config = ParallelConfig()
 
     # Mimic the behavior of VllmConfig.__post_init__()
-    if compilation_config.level == CompilationLevel.PIECEWISE:
+    if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1()
 
     return mock_config
@@ -50,23 +50,23 @@ def _create_vllm_config(
 
 class TestCudagraphDispatcher:
     @pytest.mark.parametrize(
-        "case_id,cudagraph_mode_str,compilation_level",
+        "case_id,cudagraph_mode_str,compilation_mode",
         [
             # Test case 0: Full CG for mixed batches, no separate routine
-            (0, "FULL", CompilationLevel.NO_COMPILATION),
+            (0, "FULL", CompilationMode.NONE),
             # Test case 1: Full CG for uniform batches, piecewise for mixed
-            (1, "FULL_AND_PIECEWISE", CompilationLevel.NO_COMPILATION),
+            (1, "FULL_AND_PIECEWISE", CompilationMode.NONE),
             # Test case 2: Full CG for uniform batches, no CG for mixed
-            (2, "FULL_DECODE_ONLY", CompilationLevel.NO_COMPILATION),
-            # Test case 3: Piecewise for all
-            (3, "PIECEWISE", CompilationLevel.PIECEWISE),
+            (2, "FULL_DECODE_ONLY", CompilationMode.NONE),
+            # Test case 3: PIECEWISE for all
+            (3, "PIECEWISE", CompilationMode.VLLM_COMPILE),
         ],
     )
-    def test_dispatcher(self, cudagraph_mode_str, compilation_level):
+    def test_dispatcher(self, cudagraph_mode_str, compilation_mode):
         # Setup dispatcher
         comp_config = CompilationConfig(
             cudagraph_mode=cudagraph_mode_str,
-            level=compilation_level,
+            mode=compilation_mode,
             cudagraph_capture_sizes=[1, 8],
         )
 
@@ -242,7 +242,7 @@ class TestCudagraphIntegration:
     def setup_method(self):
         # only FULL mode for non-uniform batches
         self.comp_config = CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode="FULL",
             cudagraph_capture_sizes=[10, 20],
         )

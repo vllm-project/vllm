@@ -13,7 +13,7 @@ from vllm.compilation.fusion import (
 )
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.config import CompilationConfig, CompilationLevel, PassConfig, VllmConfig
+from vllm.config import CompilationConfig, CompilationMode, PassConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -114,7 +114,7 @@ def test_fusion_rmsnorm_quant(
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["+rms_norm", "+quant_fp8"],
             pass_config=PassConfig(enable_fusion=True, enable_noop=True),
         )

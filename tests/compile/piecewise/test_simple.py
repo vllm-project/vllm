@@ -13,7 +13,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
@@ -61,7 +61,7 @@ def _run_simple_model(
 ):
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             use_inductor=use_inductor,
             splitting_ops=splitting_ops,
