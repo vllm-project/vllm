@@ -2408,7 +2408,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _has_prefill_tokens_scheduled(
         self,
-        scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
         num_reqs: int,
     ) -> bool:
@@ -2483,7 +2482,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Disable uniform decode on steps that still process prompt tokens.
             # This makes first-step behavior consistent regardless of prompt length.
             if self._has_prefill_tokens_scheduled(
-                scheduler_output, num_scheduled_tokens, self.input_batch.num_reqs
+                num_scheduled_tokens_np, self.input_batch.num_reqs
             ):
                 uniform_decode = False
             batch_descriptor = BatchDescriptor(
