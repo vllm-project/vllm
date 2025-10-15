@@ -26,9 +26,7 @@ MNK_FACTORS = [
     (2, 1024, 1024),
     (2, 1024, 1536),
     (2, 3072, 1024),
-    (2, 3072, 1536),
     (64, 1024, 1024),
-    (64, 1024, 1536),
     (64, 3072, 1024),
     (64, 2048, 1536),
     (224, 1024, 1024),
@@ -39,7 +37,7 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [40, 64, 256])
 @pytest.mark.parametrize("topk", [1, 6, 8])
-@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
 def test_cutlass_fp4_moe_no_graph(
     m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype

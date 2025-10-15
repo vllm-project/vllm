@@ -308,6 +308,16 @@ def test_modular_kernel_combinations_singlegpu(
         world_size=world_size,
     )
 
+    if (
+        (dtype == torch.float8_e4m3fn)
+        or (
+            quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
+        )
+    ) and not current_platform.has_device_capability(89):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
+
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
 

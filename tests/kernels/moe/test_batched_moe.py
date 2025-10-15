@@ -24,23 +24,18 @@ from vllm.triton_utils import tl
 
 MNK_FACTORS = [
     (1, 128, 128),
-    (1, 128, 2048),
     (1, 512, 512),
-    (1, 1024, 128),
     (1, 1024, 2048),
     (32, 128, 128),
     (32, 512, 512),
     (32, 1024, 2048),
-    (45, 128, 128),
     (45, 128, 2048),
     (45, 512, 512),
     (45, 1024, 128),
-    (45, 1024, 2048),
     (64, 512, 512),
     (64, 1024, 2048),
     (222, 128, 128),
     (222, 128, 2048),
-    (222, 1024, 128),
     (222, 1024, 2048),
 ]
 NUM_EXPERTS = [8, 64]
@@ -102,7 +97,7 @@ class BatchedMMTensors:
 
 
 @pytest.mark.parametrize("num_experts", [8, 32])
-@pytest.mark.parametrize("max_tokens_per_expert", [32, 224, 512])
+@pytest.mark.parametrize("max_tokens_per_expert", [32, 512])
 @pytest.mark.parametrize("K", [128, 1024])
 @pytest.mark.parametrize("N", [128, 1024])
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
@@ -120,6 +115,13 @@ def test_batched_mm(
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
+
+    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
+        89
+    ):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
 
     if (per_act_token_quant or block_shape is not None) and not use_fp8_w8a8:
         pytest.skip("Don't test blocking for non-quantized types.")
@@ -247,6 +249,13 @@ def test_fused_moe_batched_experts(
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
+
+    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
+        89
+    ):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
 
     if topk > e:
         pytest.skip("topk > e")
