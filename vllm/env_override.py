@@ -4,7 +4,6 @@ import os
 
 import torch
 from packaging import version
-from torch._inductor.graph import GraphLowering
 
 from vllm.logger import init_logger
 
@@ -137,4 +136,6 @@ def _update_scheduler_patched(self) -> None:
 
 
 if version.parse(str(torch.__version__)) == version.parse("2.9.0"):
+    from torch._inductor.graph import GraphLowering
+
     GraphLowering._update_scheduler = _update_scheduler_patched
