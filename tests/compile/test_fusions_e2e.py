@@ -37,11 +37,12 @@ MODELS: list[ModelBackendTestCase] = []  # tp-only
 if current_platform.is_cuda():
     MODELS_FP8 = [
         ModelBackendTestCase(
-            model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+            # Use smaller model for L40s in CI
+            model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024),
             backend=_Backend.TRITON_ATTN,
-            attention_fusions=48,
-            allreduce_fusions=96,
+            attention_fusions=32,
+            allreduce_fusions=65,
         ),
         ModelBackendTestCase(
             model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
