@@ -160,9 +160,13 @@ def test_attn_quant(
     with caplog_mp_spawn(logging.DEBUG) as log_holder:
         run_model(compilation_config, model_name, **model_kwargs)
 
-    assert f"Fused quant onto {attention_fusions} attention nodes" in log_holder.text, (
-        log_holder.text
+    matches = re.findall(
+        r"\[compilation/fusion_attn.py:\d+] "
+        r"Fused quant onto (\d+) attention nodes",
+        log_holder.text,
     )
+    assert len(matches) == 1, log_holder.text
+    assert int(matches[0]) == attention_fusions
 
 
 # TODO(luka) test both in nightly
