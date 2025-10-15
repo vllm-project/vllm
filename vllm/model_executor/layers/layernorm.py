@@ -170,7 +170,9 @@ class RMSNorm(CustomOp):
         )
         weight_dtype = dtype or torch.get_default_dtype()
         self.has_weight = has_weight
-        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=weight_dtype))
+        self.weight = torch.ones(hidden_size, dtype=weight_dtype)
+        if self.has_weight:
+            self.weight = nn.Parameter(self.weight)
 
         if current_platform.is_rocm():
             self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
