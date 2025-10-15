@@ -764,8 +764,10 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        prefix = "Transformers"
-        prefix += "MoE" if self.get_num_experts() > 1 else ""
+        cls = "Transformers"
+        # If 'hf_config != hf_text_config' it a nested config, i.e. multimodal
+        cls += "Multimodal" if self.hf_config != self.hf_text_config else ""
+        cls += "MoE" if self.get_num_experts() > 1 else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
         convert = None
@@ -781,18 +783,15 @@ class ModelConfig:
             runner = "generate"
         if convert in {None, "none"}:
             convert = "embed"
-        # Resolve Transformers backend pooling classes
+        # Resolve Transformers backend task
         if runner == "pooling":
             if convert == "embed":
-                return prefix + "EmbeddingModel"
+                return cls + "EmbeddingModel"
             if convert == "classify":
-                return prefix + "ForSequenceClassification"
-        # Resolve Transformers backend generate classes
-        if self.hf_config != self.hf_text_config:
-            # If 'hf_text_config' is the same as 'hf_config'. If not, it is
-            # probably a composite config, i.e. multimodal
-            return prefix + "ForMultimodalLM"
-        return prefix + "ForCausalLM"
+                return cls + "ForSequenceClassification"
+        else:
+            cls += "ForCausalLM"
+        return cls
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
