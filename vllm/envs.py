@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import hashlib
 import json
 import os
@@ -1408,10 +1409,34 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
 
 def __getattr__(name: str):
-    # lazy evaluation of environment variables
+    """
+    Gets environment variables lazily.
+
+    NOTE: After enable_envs_cache() invocation (which triggered after service
+    initialization), all environment variables will be cached.
+    """
     if name in environment_variables:
         return environment_variables[name]()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def enable_envs_cache() -> None:
+    """
+    Enables caching of environment variables. This is useful for performance
+    reasons, as it avoids the need to re-evaluate environment variables on
+    every call.
+
+    NOTE: Currently, it's invoked after service initialization to reduce
+    runtime overhead. This also means that environment variables should NOT
+    be updated after the service is initialized.
+    """
+    # Tag __getattr__ with functools.cache
+    global __getattr__
+    __getattr__ = functools.cache(__getattr__)
+
+    # Cache all environment variables
+    for key in environment_variables:
+        __getattr__(key)
 
 
 def __dir__():

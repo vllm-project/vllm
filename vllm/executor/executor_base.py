@@ -17,8 +17,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.tasks import SupportedTask
-from vllm.utils import make_async
-from vllm.v1.outputs import PoolerOutput, SamplerOutput
+from vllm.utils.async_utils import make_async
+from vllm.v1.outputs import SamplerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -54,7 +54,7 @@ class ExecutorBase(ABC):
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
-        self.kv_output_aggregator = None
+        self.kv_output_aggregator: KVOutputAggregator | None = None
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -143,8 +143,9 @@ class ExecutorBase(ABC):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> list[SamplerOutput | PoolerOutput] | None:
+    ) -> list[SamplerOutput]:
         output = self.collective_rpc("execute_model", args=(execute_model_req,))
+        assert output[0] is not None
         return output[0]
 
     def stop_remote_worker_execution_loop(self) -> None:
