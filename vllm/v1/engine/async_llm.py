@@ -45,6 +45,88 @@ from vllm.v1.metrics.stats import IterationStats
 logger = init_logger(__name__)
 
 
+class HealthStateTracker:
+    """Tracks engine health by monitoring scheduler stats for forward progress.
+
+    Instead of executing dummy batches to check health, this tracker observes
+    the scheduler's step_counter and current_wave from stats published over ZMQ.
+    If the counter fails to advance within the stall timeout while requests are
+    in-flight, the engine is considered unhealthy.
+
+    The tracker accounts for wave-based counter resets in data-parallel setups,
+    where step_counter resets to 0 when a wave completes.
+
+    Thread-safety: All operations use atomic reads/writes on primitive types.
+    Since updates happen in the asyncio event loop and reads also happen in the
+    event loop, no explicit locking is needed in the current architecture.
+    """
+
+    def __init__(self, stall_timeout_seconds: float = 60.0):
+        """Initialize health state tracker.
+
+        Args:
+            stall_timeout_seconds: Maximum time without progress before considering
+                the engine unhealthy. Default is 60 seconds.
+        """
+        self.last_step_counter = -1
+        self.last_current_wave = -1
+        self.last_update_time = time.monotonic()
+        self.stall_timeout = stall_timeout_seconds
+        # Track whether there are active requests to distinguish idle from stalled.
+        self.num_waiting_reqs = 0
+        self.num_running_reqs = 0
+
+    def update(
+        self, step_counter: int, current_wave: int, num_waiting_reqs: int, num_running_reqs: int
+    ) -> None:
+        """Update health state with new scheduler stats.
+
+        Args:
+            step_counter: Current step counter from scheduler stats.
+            current_wave: Current wave number (for data-parallel coordination).
+            num_waiting_reqs: Number of requests waiting to be scheduled.
+            num_running_reqs: Number of requests currently running.
+        """
+        # Update request counts.
+        self.num_waiting_reqs = num_waiting_reqs
+        self.num_running_reqs = num_running_reqs
+
+        # Detect forward progress: either wave advanced OR step_counter advanced within same wave.
+        # Wave advancement with counter reset (e.g., wave=2,step=0 after wave=1,step=100) is progress.
+        # Counter advancement within wave (e.g., wave=1,step=5 after wave=1,step=4) is progress.
+        made_progress = False
+
+        if current_wave > self.last_current_wave:
+            # Wave advanced - this is progress even if step_counter reset to 0.
+            made_progress = True
+        elif current_wave == self.last_current_wave and step_counter > self.last_step_counter:
+            # Same wave, but step_counter advanced - this is progress.
+            made_progress = True
+
+        if made_progress:
+            self.last_step_counter = step_counter
+            self.last_current_wave = current_wave
+            self.last_update_time = time.monotonic()
+
+    def is_healthy(self) -> bool:
+        """Check if the engine is healthy based on forward progress.
+
+        Returns:
+            True if the engine is healthy. The engine is considered unhealthy only if:
+            1. There are active requests (waiting or running)
+            2. Neither wave nor step_counter has advanced within the stall timeout
+
+            An idle engine (no active requests) is always considered healthy.
+        """
+        # If there are no active requests, the engine is idle and healthy.
+        if self.num_waiting_reqs == 0 and self.num_running_reqs == 0:
+            return True
+
+        # There are active requests - check if we're making progress.
+        elapsed = time.monotonic() - self.last_update_time
+        return elapsed < self.stall_timeout
+
+
 class AsyncLLM(EngineClient):
     def __init__(
         self,
@@ -148,6 +230,11 @@ class AsyncLLM(EngineClient):
                 aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
+
+        # Initialize health tracker for stats-based health checks.
+        self.health_tracker = HealthStateTracker(
+            stall_timeout_seconds=envs.VLLM_HEALTH_CHECK_STALL_TIMEOUT
+        )
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -468,6 +555,7 @@ class AsyncLLM(EngineClient):
         log_stats = self.log_stats
         logger_manager = self.logger_manager
         processor = self.processor
+        health_tracker = self.health_tracker
 
         async def output_handler():
             try:
@@ -517,6 +605,15 @@ class AsyncLLM(EngineClient):
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
                             mm_cache_stats=processor.stat_mm_cache(),
+                        )
+
+                    # 5) Update health tracker with scheduler stats for forward progress monitoring.
+                    if outputs.scheduler_stats is not None:
+                        health_tracker.update(
+                            outputs.scheduler_stats.step_counter,
+                            outputs.scheduler_stats.current_wave,
+                            outputs.scheduler_stats.num_waiting_reqs,
+                            outputs.scheduler_stats.num_running_reqs,
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -649,9 +746,33 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log()
 
     async def check_health(self) -> None:
+        """Check engine health by verifying the engine is making forward progress.
+
+        This method checks two conditions:
+        1. The engine process is alive (not errored).
+        2. The scheduler is making forward progress (step_counter advancing).
+
+        Raises:
+            EngineDeadError: If the engine is dead or has stalled without progress.
+        """
         logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
+
+        # Check if engine is making forward progress based on scheduler stats.
+        if not self.health_tracker.is_healthy():
+            logger.error(
+                "Engine health check failed: no forward progress detected "
+                "within %.1f seconds. Last wave: %d, last step counter: %d, "
+                "elapsed: %.1f seconds, waiting_reqs: %d, running_reqs: %d",
+                self.health_tracker.stall_timeout,
+                self.health_tracker.last_current_wave,
+                self.health_tracker.last_step_counter,
+                time.monotonic() - self.health_tracker.last_update_time,
+                self.health_tracker.num_waiting_reqs,
+                self.health_tracker.num_running_reqs,
+            )
+            raise EngineDeadError()
 
     async def start_profile(self) -> None:
         coros = [self.engine_core.profile_async(True)]
