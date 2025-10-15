@@ -143,6 +143,26 @@ def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# LightOnOCR
+def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [
+        "<|im_start|>system<|im_end|>\n<|im_start|>user\n<|image_pad|><|im_end|>\n<|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="lightonai/LightOnOCR-1B",
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -1690,6 +1710,7 @@ model_example_map = {
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
     "dots_ocr": run_dots_ocr,
+    "lightonocr": run_lightonocr,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "ernie45_vl": run_ernie45_vl,
