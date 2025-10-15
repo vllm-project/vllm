@@ -277,6 +277,26 @@ def fused_marlin_moe(
         topk_ids, block_size_m, global_num_experts, expert_map
     )
 
+    N = marlin_moe_intermediate_size(w1, w2)
+
+    if workspace is None:
+        max_blocks_per_sm = 8 if num_bits == 8 else 4
+        workspace = marlin_make_workspace_new(hidden_states.device, max_blocks_per_sm)
+
+    required_intermediate_cache2_elems = M * topk * N
+    if (
+        intermediate_cache2 is not None
+        and intermediate_cache2.numel() < required_intermediate_cache2_elems
+    ):
+        intermediate_cache2 = None
+
+    required_intermediate_cache13_elems = M * topk * max(2 * N, K)
+    if (
+        intermediate_cache13 is not None
+        and intermediate_cache13.numel() < required_intermediate_cache13_elems
+    ):
+        intermediate_cache13 = None
+
     assert activation is not None
     moe_output = _fused_marlin_moe(
         hidden_states=hidden_states,

@@ -84,6 +84,9 @@ def get_moe_quant_method(
         if prefix:
             # Dynamic per module/layer rules may override base config
             override_config(cloned_config, prefix=prefix)
+        # Stash useful metadata so downstream components can access the prefix of
+        # the layer that this quant config instance applies to.
+        setattr(cloned_config, "_layer_prefix", prefix)
 
         return moe_method_cls(cloned_config, layer.moe_config)
     return None
@@ -476,12 +479,40 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe)
         self.quant_config = quant_config
-        if self.quant_config.quant_type.size_bits == 4:
-            self.quant_type = scalar_types.uint4b8
-        elif self.quant_config.quant_type.size_bits == 8:
-            self.quant_type = scalar_types.uint8b128
-        else:
-            raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
+        self.layer_prefix = getattr(self.quant_config, "_layer_prefix", "")
+
+        self._supported_quant_types = {
+            4: scalar_types.uint4b8,
+            8: scalar_types.uint8b128,
+        }
+
+        self._initialize_quant_metadata()
+
+    def _initialize_quant_metadata(self) -> None:
+        """Resolve the effective quantization metadata for this MoE layer."""
+        if self.layer_prefix:
+            override_config(self.quant_config, prefix=self.layer_prefix)
+
+        bits = self.quant_config.quant_type.size_bits
+        if bits not in self._supported_quant_types:
+            raise ValueError(
+                f"GPTQMarlinMoEMethod only supports int4 and int8 now, "
+                f"received {bits}-bit configuration for layer '{self.layer_prefix}'."
+            )
+
+        self.quant_type = self._supported_quant_types[bits]
+        self.bits = bits
+        self.quant_config.weight_bits = bits
+        self.quant_config.quant_type = self.quant_type
+        # Ensure pack_factor is a plain integer for downstream tensor shape math.
+        self.quant_config.pack_factor = int(32 // bits)
+        self.pack_factor = self.quant_config.pack_factor
+        self.quant_metadata = {
+            "layer_prefix": self.layer_prefix,
+            "bits": self.bits,
+            "pack_factor": self.pack_factor,
+            "quant_type": self.quant_type,
+        }
 
     def create_weights(
         self,
@@ -626,7 +657,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
         device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
+        max_blocks_per_sm = 8 if self.bits == 8 else 4
+        layer.workspace = marlin_make_workspace_new(device, max_blocks_per_sm)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process act_order
