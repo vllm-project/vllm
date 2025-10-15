@@ -19,7 +19,7 @@ from vllm.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
-from vllm.config.cache import BlockSize
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -208,8 +208,8 @@ class TritonAttentionBackend(AttentionBackend):
         return [torch.float16, torch.bfloat16, torch.float32]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
-        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3", "fp8_e5m2"]
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[BlockSize]:

@@ -17,7 +17,7 @@ from vllm.attention.utils.fa_utils import (
     get_flash_attn_version,
 )
 from vllm.config import VllmConfig
-from vllm.config.cache import BlockSize
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
@@ -56,8 +56,8 @@ class FlashAttnMLABackend(MLACommonBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
-        return ["auto", "fp16", "bf16"]
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto"]
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[BlockSize]:
@@ -76,7 +76,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: CacheDType | None,
         block_size: int,
         use_mla: bool,
         has_sink: bool,

@@ -19,7 +19,7 @@ from vllm.attention.ops.flashmla import (
     get_mla_metadata,
 )
 from vllm.config import VllmConfig
-from vllm.config.cache import BlockSize
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -76,8 +76,8 @@ class FlashMLASparseBackend(AttentionBackend):
         return [torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
-        return ["auto", "bf16", "fp8_ds_mla"]
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto", "fp8_ds_mla"]
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[BlockSize]:

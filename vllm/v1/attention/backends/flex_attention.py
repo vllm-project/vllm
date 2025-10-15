@@ -24,7 +24,7 @@ from vllm.attention.backends.abstract import (
     is_quantized_kv_cache,
 )
 from vllm.config import VllmConfig
-from vllm.config.cache import BlockSize
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_kernel_override_batch_invariant,
@@ -111,8 +111,8 @@ class FlexAttentionBackend(AttentionBackend):
         return [torch.float16, torch.bfloat16, torch.float32]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
-        return ["auto", "fp16", "bf16"]
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto"]
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[BlockSize]:

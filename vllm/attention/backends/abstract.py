@@ -10,7 +10,7 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if TYPE_CHECKING:
-    from vllm.config.cache import BlockSize
+    from vllm.config.cache import BlockSize, CacheDType
     from vllm.platforms.interface import DeviceCapability
 
 
@@ -119,11 +119,11 @@ class AttentionBackend(ABC):
         return (not supported_dtypes) or dtype in supported_dtypes
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
         return ["auto"]
 
     @classmethod
-    def supports_kv_cache_dtype(cls, kv_cache_dtype: str | None) -> bool:
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
         supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
         return (not supported_kv_cache_dtypes) or (
             kv_cache_dtype is not None and kv_cache_dtype in supported_kv_cache_dtypes
@@ -179,7 +179,7 @@ class AttentionBackend(ABC):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: "CacheDType | None",
         block_size: int | None,
         use_mla: bool,
         has_sink: bool,
@@ -193,7 +193,7 @@ class AttentionBackend(ABC):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: "CacheDType | None",
         block_size: int | None,
         use_mla: bool,
         has_sink: bool,

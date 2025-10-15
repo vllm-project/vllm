@@ -12,7 +12,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
-from vllm.config.cache import BlockSize
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -40,8 +40,8 @@ class TritonMLABackend(MLACommonBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
-        return ["auto", "fp16", "bf16"]
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto"]
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[BlockSize]:

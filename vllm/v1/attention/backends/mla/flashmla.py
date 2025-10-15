@@ -13,7 +13,7 @@ from vllm.attention.ops.flashmla import (
     is_flashmla_dense_supported,
 )
 from vllm.config import VllmConfig
-from vllm.config.cache import BlockSize
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
@@ -55,8 +55,8 @@ class FlashMLABackend(MLACommonBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
-        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto", "fp8", "fp8_e4m3"]
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[BlockSize]:

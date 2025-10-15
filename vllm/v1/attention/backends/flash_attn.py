@@ -32,6 +32,7 @@ if is_flash_attn_varlen_func_available():
     )
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils import cdiv
@@ -111,10 +112,12 @@ class FlashAttentionBackend(AttentionBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
-    def supports_kv_cache_dtype(cls, kv_cache_dtype: str | None) -> bool:
-        if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        if kv_cache_dtype is None:
+            return True
+        if kv_cache_dtype.startswith("fp8"):
             return flash_attn_supports_fp8()
-        return kv_cache_dtype in [None, "auto", "fp16", "bf16"]
+        return kv_cache_dtype in ["auto"]
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
@@ -135,7 +138,7 @@ class FlashAttentionBackend(AttentionBackend):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: CacheDType | None,
         block_size: int,
         use_mla: bool,
         has_sink: bool,
