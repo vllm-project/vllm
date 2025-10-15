@@ -161,8 +161,7 @@ def test_attn_quant(
         run_model(compilation_config, model_name, **model_kwargs)
 
     matches = re.findall(
-        r"\[compilation/fusion_attn.py:\d+] "
-        r"Fused quant onto (\d+) attention nodes",
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
         log_holder.text,
     )
     assert len(matches) == 1, log_holder.text
@@ -252,8 +251,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
             compilation_config, model_name, tensor_parallel_size=2, **model_kwargs
         )
     matches = re.findall(
-        r"\[compilation/fusion_attn.py:\d+] "
-        r"Fused quant onto (\d+) attention nodes",
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
         log_holder.text,
     )
     assert len(matches) == 2, log_holder.text
@@ -262,8 +260,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     assert int(matches[1]) == attention_fusions
 
     matches = re.findall(
-        r"\[compilation/collective_fusion.py:\d+] "
-        r"Replaced (\d+) patterns",
+        r"collective_fusion.py:\d+] Replaced (\d+) patterns",
         log_holder.text,
     )
     assert len(matches) == 2, log_holder.text
