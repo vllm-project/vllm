@@ -18,6 +18,7 @@ from vllm.config import (
     ModelConfig,
     PassConfig,
     VllmConfig,
+    get_current_vllm_config,
     set_current_vllm_config,
 )
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -94,13 +95,11 @@ class TestModel(torch.nn.Module):
 
 
 class TestQuantModel(torch.nn.Module):
-    def __init__(
-        self, hidden_size=16, intermediate_size=32, vllm_config: VllmConfig = None
-    ):
+    def __init__(self, hidden_size=16, intermediate_size=32):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.vllm_config = vllm_config
+        self.vllm_config = get_current_vllm_config()
         self.gate_proj = torch.nn.Parameter(
             torch.empty((intermediate_size, hidden_size)), requires_grad=False
         )

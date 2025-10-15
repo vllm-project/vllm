@@ -33,7 +33,7 @@ FP4_DTYPE = torch.uint8
 
 
 def empty_bf16(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.float16, device="cuda")
+    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
 
 
 def empty_fp32(*args, **kwargs):
@@ -144,7 +144,7 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
         inputs = [
             # input, weight
             *self.rmsnorm_matcher.inputs(),
-            empty_fp32(1, 1),  # scale
+            self.quant_matcher.inputs()[1],  # scale
         ]
         pattern(*inputs)
 
@@ -200,7 +200,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
         inputs = [
             # input, weight, residual
             *self.rmsnorm_matcher.inputs(),
-            empty_fp32(1, 1),  # scale
+            self.quant_matcher.inputs()[1],  # scale
         ]
 
         pm.register_replacement(

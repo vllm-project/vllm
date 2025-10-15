@@ -169,24 +169,29 @@ def test_fusion_rmsnorm_quant(
         cleanup_pass = PostCleanupPass(vllm_config)
 
         backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend2 = TestBackend(noop_pass, cleanup_pass)
         model = TestModel(hidden_size, eps, static, cuda_force_torch)
 
         # First dimension dynamic
         x = torch.rand(num_tokens, hidden_size)
         torch._dynamo.mark_dynamic(x, 0)
 
-        result = model(x)
+        model_fused = torch.compile(model, backend=backend)
+        result_fused = model_fused(x)
 
-        model2 = torch.compile(model, backend=backend)
-        result2 = model2(x)
+        model_unfused = torch.compile(model, backend=backend2)
+        result_unfused = model_unfused(x)
 
-        # Higher tol for dynamic bfloat16
-        if dtype == torch.float16 or static:
+        if enable_rms_norm_custom_op and static:
+            ATOL, RTOL = (1e-5, 1e-5)  # up to 1e-8 close
+        elif dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
+        elif static:
+            ATOL, RTOL = (5e-3, 5e-3)
         else:
             ATOL, RTOL = (1e-2, 1e-2)
 
-        torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(result_fused, result_unfused, atol=ATOL, rtol=RTOL)
 
         assert fusion_pass.matched_count == 3
         backend.check_before_ops(model.ops_in_model_before())

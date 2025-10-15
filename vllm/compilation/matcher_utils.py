@@ -112,9 +112,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
 
     def inputs(self):
         input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
-        weight = self.empty(
-            16,
-        )
+        weight = self.empty(16)
         residual = self.empty(5, 16)
         return [input, weight, residual]
 
@@ -203,3 +201,10 @@ class MatcherQuantFP8(MatcherCustomOp):
         )
 
         return torch.empty(scale_shape, device=input.device, dtype=torch.float32)
+
+    def inputs(self) -> list[torch.Tensor]:
+        input = self.empty(5, 16)
+        if self.quant_key.scale.static:
+            return [input, self.empty_f32(1, 1)]
+
+        return [input]
