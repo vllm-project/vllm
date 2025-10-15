@@ -4,7 +4,7 @@ import dataclasses
 
 import pytest
 
-from vllm.config import CompilationLevel
+from vllm.config import CompilationMode
 from vllm.utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
@@ -21,7 +21,7 @@ class TestSetting:
 
 
 # we cannot afford testing the full Cartesian product
-# of all models and all levels
+# of all models and all modes
 @pytest.mark.parametrize(
     "test_setting",
     [
@@ -121,15 +121,13 @@ def test_compile_correctness(
         all_args: list[list[str]] = []
         all_envs: list[dict[str, str] | None] = []
 
-        for comp_level in [
-            CompilationLevel.DYNAMO_AS_IS,
-            CompilationLevel.DYNAMO_ONCE,
-            CompilationLevel.PIECEWISE,
+        for comp_mode in [
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+            CompilationMode.VLLM_COMPILE,
         ]:
-            for level in [CompilationLevel.NO_COMPILATION, comp_level]:
-                all_args.append(
-                    final_args + [f"-O.level={level}", "-O.backend=inductor"]
-                )
+            for mode in [CompilationMode.NONE, comp_mode]:
+                all_args.append(final_args + [f"-O.mode={mode}", "-O.backend=inductor"])
 
             # inductor will change the output, so we only compare if the output
             # is close, not exactly the same.
@@ -142,13 +140,13 @@ def test_compile_correctness(
             all_envs.clear()
             all_args.clear()
 
-        for level in [
-            CompilationLevel.NO_COMPILATION,
-            CompilationLevel.DYNAMO_AS_IS,
-            CompilationLevel.DYNAMO_ONCE,
-            CompilationLevel.PIECEWISE,
+        for mode in [
+            CompilationMode.NONE,
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+            CompilationMode.VLLM_COMPILE,
         ]:
-            all_args.append(final_args + [f"-O.level={level}", "-O.backend=eager"])
+            all_args.append(final_args + [f"-O.mode={mode}", "-O.backend=eager"])
             all_envs.append({})
             all_envs.append({})
 
