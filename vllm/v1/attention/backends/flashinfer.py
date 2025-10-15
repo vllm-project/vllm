@@ -3,7 +3,6 @@
 """Attention layer with FlashInfer."""
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import numpy as np
 import torch
@@ -272,7 +271,9 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
+    # When using TRTLLM attention with cudagraphs, we can use UNIFORM_BATCH
+    # mode. This will be overridden in the initializer if supported.
+    cudagraph_support: AttentionCGSupport = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 
@@ -354,7 +355,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.q_data_type = self.model_config.dtype
 
+        # If using trtllm attention, we can support uniform_batch speculative decoding
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
+        if can_use_trtllm:
+            self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
