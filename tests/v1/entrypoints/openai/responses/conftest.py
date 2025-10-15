@@ -16,7 +16,7 @@ def default_server_args():
         "8192",
         "--enforce-eager",  # For faster startup.
         "--enable-auto-tool-choice",
-        "--guided-decoding-backend",
+        "--structured-outputs-config.backend",
         "xgrammar",
         "--tool-call-parser",
         "hermes",

@@ -16,6 +16,7 @@ from openai.types.chat.chat_completion_audio import (
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from openai.types.responses import (
+    FunctionTool,
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
     ResponseCodeInterpreterCallCompletedEvent,
@@ -36,6 +37,7 @@ from openai.types.responses import (
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
+    ToolChoiceFunction,
 )
 from openai.types.responses import (
     ResponseCompletedEvent as OpenAIResponseCompletedEvent,
@@ -65,7 +67,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
 
 
 from openai.types.responses.response import IncompleteDetails, ToolChoice
-from openai.types.responses.tool import FunctionTool, Tool
+from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from pydantic import (
     BaseModel,
@@ -306,13 +308,15 @@ def get_logits_processors(
 
 def get_json_schema_from_tool(
     tool_choice: str | ToolChoice | ChatCompletionNamedToolChoiceParam,
-    tools: list[Tool | ChatCompletionToolsParam] | None,
+    tools: list[FunctionTool | ChatCompletionToolsParam] | None,
 ) -> str | dict | None:
     if tool_choice in ("none", None) or tools is None:
         return None
-    if (not isinstance(tool_choice, str)) and isinstance(tool_choice, ToolChoice):
+    if (not isinstance(tool_choice, str)) and isinstance(
+        tool_choice, ToolChoiceFunction
+    ):
         tool_name = tool_choice.name
-        tool_map = {tool.name: tool for tool in tools if isinstance(tool, Tool)}
+        tool_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
         if tool_name not in tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
         return tool_map[tool_name].parameters
@@ -537,11 +541,11 @@ class ResponsesRequest(OpenAIBaseModel):
                 raise NotImplementedError("json_object is not supported")
         # Function call
         elif not (self.tool_choice == "none" or self.tools is None):
-            structured_outputs = StructuredOutputsParams(
-                json=get_json_schema_from_tool(
-                    tools=self.tools, tool_choice=self.tool_choice
-                )
+            json_schema = get_json_schema_from_tool(
+                tools=self.tools, tool_choice=self.tool_choice
             )
+            if json_schema is not None:
+                structured_outputs = StructuredOutputsParams(json=json_schema)
         return structured_outputs
 
     def is_include_output_logprobs(self) -> bool:
