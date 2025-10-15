@@ -115,7 +115,7 @@ class TestModel(torch.nn.Module):
         return [RMS_OP, RMS_ADD_OP] if self.enable_rms_norm else [torch.ops.aten.rsqrt]
 
 
-@pytest.mark.parametrize("dtype", [torch.float16])  # , torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
