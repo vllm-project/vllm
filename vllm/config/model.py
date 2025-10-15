@@ -420,43 +420,6 @@ class ModelConfig:
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
 
-    def is_model_moe(
-        self,
-    ) -> bool:
-        """
-        Parse model configuration to determine if sequence parallel is needed.
-
-        Args:
-            hf_config: HuggingFace config
-
-        Returns:
-            True if model is MOE
-            False otherwise.
-        """
-        # Get text config (handles multimodal models)
-        assert hasattr(self, "hf_config")
-
-        text_config = self.hf_config.get_text_config()
-
-        # Check for MoE (Mixture of Experts) indicators
-        num_expert_names = [
-            "num_experts",  # Jamba
-            "moe_num_experts",  # Dbrx
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-
-        num_experts = getattr_iter(text_config, num_expert_names, 0)
-
-        # Handle list case (e.g., Ernie VL)
-        is_moe_model = False
-        if isinstance(num_experts, list):
-            is_moe_model = max(num_experts) > 1
-        else:
-            is_moe_model = num_experts > 1
-
-        return is_moe_model
-
     def __post_init__(
         self,
         # Multimodal config init vars
@@ -1789,6 +1752,51 @@ class ModelConfig:
         )
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
+    def is_model_moe(
+        self,
+    ) -> bool:
+        """
+        Parse model configuration to determine if sequence parallel is needed.
+
+        Returns:
+            True if model is MOE.
+            False otherwise.
+        """
+        # Get text config (handles multimodal models)
+        assert hasattr(self, "hf_config")
+
+        text_config = self.hf_config.get_text_config()
+
+        # Check for MoE (Mixture of Experts) indicators
+        num_expert_names = [
+            "num_experts",  # Jamba
+            "moe_num_experts",  # Dbrx
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+
+        num_experts = getattr_iter(text_config, num_expert_names, 0)
+
+        # Handle list case (e.g., Ernie VL)
+        is_moe_model = False
+        if isinstance(num_experts, list):
+            is_moe_model = max(num_experts) > 1
+        else:
+            is_moe_model = num_experts > 1
+
+        return is_moe_model
+
+    def is_quantized(self) -> bool:
+        """
+        Check if a PretrainedConfig is quantized.
+
+        Returns:
+            True if model is quantized.
+            False otherwise.
+        """
+        assert hasattr(self, "hf_config")
+        return getattr(self.hf_config, "quantization_config", None) is not None
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
