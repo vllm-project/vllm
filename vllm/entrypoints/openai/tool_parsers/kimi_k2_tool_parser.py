@@ -213,8 +213,6 @@ class KimiK2ToolParser(ToolParser):
             if matches:
                 tool_calls = []
                 for function_name, call_id, function_args in matches:
-                    # # Normalize quotes in function arguments to ensure valid JSON
-                    # normalized_args = normalize_quotes_for_json(function_args)
                     normalized_args = function_args
                     tool_calls.append(
                         ToolCall(
