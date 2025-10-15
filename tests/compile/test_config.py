@@ -4,7 +4,7 @@ import pytest
 
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.compilation import CompilationLevel
+from vllm.config.compilation import CompilationMode
 from vllm.utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
 
 
@@ -90,16 +90,16 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-def test_dynamo_as_is(vllm_runner, monkeypatch):
+def test_stock_torch_compile(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with (
-        compilation_counter.expect(dynamo_as_is_count=1),
+        compilation_counter.expect(stock_torch_compile_count=1),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m",
-            compilation_config={"level": 1},
+            compilation_config={"mode": CompilationMode.STOCK_TORCH_COMPILE},
             gpu_memory_utilization=0.4,
         ) as _,
     ):
@@ -112,11 +112,11 @@ def test_no_compilation(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     with (
-        compilation_counter.expect(num_graphs_seen=0, dynamo_as_is_count=0),
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m",
-            compilation_config={"level": 0},
+            compilation_config={"mode": CompilationMode.NONE},
             gpu_memory_utilization=0.4,
         ) as _,
     ):
@@ -130,7 +130,7 @@ def test_enforce_eager(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with (
-        compilation_counter.expect(num_graphs_seen=0, dynamo_as_is_count=0),
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m", enforce_eager=True, gpu_memory_utilization=0.4
@@ -151,7 +151,7 @@ def test_splitting_ops_dynamic():
     if is_torch_equal_or_newer("2.9.0.dev"):
         config = VllmConfig(
             compilation_config=CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.VLLM_COMPILE,
                 use_inductor_graph_partition=True,
                 splitting_ops=["vllm::unified_attention"],
             )
@@ -163,7 +163,7 @@ def test_splitting_ops_dynamic():
     # When attn_fusion pass enabled, splitting_ops now default to attention ops.
     config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             pass_config={"enable_attn_fusion": True, "enable_noop": True},
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
@@ -178,7 +178,7 @@ def test_splitting_ops_dynamic():
     if is_torch_equal_or_newer("2.9.0.dev"):
         config = VllmConfig(
             compilation_config=CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.VLLM_COMPILE,
                 use_inductor_graph_partition=True,
                 pass_config={"enable_attn_fusion": True, "enable_noop": True},
                 custom_ops=["+quant_fp8"],

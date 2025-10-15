@@ -10,7 +10,7 @@ import torch
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -38,7 +38,7 @@ class CompiledMod(torch.nn.Module):
 def make_vllm_config() -> VllmConfig:
     return VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
         )
     )
 
