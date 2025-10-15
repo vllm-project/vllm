@@ -318,37 +318,21 @@ def heuristic_constant(batch_size: int, seq_length_k: int) -> int:
 
 def heuristic_batch_based(batch_size: int, seq_length_k: int) -> int:
     """
-    Improved batch-size-based heuristic with zero slowdowns.
-
-    This policy avoids all slowdowns by never splitting large batches,
-    while still achieving significant speedups for small batches.
+    Simple batch-based heuristic with zero slowdowns.
     """
-    if batch_size <= 4:
-        # Very small batch: aggressive splitting
-        if seq_length_k >= 16:
-            return 8
-        elif seq_length_k >= 4:
-            return 4
-        elif seq_length_k >= 2:
-            return 2
-        else:
-            return 1
-    elif batch_size <= 8:
-        # Small batch: moderate splitting
-        if seq_length_k >= 16:
-            return 8
-        elif seq_length_k >= 4:
-            return 4
-        else:
-            return 1
-    elif batch_size <= 16:
-        # Medium batch: conservative splitting
-        if seq_length_k >= 16:
-            return 2
-        else:
-            return 1
+    if batch_size <= 4 and seq_length_k >= 8:
+        return 16
+    elif batch_size <= 8 and seq_length_k >= 2:
+        return 8
+    elif (batch_size <= 16 and seq_length_k >= 4) or (
+        batch_size == 48 and seq_length_k >= 32
+    ):
+        return 4
+    elif (batch_size <= 32 and seq_length_k >= 8) or (
+        batch_size == 96 and seq_length_k >= 16
+    ):
+        return 2
     else:
-        # Large batch: never split (avoids slowdowns)
         return 1
 
 
