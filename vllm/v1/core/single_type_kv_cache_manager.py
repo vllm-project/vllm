@@ -404,7 +404,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         removed_blocks: list[KVCacheBlock] = []
 
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self.null_block:
+            if self._null_block is not None and blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
@@ -557,7 +557,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         removed_blocks: list[KVCacheBlock] = []
         # we need to keep the last block to get the previous hash key
         for i in range(first_useful_block_idx - 1, -1, -1):
-            if blocks[i] == self.null_block:
+            if self._null_block is not None and blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
