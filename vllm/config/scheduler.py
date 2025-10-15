@@ -170,19 +170,11 @@ class SchedulerConfig:
         return hash_str
 
     def __post_init__(self, is_encoder_decoder: bool) -> None:
-        from vllm.model_executor.layers.batch_invariant import (
-            vllm_kernel_override_batch_invariant,
-        )
-
         if self.max_model_len is None:
             self.max_model_len = 8192
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
-
-        # Enable batch invariance settings if requested
-        if vllm_kernel_override_batch_invariant():
-            self.enable_chunked_prefill = False
 
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.

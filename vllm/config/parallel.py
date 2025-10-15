@@ -14,6 +14,9 @@ from typing_extensions import Self
 import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless, get_open_ports_list
 
@@ -560,10 +563,6 @@ class ParallelConfig:
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
-        from vllm.model_executor.layers.batch_invariant import (
-            vllm_kernel_override_batch_invariant,
-        )
-        from vllm.platforms import current_platform
 
         # Enable batch invariance settings if requested
         if vllm_kernel_override_batch_invariant():

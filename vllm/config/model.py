@@ -20,6 +20,9 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -420,10 +423,6 @@ class ModelConfig:
         video_pruning_rate: float | None,
     ) -> None:
         # Enable batch invariance settings if requested
-        from vllm.model_executor.layers.batch_invariant import (
-            vllm_kernel_override_batch_invariant,
-        )
-
         if vllm_kernel_override_batch_invariant():
             self.enforce_eager = True
 

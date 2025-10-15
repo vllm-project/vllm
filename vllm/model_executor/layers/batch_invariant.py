@@ -755,9 +755,9 @@ def vllm_kernel_override_batch_invariant():
 def override_envs_for_invariance():
     curr_attn_backend = envs.VLLM_ATTENTION_BACKEND
     supported_backends = [
+        "FLASH_ATTN",  # best supported backend
         "FLEX_ATTENTION",
         "FLASHINFER",
-        "FLASH_ATTN",
         "FLASH_ATTN_MLA",
         "TRITON_MLA",
         # Not yet supported MLA backends
@@ -772,6 +772,12 @@ def override_envs_for_invariance():
         )
         logger.warning_once(warning)
         os.environ["VLLM_ATTENTION_BACKEND"] = supported_backends[0]
+    if os.environ["VLLM_ATTENTION_BACKEND"] != supported_backends[0]:
+        warning = (
+            "You are using a decode-invariant form of batch invariance. "
+            "This will not be invariant between prefill and decode."
+        )
+        logger.warning_once(warning)
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
