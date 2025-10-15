@@ -59,9 +59,7 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
-        # Store reference to block_pool for lazy null block access
-        self.block_pool = block_pool
-        self._null_block = None  # Lazy initialization
+        self._null_block: KVCacheBlock | None = None
 
     @property
     def null_block(self) -> KVCacheBlock:
