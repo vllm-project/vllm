@@ -475,7 +475,7 @@ class CoreEngineActorManager:
                 device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
                 if pack_strategy == "spread":
                     pg_bundles += device_bundle * n_device_on_node
-                    assert pg_bundles <= world_size, (
+                    assert len(pg_bundles) <= world_size, (
                         f"pg_bundles should be <= world_size, but got {pg_bundles}"
                     )
 
