@@ -402,14 +402,35 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         last_useful_block = last_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
+
         for i in range(last_useful_block - 1, -1, -1):
             if blocks[i] == self.null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
+
             removed_blocks.append(blocks[i])
-            blocks[i] = self.null_block
+
+            # Handle an edge case where no free blocks available -
+            # repurpose the first removed block as null_block
+            if (
+                self._null_block is None
+                and len(removed_blocks) == 1
+                and self.block_pool.get_num_free_blocks() == 0
+            ):
+                self.block_pool._null_block = removed_blocks[0]
+                self.block_pool._null_block.is_null = True
+                # Cache it in the manager as well
+                self._null_block = self.block_pool._null_block
+                blocks[i] = self._null_block
+            else:
+                # Normal case: call the null_block property to allocate from free queue
+                blocks[i] = self.null_block
+
+        # Hold back the repurposed _null_block from being freed
+        if self._null_block in removed_blocks:
+            removed_blocks.remove(self._null_block)
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -541,8 +562,28 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
+
             removed_blocks.append(blocks[i])
-            blocks[i] = self.null_block
+
+            # Handle an edge case where no free blocks available -
+            # repurpose the first removed block as null_block
+            if (
+                self._null_block is None
+                and len(removed_blocks) == 1
+                and self.block_pool.get_num_free_blocks() == 0
+            ):
+                self.block_pool._null_block = removed_blocks[0]
+                self.block_pool._null_block.is_null = True
+                # Cache it in the manager as well
+                self._null_block = self.block_pool._null_block
+                blocks[i] = self._null_block
+            else:
+                # Normal case: call the null_block property to allocate from free queue
+                blocks[i] = self.null_block
+
+        # Hold back the repurposed _null_block from being freed
+        if self._null_block in removed_blocks:
+            removed_blocks.remove(self._null_block)
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
