@@ -256,8 +256,7 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
 def test_moe_model_detection(model_id, expected_is_moe_model):
     model_config = ModelConfig(model_id)
     # Just check that is_moe_model field exists and is a boolean
-    assert hasattr(model_config, "is_moe_model")
-    assert model_config.is_moe_model == expected_is_moe_model
+    assert model_config.is_model_moe() == expected_is_moe_model
 
 
 @pytest.mark.skipif(
