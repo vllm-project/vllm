@@ -1,0 +1,11 @@
+# For hf script, without -t option (tensor parallel size).
+# bash .buildkite/lm-eval-harness/run-lm-eval-chartqa-vllm-vlm-baseline.sh -m meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 -b 32 -l 100 -t 8
+model_name: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+backend: "vllm-vlm"
+tasks:
+- name: "chartqa"
+  metrics:
+  - name: "relaxed_accuracy,none"
+    value: 0.90
+limit: 100
+num_fewshot: 0
