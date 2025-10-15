@@ -102,7 +102,7 @@ MESH_DEVICE=T3K python examples/offline_inference_tt.py --measure_perf
 The command to run Llama70B on Galaxy is:
 
 ```sh
-MESH_DEVICE=TG LLAMA_DIR=<path to weights> TT_LLAMA_TEXT_VER="llama3_70b_galaxy" python examples/offline_inference_tt.py --model "meta-llama/Llama-3.1-70B-Instruct" --override_tt_config '{"dispatch_core_axis": "col", "sample_on_device_mode": "all", "fabric_config": "FABRIC_1D", "worker_l1_size": 1344544, "trace_region_size": 62000000}'
+MESH_DEVICE=TG LLAMA_DIR=<path to weights> TT_LLAMA_TEXT_VER="llama3_70b_galaxy" python examples/offline_inference_tt.py --model "meta-llama/Llama-3.1-70B-Instruct" --override_tt_config '{"dispatch_core_axis": "col", "sample_on_device_mode": "all", "fabric_config": "FABRIC_1D", "worker_l1_size": 1344544, "trace_region_size": 184915840}'
 ```
 
 ### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision models
