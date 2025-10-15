@@ -335,7 +335,7 @@ class HfRunner:
             trust_remote_code=trust_remote_code,
         )
         self.device = self.get_default_device()
-        self.dtype = torch_dtype = _get_and_verify_dtype(
+        self.dtype = dtype = _get_and_verify_dtype(
             self.model_name,
             self.config,
             dtype=dtype,
@@ -343,7 +343,7 @@ class HfRunner:
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
-        model_kwargs.setdefault("torch_dtype", torch_dtype)
+        model_kwargs.setdefault("dtype", dtype)
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
@@ -389,7 +389,7 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
-                torch_dtype=torch_dtype,
+                dtype=dtype,
                 trust_remote_code=trust_remote_code,
             )
 
@@ -399,7 +399,7 @@ class HfRunner:
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
