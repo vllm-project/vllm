@@ -112,7 +112,7 @@ class AWQMarlinConfig(QuantizationConfig):
         )
 
     @classmethod
-    def get_name(cls) -> QuantizationMethods:
+    def get_name(cls) -> "QuantizationMethods":
         return "awq_marlin"
 
     @classmethod
@@ -148,7 +148,7 @@ class AWQMarlinConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> QuantizationMethods | None:
+    ) -> Optional["QuantizationMethods"]:
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
         is_valid_user_quant = (
             user_quant is None or user_quant == "marlin" or user_quant == "awq_marlin"

@@ -63,7 +63,7 @@ class AWQConfig(QuantizationConfig):
             f"modules_to_not_convert={self.modules_to_not_convert})"
         )
 
-    def get_name(self) -> QuantizationMethods:
+    def get_name(self) -> "QuantizationMethods":
         return "awq"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
