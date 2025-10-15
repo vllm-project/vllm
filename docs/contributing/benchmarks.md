@@ -327,19 +327,20 @@ vLLM's benchmark serving script provides sophisticated load pattern simulation c
 
 - `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
 - `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
-- `--max-concurrency`: Limits concurrent outstanding requests. Use `null` for unlimited concurrency or set a value to simulate backpressure.
+- `--max-concurrency`: Limits concurrent outstanding requests. If this argument is not provided, concurrency is unlimited. Set a value to simulate backpressure.
 
-These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf --max-concurrency=null`) to production-like scenarios with realistic arrival patterns and resource constraints.
+These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf`) to production-like scenarios with realistic arrival patterns and resource constraints.
 
 **Understanding Burstiness and Traffic Patterns:**
 
 The `--burstiness` parameter mathematically controls request arrival patterns using a Gamma distribution where:
+
 - **Shape parameter**: `burstiness` value
 - **Coefficient of Variation (CV)**: `1/√burstiness`
 - **Traffic characteristics**:
-  - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
-  - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
-  - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
+    - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
+    - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
+    - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
 
 ![Load Pattern Examples](load_pattern_examples.png)
 
@@ -347,19 +348,20 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 **Load Pattern Recommendations by Use Case:**
 
-| Use Case              | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
-| ---                   | ---          | ---             | ---             | ---                                                       |
+| Use Case               | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
+| ---                    | ---          | ---             | ---             | ---                                                       |
 | **Maximum Throughput** | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
-| **Realistic Testing** | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
-| **Stress Testing**    | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
-| **Latency Profiling** | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
-| **Capacity Planning** | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
-| **SLA Validation**    | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+| **Realistic Testing**  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
+| **Stress Testing**     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
+| **Latency Profiling**  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
+| **Capacity Planning**  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
+| **SLA Validation**     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
 
 These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
 
 **Important Note on Production Architecture:**
 The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
+
 - Users send requests as fast as they can (infinite rate)
 - A load balancer or API gateway controls the maximum concurrent connections
 - The system operates at its concurrency limit, revealing true throughput capacity
@@ -373,15 +375,17 @@ To effectively configure load patterns, especially for **Capacity Planning** and
 
 ```text
 GPU KV cache size: 15,728,640 tokens
-Maximum concurrency for 8,192 tokens per request: 1.92x
+Maximum concurrency for 8,192 tokens per request: 1920
 ```
 
 **Understanding these metrics:**
+
 - **GPU KV cache size**: Total tokens that can be cached across all concurrent requests
 - **Maximum concurrency**: Theoretical maximum concurrent requests for the given `max_model_len`
 - **Calculation**: `max_concurrency = kv_cache_size / max_model_len`
 
 **Using KV cache metrics for load pattern configuration:**
+
 - **For Capacity Planning**: Set `--max-concurrency` to 80-90% of the reported maximum to test realistic resource constraints
 - **For SLA Validation**: Use the reported maximum as your SLA limit to ensure compliance testing matches production capacity
 - **For Realistic Testing**: Monitor memory usage when approaching theoretical limits to understand sustainable request rates
