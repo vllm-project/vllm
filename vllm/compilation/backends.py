@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
-    if compilation_config.use_inductor:
+    if compilation_config.backend == "inductor":
         # Use standalone compile only if requested, version is new enough,
         # and the symbol actually exists in this PyTorch build.
         if (
@@ -55,6 +55,10 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
+        assert compilation_config.backend == "eager", (
+            "Custom backends not supported with CompilationMode.VLLM_COMPILE"
+        )
+
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
 
@@ -477,7 +481,7 @@ def set_model_tag(tag: str):
 
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation level of `CompilationLevel.PIECEWISE`,
+    It is used for compilation mode of `CompilationMode.VLLM_COMPILE`,
     where we customize the compilation.
 
     The major work of this backend is to split the graph into

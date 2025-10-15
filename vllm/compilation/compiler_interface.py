@@ -575,7 +575,7 @@ class InductorAdaptor(CompilerInterface):
 
         Because it is re-entrant, we always set it (even if entering via Dynamo
         and the context was already entered). We might want to revisit if it
-        should be set at a different level of compilation.
+        should be set at a different mode of compilation.
 
         This is likely a bug in PyTorch: public APIs should not rely on
         manually setting up internal contexts. But we also rely on non-public
