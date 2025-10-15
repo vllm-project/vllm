@@ -8,6 +8,8 @@ from PIL import Image, ImageChops
 
 from vllm.multimodal.image import ImageMediaIO, convert_image_mode
 
+pytestmark = pytest.mark.cpu_test
+
 ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()
 
@@ -41,8 +43,7 @@ def test_rgba_to_rgb():
 def test_rgba_to_rgb_custom_background(tmp_path):
     """Test RGBA to RGB conversion with custom background colors."""
     # Create a simple RGBA image with transparent and opaque pixels
-    rgba_image = Image.new("RGBA", (10, 10),
-                           (255, 0, 0, 255))  # Red with full opacity
+    rgba_image = Image.new("RGBA", (10, 10), (255, 0, 0, 255))  # Red with full opacity
 
     # Make top-left quadrant transparent
     for i in range(5):
@@ -92,7 +93,7 @@ def test_rgba_to_rgb_custom_background(tmp_path):
     assert blue_numpy[0][0][2] == 255  # B
 
     # Test 4: Test with load_bytes method
-    with open(test_image_path, 'rb') as f:
+    with open(test_image_path, "rb") as f:
         image_data = f.read()
 
     image_io_green = ImageMediaIO(rgba_background_color=(0, 255, 0))
@@ -109,39 +110,47 @@ def test_rgba_background_color_validation():
     """Test that invalid rgba_background_color values are properly rejected."""
 
     # Test invalid types
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color="255,255,255")
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=255)
 
     # Test wrong number of elements
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, 255))
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, 255, 255, 255))
 
     # Test non-integer values
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255.0, 255.0, 255.0))
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, "255", 255))
 
     # Test out of range values
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(256, 255, 255))
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, -1, 255))
 
     # Test that valid values work

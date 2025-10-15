@@ -59,7 +59,7 @@ enabling the corresponding APIs:
 #### Predefined models
 
 If the [Pooler][vllm.model_executor.layers.pooler.Pooler] defined by the model accepts `pooler_config`,
-you can override some of its attributes via the `--override-pooler-config` option.
+you can override some of its attributes via the `--pooler-config` option.
 
 #### Converted models
 
@@ -75,7 +75,7 @@ the pooler assigned to each task has the following attributes by default:
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
 
-You can further customize this via the `--override-pooler-config` option,
+You can further customize this via the `--pooler-config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
 
 ## Offline Inference
@@ -130,8 +130,10 @@ It is designed for embedding models and cross-encoder models. Embedding models u
 from vllm import LLM
 
 llm = LLM(model="BAAI/bge-reranker-v2-m3", runner="pooling")
-(output,) = llm.score("What is the capital of France?",
-                      "The capital of Brazil is Brasilia.")
+(output,) = llm.score(
+    "What is the capital of France?",
+    "The capital of Brazil is Brasilia.",
+)
 
 score = output.outputs.score
 print(f"Score: {score}")
@@ -209,7 +211,7 @@ For models that support Matryoshka Embeddings but not recognized by vLLM, please
 
 Here is an example to serve a model with Matryoshka Embeddings enabled.
 
-```text
+```bash
 vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf-overrides '{"matryoshka_dimensions":[256]}'
 ```
 
@@ -220,11 +222,15 @@ You can change the output dimensions of embedding models that support Matryoshka
 ```python
 from vllm import LLM, PoolingParams
 
-llm = LLM(model="jinaai/jina-embeddings-v3",
-          runner="pooling",
-          trust_remote_code=True)
-outputs = llm.embed(["Follow the white rabbit."],
-                    pooling_params=PoolingParams(dimensions=32))
+llm = LLM(
+    model="jinaai/jina-embeddings-v3",
+    runner="pooling",
+    trust_remote_code=True,
+)
+outputs = llm.embed(
+    ["Follow the white rabbit."],
+    pooling_params=PoolingParams(dimensions=32),
+)
 print(outputs[0].outputs)
 ```
 
@@ -234,13 +240,13 @@ A code example can be found here: <gh-file:examples/offline_inference/pooling/em
 
 Use the following command to start vllm server.
 
-```text
+```bash
 vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
 ```
 
 You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter.
 
-```text
+```bash
 curl http://127.0.0.1:8000/v1/embeddings \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \

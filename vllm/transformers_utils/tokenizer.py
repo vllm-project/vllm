@@ -7,17 +7,15 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import huggingface_hub
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import (
-    get_sentence_transformer_tokenizer_config)
+from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -32,15 +30,14 @@ else:
 
 logger = init_logger(__name__)
 
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
-                     TokenizerBase]
+AnyTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast | TokenizerBase
 
 
 def decode_tokens(
     tokenizer: AnyTokenizer,
     token_ids: list[int],
     *,
-    skip_special_tokens: Optional[bool] = None,
+    skip_special_tokens: bool | None = None,
 ) -> str:
     """
     Backend-agnostic equivalent of HF's
@@ -50,8 +47,7 @@ def decode_tokens(
     settings.
     """
     if skip_special_tokens is not None:
-        return tokenizer.decode(token_ids,
-                                skip_special_tokens=skip_special_tokens)
+        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
     return tokenizer.decode(token_ids)
 
@@ -60,9 +56,9 @@ def encode_tokens(
     tokenizer: AnyTokenizer,
     text: str,
     *,
-    truncation: Optional[bool] = None,
-    max_length: Optional[int] = None,
-    add_special_tokens: Optional[bool] = None,
+    truncation: bool | None = None,
+    max_length: int | None = None,
+    add_special_tokens: bool | None = None,
 ) -> list[int]:
     """
     Backend-agnostic equivalent of HF's
@@ -95,8 +91,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer_all_special_ids = tokenizer.all_special_ids
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
-    tokenizer_all_special_tokens_extended = (
-        tokenizer.all_special_tokens_extended)
+    tokenizer_all_special_tokens_extended = tokenizer.all_special_tokens_extended
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
 
@@ -110,7 +105,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
             max_token_id = max(max_token_id, tokenizer.vocab_size)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
-
         @property
         def all_special_ids(self) -> list[int]:
             return tokenizer_all_special_ids
@@ -134,7 +128,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
             return tokenizer_len
 
         def __reduce__(self):
-            return get_cached_tokenizer, (tokenizer, )
+            return get_cached_tokenizer, (tokenizer,)
 
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
@@ -143,16 +137,15 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
 
 def get_tokenizer(
-    tokenizer_name: Union[str, Path],
+    tokenizer_name: str | Path,
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
-    revision: Optional[str] = None,
-    download_dir: Optional[str] = None,
+    revision: str | None = None,
+    download_dir: str | None = None,
     **kwargs,
 ) -> AnyTokenizer:
-    """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
-    """
+    """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
@@ -173,13 +166,13 @@ def get_tokenizer(
                     revision=revision,
                     local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                     # Ignore weights - we only need the tokenizer.
-                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
+                )
                 tokenizer_name = tokenizer_path
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
-            raise ValueError(
-                "Cannot use the fast tokenizer in slow tokenizer mode.")
+            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
     if "truncation_side" not in kwargs:
@@ -195,23 +188,28 @@ def get_tokenizer(
     is_from_mistral_org = str(tokenizer_name).split("/")[0] == "mistralai"
     if is_from_mistral_org and tokenizer_mode != "mistral":
         warnings.warn(
-            'It is strongly recommended to run mistral models with '
+            "It is strongly recommended to run mistral models with "
             '`--tokenizer-mode "mistral"` to ensure correct '
-            'encoding and decoding.',
+            "encoding and decoding.",
             FutureWarning,
-            stacklevel=2)
+            stacklevel=2,
+        )
 
     tokenizer: AnyTokenizer
     if tokenizer_mode == "mistral":
-        tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
-                                                     revision=revision)
+        tokenizer = MistralTokenizer.from_pretrained(
+            str(tokenizer_name), revision=revision
+        )
     elif tokenizer_mode == "custom":
         from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
-        tokenizer = TokenizerRegistry.get_tokenizer(str(tokenizer_name),
-                                                    *args,
-                                                    revision=revision,
-                                                    download_dir=download_dir,
-                                                    **kwargs)
+
+        tokenizer = TokenizerRegistry.get_tokenizer(
+            str(tokenizer_name),
+            *args,
+            revision=revision,
+            download_dir=download_dir,
+            **kwargs,
+        )
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -226,13 +224,16 @@ def get_tokenizer(
             # currently being imported,
             # suggest using the --trust-remote-code flag.
             if not trust_remote_code and (
-                    "does not exist or is not currently imported." in str(e)
-                    or "requires you to execute the tokenizer file" in str(e)):
-                err_msg = ("Failed to load the tokenizer. If the tokenizer "
-                           "is a custom tokenizer not yet available in the "
-                           "HuggingFace transformers library, consider "
-                           "setting `trust_remote_code=True` in LLM or using "
-                           "the `--trust-remote-code` flag in the CLI.")
+                "does not exist or is not currently imported." in str(e)
+                or "requires you to execute the tokenizer file" in str(e)
+            ):
+                err_msg = (
+                    "Failed to load the tokenizer. If the tokenizer "
+                    "is a custom tokenizer not yet available in the "
+                    "HuggingFace transformers library, consider "
+                    "setting `trust_remote_code=True` in LLM or using "
+                    "the `--trust-remote-code` flag in the CLI."
+                )
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
@@ -240,19 +241,21 @@ def get_tokenizer(
         # The special_tokens in tokenizer should also be
         # controlled by do_lower_case in encoder_config
         encoder_config = get_sentence_transformer_tokenizer_config(
-            tokenizer_name, revision)
+            tokenizer_name, revision
+        )
         if isinstance(encoder_config, dict) and encoder_config.get(
-                "do_lower_case", False):
+            "do_lower_case", False
+        ):
             special_tokens_map = {
-                k: v.lower()
-                for k, v in tokenizer.special_tokens_map.items()
+                k: v.lower() for k, v in tokenizer.special_tokens_map.items()
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
                 "Using a slow tokenizer. This might cause a significant "
-                "slowdown. Consider using a fast tokenizer instead.")
+                "slowdown. Consider using a fast tokenizer instead."
+            )
         tokenizer = get_cached_tokenizer(tokenizer)
 
     return tokenizer

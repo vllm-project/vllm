@@ -12,7 +12,7 @@ import os
 import random
 from contextlib import contextmanager
 from dataclasses import asdict
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -28,8 +28,8 @@ from vllm.utils import FlexibleArgumentParser
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompts: list[str]
-    stop_token_ids: Optional[list[int]] = None
-    lora_requests: Optional[list[LoRARequest]] = None
+    stop_token_ids: list[int] | None = None
+    lora_requests: list[LoRARequest] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -118,6 +118,23 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Dots-OCR
+def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [f"<|img|><|imgpad|><|endofimg|>{question}" for question in questions]
+    engine_args = EngineArgs(
+        model="rednote-hilab/dots.ocr",
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
     )
 
     return ModelRequestData(
@@ -559,7 +576,7 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
 
 # Intern-S1
 def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "internlm/Intern-S1"
+    model_name = "internlm/Intern-S1-mini"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1123,14 +1140,10 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
     elif modality == "video":
         placeholder = "<video>"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    messages = [
-        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+    prompts = [
+        f"<|im_start|>user\n\n{placeholder}\n{question}<|im_end|>\n<|im_start|>assistant\n"
         for question in questions
     ]
-    prompts = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1676,6 +1689,7 @@ model_example_map = {
     "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
+    "dots_ocr": run_dots_ocr,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "ernie45_vl": run_ernie45_vl,

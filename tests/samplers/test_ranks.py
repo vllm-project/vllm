@@ -8,12 +8,6 @@ from vllm import SamplingParams
 MODELS = ["distilbert/distilgpt2"]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_ranks(
@@ -26,25 +20,27 @@ def test_ranks(
     num_top_logprobs = 5
     num_prompt_logprobs = 5
 
-    with vllm_runner(model, dtype=dtype,
-                     max_logprobs=num_top_logprobs) as vllm_model:
-
+    with vllm_runner(model, dtype=dtype, max_logprobs=num_top_logprobs) as vllm_model:
         ## Test greedy logprobs ranks
         vllm_sampling_params = SamplingParams(
             temperature=0.0,
             top_p=1.0,
             max_tokens=max_tokens,
             logprobs=num_top_logprobs,
-            prompt_logprobs=num_prompt_logprobs)
-        vllm_results = vllm_model.generate_w_logprobs(example_prompts,
-                                                      vllm_sampling_params)
+            prompt_logprobs=num_prompt_logprobs,
+        )
+        vllm_results = vllm_model.generate_w_logprobs(
+            example_prompts, vllm_sampling_params
+        )
 
         ## Test non-greedy logprobs ranks
-        sampling_params = SamplingParams(temperature=1.0,
-                                         top_p=1.0,
-                                         max_tokens=max_tokens,
-                                         logprobs=num_top_logprobs,
-                                         prompt_logprobs=num_prompt_logprobs)
+        sampling_params = SamplingParams(
+            temperature=1.0,
+            top_p=1.0,
+            max_tokens=max_tokens,
+            logprobs=num_top_logprobs,
+            prompt_logprobs=num_prompt_logprobs,
+        )
         res = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
 
     for result in vllm_results:

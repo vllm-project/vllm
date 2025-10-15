@@ -42,7 +42,7 @@ def register():
 
     ModelRegistry.register_model(
         "YourModelForCausalLM",
-        "your_code:YourModelForCausalLM"
+        "your_code:YourModelForCausalLM",
     )
 ```
 

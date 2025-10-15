@@ -69,4 +69,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+
+# install nixl from source code
+RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
+ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/python3.12/dist-packages/.nixl.mesonpy.libs/plugins/"
+
+ENTRYPOINT ["vllm", "serve"]
