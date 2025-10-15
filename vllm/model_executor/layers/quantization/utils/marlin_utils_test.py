@@ -2,32 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions used for tests and benchmarks"""
 
-from typing import Optional
-
 import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.scalar_type import ScalarType, scalar_types
 
-from .marlin_utils import (GPTQ_MARLIN_TILE, marlin_permute_scales,
-                           marlin_zero_points)
-from .quant_utils import (get_pack_factor, gptq_quantize_weights,
-                          quantize_weights, sort_weights)
+from .marlin_utils import GPTQ_MARLIN_TILE, marlin_permute_scales, marlin_zero_points
+from .quant_utils import (
+    get_pack_factor,
+    gptq_quantize_weights,
+    quantize_weights,
+    sort_weights,
+)
 
 
 class MarlinWorkspace:
-
     def __init__(self, out_features, min_thread_n, max_parallel):
-        assert (out_features % min_thread_n == 0), (
-            "out_features = {} is undivisible by min_thread_n = {}".format(
-                out_features, min_thread_n))
+        assert out_features % min_thread_n == 0, (
+            "out_features = {} is indivisible by min_thread_n = {}".format(
+                out_features, min_thread_n
+            )
+        )
 
-        max_workspace_size = ((out_features // min_thread_n) * max_parallel)
+        max_workspace_size = (out_features // min_thread_n) * max_parallel
 
-        self.scratch = torch.zeros(max_workspace_size,
-                                   dtype=torch.int,
-                                   device="cuda")
+        self.scratch = torch.zeros(max_workspace_size, dtype=torch.int, device="cuda")
 
 
 def marlin_permute_weights(q_w,
@@ -69,8 +69,7 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit=False):
 
     q_w = q_w.cpu().numpy().astype(np.uint32)
 
-    q_packed = np.zeros((q_w.shape[0], q_w.shape[1] // pack_factor),
-                        dtype=np.uint32)
+    q_packed = np.zeros((q_w.shape[0], q_w.shape[1] // pack_factor), dtype=np.uint32)
     for i in range(pack_factor):
         q_packed |= q_w[:, i::pack_factor] << num_bits * i
 
@@ -153,7 +152,8 @@ def marlin_quantize(w: torch.Tensor,
 
     # Quantize (and apply act_order if provided)
     w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(
-        w, quant_type, group_size, act_order, test_perm)
+        w, quant_type, group_size, act_order, test_perm
+    )
 
     # For act_order, sort the "weights" and "g_idx" so that group ids are
     # increasing
@@ -206,10 +206,7 @@ def awq_marlin_quantize(w: torch.Tensor,
     num_groups = size_k // group_size
 
     # Quantize with zp
-    w_ref, q_w, s, zp = quantize_weights(w,
-                                         quant_type,
-                                         group_size,
-                                         zero_points=True)
+    w_ref, q_w, s, zp = quantize_weights(w, quant_type, group_size, zero_points=True)
 
     if input_dtype == torch.float8_e4m3fn and quant_type == scalar_types.uint4:
         repeated_zp = zp.repeat_interleave(group_size, 0)
