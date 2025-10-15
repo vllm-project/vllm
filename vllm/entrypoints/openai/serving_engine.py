@@ -94,10 +94,10 @@ from vllm.utils import (
     AsyncMicrobatchTokenizer,
     collect_from_async_generator,
     is_list_of,
-    make_async,
     merge_async_iterators,
     random_uuid,
 )
+from vllm.utils.func import make_async
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
