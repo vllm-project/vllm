@@ -49,6 +49,9 @@ class AttentionBackend(ABC):
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
 
+    # Does attention's forward() include kv cache update?
+    forward_includes_kv_cache: bool = True
+
     @staticmethod
     @abstractmethod
     def get_name() -> str:

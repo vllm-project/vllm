@@ -132,6 +132,19 @@ def try_get_attention_backend(
         raise AssertionError("unreachable") from None
 
 
+def try_backend_includes_kv_cache(
+    backend: _Backend,
+) -> bool:
+    """Try to get the attention backend class, skipping test if not found."""
+    backend_class_str = backend_to_class_str(backend)
+    try:
+        backend_class = resolve_obj_by_qualname(backend_class_str)
+        return backend_class.forward_includes_kv_cache
+    except ImportError as e:
+        pytest.skip(f"{backend_class_str} not available: {e}")
+        raise AssertionError("unreachable") from None
+
+
 def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
     return FullAttentionSpec(
