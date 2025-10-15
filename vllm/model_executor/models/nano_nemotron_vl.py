@@ -987,7 +987,7 @@ class NemotronH_Nano_VL_V2(
             prefix=maybe_prefix(prefix, "language_model"),
         )
         self.vision_model = self.get_vit_model_from_radio_config(config).to(
-            self.language_model.config.torch_dtype
+            self.language_model.config.dtype
         )
 
         # Construct the vision projection.
@@ -1008,7 +1008,7 @@ class NemotronH_Nano_VL_V2(
             ReLUSquaredActivation(),
             nn.Linear(vision_projection_hidden_size, llm_hidden_size, bias=False),
         )
-        self.mlp1 = self.mlp1.to(self.language_model.config.torch_dtype)
+        self.mlp1 = self.mlp1.to(self.language_model.config.dtype)
 
         self.config = config
         self.model_config = vllm_config.model_config

@@ -444,7 +444,7 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {"encode": Pooler.for_encode(pooler_config)},
+            {"token_classify": Pooler.for_token_classify(pooler_config)}
         )
 
     def forward(
