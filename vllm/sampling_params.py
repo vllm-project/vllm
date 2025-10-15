@@ -73,7 +73,16 @@ class StructuredOutputsParams:
         """
         return all(
             getattr(self, field) is None
-            for field in ("json", "regex", "choice", "grammar", "json_object", "structural_tag"))
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+                "structural_tag",
+            )
+        )
+
 
 @dataclass
 class GuidedDecodingParams(StructuredOutputsParams):
