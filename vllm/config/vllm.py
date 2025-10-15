@@ -54,6 +54,53 @@ else:
 
 logger = init_logger(__name__)
 
+# PassConfig preset instances for each compilation mode. Default fields set.
+pass_config_none = PassConfig(
+    enable_fusion=True,
+    enable_attn_fusion=True,
+    enable_noop=True,
+    enable_sequence_parallelism=True,
+    enable_async_tp=True,
+    enable_fi_allreduce_fusion=True,
+    fi_allreduce_fusion_max_token_num=16384,
+)
+pass_config_stock_torch_compile = PassConfig(
+    enable_fusion=True,
+    enable_attn_fusion=True,
+    enable_noop=True,
+    enable_sequence_parallelism=True,
+    enable_async_tp=True,
+    enable_fi_allreduce_fusion=True,
+    fi_allreduce_fusion_max_token_num=16384,
+)
+pass_config_dynamo_trace_once = PassConfig(
+    enable_fusion=True,
+    enable_attn_fusion=True,
+    enable_noop=True,
+    enable_sequence_parallelism=True,
+    enable_async_tp=True,
+    enable_fi_allreduce_fusion=True,
+    fi_allreduce_fusion_max_token_num=16384,
+)
+
+pass_config_vllm_compile = PassConfig(
+    enable_fusion=True,
+    enable_attn_fusion=True,
+    enable_noop=True,
+    enable_sequence_parallelism=True,
+    enable_async_tp=True,
+    enable_fi_allreduce_fusion=True,
+    fi_allreduce_fusion_max_token_num=16384,
+)
+
+pass_config_enable_fields = [
+    "enable_attn_fusion",
+    "enable_noop",
+    "enable_sequence_parallelism",
+    "enable_async_tp",
+    "enable_fi_allreduce_fusion",
+]
+
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -289,23 +336,27 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
-    def _set_pass_config_defaults(self, enable_all: bool) -> None:
+    def _set_pass_config_defaults(self) -> None:
         """Set all PassConfig enable_* flags if they're at default values.
 
         Args:
-            enable_all: If True, enable all passes. If False, disable all passes.
+            compilation_mode: Flag to determine with PassConfig to use.
         """
-        from dataclasses import fields
 
-        default_config = PassConfig()
         current_config = self.compilation_config.pass_config
 
-        for field in fields(PassConfig):
-            if field.name.startswith("enable_"):
-                current_val = getattr(current_config, field.name)
-                default_val = getattr(default_config, field.name)
-                if current_val == default_val:
-                    setattr(current_config, field.name, enable_all)
+        for field in pass_config_enable_fields:
+            if getattr(current_config, field) is None:
+                if self.compilation_config.mode == CompilationMode.NONE:
+                    setattr(current_config, field, getattr(pass_config_none, field))
+                elif self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+                    setattr(current_config, field, getattr(pass_config_stock_torch_compile, field))
+                elif self.compilation_config.mode == CompilationMode.DYNAMO_TRACE_ONCE:
+                    setattr(current_config, field, getattr(pass_config_dynamo_trace_once, field))
+                elif self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+                    setattr(current_config, field, getattr(pass_config_vllm_compile, field))
+                else:
+                    raise ValueError(f"Compilation mode {self.compilation_config.mode} should have been set by this point. post issue upstream.")
 
     def _apply_optimization_level_defaults(self) -> None:
         """Apply optimization level-specific default configurations.
@@ -314,10 +365,10 @@ class VllmConfig:
         Only sets values not explicitly configured by the user.
 
         Optimization Levels:
-            - O0 (NO_COMPILATION): No optimization, fast startup, eager execution
-            - O1 (DYNAMO_AS_IS): Fast compilation (to be implemented)
-            - O2 (DYNAMO_ONCE): Full optimization (to be implemented)
-            - O3 (PIECEWISE): Maximum optimization with autotuning (to be implemented)
+            - O0 (None): No optimization, fast startup, eager execution
+            - O1 (STOCK_TORCH_COMPILE): Fast compilation (to be implemented)
+            - O2 (DYNAMO_TRACE_ONCE): Full optimization (to be implemented)
+            - O3 (VLLM_COMPILE): Maximum optimization with autotuning (to be implemented)
         """
         level = self.compilation_config.level
 
@@ -326,7 +377,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
             # Disable all compilation passes
-            self._set_pass_config_defaults(enable_all=False)
+            self._set_pass_config_defaults()
 
         # TODO: Implement -O1, -O2, -O3 optimization levels
 
