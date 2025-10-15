@@ -10,7 +10,6 @@ from this remote lookup buffer.
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 from safetensors.torch import load as safetensors_load
@@ -110,7 +109,7 @@ class MooncakeStore(KVStoreBufferBase):
     def put(
         self,
         key: str,
-        value: Optional[torch.Tensor],
+        value: torch.Tensor | None,
     ) -> None:
         # A message queue needs to be introduced before making it asynchronous.
         if value is not None:
@@ -119,7 +118,7 @@ class MooncakeStore(KVStoreBufferBase):
     def get(
         self,
         key: str,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         # A message queue needs to be introduced before making it asynchronous.
         value = self._get_impl(key)
         return value
@@ -142,7 +141,7 @@ class MooncakeStore(KVStoreBufferBase):
     def _get_impl(
         self,
         key: str,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """Get KVCache from Mooncake Store"""
         try:
             data = self.store.get(key)

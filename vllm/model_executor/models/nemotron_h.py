@@ -20,7 +20,6 @@
 
 import typing
 from collections.abc import Callable, Iterable
-from typing import Optional
 
 import torch
 from torch import nn
@@ -83,7 +82,7 @@ class NemotronHMLP(nn.Module):
         self,
         config: NemotronHConfig,
         intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         reduce_results: bool = True,
         prefix: str = "",
@@ -118,8 +117,8 @@ class NemotronHMoE(nn.Module):
     def __init__(
         self,
         config: NemotronHConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        parallel_config: Optional[ParallelConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -254,10 +253,10 @@ class NemotronHMLPDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        parallel_config: Optional[ParallelConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -286,7 +285,7 @@ class NemotronHMLPDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -304,10 +303,10 @@ class NemotronHMoEDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        parallel_config: Optional[ParallelConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -325,7 +324,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -343,10 +342,10 @@ class NemotronHMambaDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        parallel_config: Optional[ParallelConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -374,7 +373,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -393,9 +392,9 @@ class NemotronHAttention(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -465,10 +464,10 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        parallel_config: Optional[ParallelConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -488,7 +487,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -569,8 +568,8 @@ class NemotronHModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -857,8 +856,8 @@ class NemotronHForCausalLM(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states = self.model(
@@ -870,7 +869,7 @@ class NemotronHForCausalLM(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

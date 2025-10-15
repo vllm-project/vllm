@@ -5,9 +5,9 @@ import json
 import time
 from collections import Counter
 from contextlib import suppress
-from typing import Any, Optional
+from typing import Any
 
-from vllm.envs import VLLM_GC_DEBUG
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -21,7 +21,7 @@ class GCDebugConfig:
     - '{"top_objects":5}': enable GC debugger with top 5 collected objects
     """
 
-    def __init__(self, gc_debug_conf: Optional[str] = None) -> None:
+    def __init__(self, gc_debug_conf: str | None = None) -> None:
         self.enabled: bool = False
         self.top_objects: int = -1
 
@@ -36,7 +36,7 @@ class GCDebugConfig:
                 self.top_objects = json_conf.get("top_objects", -1)
             except Exception:
                 self.enabled = False
-                logger.error("Failed to parse VLLM_GC_DEBUG(%s)", VLLM_GC_DEBUG)
+                logger.error("Failed to parse VLLM_GC_DEBUG(%s)", envs.VLLM_GC_DEBUG)
         logger.info("GC Debug Config. %s", str(self))
 
     def __repr__(self) -> str:
@@ -93,7 +93,7 @@ def maybe_attach_gc_debug_callback() -> None:
     """
     Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
     """
-    config = GCDebugConfig(VLLM_GC_DEBUG)
+    config = GCDebugConfig(envs.VLLM_GC_DEBUG)
     if config.enabled:
         debugger: GCDebugger = GCDebugger(config)
 

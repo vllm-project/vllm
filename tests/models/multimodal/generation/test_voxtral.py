@@ -6,12 +6,8 @@ import json
 import pytest
 import pytest_asyncio
 from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.messages import (
-    AudioChunk,
-    RawAudio,
-    TextChunk,
-    UserMessage,
-)
+from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 

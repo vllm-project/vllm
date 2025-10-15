@@ -19,7 +19,7 @@
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Literal
 
 import regex as re
 import torch
@@ -43,7 +43,7 @@ from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -103,9 +103,9 @@ def vllm_flash_attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor,
     # Transformers kwargs
-    scaling: Optional[float] = None,
+    scaling: float | None = None,
     # vLLM kwargs
-    attention_instances: Optional[dict[Attention]] = None,
+    attention_instances: dict[Attention] | None = None,
     **kwargs,
 ):
     self_attn = attention_instances[module.layer_idx]
@@ -147,10 +147,10 @@ Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
 def replace_linear_class(
     linear: nn.Linear,
     style: Style = "replicate",
-    quant_config: Optional[QuantizationConfig] = None,
+    quant_config: QuantizationConfig | None = None,
     *,
     prefix: str = "",
-) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
+) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
@@ -194,15 +194,29 @@ def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
     - `var_hidden_size` is only ever used for Intern vision encoder in vLLM
     and Transformers doesn't appear to have the same concept.
     """
-    kwargs = {
-        "hidden_size": hidden_size,
-        "eps": getattr_iter(rms_norm, ("eps", "variance_epsilon"), 1e-6),
-        "has_weight": getattr(rms_norm, "with_scale", True),
-    }
-    if (weight := getattr(rms_norm, "weight", None)) is not None:
-        # If weight is a Parameter, get its data tensor
-        weight = getattr(weight, "data", weight)
-        kwargs["dtype"] = weight.dtype
+    eps = getattr_iter(rms_norm, ("eps", "variance_epsilon"), 1e-6)
+    kwargs = {"hidden_size": hidden_size, "eps": eps}
+    # Update hidden size if weight is available
+    weight_meta = getattr(rms_norm, "weight", None)
+    if weight_meta is not None:
+        kwargs["hidden_size"] = weight_meta.size(0)
+    # Check if weight is all zeros, which indicates GemmaRMSNorm
+    # We must create a new instance because rms_norm is on meta
+    try:
+        with torch.device("cpu"):
+            weight_test = getattr(rms_norm.__class__(1), "weight", None)
+    except Exception:
+        logger.warning(
+            "Failed to determine if RMSNorm weight is centered on zero or one. "
+            "Defaulting to one."
+        )
+        weight_test = None
+    if weight_test is not None and torch.all(weight_test == 0):
+        return GemmaRMSNorm(**kwargs)
+    # Otherwise assume it's a regular RMSNorm
+    kwargs["has_weight"] = getattr(rms_norm, "with_scale", True)
+    if weight_meta is not None:
+        kwargs["dtype"] = weight_meta.dtype
     else:
         # No weight, fall back to weightless RMSNorm
         kwargs["has_weight"] = False
@@ -298,7 +312,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -374,11 +388,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def apply(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        tokenization_kwargs: Mapping[str, object] | None = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -484,7 +498,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.device_config: DeviceConfig = vllm_config.device_config
         self.model_config: ModelConfig = vllm_config.model_config
         self.parallel_config: ParallelConfig = vllm_config.parallel_config
-        self.quant_config: Optional[QuantizationConfig] = vllm_config.quant_config
+        self.quant_config: QuantizationConfig | None = vllm_config.quant_config
 
         self.pp_group = get_pp_group()
         self.tp_group = get_tp_group()
@@ -516,7 +530,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
-                torch_dtype=self.model_config.dtype,
+                dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
@@ -645,11 +659,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                     new_module = replace_linear_class(
                         child_module, style, self.quant_config, prefix=qual_name
                     )
-                # TODO(hmellor): Enable RMSNorm replacement once we have a way
-                # to choose RMSNorm vs GemmaRMSNorm
-                # elif child_module.__class__.__name__.endswith("RMSNorm"):
-                #     new_module = replace_rms_norm_class(
-                #         child_module, self.config.hidden_size)
+                elif child_module.__class__.__name__.endswith("RMSNorm"):
+                    new_module = replace_rms_norm_class(
+                        child_module, self.text_config.hidden_size
+                    )
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
 
@@ -701,7 +714,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             )
         return attention_instances
 
-    def init_parameters(self, module: nn.Module, dtype: Optional[torch.dtype] = None):
+    def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
         """
         If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
@@ -712,7 +725,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         ```
         """
 
-        def _init_parameters(module: nn.Module, dtype: Optional[torch.dtype]):
+        def _init_parameters(module: nn.Module, dtype: torch.dtype | None):
             for name, param in module.named_parameters(recurse=False):
                 if param.device == torch.device("meta"):
                     new_param = nn.Parameter(
@@ -730,12 +743,12 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if not self.pp_group.is_first_rank:
             assert intermediate_tensors is not None
             input_ids = None
@@ -828,7 +841,7 @@ class TransformersForCausalLM(TransformersBase):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -882,12 +895,12 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
         # Other models will not have `token_type_ids` in kwargs
         kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
@@ -911,8 +924,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         return LanguageModelWrapper(self)
 
     def get_multimodal_embeddings(self, **kwargs):
-        pixel_values: Optional[torch.Tensor] = kwargs.pop("pixel_values", None)
-        image_embeds: Optional[torch.Tensor] = kwargs.pop("image_embeds", None)
+        pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
+        image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         # Model might use `image_patches` instead of `pixel_values`
         if pixel_values is None:
             pixel_values = kwargs.pop("image_patches", None)

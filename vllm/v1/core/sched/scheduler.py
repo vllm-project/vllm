@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -36,6 +34,10 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+
 logger = init_logger(__name__)
 
 
@@ -45,6 +47,7 @@ class Scheduler(SchedulerInterface):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        block_size: int,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -101,15 +104,8 @@ class Scheduler(SchedulerInterface):
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
-        self.block_size = self.cache_config.block_size
-
+        self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        # Note(hc): The scheduler’s block_size must be multiplied
-        # by dcp_world_size, since block hashes are computed on the
-        # original full token sequence at a granularity of
-        # original_block_size × dcp_world_size.
-        if self.dcp_world_size > 1:
-            self.block_size *= self.dcp_world_size
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -279,6 +275,9 @@ class Scheduler(SchedulerInterface):
                     self.running.remove(preempted_req)
                     if preempted_req in scheduled_running_reqs:
                         scheduled_running_reqs.remove(preempted_req)
+                        token_budget += num_scheduled_tokens[preempted_req.request_id]
+                        req_to_new_blocks.pop(preempted_req.request_id)
+                        num_scheduled_tokens.pop(preempted_req.request_id)
                 else:
                     preempted_req = self.running.pop()
 
@@ -426,9 +425,7 @@ class Scheduler(SchedulerInterface):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
-                    new_computed_blocks = (
-                        self.kv_cache_manager.create_empty_block_list()
-                    )
+                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
@@ -615,11 +612,8 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
-        scheduled_requests = (
-            scheduled_new_reqs + scheduled_running_reqs + scheduled_resumed_reqs
-        )
         structured_output_request_ids, grammar_bitmask = self.get_grammar_bitmask(
-            scheduled_requests, scheduled_spec_decode_tokens
+            num_scheduled_tokens.keys(), scheduled_spec_decode_tokens
         )
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -709,10 +703,15 @@ class Scheduler(SchedulerInterface):
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
+        resumed_req_token_ids: list[list[int] | None] = []
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
 
-        for req in itertools.chain(running_reqs, resumed_reqs):
+        # Because resumed_reqs is usually empty, it is more efficient to do
+        # in-place appending so that we don't need to allocate a new list.
+        resumed_from_preemption = [False] * len(running_reqs)
+        resumed_from_preemption += [True] * len(resumed_reqs)
+        for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
             num_tokens = num_scheduled_tokens[req_id] - len(
@@ -728,20 +727,25 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
+            resumed_token_ids = None
+            if resumed_from_preemption[idx]:
+                resumed_token_ids = req.all_token_ids[
+                    : req.num_computed_tokens + num_tokens
+                ]
+            resumed_req_token_ids.append(resumed_token_ids)
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
-            num_output_tokens.append(req.num_output_tokens)
-        # Because resumed_reqs is usually empty, it is more efficient to do
-        # in-place appending so that we don't need to allocate a new list.
-        resumed_from_preemption = [False] * len(running_reqs)
-        resumed_from_preemption += [True] * len(resumed_reqs)
+            num_output_tokens.append(
+                req.num_output_tokens + req.num_output_placeholders
+            )
 
         return CachedRequestData(
             req_ids=req_ids,
             resumed_from_preemption=resumed_from_preemption,
             new_token_ids=new_token_ids,
+            resumed_req_token_ids=resumed_req_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
@@ -873,32 +877,28 @@ class Scheduler(SchedulerInterface):
 
     def get_grammar_bitmask(
         self,
-        requests: list[Request],
+        scheduled_request_ids: Iterable[str],
         scheduled_spec_decode_tokens: dict[str, list[int]],
-    ):
-        # NOTE: structured_output_request_ids maps
-        # a request's (request that uses structured output)
-        # request_id to its index in the batch.
-        # This will help us determine to slice the grammar bitmask
-        # and only applies valid mask for requests that
-        # uses structured decoding.
-        structured_output_request_ids: dict[str, int] = {}
-        for i, req in enumerate(requests):
-            if req.use_structured_output:
-                # PERF: in case of chunked prefill,
-                # request might not include any new tokens.
-                # Therefore, we might introduce some additional
-                # cycle to fill in the bitmask, which could be a big no-op.
-                structured_output_request_ids[req.request_id] = i
-
+    ) -> tuple[list[str], "npt.NDArray[np.int32] | None"]:
+        # Collect list of scheduled request ids that use structured output.
+        # The corresponding rows of the bitmask will be in this order.
+        # PERF: in case of chunked prefill,
+        # request might not include any new tokens.
+        # Therefore, we might introduce some additional
+        # cycle to fill in the bitmask, which could be a big no-op.
+        structured_output_request_ids = [
+            req_id
+            for req_id in scheduled_request_ids
+            if (req := self.requests.get(req_id)) and req.use_structured_output
+        ]
         if not structured_output_request_ids:
-            bitmask = None
-        else:
-            bitmask = self.structured_output_manager.grammar_bitmask(
-                self.requests,
-                structured_output_request_ids,
-                scheduled_spec_decode_tokens,
-            )
+            return structured_output_request_ids, None
+
+        bitmask = self.structured_output_manager.grammar_bitmask(
+            self.requests,
+            structured_output_request_ids,
+            scheduled_spec_decode_tokens,
+        )
         return structured_output_request_ids, bitmask
 
     def update_from_output(
@@ -919,6 +919,10 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
+        if kv_connector_stats and self.connector:
+            stats = self.connector.get_kv_connector_stats()
+            if stats:
+                kv_connector_stats = kv_connector_stats.aggregate(stats)
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1006,12 +1010,10 @@ class Scheduler(SchedulerInterface):
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
-                # NOTE: structured_output_request
-                # should not be None if use_structured_output, we have
-                # checked above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids
-                )
+                struct_output_request = request.structured_output_request
+                assert struct_output_request is not None
+                assert struct_output_request.grammar is not None
+                struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1164,7 +1166,7 @@ class Scheduler(SchedulerInterface):
 
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: RequestStatus,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
@@ -1185,7 +1187,7 @@ class Scheduler(SchedulerInterface):
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
             request = self.requests.get(req_id)
-            if request is None:
+            if request is None or request.is_finished():
                 # Invalid request ID.
                 continue
 
@@ -1363,14 +1365,8 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            if req_id not in self.requests:
-                logger.warning(
-                    "Got finished sending KV transfer for request %s,"
-                    "but the request is already freed.",
-                    req_id,
-                )
-            else:
-                self._free_blocks(self.requests[req_id])
+            assert req_id in self.requests
+            self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
         self, requests: Iterable[Request], invalid_block_ids: set[int]
@@ -1466,7 +1462,7 @@ class Scheduler(SchedulerInterface):
 
                 affected_req_ids.add(request.request_id)
 
-        return (affected_req_ids, total_affected_tokens)
+        return affected_req_ids, total_affected_tokens
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
         total_requests_to_reschedule = 0
@@ -1488,7 +1484,7 @@ class Scheduler(SchedulerInterface):
         total_tokens_to_reschedule += num_tokens_to_reschedule
 
         # Mark requests with async KV load failures; they will be rescheduled
-        # once loading completes
+        # once loading completes.
         self.failed_recving_kv_req_ids |= async_affected_req_ids
 
         # --- Handle sync KV loads (running requests) ---
