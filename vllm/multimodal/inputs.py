@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from itertools import accumulate
 from typing import (
@@ -167,11 +167,42 @@ class PlaceholderRange:
     between `offset` and `offset + length` to assign embeddings to.
     """
 
-    def get_num_embeds(self) -> int:
-        if self.is_embed is None:
-            return self.length
+    num_embeds: int = field(init=False)
+    """
+    The number of positions that actually result in an output from the encoder.
+    """
 
-        return int(self.is_embed.sum().item())
+    def __post_init__(self):
+        if self.is_embed is None:
+            object.__setattr__(self, "num_embeds", self.length)
+        else:
+            num_embeds = int(self.is_embed.sum().item())
+            object.__setattr__(self, "num_embeds", num_embeds)
+
+            # Remove leading & tailing False in `is_embed` for easier scheduling
+            if num_embeds > 0:
+                true_indices = torch.nonzero(self.is_embed, as_tuple=True)[0]
+                first_true_index = true_indices[0].item()
+                last_true_index = true_indices[-1].item()
+
+                start_trim_count = first_true_index
+                new_length = last_true_index - first_true_index + 1
+
+                object.__setattr__(self, "offset", self.offset + start_trim_count)
+                object.__setattr__(self, "length", new_length)
+
+                object.__setattr__(
+                    self,
+                    "is_embed",
+                    self.is_embed[first_true_index : last_true_index + 1],
+                )
+            else:
+                # Seems impossible?
+                object.__setattr__(self, "length", 0)
+                object.__setattr__(self, "is_embed", self.is_embed[0:0])
+
+    def get_num_embeds(self) -> int:
+        return self.num_embeds
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):

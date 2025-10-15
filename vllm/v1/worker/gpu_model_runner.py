@@ -148,9 +148,7 @@ from .utils import (
     MultiModalBudget,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
-    gather_mm_placeholders,
     sanity_check_mm_encoder_outputs,
-    scatter_mm_placeholders,
 )
 
 if TYPE_CHECKING:
@@ -1774,10 +1772,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
-            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed,
-            )
+            self.encoder_cache[mm_hash] = output
 
     def _gather_mm_embeddings(
         self,
@@ -1828,19 +1823,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
-                if (is_embed := pos_info.is_embed) is not None:
+                is_embed = pos_info.is_embed
+
+                # retrieve `encoder_output` slice based on `is_embed` mask
+                encoder_output_slice_start = start_idx
+                encoder_output_slice_end = end_idx
+                if is_embed is not None:
+                    num_encoder_output_before_start = is_embed[:start_idx].sum().item()
+                    num_encoder_output_selected = (
+                        is_embed[start_idx:end_idx].sum().item()
+                    )
+
+                    encoder_output_slice_start = num_encoder_output_before_start
+                    encoder_output_slice_end = (
+                        num_encoder_output_before_start + num_encoder_output_selected
+                    )
+
+                mm_embeds_item = encoder_output[
+                    encoder_output_slice_start:encoder_output_slice_end
+                ]
+                mm_embeds_req.append(mm_embeds_item)
+
+                # append `is_mm_embed` mask
+                if is_embed is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
                     True if is_embed is None else is_embed
                 )
-
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
-                    is_embed=is_embed,
-                )
-                mm_embeds_req.append(mm_embeds_item)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
