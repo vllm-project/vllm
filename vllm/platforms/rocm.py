@@ -19,6 +19,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.cache import CacheDType
 else:
     _Backend = None
 
@@ -505,7 +506,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+        cls, kv_cache_dtype: "CacheDType", model_config: "ModelConfig"
     ) -> bool:
         return True
 
