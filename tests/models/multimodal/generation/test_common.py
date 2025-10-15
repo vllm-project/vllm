@@ -236,8 +236,7 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        # FIXME: Investigate M-RoPE issue
-        marks=[large_gpu_mark(min_gb=32), pytest.mark.skip(reason="M-RoPE issue")],
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(

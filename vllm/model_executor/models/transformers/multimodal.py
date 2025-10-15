@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config.utils import getattr_iter
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
@@ -38,7 +38,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from transformers import BatchFeature
+    from transformers import BatchFeature, PretrainedConfig
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
@@ -261,7 +261,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         )
 
 
-class MultiModalMixin(SupportsMultiModal):
+class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     supports_multimodal_raw_input_only = True
     merge_by_field_config = True
     # Backwards compatibility for prev released models. State dicts back then
@@ -289,8 +289,8 @@ class MultiModalMixin(SupportsMultiModal):
     )
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        # Skip SupportsMultiModal.__init__ and call the next class in MRO
-        super(SupportsMultiModal, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        # Skip SupportsMRoPE.__init__ and call the next class in MRO
+        super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
     def forward(
         self,
@@ -363,3 +363,34 @@ class MultiModalMixin(SupportsMultiModal):
                 ]
 
             return vision_embeddings
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        hf_config: "PretrainedConfig",
+        image_grid_thw: list[list[int]] | torch.Tensor | None,
+        video_grid_thw: list[list[int]] | torch.Tensor | None,
+        second_per_grid_ts: list[float] | None = None,
+        context_len: int = 0,
+        seq_len: int | None = None,
+        audio_feature_lengths: torch.Tensor | None = None,
+        use_audio_in_video: bool = False,
+    ) -> tuple[torch.Tensor, int]:
+        if any((second_per_grid_ts, audio_feature_lengths, use_audio_in_video)):
+            raise NotImplementedError("Transformers backend only supports images.")
+
+        if isinstance(image_grid_thw, list):
+            image_grid_thw = torch.tensor(image_grid_thw)
+        if isinstance(video_grid_thw, list):
+            video_grid_thw = torch.tensor(video_grid_thw)
+
+        mrope_positions, mrope_position_delta = self.model.get_rope_index(
+            input_ids=torch.tensor(input_tokens).unsqueeze(0),
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+        )
+
+        mrope_positions = mrope_positions[:, 0, context_len:seq_len]
+        mrope_position_delta = mrope_position_delta[0].item()
+
+        return mrope_positions, mrope_position_delta
