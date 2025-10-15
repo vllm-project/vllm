@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     maybe_warn_marlin_atomic_add,
 )
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils import direct_register_custom_op
 
 
 def fused_marlin_moe(
@@ -239,44 +238,6 @@ def fused_marlin_moe(
             output = torch.empty_like(hidden_states)
 
     return torch.sum(intermediate_cache3.view(-1, topk, K), dim=1, out=output)
-
-
-def fused_marlin_moe_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    gating_output: torch.Tensor | None,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_type_id: int,
-    apply_router_weight_on_input: bool = False,
-    global_num_experts: int = -1,
-    global_scale1: torch.Tensor | None = None,
-    global_scale2: torch.Tensor | None = None,
-    expert_map: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
-    w1_zeros: torch.Tensor | None = None,
-    w2_zeros: torch.Tensor | None = None,
-    workspace: torch.Tensor | None = None,
-    intermediate_cache13: torch.Tensor | None = None,
-    intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
-    output: torch.Tensor | None = None,
-    inplace: bool = False,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-direct_register_custom_op(
-    op_name="fused_marlin_moe",
-    op_func=fused_marlin_moe,
-    fake_impl=fused_marlin_moe_fake,
-)
 
 
 class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):

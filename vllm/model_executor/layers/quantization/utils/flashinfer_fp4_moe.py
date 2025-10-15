@@ -32,7 +32,7 @@ def is_flashinfer_fp4_cutlass_moe_available() -> bool:
         envs.VLLM_USE_FLASHINFER_MOE_FP4
         and has_flashinfer_cutlass_fused_moe()
         and current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and current_platform.has_device_capability(100)
     )
 
 
@@ -58,7 +58,7 @@ def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1
-    enable_alltoallv = envs.VLLM_ALL2ALL_BACKEND == "flashinfer_all2allv"
+    enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
     return create_flashinfer_prepare_finalize(
         use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
     )
