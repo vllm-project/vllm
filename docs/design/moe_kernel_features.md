@@ -41,7 +41,7 @@ th {
 | flashinfer<sup>4</sup>                | standard           | nvfp4,fp8       | G,A,T                  | N     | N                     | [`FlashInferCutlassMoEPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize.FlashInferCutlassMoEPrepareAndFinalize]   |
 | MoEPrepareAndFinalizeNoEP<sup>5</sup> | standard           | fp8,int8        | G,A,T                  | N     | Y                     | [`MoEPrepareAndFinalizeNoEP`][vllm.model_executor.layers.fused_moe.prepare_finalize.MoEPrepareAndFinalizeNoEP]                                                |
 | BatchedPrepareAndFinalize<sup>5</sup> | batched            | fp8,int8        | G,A,T                  | N     | Y                     | [`BatchedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.fused_batched_moe.BatchedPrepareAndFinalize]                                               |
-| MoriPrepareAndFinalize<sup>7</sup>    | standard           | fp8<sup>8</sup> | G(128),A,T<sup>8</sup> |N     | Y                     | [`MoriPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.mori_prepare_finalize.MoriPrepareAndFinalize]                                              |
+| MoriPrepareAndFinalize<sup>7</sup>    | standard           | fp8<sup>8</sup> | G(128),A,T<sup>8</sup> | N     | Y                     | [`MoriPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.mori_prepare_finalize.MoriPrepareAndFinalize]                                                 |
 
 !!! info "Table key"
     1. All types: mxfp4, nvfp4, int4, int8, fp8
