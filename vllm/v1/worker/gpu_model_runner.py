@@ -375,9 +375,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
-        self.async_output_copy_stream = (
-            torch.cuda.Stream() if self.use_async_scheduling else None
-        )
+        # Separate cuda stream for overlapping transfer of sampled token ids from
+        # GPU to CPU when async scheduling is enabled.
+        self.async_output_copy_stream: torch.cuda.Stream | None = None
+        # cuda event to synchronize use of reused CPU tensors between steps
+        # when async scheduling is enabled.
+        self.prepare_inputs_event: torch.cuda.Event | None = None
+        if self.use_async_scheduling:
+            self.async_output_copy_stream = torch.cuda.Stream()
+            self.prepare_inputs_event = torch.cuda.Event()
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -443,14 +449,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mrope_positions = self._make_buffer(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
             )
-
-        # CUDA event to synchronize use of reused CPU tensors between steps
-        # when async scheduling is enabled.
-        self.prepare_inputs_event: torch.cuda.Event | None = None
-        if self.use_async_scheduling:
-            self.prepare_inputs_event = torch.cuda.Event()
-            # Start in a completed state.
-            self.prepare_inputs_event.record(torch.cuda.default_stream())
 
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
@@ -1523,6 +1521,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             use_sliding_window=use_sliding_window,
             use_local_attention=use_local_attention,
             num_sms=self.num_sms,
+            dcp_world_size=self.dcp_world_size,
         )
         return common_prefix_len if use_cascade else 0
 
@@ -2066,7 +2065,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         if (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
             and hasattr(self, "cudagraph_batch_sizes")
             and self.cudagraph_batch_sizes
             and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]
@@ -2876,7 +2874,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
-            logger.info("Loading model from scratch...")
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.model_config
             )
