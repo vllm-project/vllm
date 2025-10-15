@@ -157,7 +157,7 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
         with torch.device("meta"):
             seq_cls_model = AutoModelForSequenceClassification.from_config(
                 self.config,
-                torch_dtype=self.model_config.dtype,
+                dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
