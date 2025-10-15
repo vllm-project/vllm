@@ -87,6 +87,14 @@ def support_torch_compile(
 
 
 @overload
+def support_torch_compile(
+    *,
+    dynamic_arg_dims: dict[str, int | list[int]] | None,
+    mark_unbacked_dims: dict[str, int | list[int]] | None,
+) -> Callable[[_T], _T]: ...
+
+
+@overload
 def support_torch_compile(cls: _T) -> _T: ...
 
 
