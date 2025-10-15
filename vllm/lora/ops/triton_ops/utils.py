@@ -180,7 +180,7 @@ def load_v1_op_config(op_type: str,
 
 
 @functools.lru_cache
-def get_v1_op_configs(
+def get_lora_op_configs(
         op_type: str,
         max_loras: int,
         batch: int,
