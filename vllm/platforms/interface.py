@@ -551,7 +551,7 @@ class Platform:
         """
         Init platform-specific torch distributed process group.
         """
-        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+        raise NotImplementedError
 
     @classmethod
     def is_kv_cache_dtype_supported(

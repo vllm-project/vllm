@@ -415,7 +415,6 @@ class StatelessProcessGroup:
 
 
 def init_gloo_process_group(
-    backend: Backend,
     prefix_store: PrefixStore,
     group_rank: int,
     group_size: int,
@@ -432,7 +431,7 @@ def init_gloo_process_group(
             group_size,
         )
     else:
-        options = ProcessGroup.Options(backend=backend)
+        options = ProcessGroup.Options(backend="gloo")
         pg = ProcessGroup(
             prefix_store,
             group_rank,
@@ -504,24 +503,25 @@ def stateless_init_torch_distributed_process_group(
     # Use a PrefixStore to avoid accidental overrides of keys used by
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
+    try:
+        from vllm.platforms import current_platform
 
-    if backend == "gloo":
-        return init_gloo_process_group(
+        return current_platform.stateless_init_device_torch_dist_pg(
             backend=backend,
             prefix_store=prefix_store,
             group_rank=group_rank,
             group_size=group_size,
             timeout=timeout,
         )
-    from vllm.platforms import current_platform
-
-    return current_platform.stateless_init_device_torch_dist_pg(
-        backend=backend,
-        prefix_store=prefix_store,
-        group_rank=group_rank,
-        group_size=group_size,
-        timeout=timeout,
-    )
+    except NotImplementedError:
+        # If platform doesn't implement stateless_init_device_torch_dist_pg, it
+        # will raise a NotImplementedError. In this case, we fall back to gloo.
+        return init_gloo_process_group(
+            prefix_store=prefix_store,
+            group_rank=group_rank,
+            group_size=group_size,
+            timeout=timeout,
+        )
 
 
 def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
