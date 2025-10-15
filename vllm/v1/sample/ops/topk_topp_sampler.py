@@ -16,7 +16,9 @@ logger = init_logger(__name__)
 try:
     import flashinfer.sampling
 
-    if hasattr(flashinfer.sampling, "get_sampling_module"):
+    if envs.VLLM_USE_FLASHINFER_SAMPLER and hasattr(
+        flashinfer.sampling, "get_sampling_module"
+    ):
         flashinfer.sampling.get_sampling_module()
     is_flashinfer_available = True
 except (ImportError, RuntimeError) as e:
