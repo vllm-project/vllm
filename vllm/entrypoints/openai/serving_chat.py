@@ -255,8 +255,8 @@ class OpenAIServingChat(OpenAIServing):
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
-
-        request_id = self._add_prefix(request.request_id or random_uuid())
+        
+        request_id = self._add_prefix(getattr(request, "request_id", None))
 
         if request.kv_transfer_params:
             request_id = self._add_prefix(request.kv_transfer_params.get("p_side_request_id", request_id))
