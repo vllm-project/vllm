@@ -215,6 +215,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_LAZY_INIT_TOOL_SESSIONS: bool = True
 
 
 def get_default_cache_root():
@@ -1403,6 +1404,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # If set to 1, delay the initialization of MCP sessions until they are
+    # actually needed. This can help reduce the startup time of vLLM in
+    # environments where MCP sessions are not immediately needed. By default,
+    # this is enabled (1).
+    "VLLM_LAZY_INIT_TOOL_SESSIONS": lambda: bool(
+        int(os.getenv("VLLM_LAZY_INIT_TOOL_SESSIONS", "1"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

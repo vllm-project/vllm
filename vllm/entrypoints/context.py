@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Union
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
+from vllm import envs
 from vllm.entrypoints.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -150,21 +151,28 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
-        tool_server: Optional[ToolServer],
+        tool_server: ToolServer | None,
         request_id: str,
-        mcp_tools: dict[str, Mcp],
+        tools: list[Tool],
     ):
         self._messages = messages
         self.finish_reason: str | None = None
         self.available_tools = available_tools
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
+        self.request_tools = [
+            (tool.server_label if tool.type == "mcp" else tool.type) for tool in tools
+        ]
         self.called_tools: set[str] = set()
         self._tool_server = tool_server
         self.request_id = request_id
-        self.mcp_tools = mcp_tools
-        self._async_exit_stack: Optional[AsyncExitStack] = None
+        self.mcp_tools: dict[str, Mcp] = {
+            tool.server_label: tool for tool in tools if tool.type == "mcp"
+        }
+        self._async_exit_stack: AsyncExitStack | None = None
         self._reference_count = 0
         self._reference_count_lock = asyncio.Lock()
+
+        self.lazy_init_tool_sessions = envs.VLLM_LAZY_INIT_TOOL_SESSIONS
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
@@ -454,6 +462,12 @@ class HarmonyContext(ConversationContext):
             )
         )
 
+    async def _maybe_init_tool_sessions(self):
+        if not self.lazy_init_tool_sessions:
+            for tool_name in self.available_tools:
+                if _TOOL_NAME_TO_TYPE_MAP[tool_name] in self.request_tools:
+                    await self._get_tool_session(tool_name)
+
     async def __aenter__(self):
         async with self._reference_count_lock:
             self._reference_count += 1
@@ -465,6 +479,7 @@ class HarmonyContext(ConversationContext):
                 self._async_exit_stack = AsyncExitStack()
                 await self._async_exit_stack.__aenter__()
                 self._async_exit_stack.push_async_callback(self.cleanup_session)
+                await self._maybe_init_tool_sessions()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):

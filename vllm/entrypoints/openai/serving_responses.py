@@ -7,7 +7,6 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
-from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
 from typing import Final
@@ -349,11 +348,6 @@ class OpenAIServingResponses(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
-                mcp_tools = {
-                    tool.server_label: tool
-                    for tool in request.tools
-                    if tool.type == "mcp"
-                }
                 context: ConversationContext
                 if self.use_harmony:
                     if request.stream:
@@ -362,7 +356,7 @@ class OpenAIServingResponses(OpenAIServing):
                             available_tools,
                             self.tool_server,
                             request.request_id,
-                            mcp_tools,
+                            request.tools,
                         )
                     else:
                         context = HarmonyContext(
@@ -370,7 +364,7 @@ class OpenAIServingResponses(OpenAIServing):
                             available_tools,
                             self.tool_server,
                             request.request_id,
-                            mcp_tools,
+                            request.tools,
                         )
                 else:
                     context = SimpleContext()
