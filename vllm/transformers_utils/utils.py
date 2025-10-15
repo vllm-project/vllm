@@ -8,7 +8,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Any
 
-from vllm.envs import VLLM_MODEL_REDIRECT_PATH
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -86,7 +86,7 @@ def maybe_model_redirect(model: str) -> str:
     :return: maybe redirect to a local folder
     """
 
-    model_redirect_path = VLLM_MODEL_REDIRECT_PATH
+    model_redirect_path = envs.VLLM_MODEL_REDIRECT_PATH
 
     if not model_redirect_path:
         return model
