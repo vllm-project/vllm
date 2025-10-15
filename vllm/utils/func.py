@@ -6,12 +6,10 @@ Contains helpers that are applied to functions.
 This is similar in concept to the `functools` module.
 """
 
-import asyncio
-import concurrent.futures
 import inspect
 import threading
 import warnings
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from functools import lru_cache, partial, wraps
 from typing import Any, TypeVar
 
@@ -30,26 +28,6 @@ F = TypeVar("F", bound=Callable[..., Any])
 def identity(value: T, **kwargs) -> T:
     """Returns the first provided value."""
     return value
-
-
-def make_async(
-    func: Callable[P, T],
-    executor: concurrent.futures.Executor | None = None,
-) -> Callable[P, Awaitable[T]]:
-    """
-    Take a blocking function, and run it on in an executor thread.
-
-    This function prevents the blocking function from blocking the
-    asyncio event loop.
-    The code in this function needs to be thread safe.
-    """
-
-    def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future[T]:
-        loop = asyncio.get_event_loop()
-        p_func = partial(func, *args, **kwargs)
-        return loop.run_in_executor(executor=executor, func=p_func)
-
-    return _async_wrapper
 
 
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
