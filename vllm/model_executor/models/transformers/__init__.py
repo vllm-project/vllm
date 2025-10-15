@@ -24,6 +24,7 @@ from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.multimodal import (
+    DYNAMIC_ARG_DIMS,
     MultiModalDummyInputsBuilder,
     MultiModalMixin,
     MultiModalProcessingInfo,
@@ -63,15 +64,6 @@ class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
 
 
 # Multimodal models
-DYNAMIC_ARG_DIMS = {
-    "input_ids": 0,
-    # set `positions` to last dim to support Qwen-mrope
-    "positions": -1,
-    "intermediate_tensors": 0,
-    "inputs_embeds": 0,
-}
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
