@@ -3263,6 +3263,33 @@ def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
     return torch_version >= version.parse(target)
 
 
+def _is_torch_equal(target: str) -> bool:
+    assert target.count(".") == 2
+    torch_version = str(torch.__version__)
+    torch_version = version.parse(torch_version)
+    # torch version is like "2.6.0.dev20240101" or "2.6.0.dev20240101+cpu"
+    # or "2.6.0+cu128" but never "2.6.0.1"
+    return (
+        torch_version >= version.parse(target)
+        and version.parse(target + ".1") > torch_version
+    )
+
+
+def is_torch_equal(target: str) -> bool:
+    """Check if the installed torch version is == the target version.
+
+    Args:
+        target: a version string, like "2.6.0".
+
+    Returns:
+        Whether the condition meets.
+    """
+    try:
+        return _is_torch_equal(target)
+    except Exception:
+        return Version(importlib.metadata.version("torch")) == Version(target)
+
+
 @cache
 def _has_module(module_name: str) -> bool:
     """Return True if *module_name* can be found in the current environment.
