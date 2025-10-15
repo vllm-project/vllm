@@ -102,7 +102,7 @@ def _synchronize_dp_ranks(
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
     should_attempt_dp_padding: bool,
-    disable_padding_extend: bool,
+    try_disable_padding_extend: bool,
     num_tokens_padded_extended: int,
     parallel_config: ParallelConfig,
 ) -> tuple[bool, torch.Tensor | None]:
@@ -131,7 +131,7 @@ def _synchronize_dp_ranks(
         should_dp_pad=should_attempt_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
-        disable_padding_extend=disable_padding_extend,
+        disable_padding_extend=try_disable_padding_extend,
         num_tokens_padded_extended=num_tokens_padded_extended,
         parallel_config=parallel_config,
     )
@@ -170,7 +170,7 @@ def coordinate_batch_across_dp(
     parallel_config: ParallelConfig,
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
-    disable_padding_extend: bool = True,
+    try_disable_padding_extend: bool = True,
     num_tokens_padded_extended: int | None = None,
     num_scheduled_tokens_per_request: np.ndarray | None = None,
 ) -> tuple[UBatchSlices | None, torch.Tensor | None]:
@@ -187,8 +187,8 @@ def coordinate_batch_across_dp(
             TP, etc)
         uniform_decode: Used when allow_microbatching is True and/or when it is uniform
             decoding for spec-decode.
-        disable_padding_extend: If it is True across all dp rank, we do not extend the
-            padding from uniform-decode batch to non-uniform batch.
+        try_disable_padding_extend: If it is True across all dp rank, we do not extend
+            the padding to the max value of num_tokens_padded_extended across dp ranks.
         num_tokens_padded_extended: the number of tokens after extending the padding.
         num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
             number of tokens per request.
@@ -229,7 +229,7 @@ def coordinate_batch_across_dp(
         num_tokens_padded,
         should_attempt_ubatching,
         allow_dp_padding,
-        disable_padding_extend,
+        try_disable_padding_extend,
         num_tokens_padded_extended,
         parallel_config,
     )

@@ -62,10 +62,6 @@ class CudagraphDispatcher:
 
         self.keys_initialized = False
 
-        # For storing temp variables
-        self._uniform_decode: bool = False
-        self._uniform_query_len: int = 0
-
     def add_cudagraph_key(
         self, runtime_mode: CUDAGraphMode, batch_descriptor: BatchDescriptor
     ):
@@ -94,15 +90,16 @@ class CudagraphDispatcher:
         # we only have compilation_config.uniform_cudagraph_capture_sizes
         # being aligned with one uniform_query_len that greater than 1, not
         # multiple of them. Should verify this here.
-        for uniform_query_len in self.uniform_query_lens:
-            if (
-                uniform_query_len > 1
-                and self.compilation_config.uniform_cudagraph_capture_sizes
-            ):
-                assert all(
-                    x % uniform_query_len == 0
-                    for x in self.compilation_config.uniform_cudagraph_capture_sizes
-                ), f"Invalid uniform_query_lens: {uniform_query_len}"
+        if not self.compilation_config.disable_cudagraph_uniform_alignment:
+            for uniform_query_len in self.uniform_query_lens:
+                if (
+                    uniform_query_len > 1
+                    and self.compilation_config.uniform_cudagraph_capture_sizes
+                ):
+                    assert all(
+                        x % uniform_query_len == 0
+                        for x in self.compilation_config.uniform_cudagraph_capture_sizes
+                    ), f"Invalid uniform_query_lens: {uniform_query_len}"
 
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
             for bs in self.compilation_config.cudagraph_capture_sizes:
@@ -130,7 +127,10 @@ class CudagraphDispatcher:
                 # sizes.
                 candidate_sizes = (
                     self.compilation_config.cudagraph_capture_sizes
-                    if uniform_query_len == 1
+                    if (
+                        uniform_query_len == 1
+                        or self.compilation_config.disable_cudagraph_uniform_alignment
+                    )
                     else self.compilation_config.uniform_cudagraph_capture_sizes
                 )
                 cudagraph_capture_sizes_for_decode = [

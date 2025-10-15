@@ -1187,9 +1187,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # For uniform decode batch with query length > 1, we may extend to non-uniform
         # padding if there exists one dp rank that is non-uniform batch (i.e. can run
-        # into piecewise cudagraph), to resolve the conflicts of we may no have proper
-        # cudagraph for uniform batch after dp-padding.
-        disable_padding_extend = not uniform_decode or uniform_query_len <= 1
+        # into piecewise cudagraph), to resolve the conflicts where we may no have
+        # cudagraph for uniform-batch after dp-padding.
+        num_tokens_padded_extended = num_tokens_padded
+        disable_padding_extend = (
+            self.compilation_config.disable_cudagraph_uniform_alignment
+            or not self.compilation_config.cudagraph_mode.separate_routine()
+            or not uniform_decode
+            or uniform_query_len <= 1
+        )
         if (
             not disable_padding_extend
             and num_tokens_padded < self.compilation_config.max_capture_size
@@ -1197,8 +1203,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_tokens_padded_extended = self.vllm_config.pad_for_cudagraph(
                 num_tokens_padded, uniform_aligned=False
             )
-        else:
-            num_tokens_padded_extended = num_tokens_padded
 
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
@@ -1207,7 +1211,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             allow_dp_padding=allow_dp_padding,
             num_tokens_padded=num_tokens_padded,
             uniform_decode=uniform_decode,
-            disable_padding_extend=disable_padding_extend,
+            try_disable_padding_extend=disable_padding_extend,
             num_tokens_padded_extended=num_tokens_padded_extended,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
@@ -3254,7 +3258,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else num_tokens
-        if uniform_decode:
+        if uniform_decode and uniform_query_len:
+            # allow skip this assertion when it is on a dummy execution on DP setup
             assert max_query_len == uniform_query_len
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -3294,6 +3299,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Disable DP padding when running eager
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 
+        # make sure uniform-decode batch can safely hit a cudagraph when it is
+        # on a dummy execution for DP size>1.
+        num_tokens_padded_extended = total_num_scheduled_tokens
+        if (
+            total_num_scheduled_tokens
+            < self.vllm_config.compilation_config.max_capture_size
+        ):
+            num_tokens_padded_extended = self.vllm_config.pad_for_cudagraph(
+                total_num_scheduled_tokens, uniform_aligned=False
+            )
+
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
@@ -3303,8 +3319,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             allow_dp_padding=allow_dp_padding,
             num_tokens_padded=total_num_scheduled_tokens,
             uniform_decode=uniform_decode,
-            disable_padding_extend=True,
-            num_tokens_padded_extended=total_num_scheduled_tokens,
+            try_disable_padding_extend=True,
+            num_tokens_padded_extended=num_tokens_padded_extended,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
         num_tokens_after_padding = num_tokens

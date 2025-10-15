@@ -371,6 +371,27 @@ class CompilationConfig:
 
     max_capture_size: int = field(default=None, init=False)  # type: ignore
     """not configurable, computed after init"""
+    disable_cudagraph_uniform_alignment: bool = False
+    """Whether to disable uniformly alignment of cudagraph capture sizes for
+    uniform decode batch with query length>1 (i.e., for spec-decode). This flag
+    only takes effective when cudagraph_mode is FULL_DECODE_ONLY or 
+    FULL_AND_PIECEWISE.
+    
+    Uniform alignment make sure all capture sizes for uniform-decode batch 
+    are multiples of 1+num_speculative_tokens. This aligmnment is typically
+    useful for padded speculation (see #21984 for details), and is needed by
+    some attention backends to achieve their sota performance, which support
+    uniform-decode but no in a varible-length fashion.  However, we should 
+    realize here is a trade-off that while it is good for attention layer,
+    it may introduce slight regressions to other layers if these sizes after
+    alignment don't hit the multiple of 8.
+    
+    Note: for DP_size>1, the uniformity of sizes may be broken after dp_padding
+    sync. Therefore, we only ensure running full cudagraph of uniform-decode batch
+    of current rank if all dp ranks are uniform-decode batch. Otherwise, it would
+    fall back to piecewise cudagraphs, where the uniformity batch before padded 
+    should still be utilized by attention layers under eager exectution.
+    """
     uniform_cudagraph_capture_sizes: list[int] | None = None
     """
     List for capture sizes for uniform decode for the main model. Its elements
@@ -709,15 +730,6 @@ class CompilationConfig:
             else 0
         )
 
-        self.uniform_cudagraph_capture_sizes = sorted(
-            uniform_cudagraph_capture_sizes, reverse=True
-        )
-        self.max_uniform_capture_size = (
-            self.uniform_cudagraph_capture_sizes[0]
-            if self.uniform_cudagraph_capture_sizes
-            else 0
-        )
-
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [0 for i in range(self.max_capture_size + 1)]
         for end, start in zip(
@@ -729,24 +741,6 @@ class CompilationConfig:
                 else:
                     self.bs_to_padded_graph_size[bs] = end
         self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
-
-        # pre-compute the mapping for uniform decode padding.
-        self.bs_to_padded_graph_size_uniform = [
-            0 for i in range(self.max_uniform_capture_size + 1)
-        ]
-
-        for end, start in zip(
-            self.uniform_cudagraph_capture_sizes,
-            self.uniform_cudagraph_capture_sizes[1:] + [0],
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_graph_size_uniform[bs] = start
-                else:
-                    self.bs_to_padded_graph_size_uniform[bs] = end
-        self.bs_to_padded_graph_size_uniform[self.max_uniform_capture_size] = (
-            self.max_uniform_capture_size
-        )
 
         # pre-compute the mapping for uniform decode padding.
         self.bs_to_padded_graph_size_uniform = [

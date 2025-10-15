@@ -209,7 +209,8 @@ class VllmConfig:
         For drafter, caller should make sure uniform_aligned is False because
         drafter's uniform_decode_len is 1.
         """
-
+        if self.compilation_config.disable_cudagraph_uniform_alignment:
+            uniform_aligned = False
         # if batch_size > self.compilation_config.max_capture_size when
         # uniform_aligned is False, or batch_size > self.compilation_config.
         # max_uniform_capture_size when uniform_aligned is True,
@@ -714,6 +715,9 @@ class VllmConfig:
                     if size >= uniform_decode_len
                 )
             )
+            if self.compilation_config.disable_cudagraph_uniform_alignment:
+                uniform_batch_size_capture_list = batch_size_capture_list
+
             if (
                 self.parallel_config.tensor_parallel_size > 1
                 and self.compilation_config.pass_config.enable_sequence_parallelism
