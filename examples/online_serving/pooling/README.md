@@ -6,10 +6,22 @@
 python examples/online_serving/pooling/cohere_rerank_client.py
 ```
 
+## Embedding embed_dtype usage
+
+```bash
+python examples/online_serving/pooling/embedding_embed_dtype_client.py
+```
+
 ## Jinaai rerank usage
 
 ```bash
 python examples/online_serving/pooling/jinaai_rerank_client.py
+```
+
+## Multi vector retrieval usage
+
+```bash
+python examples/online_serving/pooling/multi_vector_retrieval_client.py
 ```
 
 ## Named Entity Recognition (NER) usage
