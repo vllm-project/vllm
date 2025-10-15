@@ -27,6 +27,11 @@ class FaultToleranceConfig:
     time, the original error is raised.
     """
 
+    fault_report_addr: str = ""
+    """
+    The address to use for fault reporting.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

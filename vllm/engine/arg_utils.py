@@ -1060,7 +1060,10 @@ class EngineArgs:
             "--engine-recovery-timeout",
             **fault_tolerance_kwargs["engine_recovery_timeout"],
         )
-
+        fault_tolerance_group.add_argument(
+            "--fault-report-addr",
+            **fault_tolerance_kwargs["fault_report_addr"],
+        )
         # Other arguments
         parser.add_argument(
             "--disable-log-stats",
