@@ -36,7 +36,7 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import TokenIDs, convert_to_token_id_list, get_token_count
+from vllm.v1.outputs import TokenIDs, get_token_count, token_ids_to_list
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
@@ -491,7 +491,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            token_ids = convert_to_token_id_list(token_ids)
+            token_ids = token_ids_to_list(token_ids)
             if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]

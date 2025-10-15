@@ -25,14 +25,14 @@ else:
 TokenIDs: TypeAlias = int | list[int]
 
 
-def convert_to_token_id_list(tokens: TokenIDs) -> list[int]:
+def token_ids_to_list(tokens: TokenIDs) -> list[int]:
     """
     Converts TokenIDs to a list of token IDs (i.e. list[int]).
     """
     return [tokens] if isinstance(tokens, int) else tokens
 
 
-def convert_to_token_ids(tokens: list[int]) -> TokenIDs:
+def list_to_token_ids(tokens: list[int]) -> TokenIDs:
     """
     Converts a list of token IDs (i.e. list[int]) to TokenIDs.
     """

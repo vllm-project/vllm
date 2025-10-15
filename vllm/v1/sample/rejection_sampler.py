@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.v1.outputs import TokenIDs, convert_to_token_ids
+from vllm.v1.outputs import TokenIDs, list_to_token_ids
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
@@ -137,7 +137,7 @@ class RejectionSampler(nn.Module):
             output_token_ids_np < vocab_size
         )
         outputs = [
-            convert_to_token_ids(row[valid_mask[i]].tolist())
+            list_to_token_ids(row[valid_mask[i]].tolist())
             for i, row in enumerate(output_token_ids_np)
         ]
         return outputs

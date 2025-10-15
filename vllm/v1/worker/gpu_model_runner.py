@@ -120,8 +120,8 @@ from vllm.v1.outputs import (
     PoolerOutput,
     SamplerOutput,
     TokenIDs,
-    convert_to_token_id_list,
     get_token_count,
+    token_ids_to_list,
 )
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
@@ -2332,7 +2332,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
             else:
-                sampled_ids = convert_to_token_id_list(valid_sampled_token_ids[req_idx])
+                sampled_ids = token_ids_to_list(valid_sampled_token_ids[req_idx])
             if not sampled_ids:
                 continue
 
