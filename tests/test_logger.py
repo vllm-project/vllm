@@ -503,6 +503,7 @@ def test_streaming_complete_logs_full_text_content():
         assert call_args[5] == "streaming_complete"
 
 
+# Add vllm prefix to make sure logs go through the vllm logger
 test_logger = init_logger("vllm.test_logger")
 
 
