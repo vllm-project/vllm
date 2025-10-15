@@ -471,22 +471,19 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "not implemented. Please open an issue."
             )
 
-        if not current_platform.supports_mx():
-            self.emulate = True
+        self.emulate = not current_platform.supports_mx() or not (
+            use_fp4_aiter_moe() and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+        )
+        if self.emulate:
             logger.warning_once(
-                "The current platform does not support native MXFP4/MXFP6 "
+                "The current mode does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision."
             )
         else:
-            self.emulate = True
             logger.warning_once(
-                "The current platform supports native MXFP4/MXFP6 "
-                "computation, but kernels are not yet integrated in vLLM. "
-                "Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
+                "The current mode supports native MoE MXFP4 computation"
             )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
@@ -568,20 +565,22 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
     def process_weights_after_loading(self, layer):
-        if use_fp4_aiter_moe():
-            from aiter.utility.fp4_utils import e8m0_shuffle
+        if self.emulate:
+            return
 
-            # Pre-shuffle weight scales
-            s0, s1, _ = layer.w13_weight_scale.shape
-            w13_weight_scale = layer.w13_weight_scale.view(s0 * s1, -1)
-            w13_weight_scale = e8m0_shuffle(w13_weight_scale)
-            layer.w13_weight_scale.data = w13_weight_scale.view(s0, s1, -1)
+        from aiter.utility.fp4_utils import e8m0_shuffle
 
-            s0, s1, _ = layer.w2_weight_scale.shape
-            w2_weight_scale = layer.w2_weight_scale.view(s0 * s1, -1)
-            w2_weight_scale = e8m0_shuffle(w2_weight_scale)
-            layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
-            torch.cuda.empty_cache()
+        # Pre-shuffle weight scales
+        s0, s1, _ = layer.w13_weight_scale.shape
+        w13_weight_scale = layer.w13_weight_scale.view(s0 * s1, -1)
+        w13_weight_scale = e8m0_shuffle(w13_weight_scale)
+        layer.w13_weight_scale.data = w13_weight_scale.view(s0, s1, -1)
+
+        s0, s1, _ = layer.w2_weight_scale.shape
+        w2_weight_scale = layer.w2_weight_scale.view(s0 * s1, -1)
+        w2_weight_scale = e8m0_shuffle(w2_weight_scale)
+        layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
+        torch.cuda.empty_cache()
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -641,7 +640,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             indices_type=self.topk_indices_dtype,
         )
 
-        if use_fp4_aiter_moe():
+        if not self.emulate:
             from aiter import ActivationType, QuantType
             from aiter.fused_moe import fused_moe
 
