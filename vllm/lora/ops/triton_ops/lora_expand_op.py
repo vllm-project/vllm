@@ -201,19 +201,21 @@ def _lora_expand(
     NUM_SLICES = len(lora_b_weights)
 
     # Triton kernel configs.
-    kernel_config = get_lora_op_configs(op_type="expand",
-                                      max_loras=MAX_LORAS,
-                                      batch=M,
-                                      hidden_size=MAX_N,
-                                      rank=K,
-                                      num_slices=NUM_SLICES,
-                                      add_inputs=add_inputs)
-    BLOCK_M = kernel_config['block_m']
-    BLOCK_N = kernel_config['block_n']
-    BLOCK_K = kernel_config['block_k']
-    NUM_WARPS = kernel_config['num_warps']
-    NUM_CTAS = kernel_config['num_ctas']
-    NUM_STAGES = kernel_config['num_stages']
+    kernel_config = get_lora_op_configs(
+        op_type="expand",
+        max_loras=MAX_LORAS,
+        batch=M,
+        hidden_size=MAX_N,
+        rank=K,
+        num_slices=NUM_SLICES,
+        add_inputs=add_inputs,
+    )
+    BLOCK_M = kernel_config["block_m"]
+    BLOCK_N = kernel_config["block_n"]
+    BLOCK_K = kernel_config["block_k"]
+    NUM_WARPS = kernel_config["num_warps"]
+    NUM_CTAS = kernel_config["num_ctas"]
+    NUM_STAGES = kernel_config["num_stages"]
 
     EVEN_K = K % BLOCK_K == 0  # type: ignore
 

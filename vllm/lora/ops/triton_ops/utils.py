@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
 import functools
 import json
-import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
+
+import torch
+
 from vllm import envs
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
 
 _LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
@@ -144,27 +146,23 @@ def _get_lora_b_ptr(
 
 
 @functools.lru_cache
-def load_lora_op_config(op_type: str,
-                      add_inputs: Optional[bool]) -> Optional[Dict]:
-    
+def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
         gpu_name = torch.cuda.get_device_name()
-        gpu_name = gpu_name.replace(' ', '_')
-        gpu_name = gpu_name.replace('-', '_')
+        gpu_name = gpu_name.replace(" ", "_")
+        gpu_name = gpu_name.replace("-", "_")
 
         config_fname = None
         if op_type == "shrink":
             config_fname = f"{gpu_name}_{op_type.upper()}.json"
         else:
             assert op_type == "expand"
-            config_fname = (f"{gpu_name}_"
-                            f"{op_type.upper()}_"
-                            f"{str(add_inputs).upper()}.json")
+            config_fname = (
+                f"{gpu_name}_{op_type.upper()}_{str(add_inputs).upper()}.json"
+            )
 
-        config_path = Path(
-            f'{user_defined_config_folder}/{config_fname}'
-        )
+        config_path = Path(f"{user_defined_config_folder}/{config_fname}")
         if not config_path.exists():
             logger.warning_once(f"No LoRA kernel configs founded in {config_path}")
             return None
@@ -175,44 +173,44 @@ def load_lora_op_config(op_type: str,
             config_data = json.load(f)
     else:
         config_data = None
-    
+
     return config_data
 
 
 @functools.lru_cache
 def get_lora_op_configs(
-        op_type: str,
-        max_loras: int,
-        batch: int,
-        hidden_size: int,
-        rank: int,
-        num_slices: int,
-        add_inputs: Optional[bool] = None) -> dict[str, Optional[int]]:
-
+    op_type: str,
+    max_loras: int,
+    batch: int,
+    hidden_size: int,
+    rank: int,
+    num_slices: int,
+    add_inputs: bool | None = None,
+) -> dict[str, int | None]:
     assert op_type in ["shrink", "expand"]
 
     # default config
     default = {}
     if op_type == "shrink":
         default = {
-            'block_m': 32,
-            'block_n': 16,
-            'block_k': 256 if batch < 128 else 32,
-            'split_k': 64 if batch < 128 else 8,
-            'num_warps': 4,
-            'num_ctas': 1,
-            'num_stages': 2,
-            'max_nreg': None
+            "block_m": 32,
+            "block_n": 16,
+            "block_k": 256 if batch < 128 else 32,
+            "split_k": 64 if batch < 128 else 8,
+            "num_warps": 4,
+            "num_ctas": 1,
+            "num_stages": 2,
+            "max_nreg": None,
         }
     else:
         default = {
-            'block_m': 64,
-            'block_n': 128,
-            'block_k': 16,
-            'num_warps': 4,
-            'num_ctas': 1,
-            'num_stages': 2,
-            'max_nreg': None
+            "block_m": 64,
+            "block_n": 128,
+            "block_k": 16,
+            "num_warps": 4,
+            "num_ctas": 1,
+            "num_stages": 2,
+            "max_nreg": None,
         }
     m = batch
 
@@ -221,24 +219,32 @@ def get_lora_op_configs(
     config_data: Any
     config_data = load_lora_op_config(op_type, add_inputs)
     if not config_data:
-        logger.warning_once(f"Using default LoRA kernel configs")
+        logger.warning_once("Using default LoRA kernel configs")
         return default
-    
+
     # config is structured as config_data[max_loras][num_slices][m][k][n] = {}
     # slice by max_loras
-    config_data = config_data.get(str(max_loras)) or config_data[min(
-        config_data.keys(), key=lambda x: abs(int(x) - max_loras))]
+    config_data = (
+        config_data.get(str(max_loras))
+        or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - max_loras))]
+    )
     # slice by num_slices
     config_data = config_data[str(num_slices)]
     # slice by m
-    config_data = config_data.get(str(m)) or config_data[min(
-        config_data.keys(), key=lambda x: abs(int(x) - m))]
+    config_data = (
+        config_data.get(str(m))
+        or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - m))]
+    )
     # slice by k
-    config_data = config_data.get(str(k)) or config_data[min(
-        config_data.keys(), key=lambda x: abs(int(x) - k))]
+    config_data = (
+        config_data.get(str(k))
+        or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - k))]
+    )
     # slice by n
-    config_data = config_data.get(str(n)) or config_data[min(
-        config_data.keys(), key=lambda x: abs(int(x) - n))]
+    config_data = (
+        config_data.get(str(n))
+        or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n))]
+    )
 
     assert config_data is not None
     return config_data
