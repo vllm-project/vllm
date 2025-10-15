@@ -132,16 +132,23 @@ public:
     // Ratio-based heuristic for max_splits: seq_length_k / batch_size
     // K is sequence length in tokens, convert to "k" units (1024 tokens)
     float seq_length_k = static_cast<float>(K) / 1024.0f;
-    float ratio = seq_length_k / static_cast<float>(B);
+    int max_splits = 1;
 
-    int max_splits;
-    if (ratio >= 2.5f) {
+    if (B <= 4 && seq_length_k >= 16) {
+      max_splits = 16;
+    }
+    else if (B <= 8 && seq_length_k >= 4) {
       max_splits = 8;
-    } else if (ratio >= 1.2f) {
+    }
+    else if ((B <= 16 && seq_length_k >= 8) ||
+             (B == 48 && seq_length_k >= 32)) {
       max_splits = 4;
-    } else if (ratio >= 0.5f) {
+    }
+    else if ((B <= 32 && seq_length_k >= 16) ||
+             (B == 96 && seq_length_k >= 16)) {
       max_splits = 2;
-    } else {
+    }
+    else {
       max_splits = 1;
     }
 
