@@ -12,7 +12,7 @@ import weakref
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from enum import auto, Enum
+from enum import Enum, auto
 from functools import cached_property, partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -27,6 +27,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.utils import (
     _maybe_force_spawn,
