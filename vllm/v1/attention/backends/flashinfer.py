@@ -239,7 +239,7 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def get_max_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(10, 3)
+        return DeviceCapability(12, 1)
 
     @classmethod
     def get_required_kv_cache_layout(cls, capability: DeviceCapability) -> str | None:
