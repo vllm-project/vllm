@@ -3,8 +3,9 @@
 
 import hashlib
 from functools import cached_property
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal, cast
 
+from packaging.version import parse
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
@@ -80,66 +81,38 @@ class ObservabilityConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("show_hidden_metrics_for_version", mode="before")
+    @field_validator("show_hidden_metrics_for_version")
     @classmethod
-    def _validate_version(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        value = value.lstrip("v")
-        parts = value.split(".")
-        if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
-            raise ValueError(
-                "show_hidden_metrics_for_version must look like '0.7' or '0.7.0'"
-            )
+    def _validate_show_hidden_metrics_for_version(cls, value: str | None) -> str | None:
+        if value is not None:
+            # Raises an exception if the string is not a valid version.
+            parse(value)
         return value
 
-    @field_validator("otlp_traces_endpoint", mode="after")
+    @field_validator("otlp_traces_endpoint")
     @classmethod
-    def _validate_otlp_available(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
+    def _validate_otlp_traces_endpoint(cls, value: str | None) -> str | None:
+        if value is not None:
+            from vllm.tracing import is_otel_available, otel_import_error_traceback
 
-        from vllm.tracing import is_otel_available, otel_import_error_traceback
-
-        if not is_otel_available():
-            raise ValueError(
-                "OpenTelemetry is not available. Unable to configure "
-                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
-                f"installed. Original error:\n{otel_import_error_traceback}"
-            )
-
+            if not is_otel_available():
+                raise ValueError(
+                    "OpenTelemetry is not available. Unable to configure "
+                    "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                    f"installed. Original error:\n{otel_import_error_traceback}"
+                )
         return value
 
-    @field_validator("collect_detailed_traces", mode="after")
+    @field_validator("collect_detailed_traces")
     @classmethod
     def _validate_collect_detailed_traces(
-        cls, value: list[str] | None
+        cls, value: list[DetailedTraceModules] | None
     ) -> list[DetailedTraceModules] | None:
-        if not value:
-            return None
-
-        if len(value) == 1:
-            value = [p for p in (s.strip() for s in value[0].split(",")) if p]
-
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            tok = item.strip().lower()
-            if tok and tok not in seen:
-                seen.add(tok)
-                out.append(tok)
-
-        if not out:
-            return None
-
-        allowed = set(get_args(DetailedTraceModules))
-        invalid = [t for t in out if t not in allowed]
-        if invalid:
-            raise ValueError(
-                f"collect_detailed_traces values must be one of: {sorted(allowed)}"
-            )
-
-        return cast(list[DetailedTraceModules], out)
+        """Handle the legacy case where users might provide a comma-separated
+        string instead of a list of strings."""
+        if value is not None and len(value) == 1 and "," in value[0]:
+            value = cast(list[DetailedTraceModules], value[0].split(","))
+        return value
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):
@@ -147,5 +120,4 @@ class ObservabilityConfig:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
-
         return self
