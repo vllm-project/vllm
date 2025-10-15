@@ -8,6 +8,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from typing import Optional
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
@@ -576,6 +577,63 @@ def apply_awq_marlin_linear(
         weight_zp,
         g_idx,
         g_idx_sort_indices,
+        workspace,
+        quant_type,
+        size_m=reshaped_x.shape[0],
+        size_n=output_size_per_partition,
+        size_k=input_size_per_partition,
+        use_atomic_add=use_atomic_add,
+        use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
+    )
+
+    return output.reshape(out_shape)
+
+
+def apply_rtn_marlin_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    workspace: torch.Tensor,
+    quant_type: ScalarType,
+    output_size_per_partition: int,
+    input_size_per_partition: int,
+    input_global_scale: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+    input_dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    reshaped_x = input.reshape(-1, input.shape[-1])
+    out_shape = input.shape[:-1] + (output_size_per_partition,)
+
+    use_atomic_add = should_use_atomic_add_reduce(
+        m=reshaped_x.size(0),
+        n=output_size_per_partition,
+        k=reshaped_x.size(1),
+        device=input.device,
+        dtype=input.dtype,
+    )
+
+    a_scales = None
+    if input_dtype == torch.int8:
+        reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
+        a_scales = a_scales * input_global_scale
+    elif input_dtype == torch.float8_e4m3fn:
+        reshaped_x, a_scales = ops.scaled_fp8_quant(
+            reshaped_x, use_per_token_if_dynamic=True
+        )
+
+    output = ops.gptq_marlin_gemm(
+        reshaped_x,
+        None,
+        weight,
+        bias,
+        weight_scale,
+        a_scales,
+        None,
+        None,
+        None,
+        None,
         workspace,
         quant_type,
         size_m=reshaped_x.shape[0],
