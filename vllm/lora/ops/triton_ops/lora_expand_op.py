@@ -10,7 +10,7 @@ https://arxiv.org/abs/2310.18547
 import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
-from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_v1_op_configs
+from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
@@ -201,7 +201,7 @@ def _lora_expand(
     NUM_SLICES = len(lora_b_weights)
 
     # Triton kernel configs.
-    kernel_config = get_v1_op_configs(op_type="expand",
+    kernel_config = get_lora_op_configs(op_type="expand",
                                       max_loras=MAX_LORAS,
                                       batch=M,
                                       hidden_size=MAX_N,

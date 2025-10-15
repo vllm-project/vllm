@@ -10,7 +10,7 @@ https://arxiv.org/abs/2310.18547
 import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
-from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_v1_op_configs
+from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
@@ -177,7 +177,7 @@ def _lora_shrink(
     MAX_LORAS = lora_ids.size(0)
 
     # Triton kernel configs
-    kernel_config = get_v1_op_configs("shrink",
+    kernel_config = get_lora_op_configs("shrink",
                                 max_loras=MAX_LORAS,
                                 batch=M,
                                 hidden_size=K,
