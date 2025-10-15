@@ -62,5 +62,4 @@ direct_register_custom_op(
     mutates_args=["out"],
     fake_impl=silly_attention_fake,
     target_lib=silly_lib,
-    tags=(torch._C.Tag.cudagraph_unsafe,),
 )
