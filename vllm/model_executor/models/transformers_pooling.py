@@ -16,8 +16,6 @@
 # limitations under the License.
 """Wrapper around `transformers` models for pooling tasks."""
 
-from typing import Optional, Union
-
 import torch
 from transformers import AutoModelForSequenceClassification
 
@@ -109,11 +107,11 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if self.is_roberta:
             # RoBERTa-specific positions padding
             positions += self.padding_idx + 1
@@ -137,7 +135,7 @@ class TransformersEmbeddingModel(TransformersPoolingBase):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_embed": Pooler.for_token_embed(pooler_config),
                 "embed": Pooler.for_embed(pooler_config),
             }
         )
@@ -159,7 +157,7 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
         with torch.device("meta"):
             seq_cls_model = AutoModelForSequenceClassification.from_config(
                 self.config,
-                torch_dtype=self.model_config.dtype,
+                dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
@@ -192,20 +190,14 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="classify"
                 ),
                 "score": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
                 ),
             }
         )

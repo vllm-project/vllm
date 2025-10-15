@@ -4,10 +4,9 @@
 import asyncio
 import tempfile
 from argparse import Namespace
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import StringIO
-from typing import Callable, Optional
 
 import aiohttp
 import torch
@@ -105,6 +104,13 @@ def make_arg_parser(parser: FlexibleArgumentParser):
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.",
     )
+    parser.add_argument(
+        "--enable-force-include-usage",
+        action="store_true",
+        default=False,
+        help="If set to True, include usage on every request "
+        "(even when stream_options is not specified)",
+    )
 
     return parser
 
@@ -124,7 +130,7 @@ _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elap
 class BatchProgressTracker:
     def __init__(self):
         self._total = 0
-        self._pbar: Optional[tqdm] = None
+        self._pbar: tqdm | None = None
 
     def submitted(self):
         self._total += 1
@@ -362,6 +368,7 @@ async def run_batch(
             chat_template=None,
             chat_template_content_format="auto",
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "generate" in supported_tasks
         else None
