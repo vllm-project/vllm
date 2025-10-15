@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -20,7 +20,6 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    PrefixCachingMetrics,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
@@ -42,7 +41,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
@@ -63,9 +62,9 @@ def make_request(
     prompt_token_ids: list[int],
     block_size: int = 3,
     hash_fn: Callable = hash,
-    mm_positions: Optional[list[PlaceholderRange]] = None,
-    mm_hashes: Optional[list[str]] = None,
-    cache_salt: Optional[str] = None,
+    mm_positions: list[PlaceholderRange] | None = None,
+    mm_hashes: list[str] | None = None,
+    cache_salt: str | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -536,7 +535,7 @@ def test_metrics():
     """
     Test the prefix caching metrics.
     """
-    metrics = PrefixCachingMetrics(max_recent_requests=5)
+    metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(_stats(1, 20, 9))
@@ -568,7 +567,7 @@ def test_metrics_empty_stats():
     """
     Test the prefix caching metrics with empty stats.
     """
-    metrics = PrefixCachingMetrics(max_recent_requests=5)
+    metrics = CachingMetrics(max_recent_requests=5)
     metrics.observe(_stats(0, 0, 0))
     metrics.observe(_stats(1, 20, 9))
     metrics.observe(_stats(0, 0, 0))
@@ -681,10 +680,10 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer1"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer1"]
                 ),
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer2"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer2"]
                 ),
             ],
             kv_cache_groups=[
@@ -718,7 +717,7 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer1"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer1"]
                 ),
             ],
             kv_cache_groups=[
@@ -802,7 +801,7 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer3"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer3"]
                 ),
             ],
             kv_cache_groups=[
@@ -813,7 +812,7 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer3"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer3"]
                 ),
             ],
             kv_cache_groups=[

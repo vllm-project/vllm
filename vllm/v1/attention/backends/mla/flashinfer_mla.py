@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -13,6 +13,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
@@ -22,8 +23,8 @@ FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    # enable full CUDA Graph support for decode-only capture
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -54,12 +55,12 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -93,16 +94,16 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             )
 
         self._workspace_buffer = g_fi_workspace
-        self.bmm1_scale: Optional[float] = None
-        self.bmm2_scale: Optional[float] = None
+        self.bmm1_scale: float | None = None
+        self.bmm2_scale: float | None = None
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
@@ -111,7 +112,15 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             q = torch.cat([q_nope, q_pe], dim=-1)
 
         # trtllm API requires extra dimension q_len_per_request for MTP
-        q = q.unsqueeze(1)
+        if attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
+            logger.warning_once(
+                """FlashInferMLAImpl got a query of uneven length.
+                This usually indicates an issue in batch reordering
+                or incorrect setup in dummy_run."""
+            )
+            q = q.unsqueeze(1)
+        else:
+            q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
 
         if self.bmm1_scale is None:
             self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
@@ -131,6 +140,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
         )
+
+        # Flatten the output for consistent shape
+        o = o.view(-1, o.shape[-2], o.shape[-1])
 
         # TODO: Return LSE pending support from Flashinfer API:
         # https://github.com/flashinfer-ai/flashinfer/pull/1566

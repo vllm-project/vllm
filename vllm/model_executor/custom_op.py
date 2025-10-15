@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch.nn as nn
 
@@ -114,7 +113,9 @@ class CustomOp(nn.Module):
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
-                "Custom op %s was not registered, which means it won't appear in the op registry. It will be enabled/disabled based on the global settings.",  # noqa: E501
+                "Custom op %s was not registered, which means it won't appear "
+                "in the op registry. It will be enabled/disabled based on the "
+                "global settings.",
                 cls.__name__,
             )
             return CustomOp.default_on()
@@ -128,19 +129,17 @@ class CustomOp(nn.Module):
     @staticmethod
     def default_on() -> bool:
         """
-        On by default if PyTorch Inductor is not used.
-        Specifying 'all' or 'none' in custom_op takes precedence.
+        Behavior controlled by `CompilationConfig.custom_ops`: On by default if
+        'all', off by default if 'none'.
+        When PyTorch Inductor is used, 'none' is the default value,
+        otherwise 'all'.
         """
-        from vllm.config import CompilationLevel
-
         compilation_config = get_cached_compilation_config()
-        default_on = (
-            compilation_config.level < CompilationLevel.PIECEWISE
-            or not compilation_config.use_inductor
-        )
         count_none = compilation_config.custom_ops.count("none")
         count_all = compilation_config.custom_ops.count("all")
-        return default_on and not count_none > 0 or count_all > 0
+        assert count_none + count_all == 1
+
+        return not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).
     # To check if an op with a name is enabled, call .enabled() on the class.
@@ -171,7 +170,7 @@ class CustomOp(nn.Module):
     # or
     # - @CustomOP.register_oot(name="UnquantizedFusedMoEMethod")
     @classmethod
-    def register_oot(cls, _decorated_op_cls=None, name: Optional[str] = None):
+    def register_oot(cls, _decorated_op_cls=None, name: str | None = None):
         def decorator(op_cls):
             reg_name = name if name is not None else cls.__name__
             assert reg_name not in cls.op_registry_oot, f"Duplicate op name: {reg_name}"

@@ -4,17 +4,18 @@
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, ModelDType, RunnerOption
+from vllm.config.model import ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
+from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
 
 TokensText = tuple[list[int], str]
@@ -57,7 +58,7 @@ def check_outputs_equal(
 #
 # Assumes prompt logprobs were not requested.
 TokensTextLogprobs = tuple[
-    list[int], str, Optional[Union[list[dict[int, float]], SampleLogprobs]]
+    list[int], str, list[dict[int, float]] | SampleLogprobs | None
 ]
 
 # Allow for tokens to be represented as str's rather than IDs;
@@ -68,7 +69,7 @@ TokensTextLogprobs = tuple[
 #
 # Assumes prompt logprobs were not requested.
 TextTextLogprobs = tuple[
-    list[str], str, Optional[Union[list[dict[str, float]], list[dict[str, Logprob]]]]
+    list[str], str, list[dict[str, float]] | list[dict[str, Logprob]] | None
 ]
 
 # Representation of generated sequence as a tuple of
@@ -81,18 +82,18 @@ TextTextLogprobs = tuple[
 TokensTextLogprobsPromptLogprobs = tuple[
     list[int],
     str,
-    Optional[Union[list[dict[int, float]], SampleLogprobs]],
-    Optional[Union[list[Optional[dict[int, float]]], PromptLogprobs]],
+    list[dict[int, float]] | SampleLogprobs | None,
+    list[dict[int, float] | None] | PromptLogprobs | None,
 ]
 
 
 def check_logprobs_close(
     *,
     outputs_0_lst: Sequence[
-        Union[TokensTextLogprobs, TokensTextLogprobsPromptLogprobs, TextTextLogprobs]
+        TokensTextLogprobs | TokensTextLogprobsPromptLogprobs | TextTextLogprobs
     ],
     outputs_1_lst: Sequence[
-        Union[TokensTextLogprobs, TokensTextLogprobsPromptLogprobs, TextTextLogprobs]
+        TokensTextLogprobs | TokensTextLogprobsPromptLogprobs | TextTextLogprobs
     ],
     name_0: str,
     name_1: str,
@@ -273,9 +274,9 @@ def build_model_context(
     model_id: str,
     runner: RunnerOption = "auto",
     dtype: ModelDType = "auto",
-    model_config_kwargs: Optional[dict[str, Any]] = None,
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
-    limit_mm_per_prompt: Optional[dict[str, int]] = None,
+    model_config_kwargs: dict[str, Any] | None = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
+    limit_mm_per_prompt: dict[str, int] | None = None,
     mm_processor_cache_gb: int = 0,
 ):
     """Creates an InputProcessingContext for a given model.
@@ -369,17 +370,18 @@ class ModelInfo:
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    max_model_len: int | None = None
     hf_dtype: str = "float32"
-    hf_overrides: Optional[dict[str, Any]] = None
+    hf_overrides: dict[str, Any] | None = None
     default_pooling_type: str = ""
     enable_test: bool = True
 
 
 @dataclass
 class EmbedModelInfo(ModelInfo):
-    mteb_score: Optional[float] = None
+    mteb_score: float | None = None
     is_matryoshka: bool = False
-    matryoshka_dimensions: Optional[list[int]] = None
+    matryoshka_dimensions: list[int] | None = None
 
 
 @dataclass
@@ -394,7 +396,7 @@ class LASTPoolingEmbedModelInfo(EmbedModelInfo):
 
 @dataclass
 class RerankModelInfo(ModelInfo):
-    mteb_score: Optional[float] = None
+    mteb_score: float | None = None
 
 
 @dataclass
@@ -410,14 +412,43 @@ class LASTPoolingRerankModelInfo(RerankModelInfo):
 @dataclass
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
-    hf_ppl: Optional[float] = None
+    hf_ppl: float | None = None
+
+
+def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
+    # A model family has many models with the same architecture,
+    # and we don't need to test each one.
+    if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
+        import pytest
+
+        pytest.skip("Skipping test.")
+
+    # Allow vllm to test using the given dtype, such as float32
+    vllm_extra_kwargs = vllm_extra_kwargs or {}
+    vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
+
+    # Allow vllm to test using hf_overrides
+    if model_info.hf_overrides is not None:
+        vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
+    # Allow changing the head dtype used by vllm in tests
+    if ci_envs.VLLM_CI_HEAD_DTYPE is not None:
+        if "hf_overrides" not in vllm_extra_kwargs:
+            vllm_extra_kwargs["hf_overrides"] = {}
+        vllm_extra_kwargs["hf_overrides"]["head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
+
+    # Allow control over whether tests use enforce_eager
+    if ci_envs.VLLM_CI_ENFORCE_EAGER is not None:
+        vllm_extra_kwargs["enforce_eager"] = ci_envs.VLLM_CI_ENFORCE_EAGER
+
+    return vllm_extra_kwargs
 
 
 def dummy_hf_overrides(
     hf_config: PretrainedConfig,
     *,
     model_arch: str = "",
-    exist_overrides: Optional[dict[str, Any]] = None,
+    exist_overrides: dict[str, Any] | None = None,
     use_original_num_layers: bool = False,
 ) -> PretrainedConfig:
     """
@@ -506,8 +537,8 @@ def dummy_hf_overrides(
 
 def check_transformers_version(
     model: str,
-    min_transformers_version: Optional[str] = None,
-    max_transformers_version: Optional[str] = None,
+    min_transformers_version: str | None = None,
+    max_transformers_version: str | None = None,
 ):
     from .registry import _HfExamplesInfo
 

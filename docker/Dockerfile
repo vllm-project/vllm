@@ -15,7 +15,7 @@ ARG PYTHON_VERSION=3.12
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 
-# Important: We build with an old version of Ubuntu to maintain broad 
+# Important: We build with an old version of Ubuntu to maintain broad
 # compatibility with other Linux OSes. The main reason for this is that the
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
@@ -229,7 +229,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
-ARG VLLM_MAX_SIZE_MB=450
+ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
@@ -356,75 +356,14 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# If we need to build FlashInfer wheel before its release:
-# $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
-# $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-# $ cd flashinfer
-# $ git checkout v0.2.6.post1
-# $ python -m flashinfer.aot
-# $ python -m build --no-isolation --wheel
-# $ ls -la dist
-# -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
-# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
+# Install FlashInfer pre-compiled kernel cache and binaries
+# https://docs.flashinfer.ai/installation.html
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system flashinfer-cubin==0.4.0 \
+    && uv pip install --system flashinfer-jit-cache==0.4.0 \
+        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && flashinfer show-config
 
-# Install FlashInfer from source
-ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-# Keep this in sync with "flashinfer" extra in setup.py
-ARG FLASHINFER_GIT_REF="v0.3.1"
-# Flag to control whether to compile FlashInfer AOT kernels
-# Set to "true" to enable AOT compilation:
-# docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
-ARG FLASHINFER_AOT_COMPILE=false
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-  . /etc/environment
-    git clone --depth 1 --recursive --shallow-submodules \
-        --branch ${FLASHINFER_GIT_REF} \
-        ${FLASHINFER_GIT_REPO} flashinfer
-    # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-    # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-    if [[ "${CUDA_VERSION}" == 11.* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-    elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-    else
-        # CUDA 12.8+ supports 10.0a and 12.0
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
-    fi
-    pushd flashinfer
-        if [[ "${CUDA_VERSION}" == 12.8.* ]] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then
-            # NOTE: To make new precompiled wheels, see tools/flashinfer-build.sh
-            echo "🏗️  Installing FlashInfer from pre-compiled wheel"
-            uv pip install --system https://wheels.vllm.ai/flashinfer-python/flashinfer_python-0.3.1-cp39-abi3-manylinux1_x86_64.whl \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-            if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
-                # Download pre-compiled cubins
-                TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                    python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
-            fi
-        elif [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
-            echo "🏗️  Installing FlashInfer with AOT compilation for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-            export FLASHINFER_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}"
-            # HACK: We need these to run flashinfer.aot before installing flashinfer, get from the package in the future
-            uv pip install --system cuda-python==$(echo $CUDA_VERSION | cut -d. -f1,2) pynvml==$(echo $CUDA_VERSION | cut -d. -f1) nvidia-nvshmem-cu$(echo $CUDA_VERSION | cut -d. -f1)
-            # Build AOT kernels
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                python3 -m flashinfer.aot
-            # Install with no-build-isolation since we already built AOT kernels
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                uv pip install --system --no-build-isolation . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-            # Download pre-compiled cubins
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
-        else
-            echo "🏗️  Installing FlashInfer without AOT compilation in JIT mode"
-            uv pip install --system . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-        fi
-    popd
-    rm -rf flashinfer
-BASH
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
@@ -542,7 +481,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3]>=0.14.0'
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.14.0'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
