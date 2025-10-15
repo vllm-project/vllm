@@ -1269,6 +1269,15 @@ def flat_product(*iterables: Iterable[Any]):
     Flatten lists of tuples of the cartesian product.
     Useful when we want to avoid nested tuples to allow
     test params to be unpacked directly from the decorator.
+
+    Example:
+    flat_product([(1, 2), (3, 4)], ["a", "b"]) ->
+    [
+      (1, 2, "a"),
+      (1, 2, "b"),
+      (3, 4, "a"),
+      (3, 4, "b"),
+    ]
     """
     for element in itertools.product(*iterables):
         normalized = (e if isinstance(e, tuple) else (e,) for e in element)
