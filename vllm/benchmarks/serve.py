@@ -567,13 +567,21 @@ async def benchmark(
     if num_warmups > 0:
         print(f"Warming up with {num_warmups} requests...")
         warmup_pbar = None if disable_tqdm else tqdm(total=num_warmups)
+        warmup_semaphore = (
+            asyncio.Semaphore(max_concurrency)
+            if max_concurrency
+            else contextlib.nullcontext()
+        )
         warmup_tasks = []
 
+        async def warmup_limited_request_func():
+            async with warmup_semaphore:
+                return await request_func(
+                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                )
+
         for _ in range(num_warmups):
-            req_fn = request_func(
-                request_func_input=test_input, session=session, pbar=warmup_pbar
-            )
-            request_task = asyncio.create_task(req_fn)
+            request_task = asyncio.create_task(warmup_limited_request_func())
             warmup_tasks.append(request_task)
         _ = await asyncio.gather(*warmup_tasks)
 
