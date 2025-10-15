@@ -37,4 +37,4 @@ For Qwen3-235B-A22B, we have 4 kv-heads. When we deploy it with `-tp 8`, the KV 
 
 In short, for decode context parallel, try to increase `-tp` size until you get satisfactory performance, and then add `-dcp` to reduce the KV cache duplication.
 
-Decode context parallel is supported in vLLM, for both MLA and GQA models.
+Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
