@@ -50,7 +50,7 @@ def check_stop(
         return True
 
     if request.pooling_params:
-        if pooler_output is not None:
+        if request.num_computed_tokens >= request.num_prompt_tokens:
             request.status = RequestStatus.FINISHED_STOPPED
             return True
         return False

@@ -7,6 +7,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -987,9 +989,10 @@ class Scheduler(SchedulerInterface):
                 )
 
             # Stop checking for pooler models.
-            pooler_output = None
             if pooler_outputs:
                 pooler_output = pooler_outputs[req_index]
+                if pooler_output is not None:
+                    request.pooling_outputs.append(pooler_output)
                 stopped = check_stop(request, self.max_model_len, pooler_output)
 
             if stopped:
@@ -1020,8 +1023,8 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None or kv_transfer_params:
-                # Add EngineCoreOutput for this Request.
+            if new_token_ids or kv_transfer_params:
+                # Add EngineCoreOutput for this generate Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
@@ -1029,7 +1032,32 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        pooling_output=pooler_output,
+                        pooling_output=None,
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                        trace_headers=request.trace_headers,
+                        num_cached_tokens=request.num_cached_tokens,
+                    )
+                )
+            elif request.pooling_params is not None and stopped:
+                pooling_outputs = request.pooling_outputs
+
+                if len(pooling_outputs) == 1:
+                    pooling_output = pooling_outputs[1]
+                else:
+                    assert len(set([x.shape[-1] for x in pooling_outputs])) == 1
+                    pooling_output = torch.concat(pooling_outputs, dim=0)
+
+                # Add EngineCoreOutput for this generate Request.
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=new_token_ids,
+                        finish_reason=request.get_finished_reason(),
+                        new_logprobs=new_logprobs,
+                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        pooling_output=pooling_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
