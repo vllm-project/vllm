@@ -109,10 +109,49 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_size_mb: dict[int,
+                                          float] = field(default_factory=dict)
+    """The thresholds of the communicated tensor sizes under which
+    vllm should use flashinfer fused allreduce. Specified as a
+    dictionary mapping each world size to the threshold in MB
+        { <world size>: <max size in mb> }
+    Unspecified world sizes will fallback to
+        _FI_ALLREDUCE_MAX_INPUT_SIZES = {
+            "9.0": {
+                2: 64 * MiB,  # 64MB
+                4: 2 * MiB,  # 2MB
+                8: 1 * MiB,  # 1MB
+            },
+            "10.0": {
+                2: 64 * MiB,  # 64MB
+                4: 32 * MiB,  # 32MB
+                8: 1 * MiB,  # 1MB
+            },
+        }, where key is the device capability"""
 
     # TODO(luka) better pass enabling system.
+
+    def flashinfer_max_size(self, world_size: int) -> Optional[int]:
+        """
+        Returns the max communication size in bytes for flashinfer
+        allreduce fusion for the given world size. Returns None if world size
+        is not supported by configs as it's not supported by flashinfer.
+        """
+
+        # import here to avoid circular dependencies
+        from vllm.platforms import current_platform
+        MiB = 1024 * 1024
+
+        device_capability = current_platform.get_device_capability(
+        ).as_version_str()
+        fi_allreduce_fusion_max_size_mb = \
+            self.fi_allreduce_fusion_max_size_mb.get(device_capability, {})
+        max_sizes = {
+            k: int(v * MiB)
+            for k, v in fi_allreduce_fusion_max_size_mb.items()
+        }
+        # return None if world size is not supported by flashinfer
+        return max_sizes.get(world_size)
 
     def uuid(self):
         """
@@ -134,6 +173,36 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
+            if self.enable_fi_allreduce_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Allreduce + rms norm + quant (fp8) fusion might not work"
+                )
+
+        # import here to avoid circular dependencies
+        from vllm.platforms import current_platform
+
+        # Default tuned max size of the input tensor
+        # per world size per device capability
+        # to use flashinfer fused allreduce
+        fi_allreduce_fusion_max_size_mb = {
+            "9.0": {
+                2: 64,  # 64MB
+                4: 2,  # 2MB
+                8: 1,  # 1MB
+            },
+            "10.0": {
+                2: 64,  # 64MB
+                4: 32,  # 32MB
+                8: 1,  # 1MB
+            },
+        }
+        device_capability = current_platform.get_device_capability(
+        ).as_version_str()
+
+        max_sizes = fi_allreduce_fusion_max_size_mb.get(device_capability, {})
+        max_sizes.update(self.fi_allreduce_fusion_max_size_mb)
+        self.fi_allreduce_fusion_max_size_mb[device_capability] = max_sizes
 
 
 @config
