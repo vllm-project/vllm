@@ -344,7 +344,7 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
 
     hidden_size = config.hidden_size
-    dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
+    dtype = torch.float16 if current_platform.is_rocm() else config.dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     use_customized_permute = args.use_customized_permute
