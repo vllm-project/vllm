@@ -75,7 +75,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv, direct_register_custom_op, resolve_obj_by_qualname
+from vllm.utils import cdiv, direct_register_custom_op
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
@@ -1169,7 +1169,7 @@ class DeepseekV2Model(nn.Module):
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
-        if self.is_v32 and enable_dsa_topk_indices_buffer():
+        if self.is_v32:
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1509,19 +1509,3 @@ def get_spec_layer_idx_from_weight_name(
             if weight_name.startswith(f"model.layers.{layer_idx + i}."):
                 return layer_idx + i
     return None
-
-
-def enable_dsa_topk_indices_buffer():
-    return resolve_obj_by_qualname(
-        current_platform.get_attn_backend_cls(
-            selected_backend=None,
-            head_size=None,
-            dtype=None,
-            kv_cache_dtype=None,
-            block_size=None,
-            use_v1=True,
-            use_mla=True,
-            has_sink=False,
-            use_sparse=True,
-        )
-    ).enable_dsa_topk_indices_buffer()

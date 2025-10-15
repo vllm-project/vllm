@@ -22,7 +22,6 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (
     DeepseekV2DecoderLayer,
-    enable_dsa_topk_indices_buffer,
     get_spec_layer_idx_from_weight_name,
 )
 from .interfaces import SupportsPP
@@ -64,7 +63,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.device = current_platform.device_type
 
         self.is_v32 = hasattr(config, "index_topk")
-        if self.is_v32 and enable_dsa_topk_indices_buffer():
+        if self.is_v32:
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
