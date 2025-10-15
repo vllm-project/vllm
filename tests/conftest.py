@@ -1011,8 +1011,12 @@ class VllmRunner:
         req_outputs = self.llm.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
-    def encode(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.encode(prompts)
+    def token_embed(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.encode(prompts, pooling_task="token_embed")
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def token_classify(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
         return [req_output.outputs.data for req_output in req_outputs]
 
     def reward(self, prompts: list[str]) -> list[list[float]]:
