@@ -356,13 +356,13 @@ def test_toy_llama(
     )
 
     compile_config_no_compile = CompilationConfig(
-        level=CompilationLevel.NO_COMPILATION,
+        level=CompilationMode.NONE,
         cudagraph_mode=CUDAGraphMode.NONE,
         backend="eager",
     )
 
     compile_config_no_split = CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
+        level=CompilationMode.VLLM_COMPILE,
         use_inductor_graph_partition=use_inductor_graph_partition,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         backend=backend,
