@@ -1,6 +1,9 @@
 # Context Parallel Deployment
 
-Context parallel mainly solves the problem of serving long context requests. As prefill and decode present quite different characteristics, we need to implement context parallel separately for them.
+Context parallel mainly solves the problem of serving long context requests. As prefill and decode present quite different characteristics and have quite different SLO (service level objectives), we need to implement context parallel separately for them. The major considerations are:
+
+- For long context prefill, we need to control the TTFT (time to first token) by amortizing the computation time of the prefill across query tokens.
+- For long context decode, we need more space for KV cache to increase the batchsize (and hence the throughput).
 
 ## Prefill Context Parallel
 
