@@ -1623,6 +1623,29 @@ def is_global_first_rank() -> bool:
         return True
 
 
+def is_local_first_rank() -> bool:
+    """
+    Check if the current process is the first local rank (rank 0 on its node).
+    """
+    try:
+        # prefer the initialized world group if available
+        global _WORLD
+        if _WORLD is not None:
+            return _WORLD.local_rank == 0
+
+        if not torch.distributed.is_initialized():
+            return True
+
+        # fallback to environment-provided local rank if available
+        # note: envs.LOCAL_RANK is set when using env:// launchers (e.g., torchrun)
+        try:
+            return int(envs.LOCAL_RANK) == 0  # type: ignore[arg-type]
+        except Exception:
+            return torch.distributed.get_rank() == 0
+    except Exception:
+        return True
+
+
 def _node_count(pg: ProcessGroup | StatelessProcessGroup) -> int:
     """
     Returns the total number of nodes in the process group.

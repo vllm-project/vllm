@@ -13,7 +13,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.distributed.parallel_state import is_global_first_rank
+from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -312,7 +312,7 @@ class DefaultModelLoader(BaseModelLoader):
             loaded_weights = load_weights_and_online_quantize(self, model, model_config)
 
         self.counter_after_loading_weights = time.perf_counter()
-        if is_global_first_rank():
+        if is_local_first_rank():
             logger.info(
                 "Loading weights took %.2f seconds",
                 self.counter_after_loading_weights
