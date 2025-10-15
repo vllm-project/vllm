@@ -820,10 +820,10 @@ class Llama4ForConditionalGeneration(
         # shard image input
         if self.use_data_parallel:
             vision_embeddings_flat = run_dp_sharded_vision_model(
-                flat_data, self.vision_model
+                pixel_values, self.vision_model
             )
         else:
-            vision_embeddings_flat = self.vision_model(flat_data)
+            vision_embeddings_flat = self.vision_model(pixel_values)
 
         vision_embeddings_flat = self.multi_modal_projector(vision_embeddings_flat)
 
