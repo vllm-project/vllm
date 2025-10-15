@@ -70,7 +70,7 @@ from vllm.transformers_utils.tokenizers import (
     truncate_tool_call_ids,
     validate_request_params,
 )
-from vllm.utils import as_list
+from vllm.utils import as_list, random_uuid
 
 logger = init_logger(__name__)
 
@@ -256,9 +256,18 @@ class OpenAIServingChat(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
+        request_id = self._ensure_prefix(request.request_id or random_uuid())
+
+        if request.kv_transfer_params:
+            request_id = self._ensure_prefix(request.kv_transfer_params.get("p_side_request_id", request_id))
+
+        default = request.request_id or request_id
+        if raw_request is None:
+            req_id_head = default
+        else:
+            req_id_head = raw_request.headers.get("X-Request-ID")
+
+        raw_request_id = self._ensure_prefix(req_id_head) if req_id_head else request_id
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -346,7 +355,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.chat_completion_stream_generator(
                 request,
                 result_generator,
-                request_id,
+                raw_request_id, # the real request ID to return to user
                 model_name,
                 conversation,
                 tokenizer,
@@ -354,10 +363,12 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         try:
+            # P side in P/D seperate always call the full generator, no need to pass internal request id to streaming generator
             return await self.chat_completion_full_generator(
                 request,
                 result_generator,
-                request_id,
+                raw_request_id, # the real request ID to return to user
+                request_id, # the internal vLLM request ID, pass it to D side in kv_transfer_params
                 model_name,
                 conversation,
                 tokenizer,
@@ -366,6 +377,11 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+
+    def _ensure_prefix(self, rid, prefix="chatcmpl-"):
+        if rid and not rid.startswith(prefix):
+            return prefix + rid
+        return rid
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -1251,7 +1267,8 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
-        request_id: str,
+        request_id: str, # the real request ID to return to user
+        vllm_request_id: str, # the internal vLLM request ID, pass it to D side in kv_transfer_params
         model_name: str,
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
@@ -1270,6 +1287,10 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert final_res is not None
+
+        # Pass the internal request id in P side to D side in kv_transfer_params
+        if final_res.kv_transfer_params:
+            final_res.kv_transfer_params["p_side_request_id"] = vllm_request_id
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
