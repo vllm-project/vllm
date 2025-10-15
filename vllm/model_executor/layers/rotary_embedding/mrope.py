@@ -7,7 +7,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .base import RotaryEmbedding
+from .base import RotaryEmbeddingBase
 from .common import apply_rotary_emb_dispatch
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
 
@@ -199,7 +199,7 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return x_t
 
 
-class MRotaryEmbedding(RotaryEmbedding):
+class MRotaryEmbedding(RotaryEmbeddingBase):
     """Rotary Embedding with Multimodal Sections."""
 
     def __init__(
@@ -356,24 +356,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
-
-    def forward_xpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        offsets: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_native(positions, query, key, offsets)
-
-    def forward_cpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        offsets: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_native(positions, query, key, offsets)
 
     @staticmethod
     def get_next_input_positions(
