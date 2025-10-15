@@ -256,10 +256,10 @@ class OpenAIServingChat(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
-        request_id = self._ensure_prefix(request.request_id or random_uuid())
+        request_id = self._add_prefix(request.request_id or random_uuid())
 
         if request.kv_transfer_params:
-            request_id = self._ensure_prefix(request.kv_transfer_params.get("p_side_request_id", request_id))
+            request_id = self._add_prefix(request.kv_transfer_params.get("p_side_request_id", request_id))
 
         default = request.request_id or request_id
         if raw_request is None:
@@ -267,7 +267,7 @@ class OpenAIServingChat(OpenAIServing):
         else:
             req_id_head = raw_request.headers.get("X-Request-ID")
 
-        raw_request_id = self._ensure_prefix(req_id_head) if req_id_head else request_id
+        raw_request_id = self._add_prefix(req_id_head) if req_id_head else request_id
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -378,10 +378,12 @@ class OpenAIServingChat(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-    def _ensure_prefix(self, rid, prefix="chatcmpl-"):
-        if rid and not rid.startswith(prefix):
-            return prefix + rid
-        return rid
+    def _add_prefix(self, request_id, prefix="chatcmpl-"):
+        if request_id and not request_id.startswith(prefix):
+            return prefix + request_id
+        elif not request_id:
+            return prefix + random_uuid()
+        return request_id
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
