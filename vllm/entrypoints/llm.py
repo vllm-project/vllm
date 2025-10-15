@@ -176,7 +176,7 @@ class LLM:
             argument is deprecated and will be removed in v0.12.0 or v1.0.0,
             whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
-            integer, it is used as the level of compilation optimization. If it
+            integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
@@ -257,9 +257,7 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    level=compilation_config
-                )
+                compilation_config_instance = CompilationConfig(mode=compilation_config)
             elif isinstance(compilation_config, dict):
                 compilation_config_instance = CompilationConfig(
                     **{
