@@ -1041,7 +1041,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-        last_step_valid_sampled_token_ids = None,
+        last_step_valid_sampled_token_ids=None,
     ) -> tuple[
         PerLayerAttnMetadata,
         torch.Tensor,
@@ -1088,7 +1088,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 draft_token_ids = self._draft_token_ids
             for x in range(num_reqs):
                 self.input_batch.token_ids_cpu[
-                    x, start_index[x]:end_token_index[x]
+                    x, start_index[x] : end_token_index[x]
                 ] = draft_token_ids[x]
                 self.input_batch.spec_token_ids[x] = draft_token_ids[x]
             # NOTE(woosuk): `num_tokens` here may include spec tokens.
@@ -2764,9 +2764,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
             if kv_connector_output is not None:
                 final_kv_connector_output.finished_sending.update(
-                    kv_connector_output.finished_sending)
+                    kv_connector_output.finished_sending
+                )
                 final_kv_connector_output.finished_recving.update(
-                    kv_connector_output.finished_recving)
+                    kv_connector_output.finished_recving
+                )
 
         final_token_ids = None
         for each_token_ids in cached_valid_sampled_token_ids:
