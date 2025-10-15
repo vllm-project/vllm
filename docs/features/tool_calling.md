@@ -27,27 +27,29 @@ Next, make a request that triggers the model to use the available tools:
         return f"Getting the weather for {location} in {unit}..."
     tool_functions = {"get_weather": get_weather}
 
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location", "unit"],
                 },
-                "required": ["location", "unit"]
-            }
-        }
-    }]
+            },
+        },
+    ]
 
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
         tools=tools,
-        tool_choice="auto"
+        tool_choice="auto",
     )
 
     tool_call = response.choices[0].message.tool_calls[0].function
@@ -402,8 +404,7 @@ Here is a summary of a plugin file:
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
-        def adjust_request(
-                self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
             return request
 
         # implement the tool call parse for stream call
@@ -416,7 +417,7 @@ Here is a summary of a plugin file:
             current_token_ids: Sequence[int],
             delta_token_ids: Sequence[int],
             request: ChatCompletionRequest,
-        ) -> Union[DeltaMessage, None]:
+        ) -> DeltaMessage | None:
             return delta
 
         # implement the tool parse for non-stream call

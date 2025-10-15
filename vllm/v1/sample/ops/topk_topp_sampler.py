@@ -46,23 +46,15 @@ class TopKTopPSampler(nn.Module):
                         "Falling back to default sampling implementation."
                     )
                     self.forward = self.forward_native
-                elif envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
-                    # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
-                    # sampling unless VLLM_USE_FLASHINFER_SAMPLER=1 (i.e., by
-                    # default it is unused). For backward compatibility, we set
-                    # `VLLM_USE_FLASHINFER_SAMPLER` as None by default and
-                    # interpret it differently in V0 and V1 samplers: In V0,
-                    # None means False, while in V1, None means True. This is
-                    # why we use the condition
-                    # `envs.VLLM_USE_FLASHINFER_SAMPLER is not False` here.
+                elif envs.VLLM_USE_FLASHINFER_SAMPLER:
+                    # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
                     logger.info_once("Using FlashInfer for top-p & top-k sampling.")
                     self.forward = self.forward_cuda
                 else:
-                    logger.warning_once(
-                        "FlashInfer is available, but it is not enabled. "
-                        "Falling back to the PyTorch-native implementation of "
-                        "top-p & top-k sampling. For the best performance, "
-                        "please set VLLM_USE_FLASHINFER_SAMPLER=1."
+                    logger.debug_once(
+                        "FlashInfer top-p/top-k sampling is available but disabled "
+                        "by default. Set VLLM_USE_FLASHINFER_SAMPLER=1 to opt in "
+                        "after verifying accuracy for your workloads."
                     )
                     self.forward = self.forward_native
             else:
