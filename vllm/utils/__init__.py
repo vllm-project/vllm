@@ -3273,7 +3273,7 @@ def _is_torch_equal(target: str) -> bool:
     # or "2.6.0+cu128" but never "2.6.0.1"
     return (
         torch_version >= version.parse(target)
-        and version.parse(target + ".1") >= torch_version
+        and version.parse(target + ".1") > torch_version
     )
 
 
