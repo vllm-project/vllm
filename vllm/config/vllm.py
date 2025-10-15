@@ -67,49 +67,56 @@ class OptimizationLevel(Enum):
 
 # PassConfig preset instances for each compilation mode. Default fields set.
 pass_config_none = PassConfig(
-    enable_fusion=True,
-    enable_attn_fusion=True,
-    enable_noop=True,
-    enable_sequence_parallelism=True,
-    enable_async_tp=True,
-    enable_fi_allreduce_fusion=True,
+    enable_noop=False,
+    enable_fusion=False,
+    enable_attn_fusion=None,
+    enable_sequence_parallelism=None,
+    enable_async_tp=None,
+    enable_fi_allreduce_fusion=False,
     fi_allreduce_fusion_max_token_num=16384,
 )
 pass_config_stock_torch_compile = PassConfig(
-    enable_fusion=True,
-    enable_attn_fusion=True,
     enable_noop=True,
-    enable_sequence_parallelism=True,
-    enable_async_tp=True,
-    enable_fi_allreduce_fusion=True,
+    enable_fusion=True,
+    enable_attn_fusion=None,
+    enable_sequence_parallelism=None,
+    enable_async_tp=None,
+    enable_fi_allreduce_fusion=False,
     fi_allreduce_fusion_max_token_num=16384,
 )
 pass_config_dynamo_trace_once = PassConfig(
+    enable_noop=True,
     enable_fusion=True,
     enable_attn_fusion=True,
-    enable_noop=True,
-    enable_sequence_parallelism=True,
-    enable_async_tp=True,
-    enable_fi_allreduce_fusion=True,
+    enable_sequence_parallelism=None,
+    enable_async_tp=None,
+    enable_fi_allreduce_fusion=False,
     fi_allreduce_fusion_max_token_num=16384,
 )
 
 pass_config_vllm_compile = PassConfig(
-    enable_fusion=True,
-    enable_attn_fusion=True,
     enable_noop=True,
-    enable_sequence_parallelism=True,
-    enable_async_tp=True,
+    enable_fusion=True,
+    enable_attn_fusion=None,
+    enable_sequence_parallelism=None,
+    enable_async_tp=None,
     enable_fi_allreduce_fusion=True,
     fi_allreduce_fusion_max_token_num=16384,
 )
 
-pass_config_enable_fields = [
+pass_config_level_fields = [
+    "enable_fusion",
     "enable_attn_fusion",
-    "enable_noop",
+    "enable_fi_allreduce_fusion",
+]
+
+pass_config_quantization_fields = [
+    "enable_attn_fusion",
+]
+
+pass_config_moe_fields = [
     "enable_sequence_parallelism",
     "enable_async_tp",
-    "enable_fi_allreduce_fusion",
 ]
 
 compilation_config_default_fields = [
@@ -384,18 +391,33 @@ class VllmConfig:
             - O2 (DYNAMO_TRACE_ONCE): Full optimization
             - O3 (VLLM_COMPILE): Maximum optimization with autotuning
         """
-        # TODO: Implement model specific paramters,
+        # Apply optimization level default if not set by user.
         default_config = optimization_level_to_config[self.optimization_level]
         for element in compilation_config_default_fields:
             if getattr(self.compilation_config, element) is None:
                 setattr(self.compilation_config, element, default_config[element])
-        for element in pass_config_enable_fields:
-            if getattr(self.compilation_config.pass_config, element) is None:
-                default_element = getattr(default_config["pass_config"], element)
-                setattr(self.compilation_config.pass_config, element, default_element)
         for element in vllm_config_default_fields:
             if getattr(self, element) is None:
                 setattr(self, element, default_config["element"])
+
+        for element in pass_config_level_fields:
+            if getattr(self.compilation_config.pass_config, element) is None:
+                default_element = getattr(default_config["pass_config"], element)
+                setattr(self.compilation_config.pass_config, element, default_element)
+
+        assert self.optimization_level is not None
+
+        # Apply model specific optimizations.
+        if self.optimization_level > OptimizationLevel.O0:  # type: ignore
+            is_quantized = self.model_config.is_quantized()
+            for element in pass_config_quantization_fields:
+                if getattr(self.compilation_config.pass_config, element) is None:
+                    setattr(self.compilation_config.pass_config, element, is_quantized)
+
+            is_sequential = not self.model_config.is_model_moe()
+            for element in pass_config_moe_fields:
+                if getattr(self.compilation_config.pass_config, element) is None:
+                    setattr(self.compilation_config.pass_config, element, is_sequential)
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
