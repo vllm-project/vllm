@@ -40,7 +40,7 @@ class ModernBertEmbeddings(nn.Module):
             config.vocab_size, config.hidden_size
         )
         self.norm = nn.LayerNorm(
-            config.hidden_size, eps=config.layer_norm_eps, bias=config.norm_bias
+            config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
