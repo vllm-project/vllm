@@ -594,8 +594,6 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
-
     if ramp_up_strategy is not None:
         print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
         print(
@@ -605,7 +603,7 @@ async def benchmark(
     else:
         print(f"Traffic request rate: {request_rate}")
 
-    print(f"Burstiness factor: {burstiness} ({distribution})")
+    print(f"Burstiness factor: {burstiness}")
     print(f"Maximum request concurrency: {max_concurrency}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
@@ -1008,8 +1006,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=float("inf"),
         help="Number of requests per second. If this is inf, "
         "then all the requests are sent at time 0. "
-        "Otherwise, we use Poisson process or gamma distribution "
-        "to synthesize the request arrival times.",
+        "Otherwise, we use gamma distribution to synthesize the request arrival times.",
     )
     parser.add_argument(
         "--burstiness",
