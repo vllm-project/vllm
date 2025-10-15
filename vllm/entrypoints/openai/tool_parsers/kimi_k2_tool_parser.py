@@ -646,4 +646,4 @@ class KimiK2ToolParser(ToolParser):
 
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            return None  # do not stream a delta. skip this token ID.(base)
+            return None  # do not stream a delta. skip this token ID.
