@@ -4,7 +4,7 @@
 
 from collections.abc import Sequence
 from typing import Union
-
+import json
 import regex as re
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -28,9 +28,6 @@ def normalize_quotes_for_json(text: str) -> str:
     """
     if not text or not isinstance(text, str):
         return text
-    
-    import json
-    import re
     
     def unwrap_nested_text_structure(s: str, max_depth: int = 10) -> str:
         """
@@ -192,97 +189,6 @@ class KimiK2ToolParser(ToolParser):
             raise RuntimeError(
                 "Kimi-K2 Tool parser could not locate tool call start/end "
                 "tokens in the tokenizer!")
-
-    # def extract_tool_calls(
-    #     self,
-    #     model_output: str,
-    #     request: ChatCompletionRequest,
-    # ) -> ExtractedToolCallInformation:
-
-    #     # Check for both standard format and Kimi format
-    #     # Standard: <|tool_calls_section_begin|><|tool_call_begin|>functions.name:id<|tool_call_argument_begin|>...<|tool_call_end|><|tool_calls_section_end|>
-    #     # Kimi: <|tool_call_end|><|tool_call_begin|>functions.name:id<|tool_call_argument_begin|>...<|tool_call_end|><|tool_calls_section_end|>
-        
-    #     try:
-    #         # Use a comprehensive regex that handles both formats
-    #         tool_call_pattern = re.compile(
-    #             r"<\|tool_call_begin\|>\s*functions\.([^:]+):(\d+)\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*<\|tool_call_end\|>",
-    #             re.DOTALL
-    #         )
-    #         matches = tool_call_pattern.findall(model_output)
-            
-    #         if matches:
-    #             tool_calls = []
-    #             for function_name, call_id, function_args in matches:
-    #                 # Normalize quotes in function arguments to ensure valid JSON
-    #                 normalized_args = normalize_quotes_for_json(function_args)
-    #                 tool_calls.append(
-    #                     ToolCall(
-    #                         id=f"functions.{function_name}:{call_id}",
-    #                         type='function',
-    #                         function=FunctionCall(name=function_name,
-    #                                               arguments=normalized_args),
-    #                     ))
-
-    #             # Extract content before tool calls (following兜底逻辑 approach)
-    #             # Always extract content before <|tool_call_begin|>, then clean misplaced markers
-    #             content = ""
-    #             first_tool_begin = model_output.find(self.tool_call_start_token)
-    #             if first_tool_begin != -1:
-    #                 content = model_output[:first_tool_begin]
-                    
-    #                 # Remove misplaced <|tool_call_end|> markers that should have been <|tool_calls_section_begin|>
-    #                 # This handles cases where the model replaced the section begin marker
-    #                 content = re.sub(r"<\|tool_call_end\|>", "", content)
-                    
-    #                 # Clean up any remaining markers
-    #                 content = re.sub(r"<\|tool_calls_section_end\|>\s*$", "", content, flags=re.DOTALL)
-                    
-    #                 # Clean other markers
-    #                 markers_to_clean = [
-    #                     self.tool_calls_start_token,
-    #                     self.tool_calls_end_token,
-    #                     "<|tool_call_argument_begin|>"
-    #                 ]
-    #                 for marker in markers_to_clean:
-    #                     content = content.replace(marker, "")
-    #                 content = content.strip()
-                    
-    #                 # Normalize quotes in content to ensure valid JSON
-    #                 if content:
-    #                     content = normalize_quotes_for_json(content)
-
-    #             return ExtractedToolCallInformation(
-    #                 tools_called=True,
-    #                 tool_calls=tool_calls,
-    #                 content=content if content else None,
-    #             )
-
-    #     except Exception:
-    #         logger.exception("Error in extracting tool calls from response.")
-            
-    #     # If no tool calls found, return cleaned content
-    #     cleaned_content = model_output
-    #     markers_to_clean = [
-    #         self.tool_calls_start_token,
-    #         self.tool_calls_end_token,
-    #         self.tool_call_start_token, 
-    #         self.tool_call_end_token,
-    #         "<|tool_call_argument_begin|>"
-    #     ]
-    #     for marker in markers_to_clean:
-    #         cleaned_content = cleaned_content.replace(marker, "")
-    #     cleaned_content = cleaned_content.strip()
-        
-    #     # Normalize quotes in content to ensure valid JSON
-    #     if cleaned_content:
-    #         cleaned_content = normalize_quotes_for_json(cleaned_content)
-        
-    #     return ExtractedToolCallInformation(
-    #         tools_called=False,
-    #         tool_calls=[],
-    #         content=cleaned_content if cleaned_content else None
-    #     )
 
 
     def extract_tool_calls(
