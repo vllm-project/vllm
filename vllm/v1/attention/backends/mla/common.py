@@ -546,7 +546,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.aot_schedule = current_platform.is_cuda_alike()
+        self.align_chunk_ctx_to_page_size = current_platform.is_cuda_alike()
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -555,8 +555,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        # Don't try to access the runner on AMD
-        if self.aot_schedule:
+        if self.align_chunk_ctx_to_page_size:
             self.page_size = self.kv_cache_spec.block_size
 
         self.chunked_prefill_workspace_size = (
@@ -816,7 +815,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size // num_prefills_with_context_cpu
                 )
 
-                if self.aot_schedule:
+                if self.align_chunk_ctx_to_page_size:
                     # align max_context_chunk to page_size by rounding down,
                     # currently the `gather_and_maybe_dequant_cache` kernel
                     # cannot handle `context_chunk_starts` that are not aligned
