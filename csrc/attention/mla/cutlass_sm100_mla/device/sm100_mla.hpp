@@ -128,9 +128,6 @@ public:
     if (args.split_kv >= 1) return;
     auto [H, K, D, B] = args.problem_shape;
     int sm_count = args.hw_info.sm_count;
-
-    // Ratio-based heuristic for max_splits: seq_length_k / batch_size
-    // K is sequence length in tokens, convert to "k" units (1024 tokens)
     float seq_length_k = static_cast<float>(K) / 1024.0f;
     int max_splits = 1;
 
