@@ -863,8 +863,8 @@ def determine_expert_map(
     ep_size: int,
     ep_rank: int,
     global_num_experts: int,
-    num_fused_shared_experts: int,
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
+    num_fused_shared_experts: int = 0,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """
     Calculates how many experts should be assigned to each rank for EP and
@@ -1180,8 +1180,8 @@ class FusedMoE(CustomOp):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
-                num_fused_shared_experts=self.num_fused_shared_experts,
                 expert_placement_strategy=expert_placement_strategy,
+                num_fused_shared_experts=self.num_fused_shared_experts,
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("expert_map", expert_map)
