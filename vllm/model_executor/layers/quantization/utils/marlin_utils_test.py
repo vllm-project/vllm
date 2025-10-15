@@ -108,12 +108,12 @@ def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
     perm = np.array(perm_list)
 
     if num_bits == 4:
-        if is_a_8bit:
+        if is_a_8bit:  # noqa: SIM108
             interleave = np.array([0, 4, 1, 5, 2, 6, 3, 7])
         else:
             interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
     elif num_bits == 8:
-        if is_a_8bit:
+        if is_a_8bit:  # noqa: SIM108
             interleave = np.array([0, 1, 2, 3])
         else:
             interleave = np.array([0, 2, 1, 3])
