@@ -183,6 +183,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     )
 
         # Get the metadata
+        if self._is_dummy_run():
+            return
+
         metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, P2pNcclConnectorMetadata)
 
@@ -283,6 +286,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 return layer[:, block_ids, ...]
 
             return None
+
+        if self._is_dummy_run():
+            return
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)

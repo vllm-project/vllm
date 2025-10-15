@@ -162,8 +162,19 @@ def test_multi_shared_storage_connector_consistency():
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage1-WORKER"][:5] == [
-        "register_kv_caches",
+    register_kv_caches_event_index = events["storage1-WORKER"].index(
+        "register_kv_caches"
+    )
+    bind_connector_metadata_event_index = events["storage1-WORKER"].index(
+        "bind_connector_metadata"
+    )
+    assert (
+        events["storage1-WORKER"][register_kv_caches_event_index]
+        == "register_kv_caches"
+    )
+    assert events["storage1-WORKER"][
+        bind_connector_metadata_event_index : bind_connector_metadata_event_index + 4
+    ] == [
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",
@@ -174,8 +185,13 @@ def test_multi_shared_storage_connector_consistency():
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-WORKER"][:5] == [
-        "register_kv_caches",
+    assert (
+        events["storage2-WORKER"][register_kv_caches_event_index]
+        == "register_kv_caches"
+    )
+    assert events["storage2-WORKER"][
+        bind_connector_metadata_event_index : bind_connector_metadata_event_index + 4
+    ] == [
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",

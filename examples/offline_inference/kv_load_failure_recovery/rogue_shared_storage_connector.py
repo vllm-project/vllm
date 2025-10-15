@@ -45,6 +45,11 @@ class RogueSharedStorageConnector(SharedStorageConnector):
         self._req_to_block_ids: dict[str, list[int]] = dict()
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+
+        if self._is_dummy_run():
+            return
+
         assert isinstance(connector_metadata, RogueSharedStorageConnectorMetadata)
         index, failed_request = next(
             (
@@ -66,14 +71,17 @@ class RogueSharedStorageConnector(SharedStorageConnector):
                 "first load request. Total blocks: %d",
                 len(self._invalid_block_ids),
             )
-        super().bind_connector_metadata(connector_metadata)
 
     def clear_connector_metadata(self) -> None:
         self._invalid_block_ids = None
         super().clear_connector_metadata()
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
-        if self._async_load and forward_context.attn_metadata is None:
+        if (
+            self._async_load
+            and forward_context.attn_metadata is None
+            and not self._is_dummy_run()
+        ):
             # Bypass  sanity check in super().start_load_kv
             forward_context.attn_metadata = "None"
 
@@ -82,7 +90,7 @@ class RogueSharedStorageConnector(SharedStorageConnector):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        if self._async_load:
+        if self._async_load and not self._is_dummy_run():
             meta = self._get_connector_metadata()
             assert isinstance(meta, RogueSharedStorageConnectorMetadata)
             if meta.req_to_block_ids:
