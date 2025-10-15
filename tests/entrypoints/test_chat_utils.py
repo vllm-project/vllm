@@ -1810,6 +1810,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         "unsed_kwargs_2": "abc",
         # should not appear
         "chat_template": "{% Hello world! %}",
+        "tokenize": True,
         # used by tokenizer
         "continue_final_message": True,
         "tools": tools,

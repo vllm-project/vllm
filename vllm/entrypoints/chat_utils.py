@@ -1509,7 +1509,7 @@ def resolve_chat_template_kwargs(
 
     # We exclude chat_template from kwargs here, because
     # chat template has been already resolved at this stage
-    unexpected_vars = {"chat_template"}
+    unexpected_vars = {"chat_template", "tokenize"}
     accept_vars = (fn_kw | template_vars) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
@@ -1521,7 +1521,6 @@ def apply_hf_chat_template(
     tools: list[dict[str, Any]] | None,
     *,
     model_config: ModelConfig,
-    tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
@@ -1548,7 +1547,7 @@ def apply_hf_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
-            tokenize=tokenize,
+            tokenize=False,
             **resolved_kwargs,
         )
 
