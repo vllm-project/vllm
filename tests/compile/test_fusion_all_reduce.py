@@ -13,7 +13,7 @@ from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     DeviceConfig,
     ModelConfig,
     PassConfig,
@@ -291,7 +291,7 @@ def all_reduce_fusion_pass_on_test_model(
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE, custom_ops=custom_ops
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=custom_ops
         )
     )
     vllm_config.compilation_config.pass_config = PassConfig(
@@ -302,7 +302,7 @@ def all_reduce_fusion_pass_on_test_model(
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
-    model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
+    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
     vllm_config.model_config = ModelConfig(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )

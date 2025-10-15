@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 import torch._inductor.pattern_matcher as pm

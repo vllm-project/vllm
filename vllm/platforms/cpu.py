@@ -4,13 +4,13 @@
 import json
 import os
 import platform
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -128,7 +128,7 @@ class CpuPlatform(Platform):
         selected_backend: "_Backend",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -247,12 +247,12 @@ class CpuPlatform(Platform):
             parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
-        from vllm.config import CompilationLevel
+        from vllm.config import CompilationMode
 
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 
         compilation_config = vllm_config.compilation_config
-        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
+        if vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # Note: vLLM V1 is using PIECEWISE level compilation, which will
             # take time to compile kernels just-in-time with the inductor
             # backend. For CPU CI tests, most of them are executed fast and
@@ -265,7 +265,7 @@ class CpuPlatform(Platform):
             else:
                 backend = "inductor"
 
-            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
             compilation_config.backend = backend
             compilation_config.inductor_compile_config.update(
                 {
@@ -275,11 +275,9 @@ class CpuPlatform(Platform):
                     "epilogue_fusion": True,
                 }
             )
-            if compilation_config.use_inductor:
-                compilation_config.custom_ops = ["none"]
 
         if vllm_config.lora_config is not None:
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.mode = CompilationMode.NONE
 
         assert vllm_config.device_config.device_type == "cpu"
 

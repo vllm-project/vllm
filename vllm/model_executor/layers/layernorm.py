@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
 
-from typing import Optional, Union
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -159,9 +157,9 @@ class RMSNorm(CustomOp):
         self,
         hidden_size: int,
         eps: float = 1e-6,
-        var_hidden_size: Optional[int] = None,
+        var_hidden_size: int | None = None,
         has_weight: bool = True,
-        dtype: Optional[torch.dtype] = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
 
@@ -188,10 +186,10 @@ class RMSNorm(CustomOp):
         variance_epsilon: float,
         hidden_size: int,
         orig_dtype: torch.dtype,
-        weight: Optional[torch.Tensor] = None,
-        residual: Optional[torch.Tensor] = None,
-        variance_size_override: Optional[int] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        weight: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+        variance_size_override: int | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         x = x.to(torch.float32)
         if residual is not None:
@@ -231,8 +229,8 @@ class RMSNorm(CustomOp):
     def forward_native(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
 
         return self.forward_static(
@@ -248,8 +246,8 @@ class RMSNorm(CustomOp):
     def forward_cuda(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
@@ -264,8 +262,8 @@ class RMSNorm(CustomOp):
     def forward_hip(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
@@ -280,8 +278,8 @@ class RMSNorm(CustomOp):
     def forward_xpu(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
@@ -330,12 +328,16 @@ class GemmaRMSNorm(CustomOp):
         weight: torch.Tensor,
         variance_epsilon: float,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
         if residual is not None:
-            x = x + residual.float() if orig_dtype == torch.float16 else x + residual
+            x = (
+                x.float() + residual.float()
+                if orig_dtype == torch.float16
+                else x + residual
+            )
             residual = x
 
         x = x.float()
@@ -350,16 +352,16 @@ class GemmaRMSNorm(CustomOp):
     def forward_native(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         return self.forward_static(self.weight.data, self.variance_epsilon, x, residual)
 
     def forward_cuda(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if torch.compiler.is_compiling():
             return self.forward_native(x, residual)
 

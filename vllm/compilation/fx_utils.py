@@ -3,7 +3,6 @@
 
 import operator
 from collections.abc import Iterable, Iterator
-from typing import Optional, Union
 
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -19,9 +18,7 @@ def is_auto_func(node: fx.Node, op: OpOverload) -> bool:
 
 
 # Returns the first specified node with the given op (if it exists)
-def find_specified_fn_maybe(
-    nodes: Iterable[fx.Node], op: OpOverload
-) -> Optional[fx.Node]:
+def find_specified_fn_maybe(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node | None:
     for node in nodes:
         if node.target == op:
             return node
@@ -36,7 +33,7 @@ def find_specified_fn(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node:
 
 
 # Returns the first auto_functionalized node with the given op (if it exists)
-def find_auto_fn_maybe(nodes: Iterable[fx.Node], op: OpOverload) -> Optional[fx.Node]:
+def find_auto_fn_maybe(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node | None:
     for node in nodes:
         if is_func(node, auto_functionalized) and node.args[0] == op:  # noqa
             return node
@@ -52,7 +49,7 @@ def find_auto_fn(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node:
 
 # Returns the getitem node that extracts the idx-th element from node
 # (if it exists)
-def find_getitem_maybe(node: fx.Node, idx: int) -> Optional[fx.Node]:
+def find_getitem_maybe(node: fx.Node, idx: int) -> fx.Node | None:
     for user in node.users:
         if is_func(user, operator.getitem) and user.args[1] == idx:
             return user
@@ -69,7 +66,7 @@ def find_getitem(node: fx.Node, idx: int) -> fx.Node:
 # An auto-functionalization-aware utility for finding nodes with a specific op
 # Also handles op overload packets and finds all overloads
 def find_op_nodes(
-    op: Union[OpOverload, OpOverloadPacket], graph: fx.Graph
+    op: OpOverload | OpOverloadPacket, graph: fx.Graph
 ) -> Iterator[fx.Node]:
     if isinstance(op, OpOverloadPacket):
         for overload in op.overloads():

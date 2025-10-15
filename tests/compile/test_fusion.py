@@ -12,7 +12,7 @@ from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     ModelConfig,
     PassConfig,
     VllmConfig,
@@ -153,7 +153,7 @@ def test_fusion_rmsnorm_quant(
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
             pass_config=PassConfig(enable_fusion=True, enable_noop=True),
         ),

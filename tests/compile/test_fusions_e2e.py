@@ -6,7 +6,7 @@ from __future__ import annotations
 import itertools
 import logging
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any
 
 import pytest
 import regex as re
@@ -14,7 +14,7 @@ from black.cache import NamedTuple
 
 from tests.v1.attention.utils import _Backend
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel, CUDAGraphMode, PassConfig
+from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
 from vllm.utils.flashinfer import has_flashinfer
@@ -27,7 +27,7 @@ class ModelBackendTestCase(NamedTuple):
     model_kwargs: dict[str, Any]
     backend: _Backend
     attention_fusions: int
-    allreduce_fusions: Optional[int] = None
+    allreduce_fusions: int | None = None
 
 
 MODELS_FP8: list[ModelBackendTestCase] = []
@@ -130,7 +130,7 @@ def test_attn_quant(
 
     if inductor_graph_partition:
         mode = CUDAGraphMode.FULL_AND_PIECEWISE
-        splitting_ops: Optional[list[str]] = None
+        splitting_ops: list[str] | None = None
     else:
         mode = CUDAGraphMode.FULL_DECODE_ONLY
         splitting_ops = []
@@ -151,7 +151,7 @@ def test_attn_quant(
         cudagraph_mode=mode,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationLevel.PIECEWISE,
+        level=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
@@ -212,7 +212,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
 
     if inductor_graph_partition:
         mode = CUDAGraphMode.FULL_AND_PIECEWISE
-        splitting_ops: Optional[list[str]] = None
+        splitting_ops: list[str] | None = None
     else:
         mode = CUDAGraphMode.FULL_DECODE_ONLY
         splitting_ops = []
@@ -233,7 +233,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         custom_ops=custom_ops_list,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationLevel.PIECEWISE,
+        level=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(
             enable_attn_fusion=True,
             enable_noop=True,
@@ -268,9 +268,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     assert int(matches[1]) == allreduce_fusions
 
 
-def run_model(
-    compile_config: Union[int, CompilationConfig], model: str, **model_kwargs
-):
+def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)

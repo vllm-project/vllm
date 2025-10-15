@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from copy import deepcopy
-from typing import Callable, Union
 
 import depyf
 from torch import fx
@@ -50,7 +49,7 @@ class TestBackend:
     Inductor config is default-initialized from VllmConfig.CompilationConfig.
     """
 
-    def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph], None]]):
+    def __init__(self, *passes: InductorPass | Callable[[fx.Graph], None]):
         self.custom_passes = list(passes)
         vllm_config = get_current_vllm_config()
         compile_config = vllm_config.compilation_config

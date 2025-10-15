@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 from torch._higher_order_ops import auto_functionalized
@@ -63,7 +62,7 @@ class MatcherCustomOp(ABC):
 
 
 class MatcherRMSNorm(MatcherCustomOp):
-    def __init__(self, epsilon: float, enabled: Optional[bool] = None):
+    def __init__(self, epsilon: float, enabled: bool | None = None):
         if enabled is None:
             enabled = RMSNorm.enabled()
 
@@ -104,7 +103,7 @@ class MatcherRMSNorm(MatcherCustomOp):
 
 
 class MatcherFusedAddRMSNorm(MatcherCustomOp):
-    def __init__(self, epsilon: float, enabled: Optional[bool] = None):
+    def __init__(self, epsilon: float, enabled: bool | None = None):
         if enabled is None:
             enabled = RMSNorm.enabled()
 
@@ -147,7 +146,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
 
 
 class MatcherQuantFP8(MatcherCustomOp):
-    def __init__(self, quant_key: QuantKey, enabled: Optional[bool] = None):
+    def __init__(self, quant_key: QuantKey, enabled: bool | None = None):
         if enabled is None:
             enabled = QuantFP8.enabled()
 
@@ -165,7 +164,7 @@ class MatcherQuantFP8(MatcherCustomOp):
     def forward_custom(
         self,
         input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
+        scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # TODO: why does empty_like produce a permute but
         #  empty via shape doesn't?
@@ -190,7 +189,7 @@ class MatcherQuantFP8(MatcherCustomOp):
     def forward_native(
         self,
         input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
+        scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.quant_fp8(input, scale)
 
