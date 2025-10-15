@@ -1,6 +1,4 @@
-# Study 1: Should we revert CUTLASS MLA num-splits heuristic?
-# Question: What is the optimal num_kv_splits for different batch sizes?
-# Related PRs: #24966, #25509
+# Study 1: What is the optimal CUTLASS_MLA num_kv_splits for different batch sizes?
 
 description: "CUTLASS MLA num-splits optimization study"
 

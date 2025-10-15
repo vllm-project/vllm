@@ -1,5 +1,4 @@
 # Study 3: Is FlashInfer-MLA better than CUTLASS MLA after num-splits optimization?
-# Question: After optimizing CUTLASS MLA's num_kv_splits, is FlashInfer-MLA still competitive?
 
 description: "FlashInfer-MLA vs optimized CUTLASS MLA comparison"
 
