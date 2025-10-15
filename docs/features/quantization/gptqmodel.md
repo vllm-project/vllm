@@ -40,7 +40,7 @@ Here is an example of how to quantize `meta-llama/Llama-3.2-1B-Instruct`:
     calibration_dataset = load_dataset(
         "allenai/c4",
         data_files="en/c4-train.00001-of-01024.json.gz",
-        split="train"
+        split="train",
     ).select(range(1024))["text"]
 
     quant_config = QuantizeConfig(bits=4, group_size=128)

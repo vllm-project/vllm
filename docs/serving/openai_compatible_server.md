@@ -24,8 +24,8 @@ To call the server, in your preferred text editor, create a script that uses an 
     completion = client.chat.completions.create(
         model="NousResearch/Meta-Llama-3-8B-Instruct",
         messages=[
-            {"role": "user", "content": "Hello!"}
-        ]
+            {"role": "user", "content": "Hello!"},
+        ],
     )
 
     print(completion.choices[0].message)
@@ -101,8 +101,13 @@ both a `type` and a `text` field. An example is provided below:
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
     messages=[
-        {"role": "user", "content": [{"type": "text", "text": "Classify this sentiment: vLLM is wonderful!"}]}
-    ]
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Classify this sentiment: vLLM is wonderful!"},
+            ],
+        },
+    ],
 )
 ```
 
@@ -130,11 +135,11 @@ Or directly merge them into the JSON payload if you are using HTTP call directly
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
     messages=[
-        {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+        {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"},
     ],
     extra_body={
-        "structured_outputs": {"choice": ["positive", "negative"]}
-    }
+        "structured_outputs": {"choice": ["positive", "negative"]},
+    },
 )
 ```
 
@@ -149,11 +154,11 @@ with `--enable-request-id-headers`.
     completion = client.chat.completions.create(
         model="NousResearch/Meta-Llama-3-8B-Instruct",
         messages=[
-            {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+            {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"},
         ],
         extra_headers={
             "x-request-id": "sentiment-classification-00001",
-        }
+        },
     )
     print(completion._request_id)
 
@@ -162,7 +167,7 @@ with `--enable-request-id-headers`.
         prompt="A robot may not injure a human being",
         extra_headers={
             "x-request-id": "completion-test",
-        }
+        },
     )
     print(completion._request_id)
     ```
@@ -403,7 +408,7 @@ The Transcriptions API supports uploading audio files in various formats includi
             model="openai/whisper-large-v3-turbo",
             file=audio_file,
             language="en",
-            response_format="verbose_json"
+            response_format="verbose_json",
         )
 
     print(transcription.text)
@@ -812,22 +817,22 @@ You can pass multi-modal inputs to scoring models by passing `content` including
                 "model": "jinaai/jina-reranker-m0",
                 "text_1": "slm markdown",
                 "text_2": {
-                  "content": [
-                          {
-                              "type": "image_url",
-                              "image_url": {
-                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-                              },
-                          },
-                          {
-                              "type": "image_url",
-                              "image_url": {
-                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-                              },
-                          },
-                      ]
-                  }
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                            },
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+                            },
+                        },
+                    ],
                 },
+            },
         )
         response.raise_for_status()
         response_json = response.json()
