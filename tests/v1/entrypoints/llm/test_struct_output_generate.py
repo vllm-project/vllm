@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import json
 from dataclasses import fields
 from enum import Enum
@@ -29,7 +27,9 @@ from vllm.sampling_params import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import TokenizerMode
+    from vllm.config.model import TokenizerMode
+else:
+    TokenizerMode = str
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",

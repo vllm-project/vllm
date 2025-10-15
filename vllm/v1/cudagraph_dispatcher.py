@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import NamedTuple, Optional
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
@@ -165,7 +164,7 @@ class CudagraphDispatcher:
 
     def dispatch(
         self, batch_descriptor: BatchDescriptor, use_cascade_attn: bool = False
-    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
+    ) -> tuple[CUDAGraphMode, BatchDescriptor | None]:
         """
         Given conditions(e.g.,batch descriptor and if using cascade attention),
         dispatch to a cudagraph runtime mode and the valid batch descriptor.

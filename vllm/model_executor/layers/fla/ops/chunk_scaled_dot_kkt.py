@@ -7,7 +7,6 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
-from typing import Optional
 
 import torch
 
@@ -104,8 +103,8 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
     beta: torch.Tensor,
-    g_cumsum: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g_cumsum: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
