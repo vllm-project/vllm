@@ -12,6 +12,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    MultipleOf,
 )
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
@@ -79,6 +80,10 @@ class XFormersAttentionBackend(AttentionBackend):
             248,
             256,
         ]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -275,12 +280,12 @@ class XFormersAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0.")
@@ -323,9 +328,9 @@ class XFormersAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: XFormersAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with XFormers.
 
@@ -349,7 +354,7 @@ class XFormersAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         # Cache the input KVs.
         key_cache, value_cache = kv_cache.unbind(0)

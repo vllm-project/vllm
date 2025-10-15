@@ -75,8 +75,7 @@ async def test_merge_async_iterators():
 
     for iterator in iterators:
         try:
-            # Can use anext() in python >= 3.10
-            await asyncio.wait_for(iterator.__anext__(), 1)
+            await asyncio.wait_for(anext(iterator), 1)
         except StopAsyncIteration:
             # All iterators should be cancelled and print this message.
             print("Iterator was cancelled normally")
@@ -300,7 +299,7 @@ def test_dict_args(parser):
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
-        # Test compile config and compilation level
+        # Test compile config and compilation mode
         "-O.use_inductor=true",
         "-O.backend",
         "custom",
@@ -353,7 +352,7 @@ def test_dict_args(parser):
         },
     }
     assert parsed_args.compilation_config == {
-        "level": 1,
+        "mode": 1,
         "use_inductor": True,
         "backend": "custom",
         "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
@@ -368,7 +367,7 @@ def test_duplicate_dict_args(caplog_vllm, parser):
         "--hf-overrides.key1",
         "val2",
         "-O1",
-        "-O.level",
+        "-O.mode",
         "2",
         "-O3",
     ]
@@ -376,12 +375,12 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     parsed_args = parser.parse_args(args)
     # Should be the last value
     assert parsed_args.hf_overrides == {"key1": "val2"}
-    assert parsed_args.compilation_config == {"level": 3}
+    assert parsed_args.compilation_config == {"mode": 3}
 
     assert len(caplog_vllm.records) == 1
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
-    assert "-O.level" in caplog_vllm.text
+    assert "-O.mode" in caplog_vllm.text
 
 
 @pytest.mark.parametrize(

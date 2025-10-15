@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import logging
 import tempfile
-from typing import Any, Union
+from typing import Any
 
 import pytest
 import torch
@@ -14,7 +12,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
-from vllm.config import CompilationConfig, CompilationLevel, CUDAGraphMode, PassConfig
+from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
 
@@ -82,22 +80,22 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
 
 @pytest.mark.parametrize(
-    "optimization_level",
-    [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
+    "compilation_mode",
+    [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
 )
 @pytest.mark.parametrize("model_info", models_list(all=True))
 @create_new_process_for_each_test()
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model_info: tuple[str, dict[str, Any]],
-    optimization_level: int,
+    compilation_mode: int,
 ):
     model, model_kwargs = model_info
 
     with monkeypatch.context():
         print(f"MODEL={model}")
 
-        run_model(optimization_level, model, model_kwargs)
+        run_model(compilation_mode, model, model_kwargs)
 
 
 # TODO(luka) add other supported compilation config scenarios here
@@ -106,7 +104,7 @@ def test_full_graph(
     [
         # additional compile sizes, only some of the models
         (
-            CompilationConfig(level=CompilationLevel.PIECEWISE, compile_sizes=[1, 2]),
+            CompilationConfig(mode=CompilationMode.VLLM_COMPILE, compile_sizes=[1, 2]),
             model,
         )
         for model in models_list(all=False)
@@ -115,7 +113,7 @@ def test_full_graph(
         # RMSNorm + quant fusion, only 8-bit quant models
         (
             CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 custom_ops=["+rms_norm"],
                 pass_config=PassConfig(enable_fusion=True, enable_noop=True),
             ),
@@ -127,7 +125,8 @@ def test_full_graph(
         # Test depyf integration works
         (
             CompilationConfig(
-                level=CompilationLevel.PIECEWISE, debug_dump_path=tempfile.gettempdir()
+                mode=CompilationMode.VLLM_COMPILE,
+                debug_dump_path=tempfile.gettempdir(),
             ),
             ("facebook/opt-125m", {}),
         ),
@@ -136,7 +135,7 @@ def test_full_graph(
         # graph inductor partition
         (
             CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 # inductor graph partition uses
                 # torch._C.Tag.cudagraph_unsafe to specify splitting ops
                 use_inductor_graph_partition=True,
@@ -166,10 +165,10 @@ def test_custom_compile_config(
 
 
 @pytest.mark.parametrize(
-    "optimization_level",
-    [CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE],
+    "compilation_mode",
+    [CompilationMode.NONE, CompilationMode.VLLM_COMPILE],
 )
-def test_fp8_kv_scale_compile(optimization_level: int):
+def test_fp8_kv_scale_compile(compilation_mode: int):
     model = "Qwen/Qwen2-0.5B"
     model_kwargs = {
         "quantization": "fp8",
@@ -177,7 +176,7 @@ def test_fp8_kv_scale_compile(optimization_level: int):
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
-    run_model(optimization_level, model, model_kwargs)
+    run_model(compilation_mode, model, model_kwargs)
 
 
 def test_inductor_graph_partition_attn_fusion(caplog_vllm):
@@ -186,7 +185,7 @@ def test_inductor_graph_partition_attn_fusion(caplog_vllm):
 
     model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
     compilation_config = CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
+        mode=CompilationMode.VLLM_COMPILE,
         use_inductor_graph_partition=True,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         custom_ops=["+quant_fp8"],
@@ -217,7 +216,7 @@ def test_inductor_graph_partition_attn_fusion(caplog_vllm):
 
 
 def run_model(
-    compile_config: Union[int, CompilationConfig],
+    compile_config: int | CompilationConfig,
     model: str,
     model_kwargs: dict[str, Any],
 ):

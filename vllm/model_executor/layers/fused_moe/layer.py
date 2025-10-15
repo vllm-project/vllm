@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from typing import Callable, Literal, Optional, Union, get_args, overload
+from typing import Literal, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -70,15 +70,15 @@ if current_platform.is_cuda_alike():
         )
 else:
     fused_experts = None  # type: ignore
-    FusedMoEPermuteExpertsUnpermute = None  # type: ignore
-    FusedMoEPrepareAndFinalize = None  # type: ignore
+    FusedMoEPermuteExpertsUnpermute = object  # type: ignore
+    FusedMoEPrepareAndFinalize = object  # type: ignore
 
     def _eplb_map_to_physical_and_record(
         topk_ids: torch.Tensor,
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
-        indices_type: Optional[torch.dtype],
+        indices_type: torch.dtype | None,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
@@ -110,8 +110,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe = moe
-        self.moe_quant_config: Optional[FusedMoEQuantConfig] = None
-        self.fused_experts: Optional[FusedMoEModularKernel] = None
+        self.moe_quant_config: FusedMoEQuantConfig | None = None
+        self.fused_experts: FusedMoEModularKernel | None = None
         self.topk_indices_dtype = None
 
     @abstractmethod
@@ -139,12 +139,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @staticmethod
     def _maybe_make_prepare_finalize(
         moe: FusedMoEConfig,
-        quant_config: Optional[FusedMoEQuantConfig],
-    ) -> Optional[FusedMoEPrepareAndFinalize]:
+        quant_config: FusedMoEQuantConfig | None,
+    ) -> FusedMoEPrepareAndFinalize | None:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
-        prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
+        prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
         # TODO: could allow this now
         assert not moe.use_flashinfer_cutlass_kernels, "Must be created in modelopt.py"
@@ -229,7 +229,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         return prepare_finalize
 
-    def maybe_make_prepare_finalize(self) -> Optional[FusedMoEPrepareAndFinalize]:
+    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
         if self.moe.moe_parallel_config.use_all2all_kernels:
             return FusedMoEMethodBase._maybe_make_prepare_finalize(
                 self.moe, self.moe_quant_config
@@ -280,7 +280,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @abstractmethod
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         raise NotImplementedError
 
     @property
@@ -296,21 +296,21 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
 
@@ -368,7 +368,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 )
             self.flashinfer_cutlass_moe = None  # type: ignore
 
-    def maybe_make_prepare_finalize(self) -> Optional[FusedMoEPrepareAndFinalize]:
+    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
         if self.rocm_aiter_moe_enabled:
             return None
         else:
@@ -532,21 +532,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -578,7 +578,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         if self.moe.has_bias:
             return biased_moe_quant_config(
                 layer.w13_bias,
@@ -595,21 +595,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
 
@@ -705,21 +705,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             enable_eplb is not False
             or expert_load_view is not None
@@ -754,21 +754,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             enable_eplb is not False
             or expert_load_view is not None
@@ -795,21 +795,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not use_grouped_topk
         assert num_expert_group is None
         assert topk_group is None
@@ -860,7 +860,7 @@ def determine_expert_map(
     ep_rank: int,
     global_num_experts: int,
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
-) -> tuple[int, Optional[torch.Tensor]]:
+) -> tuple[int, torch.Tensor | None]:
     """
     Calculates how many experts should be assigned to each rank for EP and
     creates a mapping from global to local expert index. Experts are
@@ -941,7 +941,7 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 def maybe_roundup_hidden_size(
     hidden_size: int,
     act_dtype: torch.dtype,
-    quant_config: Optional[QuantizationConfig],
+    quant_config: QuantizationConfig | None,
     moe_parallel_config: FusedMoEParallelConfig,
 ) -> int:
     """
@@ -1016,30 +1016,30 @@ class FusedMoE(CustomOp):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
         reduce_results: bool = False,
         renormalize: bool = True,
         use_grouped_topk: bool = False,
-        num_expert_group: Optional[int] = None,
-        topk_group: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        tp_size: Optional[int] = None,
-        ep_size: Optional[int] = None,
-        dp_size: Optional[int] = None,
+        num_expert_group: int | None = None,
+        topk_group: int | None = None,
+        quant_config: QuantizationConfig | None = None,
+        tp_size: int | None = None,
+        ep_size: int | None = None,
+        dp_size: int | None = None,
         prefix: str = "",
-        custom_routing_function: Optional[Callable] = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
         is_sequence_parallel=False,
-        zero_expert_num: Optional[int] = 0,
-        zero_expert_type: Optional[str] = None,
-        expert_mapping: Optional[list[tuple[str, str, int, str]]] = None,
+        zero_expert_num: int | None = 0,
+        zero_expert_type: str | None = None,
+        expert_mapping: list[tuple[str, str, int, str]] | None = None,
     ):
         super().__init__()
         if params_dtype is None:
@@ -1092,9 +1092,9 @@ class FusedMoE(CustomOp):
         self.layer_name = prefix
 
         self.enable_eplb = enable_eplb
-        self.expert_load_view: Optional[torch.Tensor] = None
-        self.logical_to_physical_map: Optional[torch.Tensor] = None
-        self.logical_replica_count: Optional[torch.Tensor] = None
+        self.expert_load_view: torch.Tensor | None = None
+        self.logical_to_physical_map: torch.Tensor | None = None
+        self.logical_replica_count: torch.Tensor | None = None
 
         # Determine expert maps
         if self.use_ep:
@@ -1128,7 +1128,7 @@ class FusedMoE(CustomOp):
                     )
                     expert_placement_strategy = "linear"
 
-            self.expert_map: Optional[torch.Tensor]
+            self.expert_map: torch.Tensor | None
             local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -1187,12 +1187,12 @@ class FusedMoE(CustomOp):
             has_bias=has_bias,
         )
         self.moe_config = moe
-        self.moe_quant_config: Optional[FusedMoEQuantConfig] = None
+        self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
-        quant_method: Optional[QuantizeMethodBase] = None
+        quant_method: QuantizeMethodBase | None = None
         quant_method = (
             UnquantizedFusedMoEMethod(moe)
             if quant_config is None
@@ -1238,8 +1238,8 @@ class FusedMoE(CustomOp):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         # Chunked all2all staging tensor
-        self.batched_hidden_states: Optional[torch.Tensor] = None
-        self.batched_router_logits: Optional[torch.Tensor] = None
+        self.batched_hidden_states: torch.Tensor | None = None
+        self.batched_router_logits: torch.Tensor | None = None
 
         if self.use_dp_chunking:
             states_shape: tuple[int, ...]
@@ -1262,7 +1262,7 @@ class FusedMoE(CustomOp):
             )
 
     @property
-    def shared_experts(self) -> Optional[torch.nn.Module]:
+    def shared_experts(self) -> torch.nn.Module | None:
         return None
 
     @property
@@ -1534,7 +1534,7 @@ class FusedMoE(CustomOp):
         shard_id: str,
         expert_id: int,
         return_success: bool = False,
-    ) -> Optional[bool]:
+    ) -> bool | None:
         if self.quant_config and self.quant_config.get_name() == "mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
@@ -1851,21 +1851,21 @@ class FusedMoE(CustomOp):
         top_k: int,
         use_grouped_topk: bool,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        indices_type: Optional[torch.dtype] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        indices_type: torch.dtype | None = None,
         enable_eplb: bool = False,
-        expert_map: Optional[torch.Tensor] = None,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-        global_num_experts: Optional[int] = None,
-        zero_expert_num: Optional[int] = None,
-        zero_expert_type: Optional[str] = None,
+        expert_map: torch.Tensor | None = None,
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+        global_num_experts: int | None = None,
+        zero_expert_num: int | None = None,
+        zero_expert_type: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -2006,7 +2006,7 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
             hidden_states = F.pad(
@@ -2047,14 +2047,14 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward_native(hidden_states, router_logits)
 
     def forward_impl_chunked(
         self,
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
         assert self.batched_hidden_states.dtype == full_hidden_states.dtype
@@ -2200,7 +2200,7 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
         self.ensure_moe_quant_config()
