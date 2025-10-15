@@ -6,7 +6,7 @@ import socket
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -16,7 +16,6 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -56,8 +55,9 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
-        client_addresses: Optional[dict[str, str]] = None,
+        stat_loggers: list[StatLoggerFactory] | None = None,
+        aggregate_engine_logging: bool = False,
+        client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> None:
@@ -136,7 +136,7 @@ class AsyncLLM(EngineClient):
         )
 
         # Loggers.
-        self.logger_manager: Optional[StatLoggerManager] = None
+        self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
@@ -144,10 +144,11 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=stat_loggers,
                 enable_default_loggers=log_stats,
                 client_count=client_count,
+                aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
 
-        self.output_handler: Optional[asyncio.Task] = None
+        self.output_handler: asyncio.Task | None = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -185,10 +186,11 @@ class AsyncLLM(EngineClient):
         vllm_config: VllmConfig,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        stat_loggers: list[StatLoggerFactory] | None = None,
         enable_log_requests: bool = False,
+        aggregate_engine_logging: bool = False,
         disable_log_stats: bool = False,
-        client_addresses: Optional[dict[str, str]] = None,
+        client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
         disable_log_requests: bool = True,  # Deprecated, will be removed
@@ -209,6 +211,7 @@ class AsyncLLM(EngineClient):
             stat_loggers=stat_loggers,
             log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
+            aggregate_engine_logging=aggregate_engine_logging,
             usage_context=usage_context,
             client_addresses=client_addresses,
             client_count=client_count,
@@ -221,7 +224,7 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        stat_loggers: list[StatLoggerFactory] | None = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -259,15 +262,15 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: Union[EngineCoreRequest, PromptType],
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt: EngineCoreRequest | PromptType,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
-        prompt_text: Optional[str] = None,
+        data_parallel_rank: int | None = None,
+        prompt_text: str | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -325,8 +328,8 @@ class AsyncLLM(EngineClient):
     async def _add_request(
         self,
         request: EngineCoreRequest,
-        prompt: Optional[str],
-        parent_req: Optional[ParentRequest],
+        prompt: str | None,
+        parent_req: ParentRequest | None,
         index: int,
         queue: RequestOutputCollector,
     ):
@@ -346,16 +349,16 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: Union[EngineCoreRequest, PromptType],
+        prompt: EngineCoreRequest | PromptType,
         sampling_params: SamplingParams,
         request_id: str,
         *,
-        prompt_text: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_text: str | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
+        data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -463,6 +466,7 @@ class AsyncLLM(EngineClient):
         output_processor = self.output_processor
         log_stats = self.log_stats
         logger_manager = self.logger_manager
+        processor = self.processor
 
         async def output_handler():
             try:
@@ -478,12 +482,12 @@ class AsyncLLM(EngineClient):
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
-                    if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
+                    if num_outputs <= envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                         slices = (outputs.outputs,)
                     else:
                         slices = np.array_split(
                             outputs.outputs,
-                            cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
+                            cdiv(num_outputs, envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
                         )
 
                     for i, outputs_slice in enumerate(slices):
@@ -511,6 +515,7 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
+                            mm_cache_stats=processor.stat_mm_cache(),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -518,7 +523,7 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
+    async def abort(self, request_id: str | Iterable[str]) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (
@@ -535,11 +540,11 @@ class AsyncLLM(EngineClient):
         prompt: PromptType,
         pooling_params: PoolingParams,
         request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        lora_request: LoRARequest | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: Optional[int] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        truncate_prompt_tokens: int | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -620,11 +625,11 @@ class AsyncLLM(EngineClient):
             raise EngineGenerateError() from e
 
     @property
-    def tokenizer(self) -> Optional[AnyTokenizer]:
+    def tokenizer(self) -> AnyTokenizer | None:
         return self.processor.tokenizer
 
     @tokenizer.setter
-    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
         self.processor.tokenizer = tokenizer
 
     async def get_tokenizer(self) -> AnyTokenizer:
@@ -660,10 +665,10 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_cache()
+        self.processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
-    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
+    async def reset_prefix_cache(self, device: Device | None = None) -> None:
         if device == Device.CPU:
             raise ValueError("Not supported on CPU.")
         await self.engine_core.reset_prefix_cache_async()
@@ -672,7 +677,7 @@ class AsyncLLM(EngineClient):
         await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
-    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)
 
     async def is_sleeping(self) -> bool:
@@ -697,9 +702,9 @@ class AsyncLLM(EngineClient):
     async def collective_rpc(
         self,
         method: str,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
     ):
         """
         Perform a collective RPC call to the given path.
