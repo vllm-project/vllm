@@ -365,7 +365,8 @@ def get_json_schema_from_tool(
                 for def_name, def_schema in defs.items():
                     if def_name in all_defs and all_defs[def_name] != def_schema:
                         raise ValueError(
-                            f"Tool definition '{def_name}' has multiple schemas, which is not supported."
+                            f"Tool definition '{def_name}' has multiple schemas, "
+                            "which is not supported."
                         )
                     all_defs[def_name] = def_schema
             return all_defs
