@@ -849,6 +849,47 @@ class OpenAIServingResponses(OpenAIServing):
             messages.extend(request.input)  # type: ignore
         return messages
 
+    def _construct_harmony_system_input_message(
+        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: list[str]
+    ) -> OpenAIHarmonyMessage:
+        reasoning_effort = request.reasoning.effort if request.reasoning else None
+        enable_browser = (
+            "web_search_preview" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("browser")
+        )
+        enable_code_interpreter = (
+            "code_interpreter" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("python")
+        )
+        enable_container = (
+            "container" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("container")
+        )
+        sys_msg = get_system_message(
+            reasoning_effort=reasoning_effort,
+            browser_description=(
+                self.tool_server.get_tool_description("browser")
+                if enable_browser and self.tool_server is not None
+                else None
+            ),
+            python_description=(
+                self.tool_server.get_tool_description("python")
+                if enable_code_interpreter and self.tool_server is not None
+                else None
+            ),
+            container_description=(
+                self.tool_server.get_tool_description("container")
+                if enable_container and self.tool_server is not None
+                else None
+            ),
+            instructions=request.instructions,
+            with_custom_tools=with_custom_tools,
+        )
+        return sys_msg
+
     def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
@@ -857,9 +898,7 @@ class OpenAIServingResponses(OpenAIServing):
         messages: list[OpenAIHarmonyMessage] = []
         if prev_response is None:
             # New conversation.
-            reasoning_effort = request.reasoning.effort if request.reasoning else None
             tool_types = [tool.type for tool in request.tools]
-
             # Allow the MCP Tool type to enable built in tools if the
             # server_label is allowlisted in
             # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
@@ -870,41 +909,10 @@ class OpenAIServingResponses(OpenAIServing):
                         and tool.server_label in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
                     ):
                         tool_types.append(tool.server_label)
-            enable_browser = (
-                "web_search_preview" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("browser")
-            )
-            enable_code_interpreter = (
-                "code_interpreter" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("python")
-            )
-            enable_container = (
-                "container" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("container")
-            )
             with_custom_tools = has_custom_tools(tool_types)
-            sys_msg = get_system_message(
-                reasoning_effort=reasoning_effort,
-                browser_description=(
-                    self.tool_server.get_tool_description("browser")
-                    if enable_browser and self.tool_server is not None
-                    else None
-                ),
-                python_description=(
-                    self.tool_server.get_tool_description("python")
-                    if enable_code_interpreter and self.tool_server is not None
-                    else None
-                ),
-                container_description=(
-                    self.tool_server.get_tool_description("container")
-                    if enable_container and self.tool_server is not None
-                    else None
-                ),
-                instructions=request.instructions,
-                with_custom_tools=with_custom_tools,
+
+            sys_msg = self._construct_harmony_system_input_message(
+                request, with_custom_tools, tool_types
             )
             messages.append(sys_msg)
             if with_custom_tools:
