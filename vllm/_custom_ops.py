@@ -527,15 +527,15 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     @register_fake("_C::gptq_marlin_gemm")
     def _gptq_marlin_gemm_fake(
         a: torch.Tensor,
-        c: Optional[torch.Tensor],
+        c: torch.Tensor | None,
         b_q_weight: torch.Tensor,
-        b_bias: Optional[torch.Tensor],
+        b_bias: torch.Tensor | None,
         b_scales: torch.Tensor,
-        a_scales: Optional[torch.Tensor],
-        global_scale: Optional[torch.Tensor],
-        b_zeros: Optional[torch.Tensor],
-        g_idx: Optional[torch.Tensor],
-        perm: Optional[torch.Tensor],
+        a_scales: torch.Tensor | None,
+        global_scale: torch.Tensor | None,
+        b_zeros: torch.Tensor | None,
+        g_idx: torch.Tensor | None,
+        perm: torch.Tensor | None,
         workspace: torch.Tensor,
         b_q_type_id: int,
         size_m: torch.SymInt,
@@ -1210,7 +1210,7 @@ def awq_marlin_moe_repack(
 
 def marlin_int4_fp8_preprocess(
     qweight: torch.Tensor,
-    qzeros_or_none: Optional[torch.Tensor] = None,
+    qzeros_or_none: torch.Tensor | None = None,
     inplace: bool = False,
 ):
     return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none, inplace)
@@ -1218,15 +1218,15 @@ def marlin_int4_fp8_preprocess(
 
 def gptq_marlin_gemm(
     a: torch.Tensor,
-    c: Optional[torch.Tensor],
+    c: torch.Tensor | None,
     b_q_weight: torch.Tensor,
-    b_bias: Optional[torch.Tensor],
+    b_bias: torch.Tensor | None,
     b_scales: torch.Tensor,
-    a_scales: Optional[torch.Tensor],
-    global_scale: Optional[torch.Tensor],
-    b_zeros: Optional[torch.Tensor],
-    g_idx: Optional[torch.Tensor],
-    perm: Optional[torch.Tensor],
+    a_scales: torch.Tensor | None,
+    global_scale: torch.Tensor | None,
+    b_zeros: torch.Tensor | None,
+    g_idx: torch.Tensor | None,
+    perm: torch.Tensor | None,
     workspace: torch.Tensor,
     b_q_type: ScalarType,
     size_m: int,
@@ -1561,7 +1561,7 @@ def allspark_repack_weight(
             if use asymmetric quantization, has_zp = True.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] :
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] :
             rearranged weight, scale, and optionally zero_point.
     """
     K = qweight.shape[0]
@@ -1644,7 +1644,7 @@ def scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
+      tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
     """
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
@@ -1889,15 +1889,15 @@ def grouped_topk(
 
 def moe_wna16_marlin_gemm(
     input: torch.Tensor,
-    output: Optional[torch.Tensor],
+    output: torch.Tensor | None,
     b_qweight: torch.Tensor,
-    b_bias: Optional[torch.Tensor],
+    b_bias: torch.Tensor | None,
     b_scales: torch.Tensor,
-    a_scales: Optional[torch.Tensor],
-    global_scale: Optional[torch.Tensor],
-    b_qzeros: Optional[torch.Tensor],
-    g_idx: Optional[torch.Tensor],
-    perm: Optional[torch.Tensor],
+    a_scales: torch.Tensor | None,
+    global_scale: torch.Tensor | None,
+    b_qzeros: torch.Tensor | None,
+    g_idx: torch.Tensor | None,
+    perm: torch.Tensor | None,
     workspace: torch.Tensor,
     sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
@@ -1983,15 +1983,15 @@ if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "marlin_gemm_moe")
     @register_fake("_moe_C::moe_wna16_marlin_gemm")
     def moe_wna16_marlin_gemm_fake(
         input: torch.Tensor,
-        output: Optional[torch.Tensor],
+        output: torch.Tensor | None,
         b_qweight: torch.Tensor,
-        b_bias: Optional[torch.Tensor],
+        b_bias: torch.Tensor | None,
         b_scales: torch.Tensor,
-        a_scales: Optional[torch.Tensor],
-        global_scale: Optional[torch.Tensor],
-        b_qzeros: Optional[torch.Tensor],
-        g_idx: Optional[torch.Tensor],
-        perm: Optional[torch.Tensor],
+        a_scales: torch.Tensor | None,
+        global_scale: torch.Tensor | None,
+        b_qzeros: torch.Tensor | None,
+        g_idx: torch.Tensor | None,
+        perm: torch.Tensor | None,
         workspace: torch.Tensor,
         sorted_token_ids: torch.Tensor,
         expert_ids: torch.Tensor,
@@ -2481,7 +2481,7 @@ def onednn_scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
+      tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
     """
     output = torch.empty_like(input, dtype=torch.int8)
     token_num = input.numel() // input.shape[-1]
