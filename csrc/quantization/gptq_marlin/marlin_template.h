@@ -892,16 +892,16 @@ __global__ void Marlin(
   FragZP frag_zpf[2];                    // Zero-points in fp16 in HQQ
 
   if constexpr (is_a_8bit) {
-    #pragma unroll
+  #pragma unroll
     for (int j = 0; j < 2; j++) {
-    #pragma unroll
+  #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
-    #pragma unroll
+  #pragma unroll
         for (int g = 0; g < 4; g++) {
           frag_c_tmp[i][j][0][g] = 0.0f;
         }
 
-    #pragma unroll
+  #pragma unroll
         for (int g = 0; g < 4; g++) {
           frag_c_tmp[i][j][1][g] = 0.0f;
         }
