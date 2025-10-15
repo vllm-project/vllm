@@ -93,7 +93,7 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
         out_data_format="b64_json",
     )
 
-    pooling_params = PoolingParams(task="encode", softmax=False)
+    pooling_params = PoolingParams(task="token_classify", activation=False)
 
     with vllm_runner(
         model_name,
