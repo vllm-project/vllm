@@ -97,17 +97,17 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    enable_fusion: bool = False
+    enable_fusion: bool | None = None
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
+    enable_attn_fusion: bool | None = None
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = False
+    enable_noop: bool | None = None
     """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = False
+    enable_sequence_parallelism: bool | None = None
     """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = False
+    enable_async_tp: bool | None = None
     """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = False
+    enable_fi_allreduce_fusion: bool | None = None
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
