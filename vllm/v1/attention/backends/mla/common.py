@@ -546,7 +546,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.aot_schedule = current_platform.is_cuda()
+        self.aot_schedule = current_platform.is_cuda_alike()
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
