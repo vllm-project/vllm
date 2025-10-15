@@ -85,6 +85,9 @@ def add_token_and_check_stop(
         return True, 0
 
     possible_len = min(len(token_ids), remain_len)
+    # chunked prefill
+    if possible_len <= 0:
+        return False, 0
 
     true_idx = 0
     sampling_params = request.sampling_params
