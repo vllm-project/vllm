@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.tasks import SupportedTask
-from vllm.utils.func import make_async
+from vllm.utils.async_utils import make_async
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
