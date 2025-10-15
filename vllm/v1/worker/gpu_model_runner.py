@@ -114,12 +114,12 @@ from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     DraftTokenIds,
+    KVConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
     SamplerOutput,
-    KVConnectorOutput,
 )
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
@@ -1041,7 +1041,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return encoder_seq_lens
 
     def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput",
+        self,
+        scheduler_output: "SchedulerOutput",
         last_step_valid_sampled_token_ids = None,
     ) -> tuple[
         PerLayerAttnMetadata,
@@ -1066,7 +1067,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self._draft_token_ids is not None:
                 token_each_reqs = [1 + len(x) for x in self._draft_token_ids]
             else:
-                token_each_reqs = [1]*self.input_batch.num_reqs
+                token_each_reqs = [1] * self.input_batch.num_reqs
             total_num_scheduled_tokens = sum(token_each_reqs)
         else:
             total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1078,8 +1079,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
-            num_draft_tokens = np.array([len(x) for x in self._draft_token_ids],
-                    dtype=np.int32)
+            num_draft_tokens = np.array(
+                [len(x) for x in self._draft_token_ids], dtype=np.int32
+            )
             start_index = self.input_batch.num_tokens_no_spec[:num_reqs]
             end_token_index = start_index + num_draft_tokens
             if isinstance(self._draft_token_ids, torch.Tensor):
@@ -1087,8 +1089,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 draft_token_ids = self._draft_token_ids
             for x in range(num_reqs):
-                self.input_batch.token_ids_cpu[x, start_index[x]:end_token_index[x]] = \
-                        draft_token_ids[x]
+                self.input_batch.token_ids_cpu[
+                    x, start_index[x]:end_token_index[x]
+                ] = draft_token_ids[x]
                 self.input_batch.spec_token_ids[x] = draft_token_ids[x]
             # NOTE(woosuk): `num_tokens` here may include spec tokens.
             self.input_batch.num_tokens[:num_reqs] += num_draft_tokens
@@ -1116,10 +1119,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if self.curr_step > 0:
             last_step_computed_tokens = np.array(
-                    [len(x) for x in last_step_valid_sampled_token_ids],
-                    dtype=np.int32)
-            self.input_batch.num_computed_tokens_cpu[req_indices] += \
-                    last_step_computed_tokens[req_indices]
+                [len(x) for x in last_step_valid_sampled_token_ids], dtype=np.int32
+            )
+            self.input_batch.num_computed_tokens_cpu[req_indices] += (
+                last_step_computed_tokens[req_indices]
+            )
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
         np.add(
@@ -2161,7 +2165,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self._draft_token_ids is not None:
                 token_each_reqs = [1 + len(x) for x in self._draft_token_ids]
             else:
-                token_each_reqs = [1]*self.input_batch.num_reqs
+                token_each_reqs = [1] * self.input_batch.num_reqs
             num_scheduled_tokens = sum(token_each_reqs)
         else:
             num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -2547,10 +2551,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # some cases that ms doesn't support
             if self.uses_mrope:
                 self.total_step = 1
-            if (self.supports_mm_inputs and not self.model_config.is_encoder_decoder):
+            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 self.total_step = 1
-            if (self.model_config.is_encoder_decoder
-                    and scheduler_output.scheduled_encoder_inputs):
+            if (
+                self.model_config.is_encoder_decoder
+                and scheduler_output.scheduled_encoder_inputs
+            ):
                 self.total_step = 1
         else:
             self.total_step = 1
@@ -2558,7 +2564,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cached_valid_sampled_token_ids = []
         final_kv_connector_output = KVConnectorOutput()
         final_kv_connector_output.finished_sending = set()
-        final_kv_connector_output.finished_receving = set()
+        final_kv_connector_output.finished_recving = set()
         for self.curr_step in range(self.total_step):
             if self.curr_step > 0:
                 # Prepare the decoder inputs.
@@ -2572,8 +2578,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     ubatch_slices,
                     num_tokens_across_dp,
                     use_cascade_attn,
-                ) = self._prepare_inputs(scheduler_output,
-                    cached_valid_sampled_token_ids[-1])
+                ) = self._prepare_inputs(
+                    scheduler_output, cached_valid_sampled_token_ids[-1]
+                )
                 (
                     num_scheduled_tokens,
                     input_ids,
@@ -2593,7 +2600,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     else [attn_metadata]
                 )
                 if any(
-                    getattr(m, "enable_kv_scales_calculation", False) for m in metadata_list
+                    getattr(m, "enable_kv_scales_calculation", False)
+                    for m in metadata_list
                 ):
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
@@ -2610,7 +2618,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     ubatch_slices=ubatch_slices,
                 ),
                 record_function_or_nullcontext("Forward"),
-                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+                self.maybe_get_kv_connector_output(
+                    scheduler_output
+                ) as kv_connector_output,
             ):
                 model_output = self._model_forward(
                     input_ids=input_ids,
@@ -2758,9 +2768,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
             if kv_connector_output is not None:
                 final_kv_connector_output.finished_sending.update(
-                        kv_connector_output.finished_sending)
-                final_kv_connector_output.finished_receving.update(
-                        kv_connector_output.finished_receving)
+                    kv_connector_output.finished_sending)
+                final_kv_connector_output.finished_recving.update(
+                    kv_connector_output.finished_recving)
 
         final_token_ids = None
         for each_token_ids in cached_valid_sampled_token_ids:

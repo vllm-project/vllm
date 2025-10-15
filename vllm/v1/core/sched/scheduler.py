@@ -919,7 +919,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         num_steps = model_runner_output.step_num
-        
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
         kv_connector_stats = (
@@ -961,7 +961,7 @@ class Scheduler(SchedulerInterface):
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
             if scheduled_spec_token_ids:
-                num_draft_tokens = len(scheduled_spec_token_ids)*num_steps
+                num_draft_tokens = len(scheduled_spec_token_ids) * num_steps
                 num_accepted = len(generated_token_ids) - num_steps
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens

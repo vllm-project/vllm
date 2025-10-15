@@ -201,8 +201,9 @@ class EngineCore:
         self.step_num = int(additional_config.get("multi_step", 1))
         if self.step_num > 1:
             logger.info(f"multi step is enabled. step num is {self.step_num}")
-        self.scheduler.num_lookahead_tokens = (self.step_num - 1) \
-                * (1 + self.scheduler.num_spec_tokens)
+        self.scheduler.num_lookahead_tokens = (self.step_num - 1) * (
+            1 + self.scheduler.num_spec_tokens
+        )
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -331,10 +332,13 @@ class EngineCore:
             self.model_executor.execute_model,  # type: ignore
             scheduler_output,
         )
-        for req_id, num_scheduled_token in \
-            scheduler_output.num_scheduled_tokens.items():
-            self.scheduler.requests[req_id].num_computed_tokens += \
+        for (
+            req_id,
+            num_scheduled_token,
+        ) in scheduler_output.num_scheduled_tokens.items():
+            self.scheduler.requests[req_id].num_computed_tokens += (
                     num_scheduled_token * (model_output.step_num - 1)
+            )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
