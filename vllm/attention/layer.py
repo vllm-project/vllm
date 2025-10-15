@@ -404,8 +404,7 @@ class Attention(nn.Module, AttentionLayerBase):
         return s
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading(act_dtype)
+        self.impl.process_weights_after_loading(act_dtype)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
