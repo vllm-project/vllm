@@ -330,6 +330,20 @@ class VllmConfig:
                     setattr(current_config, field, getattr(pass_config_vllm_compile, field))
                 else:
                     raise ValueError(f"Compilation mode {self.compilation_config.mode} should have been set by this point. post issue upstream.")
+    def _set_cudagraph_mode_defaults(self) -> None:
+        mode = self.compilation_config.mode
+        if self.compilation_config.cudagraph_mode is None:
+            if mode == CompilationMode.NONE:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE 
+            elif mode == CompilationMode.STOCK_TORCH_COMPILE:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            elif mode == CompilationMode.DYNAMO_TRACE_ONCE:
+                 self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            elif mode == CompilationMode.VLLM_COMPILE:
+                 self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            else:
+                raise ValueError(f"Compilation mode {self.compilation_config.mode} should have been set by this point. post issue upstream.")
+
 
     def _apply_optimization_level_defaults(self) -> None:
         """Apply optimization level-specific default configurations.
@@ -343,14 +357,11 @@ class VllmConfig:
             - O2 (DYNAMO_TRACE_ONCE): Full optimization (to be implemented)
             - O3 (VLLM_COMPILE): Maximum optimization with autotuning (to be implemented)
         """
-        level = self.compilation_config.level
+       
+        self._set_pass_config_defaults()
+        self._set_cudagraph_mode_defaults()
+        
 
-        if level == CompilationMode.NONE:
-            if self.compilation_config.cudagraph_mode is None:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
-            # Disable all compilation passes
-            self._set_pass_config_defaults()
 
         # TODO: Implement -O1, -O2, -O3 optimization levels
 
