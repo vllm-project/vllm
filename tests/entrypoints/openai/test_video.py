@@ -124,7 +124,15 @@ async def test_single_chat_session_video(
 async def test_error_on_invalid_video_url_type(
     client: openai.AsyncOpenAI, model_name: str, video_url: str
 ):
-    messages = dummy_messages_from_video_url(video_url)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": video_url},
+                {"type": "text", "text": "What's in this video?"},
+            ],
+        }
+    ]
 
     # video_url should be a dict {"url": "some url"}, not directly a string
     with pytest.raises(openai.BadRequestError):
