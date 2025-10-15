@@ -219,7 +219,7 @@ def get_lora_op_configs(
     k, n = (hidden_size, rank) if op_type == "shrink" else (rank, hidden_size)
 
     config_data: Any
-    config_data = load_v1_op_config(op_type, add_inputs)
+    config_data = load_lora_op_config(op_type, add_inputs)
     if not config_data:
         logger.warning_once(f"Using default LoRA kernel configs")
         return default
