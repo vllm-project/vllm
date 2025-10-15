@@ -136,8 +136,8 @@ def get_mk_alignment_for_contiguous_layout() -> list[int]:
     _lazy_init()
     if _get_mk_alignment_for_contiguous_layout_impl is None:
         return _missing()
-    m_align, k_align = _get_mk_alignment_for_contiguous_layout_impl()
-    return [m_align, k_align]
+    mk_align_size = _get_mk_alignment_for_contiguous_layout_impl()
+    return [mk_align_size, mk_align_size]
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
