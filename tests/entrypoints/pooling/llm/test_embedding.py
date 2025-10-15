@@ -35,6 +35,13 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.skip_global_cleanup
+def test_encode_api(llm: LLM):
+    outputs = llm.encode(prompts, pooling_task="token_embed", use_tqdm=False)
+    multi_vector = outputs[0].outputs.data
+    assert multi_vector.shape == (11, 384)
+
+
 def test_pooling_params(llm: LLM):
     def get_outputs(normalize):
         outputs = llm.embed(

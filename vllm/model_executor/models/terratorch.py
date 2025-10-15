@@ -250,7 +250,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {"encode": Pooler.for_encode(pooler_config)},
+            {"token_classify": Pooler.for_token_classify(pooler_config)}
         )
 
     def get_input_embeddings(
