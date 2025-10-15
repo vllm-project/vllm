@@ -227,6 +227,29 @@ class OpenAIServingResponses(OpenAIServing):
             )
         return None
 
+    def _validate_create_responses_input(
+        self, request: ResponsesRequest
+    ) -> ErrorResponse | None:
+        if self.use_harmony and request.is_include_output_logprobs():
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="logprobs are not supported with gpt-oss models",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if request.store and not self.enable_store and request.background:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "This vLLM engine does not support `store=True` and "
+                    "therefore does not support the background mode. To "
+                    "enable these features, set the environment variable "
+                    "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
+                    "the vLLM server."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        return None
+
     async def create_responses(
         self,
         request: ResponsesRequest,
@@ -240,6 +263,9 @@ class OpenAIServingResponses(OpenAIServing):
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+        maybe_validation_error = self._validate_create_responses_input(request)
+        if maybe_validation_error is not None:
+            return maybe_validation_error
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
@@ -248,18 +274,6 @@ class OpenAIServingResponses(OpenAIServing):
             raise self.engine_client.dead_error
 
         if request.store and not self.enable_store:
-            if request.background:
-                return self.create_error_response(
-                    err_type="invalid_request_error",
-                    message=(
-                        "This vLLM engine does not support `store=True` and "
-                        "therefore does not support the background mode. To "
-                        "enable these features, set the environment variable "
-                        "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
-                        "the vLLM server."
-                    ),
-                    status_code=HTTPStatus.BAD_REQUEST,
-                )
             # Disable the store option.
             # NOTE(woosuk): Although returning an error is possible, we opted
             # to implicitly disable store and process the request anyway, as
@@ -267,12 +281,6 @@ class OpenAIServingResponses(OpenAIServing):
             # (i.e., their request's `store=True` just because it's the default
             # value).
             request.store = False
-        if self.use_harmony and request.is_include_output_logprobs():
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message="logprobs are not supported with gpt-oss models",
-                status_code=HTTPStatus.BAD_REQUEST,
-            )
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
