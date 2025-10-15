@@ -123,14 +123,12 @@ def mypy(
 
 
 def main():
-    print("HLOL")
     ci = sys.argv[1] == "1"
     python_version = sys.argv[2]
     file_groups = group_files(sys.argv[3:])
 
     if python_version == "local":
         python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-        print(f"Using local Python version: {python_version}")
 
     returncode = 0
     for file_group, changed_files in file_groups.items():
@@ -143,5 +141,4 @@ def main():
 
 
 if __name__ == "__main__":
-    print("LOL")
     sys.exit(main())
