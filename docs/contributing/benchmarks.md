@@ -349,6 +349,7 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 | Use Case              | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
 | ---                   | ---          | ---             | ---             | ---                                                       |
+| **Maximum Throughput** | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
 | **Realistic Testing** | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
 | **Stress Testing**    | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
 | **Latency Profiling** | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
@@ -356,6 +357,15 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 | **SLA Validation**    | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
 
 These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
+
+**Important Note on Production Architecture:**
+The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
+- Users send requests as fast as they can (infinite rate)
+- A load balancer or API gateway controls the maximum concurrent connections
+- The system operates at its concurrency limit, revealing true throughput capacity
+- `--burstiness` has no effect since request timing is not controlled when rate is infinite
+
+This pattern helps determine optimal concurrency settings for your production load balancer configuration.
 
 **Interpreting KV Cache Configuration Logs:**
 
