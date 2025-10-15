@@ -2482,9 +2482,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             # Disable uniform decode on steps that still process prompt tokens.
             # This makes first-step behavior consistent regardless of prompt length.
-            if self._has_prefill_tokens_scheduled(scheduler_output,
-                                                  num_scheduled_tokens,
-                                                  self.input_batch.num_reqs):
+            if self._has_prefill_tokens_scheduled(
+                scheduler_output, num_scheduled_tokens, self.input_batch.num_reqs
+            ):
                 uniform_decode = False
             batch_descriptor = BatchDescriptor(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode
