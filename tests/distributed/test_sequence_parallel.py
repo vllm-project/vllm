@@ -7,14 +7,16 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
  all workers in a node other than the head node, which can cause the test
  to fail.
 """
+
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
-from vllm.config import RunnerOption
+from vllm.config.compilation import CompilationMode
+from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -35,28 +37,15 @@ class ParallelSetup(NamedTuple):
 
 class SPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    load_format: str | None = None
 
 
 @dataclass
 class SPTestSettings:
     parallel_setups: list[ParallelSetup]
-    # NOTE: the length of distributed_backends and
-    # vllm_major_versions should be the same, and they
-    # are first zipped together to iterate over all
-    # test settings.
     distributed_backends: list[str]
-    # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: list[str]
     runner: RunnerOption
     test_options: SPTestOptions
-
-    def __post_init__(self):
-        if len(self.distributed_backends) != len(self.vllm_major_versions):
-            raise ValueError(
-                f"Length mismatch: distributed_backends "
-                f"({len(self.distributed_backends)}) != "
-                f"vllm_major_versions ({len(self.vllm_major_versions)})")
 
     @staticmethod
     def detailed(
@@ -65,25 +54,28 @@ class SPTestSettings:
         pp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False, True]:
             for pp_multiplier in [1, 2]:
                 for chunked_prefill_val in [False, True]:
                     parallel_setups.append(
-                        ParallelSetup(tp_size=tp_base,
-                                      pp_size=pp_multiplier * pp_base,
-                                      enable_fusion=False,
-                                      eager_mode=eager_mode_val,
-                                      chunked_prefill=chunked_prefill_val))
+                        ParallelSetup(
+                            tp_size=tp_base,
+                            pp_size=pp_multiplier * pp_base,
+                            enable_fusion=False,
+                            eager_mode=eager_mode_val,
+                            chunked_prefill=chunked_prefill_val,
+                        )
+                    )
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
-            vllm_major_versions=["1", "1"],
             runner=runner,
-            test_options=SPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=SPTestOptions(
+                multi_node_only=multi_node_only, load_format=load_format
+            ),
         )
 
     @staticmethod
@@ -93,25 +85,28 @@ class SPTestSettings:
         pp_base: int = 1,
         runner: RunnerOption = "auto",
         multi_node_only: bool = False,
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False, True]:
             for pp_multiplier in [1, 2]:
                 for chunked_prefill_val in [False, True]:
                     parallel_setups.append(
-                        ParallelSetup(tp_size=tp_base,
-                                      pp_size=pp_multiplier * pp_base,
-                                      enable_fusion=False,
-                                      eager_mode=eager_mode_val,
-                                      chunked_prefill=chunked_prefill_val))
+                        ParallelSetup(
+                            tp_size=tp_base,
+                            pp_size=pp_multiplier * pp_base,
+                            enable_fusion=False,
+                            eager_mode=eager_mode_val,
+                            chunked_prefill=chunked_prefill_val,
+                        )
+                    )
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
-            vllm_major_versions=["1", "1"],
             runner=runner,
-            test_options=SPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=SPTestOptions(
+                multi_node_only=multi_node_only, load_format=load_format
+            ),
         )
 
     @staticmethod
@@ -121,40 +116,46 @@ class SPTestSettings:
         pp_base: int = 1,
         runner: RunnerOption = "auto",
         multi_node_only: bool = False,
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for fusion_val in [False, True]:
             parallel_setups.append(
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=pp_base,
-                              enable_fusion=fusion_val,
-                              eager_mode=True,
-                              chunked_prefill=False))
+                ParallelSetup(
+                    tp_size=tp_base,
+                    pp_size=pp_base,
+                    enable_fusion=fusion_val,
+                    eager_mode=True,
+                    chunked_prefill=False,
+                )
+            )
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
-            vllm_major_versions=["1", "1"],
             runner=runner,
-            test_options=SPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=SPTestOptions(
+                multi_node_only=multi_node_only, load_format=load_format
+            ),
         )
 
     def iter_params(self, model_id: str):
         opts = self.test_options
 
         for parallel_setup in self.parallel_setups:
-            for backend, vllm_major_version in zip(self.distributed_backends,
-                                                   self.vllm_major_versions):
-                yield (model_id, parallel_setup, backend, vllm_major_version,
-                       self.runner, opts)
+            for backend in self.distributed_backends:
+                yield (
+                    model_id,
+                    parallel_setup,
+                    backend,
+                    self.runner,
+                    opts,
+                )
 
 
 def _compare_sp(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available: int,
@@ -200,8 +201,10 @@ def _compare_sp(
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
-        pytest.skip("Skipping multi-node pipeline parallel test for "
-                    "multiprocessing distributed backend")
+        pytest.skip(
+            "Skipping multi-node pipeline parallel test for "
+            "multiprocessing distributed backend"
+        )
     if multi_node_only and not VLLM_MULTI_NODE:
         pytest.skip("Not in multi-node setting")
 
@@ -232,18 +235,14 @@ def _compare_sp(
         common_args.append("--skip-tokenizer-init")
 
     compilation_config = {
-        'level': 3,
-        'custom_ops': ["+rms_norm"],
-        'compile_sizes': [4, 8],
-        'pass_config': {
-            'enable_sequence_parallelism': True,
-            'enable_fusion': enable_fusion,
-            'enable_noop': True,
+        "mode": CompilationMode.VLLM_COMPILE,
+        "custom_ops": ["+rms_norm"],
+        "compile_sizes": [4, 8],
+        "pass_config": {
+            "enable_sequence_parallelism": True,
+            "enable_fusion": enable_fusion,
+            "enable_noop": True,
         },
-    }
-
-    tp_sp_env = tp_env = {
-        "VLLM_USE_V1": vllm_major_version,
     }
 
     tp_sp_args = [
@@ -258,9 +257,6 @@ def _compare_sp(
         json.dumps(compilation_config),
     ]
 
-    tp_env = {
-        "VLLM_USE_V1": vllm_major_version,
-    }
     tp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -269,21 +265,7 @@ def _compare_sp(
         "mp",
     ]
 
-    try:
-        compare_two_settings(model_id,
-                             tp_sp_args,
-                             tp_args,
-                             tp_sp_env,
-                             tp_env,
-                             method=method)
-    except Exception:
-        testing_ray_compiled_graph = tp_sp_env is not None
-        if testing_ray_compiled_graph and vllm_major_version == "0":
-            # Ray Compiled Graph tests are flaky for V0,
-            # so we don't want to fail the test
-            logger.exception("Ray Compiled Graph tests failed")
-        else:
-            raise
+    compare_two_settings(model_id, tp_sp_args, tp_args, method=method)
 
 
 SP_TEXT_GENERATION_MODELS = {
@@ -301,10 +283,16 @@ SP_TEST_MODELS = [
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "runner", "test_options"),
+    (
+        "model_id",
+        "parallel_setup",
+        "distributed_backend",
+        "runner",
+        "test_options",
+    ),
     [
-        params for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
+        params
+        for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
         for params in settings.iter_params(model_id)
         if model_id in SP_TEST_MODELS
     ],
@@ -314,17 +302,17 @@ def test_tp_sp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available,
 ):
-    _compare_sp(model_id,
-                parallel_setup,
-                distributed_backend,
-                vllm_major_version,
-                runner,
-                test_options,
-                num_gpus_available,
-                method="generate",
-                is_multimodal=False)
+    _compare_sp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        runner,
+        test_options,
+        num_gpus_available,
+        method="generate",
+        is_multimodal=False,
+    )

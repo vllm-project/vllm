@@ -6,10 +6,11 @@ import base64
 import numpy as np
 import pytest
 import requests
+import torch
 
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import PoolingResponse
+from vllm.entrypoints.openai.protocol import EMBED_DTYPE_TO_TORCH_DTYPE, PoolingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
@@ -46,11 +47,7 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
     # test single pooling
     response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_texts,
-            "encoding_format": "float"
-        },
+        json={"model": model_name, "input": input_texts, "encoding_format": "float"},
     )
     response.raise_for_status()
     poolings = PoolingResponse.model_validate(response.json())
@@ -66,11 +63,7 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
     input_tokens = [1, 1, 1, 1, 1]
     response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_tokens,
-            "encoding_format": "float"
-        },
+        json={"model": model_name, "input": input_tokens, "encoding_format": "float"},
     )
     response.raise_for_status()
     poolings = PoolingResponse.model_validate(response.json())
@@ -88,16 +81,13 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
 async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
     # test list[str]
     input_texts = [
-        "The cat sat on the mat.", "A feline was resting on a rug.",
-        "Stars twinkle brightly in the night sky."
+        "The cat sat on the mat.",
+        "A feline was resting on a rug.",
+        "Stars twinkle brightly in the night sky.",
     ]
     response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_texts,
-            "encoding_format": "float"
-        },
+        json={"model": model_name, "input": input_texts, "encoding_format": "float"},
     )
     response.raise_for_status()
     poolings = PoolingResponse.model_validate(response.json())
@@ -110,15 +100,15 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
     assert poolings.usage.total_tokens == 29
 
     # test list[list[int]]
-    input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
-                    [25, 32, 64, 77]]
+    input_tokens = [
+        [4, 5, 7, 9, 20],
+        [15, 29, 499],
+        [24, 24, 24, 24, 24],
+        [25, 32, 64, 77],
+    ]
     response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_tokens,
-            "encoding_format": "float"
-        },
+        json={"model": model_name, "input": input_tokens, "encoding_format": "float"},
     )
     response.raise_for_status()
     poolings = PoolingResponse.model_validate(response.json())
@@ -133,18 +123,21 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_conversation_pooling(server: RemoteOpenAIServer,
-                                    model_name: str):
-    messages = [{
-        "role": "user",
-        "content": "The cat sat on the mat.",
-    }, {
-        "role": "assistant",
-        "content": "A feline was resting on a rug.",
-    }, {
-        "role": "user",
-        "content": "Stars twinkle brightly in the night sky.",
-    }]
+async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str):
+    messages = [
+        {
+            "role": "user",
+            "content": "The cat sat on the mat.",
+        },
+        {
+            "role": "assistant",
+            "content": "A feline was resting on a rug.",
+        },
+        {
+            "role": "user",
+            "content": "Stars twinkle brightly in the night sky.",
+        },
+    ]
 
     chat_response = requests.post(
         server.url_for("pooling"),
@@ -180,24 +173,22 @@ async def test_conversation_pooling(server: RemoteOpenAIServer,
         },
     )
     completions_response.raise_for_status()
-    completion_poolings = PoolingResponse.model_validate(
-        completions_response.json())
+    completion_poolings = PoolingResponse.model_validate(completions_response.json())
 
     assert chat_poolings.id is not None
     assert completion_poolings.id is not None
     assert chat_poolings.created <= completion_poolings.created
-    assert chat_poolings.model_dump(
-        exclude={"id", "created"}) == (completion_poolings.model_dump(
-            exclude={"id", "created"}))
+    assert chat_poolings.model_dump(exclude={"id", "created"}) == (
+        completion_poolings.model_dump(exclude={"id", "created"})
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_base64_pooling(server: RemoteOpenAIServer,
-                                    model_name: str):
+async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str):
     input_texts = [
         "Hello my name is",
-        "The best thing about vLLM is that it supports many different models"
+        "The best thing about vLLM is that it supports many different models",
     ]
 
     float_response = requests.post(
@@ -210,9 +201,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer,
     )
     float_response.raise_for_status()
     responses_float = PoolingResponse.model_validate(float_response.json())
-    float_data = [
-        np.array(d.data).squeeze(-1).tolist() for d in responses_float.data
-    ]
+    float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
 
     base64_response = requests.post(
         server.url_for("pooling"),
@@ -228,13 +217,15 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer,
     decoded_responses_base64_data = []
     for data in responses_base64.data:
         decoded_responses_base64_data.append(
-            np.frombuffer(base64.b64decode(data.data),
-                          dtype="float32").tolist())
+            np.frombuffer(base64.b64decode(data.data), dtype="float32").tolist()
+        )
 
-    check_embeddings_close(embeddings_0_lst=float_data,
-                           embeddings_1_lst=decoded_responses_base64_data,
-                           name_0="float32",
-                           name_1="base64")
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=decoded_responses_base64_data,
+        name_0="float32",
+        name_1="base64",
+    )
 
     # Default response is float32 decoded from base64 by OpenAI Client
     default_response = requests.post(
@@ -250,10 +241,86 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer,
         np.array(d.data).squeeze(-1).tolist() for d in responses_default.data
     ]
 
-    check_embeddings_close(embeddings_0_lst=float_data,
-                           embeddings_1_lst=default_data,
-                           name_0="float32",
-                           name_1="default")
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=default_data,
+        name_0="float32",
+        name_1="default",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_base64_embed_dtype(server: RemoteOpenAIServer, model_name: str):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ]
+
+    url = server.url_for("pooling")
+    float_response = requests.post(
+        url,
+        json={
+            "model": model_name,
+            "input": input_texts,
+            "encoding_format": "float",
+        },
+    )
+    responses_float = PoolingResponse.model_validate(float_response.json())
+    float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
+
+    for embed_dtype, torch_dtype in EMBED_DTYPE_TO_TORCH_DTYPE.items():
+        responses_base64 = requests.post(
+            url,
+            json={
+                "model": model_name,
+                "input": input_texts,
+                "encoding_format": "base64",
+                "embed_dtype": embed_dtype,
+            },
+        )
+
+        base64_data = []
+        for data in responses_base64.json()["data"]:
+            base64_data.append(
+                torch.frombuffer(base64.b64decode(data["data"]), dtype=torch_dtype)
+                .to(torch.float32)
+                .tolist()
+            )
+
+        check_embeddings_close(
+            embeddings_0_lst=float_data,
+            embeddings_1_lst=base64_data,
+            name_0="float_data",
+            name_1="base64_data",
+            tol=1e-2,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_base64_embed_dtype_not_supported(
+    server: RemoteOpenAIServer, model_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ]
+
+    bad_embed_dtype = "bad_embed_dtype"
+
+    responses_base64 = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": input_texts,
+            "encoding_format": "base64",
+            "embed_dtype": bad_embed_dtype,
+        },
+    )
+
+    assert responses_base64.status_code == 400
+    assert responses_base64.json()["error"]["message"].startswith(
+        f"embed_dtype={bad_embed_dtype!r} is not supported."
+    )
 
 
 @pytest.mark.asyncio
@@ -268,39 +335,46 @@ async def test_invocations(server: RemoteOpenAIServer):
         "encoding_format": "float",
     }
 
-    completion_response = requests.post(server.url_for("pooling"),
-                                        json=request_args)
+    completion_response = requests.post(server.url_for("pooling"), json=request_args)
     completion_response.raise_for_status()
 
-    invocation_response = requests.post(server.url_for("invocations"),
-                                        json=request_args)
+    invocation_response = requests.post(
+        server.url_for("invocations"), json=request_args
+    )
     invocation_response.raise_for_status()
 
     completion_output = completion_response.json()
     invocation_output = invocation_response.json()
 
     assert completion_output.keys() == invocation_output.keys()
-    for completion_data, invocation_data in zip(completion_output["data"],
-                                                invocation_output["data"]):
+    for completion_data, invocation_data in zip(
+        completion_output["data"], invocation_output["data"]
+    ):
         assert completion_data.keys() == invocation_data.keys()
-        check_embeddings_close(embeddings_0_lst=completion_data["data"],
-                               embeddings_1_lst=invocation_data["data"],
-                               name_0="completion",
-                               name_1="invocation")
+        check_embeddings_close(
+            embeddings_0_lst=completion_data["data"],
+            embeddings_1_lst=invocation_data["data"],
+            name_0="completion",
+            name_1="invocation",
+        )
 
 
 @pytest.mark.asyncio
 async def test_invocations_conversation(server: RemoteOpenAIServer):
-    messages = [{
-        "role": "user",
-        "content": "The cat sat on the mat.",
-    }, {
-        "role": "assistant",
-        "content": "A feline was resting on a rug.",
-    }, {
-        "role": "user",
-        "content": "Stars twinkle brightly in the night sky.",
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": "The cat sat on the mat.",
+        },
+        {
+            "role": "assistant",
+            "content": "A feline was resting on a rug.",
+        },
+        {
+            "role": "user",
+            "content": "Stars twinkle brightly in the night sky.",
+        },
+    ]
 
     request_args = {
         "model": MODEL_NAME,
@@ -311,18 +385,22 @@ async def test_invocations_conversation(server: RemoteOpenAIServer):
     chat_response = requests.post(server.url_for("pooling"), json=request_args)
     chat_response.raise_for_status()
 
-    invocation_response = requests.post(server.url_for("invocations"),
-                                        json=request_args)
+    invocation_response = requests.post(
+        server.url_for("invocations"), json=request_args
+    )
     invocation_response.raise_for_status()
 
     chat_output = chat_response.json()
     invocation_output = invocation_response.json()
 
     assert chat_output.keys() == invocation_output.keys()
-    for chat_data, invocation_data in zip(chat_output["data"],
-                                          invocation_output["data"]):
+    for chat_data, invocation_data in zip(
+        chat_output["data"], invocation_output["data"]
+    ):
         assert chat_data.keys() == invocation_data.keys()
-        check_embeddings_close(embeddings_0_lst=chat_data["data"],
-                               embeddings_1_lst=invocation_data["data"],
-                               name_0="chat",
-                               name_1="invocation")
+        check_embeddings_close(
+            embeddings_0_lst=chat_data["data"],
+            embeddings_1_lst=invocation_data["data"],
+            name_0="chat",
+            name_1="invocation",
+        )
