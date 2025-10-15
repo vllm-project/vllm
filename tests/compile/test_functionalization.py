@@ -54,8 +54,7 @@ class TestSiluMul(torch.nn.Module):
             return y
 
     def example_inputs(self, num_tokens=32, hidden_size=128):
-        dtype = torch.float16 if TEST_FP8 else torch.float32
-        return (torch.rand(num_tokens, hidden_size * 2, dtype=dtype),)
+        return (torch.rand(num_tokens, hidden_size * 2),)
 
     def ops_in_model(self, do_fusion):
         if TEST_FP8 and do_fusion:
@@ -73,15 +72,11 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        dtype = torch.float16 if TEST_FP8 else torch.float32
-
         self.gate_proj = torch.nn.Parameter(
-            torch.empty((intermediate_size, hidden_size), dtype=dtype)
+            torch.empty((intermediate_size, hidden_size))
         )
         self.norm = RMSNorm(intermediate_size, 1e-05)
-        self.norm.weight = torch.nn.Parameter(
-            torch.ones(intermediate_size, dtype=dtype)
-        )
+        self.norm.weight = torch.nn.Parameter(torch.ones(intermediate_size))
 
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
@@ -118,9 +113,8 @@ class TestFusedAddRMSNorm(torch.nn.Module):
             return norm_output, residual_output
 
     def example_inputs(self, batch_size=8, hidden_size=16, seq_len=16):
-        dtype = torch.float16 if TEST_FP8 else torch.float32
-        hidden_states = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
-        residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
+        hidden_states = torch.randn((batch_size * seq_len, hidden_size))
+        residual = torch.randn((batch_size * seq_len, hidden_size))
         return (hidden_states, residual)
 
     def ops_in_model(self, do_fusion):
@@ -151,10 +145,9 @@ class TestRotaryEmbedding(torch.nn.Module):
         return q_rotated, k_rotated
 
     def example_inputs(self, num_tokens=32, head_dim=64):
-        dtype = torch.float16
         positions = torch.arange(num_tokens, dtype=torch.long)
-        q = torch.randn(num_tokens, head_dim, dtype=dtype)
-        k = torch.randn(num_tokens, head_dim, dtype=dtype)
+        q = torch.randn(num_tokens, head_dim)
+        k = torch.randn(num_tokens, head_dim)
         return (positions, q, k)
 
     def ops_in_model(self, do_fusion):
@@ -172,7 +165,7 @@ class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
         self.hidden_size = head_dim * num_heads
 
         self.qkv_proj = torch.nn.Linear(
-            self.hidden_size, self.hidden_size * 3, bias=False, dtype=torch.float16
+            self.hidden_size, self.hidden_size * 3, bias=False
         )
 
         self.rotary_emb = get_rope(
@@ -196,10 +189,9 @@ class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
         return qkv_updated
 
     def example_inputs(self, num_tokens=32, head_dim=64, num_heads=4):
-        dtype = torch.float16
         hidden_size = head_dim * num_heads
         positions = torch.arange(num_tokens, dtype=torch.long)
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype)
+        hidden_states = torch.randn(num_tokens, hidden_size)
         return (positions, hidden_states)
 
     def ops_in_model(self, do_fusion):
@@ -217,14 +209,18 @@ MODELS = [
 ]
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("model_class", MODELS)
 @pytest.mark.parametrize("do_fusion", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda", reason="Only test on CUDA")
-def test_fix_functionalization(model_class: torch.nn.Module, do_fusion: bool):
+def test_fix_functionalization(
+    model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
+):
     torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=torch.bfloat16),
+        model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             custom_ops=["all"],
             pass_config=PassConfig(enable_fusion=do_fusion, enable_noop=True),
