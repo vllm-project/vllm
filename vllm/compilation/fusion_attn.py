@@ -24,7 +24,7 @@ from vllm.utils import round_up
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 from .fx_utils import is_func
 from .inductor_pass import enable_fake_mode
-from .matcher_utils import MatcherQuant
+from .matcher_utils import MatcherQuantFP8
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -129,7 +129,7 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=symmetric
         )
         super().__init__(layer, quant_key, dtype)
-        self.quant_matcher = MatcherQuant(quant_key)
+        self.quant_matcher = MatcherQuantFP8(quant_key)
 
     def _register(self, pm_pass: PatternMatcherPass):
         def pattern(

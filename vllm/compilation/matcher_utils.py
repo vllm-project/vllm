@@ -146,21 +146,21 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         )
 
 
-class MatcherQuant:
+class MatcherQuantFP8(MatcherCustomOp):
     def __init__(self, quant_key: QuantKey, enabled: Optional[bool] = None):
+        if enabled is None:
+            enabled = QuantFP8.enabled()
+
+        super().__init__(enabled)
         self.quant_key = quant_key
         assert quant_key in QUANT_OPS, f"unsupported quantization scheme {quant_key}"
         self.QUANT_OP = QUANT_OPS[quant_key]
 
+        assert quant_key.dtype == current_platform.fp8_dtype(), (
+            "Only QuantFP8 supported by"
+        )
         assert quant_key.scale2 is None
         self.quant_fp8 = QuantFP8(quant_key.scale.static, quant_key.scale.group_shape)
-
-        if enabled is None:
-            # TODO either pass config to enabled or set it globally
-            #  (global during pass init seems reasonable)
-            enabled = self.quant_fp8.enabled()
-
-        self.forward = self.forward_custom if enabled else self.forward_native
 
     def forward_custom(
         self,
@@ -204,8 +204,3 @@ class MatcherQuant:
         )
 
         return torch.empty(scale_shape, device=input.device, dtype=torch.float32)
-
-    def __call__(
-        self, input: torch.Tensor, scale: Optional[torch.Tensor] = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.forward(input, scale)

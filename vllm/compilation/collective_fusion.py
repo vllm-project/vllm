@@ -25,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 from .inductor_pass import enable_fake_mode
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuant, MatcherRMSNorm
+from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -46,11 +46,8 @@ else:
 
 logger = init_logger(__name__)
 
-ALLREDUCE_OP = torch.ops.vllm.all_reduce.default
-RMS_OP = torch.ops._C.rms_norm.default
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-STATIC_FP8_QUANT_OP = torch.ops._C.static_scaled_fp8_quant.default
-STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
+if hasattr(torch.ops._C, "scaled_fp4_quant"):
+    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
 
 
 class BasePattern:
@@ -650,19 +647,6 @@ class FlashInferFusedAllReduceParams:
         }
 
 
-class BaseAllReduceRMSNormPattern(BasePattern):
-    def __init__(
-        self,
-        epsilon: float,
-        dtype: torch.dtype,
-        device: str,
-        allreduce_params: FlashInferFusedAllReduceParams,
-    ):
-        super().__init__(dtype, device)
-        self.epsilon = epsilon
-        self.allreduce_params = allreduce_params
-
-
 class AllReduceRMSNormPattern(BasePattern):
     """
     This pattern replaces the allreduce + rms norm (without residual)
@@ -808,7 +792,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         self.allreduce_params = allreduce_params
         self.quant_dtype = torch.float8_e4m3fn
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
-        self.quant_matcher = MatcherQuant(kFp8StaticTensorSym)
+        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def register(self, pm_pass: PatternMatcherPass):
         def get_inputs():
@@ -877,7 +861,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         self.quant_dtype = torch.float8_e4m3fn
 
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
-        self.quant_matcher = MatcherQuant(kFp8StaticTensorSym)
+        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def register(self, pm_pass: PatternMatcherPass):
         def get_inputs():

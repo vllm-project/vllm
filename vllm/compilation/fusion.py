@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .inductor_pass import enable_fake_mode
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuant, MatcherRMSNorm
+from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -102,7 +102,7 @@ class RMSNormQuantPattern:
             if not key.fused_add
             else MatcherFusedAddRMSNorm(epsilon)
         )
-        self.quant_matcher = MatcherQuant(key.quant)
+        self.quant_matcher = MatcherQuantFP8(key.quant)
 
 
 class RMSNormStaticQuantPattern(RMSNormQuantPattern):
