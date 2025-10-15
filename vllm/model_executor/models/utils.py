@@ -8,7 +8,7 @@ from typing import Any, Literal, Protocol, overload
 
 import torch
 import torch.nn as nn
-from torch.func import functional_call
+from torch.functools import functional_call
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 

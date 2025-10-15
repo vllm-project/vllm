@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
-from vllm.utils.func import run_once
+from vllm.utils.functools import run_once
 
 logger = init_logger(__name__)
 
