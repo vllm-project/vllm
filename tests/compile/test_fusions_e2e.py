@@ -90,7 +90,7 @@ elif current_platform.is_rocm():
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(max_model_len=1024),
-            backend=_Backend.ROCM_AITER_FA,  # TODO ROCM_AITER_UNIFIED_ATTN
+            backend=_Backend.ROCM_AITER_UNIFIED_ATTN,
             attention_fusions=32,
         ),
     ]
@@ -187,7 +187,7 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
         flat_product(
             MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
         )
-    )  # TODO
+    )
     # Toggle RMSNorm for FP4 models and unquant models
     + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
 )

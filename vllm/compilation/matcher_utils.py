@@ -34,7 +34,9 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 class MatcherCustomOp(ABC):
     def __init__(self, enabled: bool):
-        self.model_dtype = get_current_vllm_config().model_config.dtype
+        config = get_current_vllm_config()
+        self.model_dtype = config.model_config.dtype if config.model_config else None
+        self.device = config.device_config.device if config.device_config else None
 
         self.enabled = enabled
         self.forward = self.forward_custom if enabled else self.forward_native
@@ -51,10 +53,10 @@ class MatcherCustomOp(ABC):
         return self.forward(*args, **kws)
 
     def empty(self, *args, **kws):
-        return torch.empty(*args, dtype=self.model_dtype, device="cuda", **kws)
+        return torch.empty(*args, dtype=self.model_dtype, device=self.device, **kws)
 
     def empty_f32(self, *args, **kws):
-        return torch.empty(*args, dtype=torch.float32, device="cuda", **kws)
+        return torch.empty(*args, dtype=torch.float32, device=self.device, **kws)
 
     def inputs(self) -> list[torch.Tensor]:
         """Utility for inputs to the pattern"""
@@ -166,7 +168,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         input: torch.Tensor,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # TODO: why does empty_like produce a permute but
+        # TODO(luka): why does empty_like produce a permute but
         #  empty via shape doesn't?
         result = torch.empty(
             input.shape, device=input.device, dtype=self.quant_key.dtype

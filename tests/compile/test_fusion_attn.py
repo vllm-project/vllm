@@ -101,7 +101,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         num_blocks = batch_size * max_blocks
         backend = self.attn.backend
 
-        # TODO use get_kv_cache_stride_order
+        # TODO(luka) use get_kv_cache_stride_order
         # Create dummy KV cache for the selected backend
         if backend == _Backend.ROCM_ATTN:
             # k/v as 1st dimention
