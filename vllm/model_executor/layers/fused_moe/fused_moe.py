@@ -1134,11 +1134,8 @@ def fused_topk_bias(
     scores_for_choice = scores.view(
         -1, n_routed_experts
     ) + e_score_correction_bias.unsqueeze(0)
-    # For batch invariance, use sorted=True to ensure deterministic expert selection
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_kernel_override_batch_invariant,
-    )
 
+    # For batch invariance, use sorted=True to ensure deterministic expert selection
     use_sorted = vllm_kernel_override_batch_invariant()
     topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[1]
     topk_weights = scores.gather(1, topk_indices)
@@ -1201,11 +1198,8 @@ def grouped_topk(
         group_scores = (
             scores.view(num_token, num_expert_group, -1).max(dim=-1).values
         )  # [n, n_group]
-    # For batch invariance, use sorted=True to ensure deterministic expert selection
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_kernel_override_batch_invariant,
-    )
 
+    # For batch invariance, use sorted=True to ensure deterministic expert selection
     use_sorted = vllm_kernel_override_batch_invariant()
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=use_sorted)[
         1

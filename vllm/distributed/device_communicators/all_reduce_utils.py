@@ -19,6 +19,9 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.utils import cuda_device_count_stateless, update_environment_variables
 
 logger = init_logger(__name__)
@@ -69,9 +72,6 @@ NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
 def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) -> bool:
     from vllm.distributed.device_communicators.pynccl_allocator import (
         is_symmetric_memory_enabled,
-    )
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_kernel_override_batch_invariant,
     )
 
     if vllm_kernel_override_batch_invariant():
