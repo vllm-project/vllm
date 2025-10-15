@@ -99,7 +99,6 @@ class TestQuantModel(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.vllm_config = get_current_vllm_config()
         self.gate_proj = torch.nn.Parameter(
             torch.empty((intermediate_size, hidden_size)), requires_grad=False
         )
@@ -152,16 +151,12 @@ class TestQuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         ops_to_remove = [torch.ops.vllm.all_reduce.default]  # Always removed by SP
         # The following are only removed if fusion happens
-        if (
-            self.vllm_config
-            and self.vllm_config.compilation_config.pass_config.enable_fusion
-        ):
-            ops_to_remove.extend(
-                [
-                    torch.ops._C.fused_add_rms_norm.default,
-                    torch.ops._C.static_scaled_fp8_quant.default,
-                ]
-            )
+        config = get_current_vllm_config()
+        if config.compilation_config.pass_config.enable_fusion:
+            ops_to_remove.append(torch.ops._C.fused_add_rms_norm.default)
+            # Only check for static_scaled_fp8_quant if custom quant_fp8 is enabled
+            if "+quant_fp8" in config.compilation_config.custom_ops:
+                ops_to_remove.append(torch.ops._C.static_scaled_fp8_quant.default)
         return ops_to_remove
 
     def ops_in_model_after(self):
@@ -169,24 +164,23 @@ class TestQuantModel(torch.nn.Module):
             torch.ops.vllm.reduce_scatter.default,
             torch.ops.vllm.all_gather.default,
         ]
-        # The following is only added if fusion happens
+        # The following is only added if fusion happens and custom quant_fp8 is enabled
+        config = get_current_vllm_config()
         if (
-            self.vllm_config
-            and self.vllm_config.compilation_config.pass_config.enable_fusion
+            config.compilation_config.pass_config.enable_fusion
+            and "+quant_fp8" in config.compilation_config.custom_ops
         ):
             ops_to_add.append(torch.ops._C.fused_add_rms_norm_static_fp8_quant.default)
         return ops_to_add
 
     def ops_in_model(self):
-        if (
-            self.vllm_config
-            and self.vllm_config.compilation_config.pass_config.enable_fusion
-        ):
-            # If fusion happens, the fused op is the one
+        config = get_current_vllm_config()
+        if config.compilation_config.pass_config.enable_fusion:
+            # If fusion happens with custom quant_fp8, the fused op is the one
             # we check for (de)functionalization
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         else:
-            # If no fusion, the original ops are checked
+            # If no fusion or using native quant, the original ops are checked
             return [
                 torch.ops._C.fused_add_rms_norm.default,
                 # TODO  functionalization pass does not handle this yet
@@ -195,7 +189,14 @@ class TestQuantModel(torch.nn.Module):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("test_model_cls", [TestModel, TestQuantModel])
+@pytest.mark.parametrize(
+    "test_model_cls, custom_ops",
+    [
+        (TestModel, ""),
+        (TestQuantModel, "+quant_fp8"),
+        (TestQuantModel, "-quant_fp8"),
+    ],
+)
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
@@ -204,6 +205,7 @@ class TestQuantModel(torch.nn.Module):
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_pass(
     test_model_cls: type[torch.nn.Module],
+    custom_ops: str,
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -220,6 +222,7 @@ def test_sequence_parallelism_pass(
             args=(
                 num_processes,
                 test_model_cls,
+                custom_ops,
                 batch_size,
                 seq_len,
                 hidden_size,
@@ -236,6 +239,7 @@ def sequence_parallelism_pass_on_test_model(
     local_rank: int,
     world_size: int,
     test_model_cls: type[torch.nn.Module],
+    custom_ops: str,
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -264,12 +268,14 @@ def sequence_parallelism_pass_on_test_model(
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # configure vllm config for SequenceParallelismPass
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
     compilation_config = CompilationConfig(
+        custom_ops=custom_ops_list,
         pass_config=PassConfig(
             enable_sequence_parallelism=True,
             enable_fusion=enable_fusion,
             enable_noop=True,
-        )
+        ),
     )  # NoOp needed for fusion
     device_config = DeviceConfig(device=torch.device("cuda"))
 
