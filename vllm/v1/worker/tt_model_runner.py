@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
 from vllm.platforms.tt import TTPlatform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import LayerBlockType
+from vllm.utils import LayerBlockType, cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
@@ -116,6 +116,14 @@ class TTModelRunner:
             max_num_batched_tokens=max_num_batched_tokens,
             block_sizes=[kv_cache_spec.block_size],
         )
+
+        # The block tables in the persistent input batch have
+        # max_num_blocks_per_req = cdiv(max_model_len, block_size) but this
+        # does not take into account num blocks in KV cache. Actual max is min
+        # of these two. Used to slice block tables during input prep.
+        self.max_num_blocks_per_req = min(
+            cdiv(self.model_config.max_model_len,
+                 self.cache_config.block_size), kv_cache_config.num_blocks)
 
         # Only DP rank 0 allocates KV cache
         if self.parallel_config.data_parallel_rank != 0:
@@ -273,11 +281,12 @@ class TTModelRunner:
         assert (len(input_batch.block_table.block_tables) == 1
                 ), "Currently only supporting 1 KV cache group"
 
-        # Second dim of block table kept as fixed size max_num_blocks_per_req
-        # (ceil(max_model_len / block_size)) so ttnn tracing can work
-        # (requires constant shape).
+        # Second dim of block table is (ceil(max_model_len / block_size)).
+        # Slice to self.max_num_blocks_per_req which also takes into
+        # account max num blocks in KV cache in case max KV blocks is smaller.
+        # Constant shape is required for ttnn tracing to work.
         block_tables = input_batch.block_table[0].get_cpu_tensor(
-        )[:num_reqs, :]
+        )[:num_reqs, :self.max_num_blocks_per_req]
 
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
