@@ -241,7 +241,8 @@ class NixlConnector(KVConnectorBase_V1):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        assert self.connector_worker is not None
+        if self.connector_worker is None:
+            return None
         return self.connector_worker.get_kv_connector_stats()
 
     @classmethod
