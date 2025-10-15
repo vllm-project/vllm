@@ -412,18 +412,24 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
             removed_blocks.append(blocks[i])
 
-            # Handle an edge case where no free blocks available -
-            # repurpose the first removed block as null_block
+            # Handle an edge case where no free blocks available
+            # but we haven't allocated the null block yet
             if (
                 self._null_block is None
                 and len(removed_blocks) == 1
                 and self.block_pool.get_num_free_blocks() == 0
             ):
-                self.block_pool._null_block = removed_blocks[0]
-                self.block_pool._null_block.is_null = True
-                # Cache it in the manager as well
-                self._null_block = self.block_pool._null_block
-                blocks[i] = self._null_block
+                # It's possible that another manager already allocated a null block
+                # in the shared block pool
+                if self.block_pool._null_block is not None:
+                    self._null_block = self.block_pool._null_block
+                else:
+                    # If not, repurpose the first removed block as the null block
+                    self.block_pool._null_block = removed_blocks[0]
+                    self.block_pool._null_block.is_null = True
+                    # Cache it in the manager as well
+                    self._null_block = self.block_pool._null_block
+                    blocks[i] = self._null_block
             else:
                 # Normal case: call the null_block property to allocate from free queue
                 blocks[i] = self.null_block
@@ -565,18 +571,24 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
             removed_blocks.append(blocks[i])
 
-            # Handle an edge case where no free blocks available -
-            # repurpose the first removed block as null_block
+            # Handle an edge case where no free blocks available
+            # but we haven't allocated the null block yet
             if (
                 self._null_block is None
                 and len(removed_blocks) == 1
                 and self.block_pool.get_num_free_blocks() == 0
             ):
-                self.block_pool._null_block = removed_blocks[0]
-                self.block_pool._null_block.is_null = True
-                # Cache it in the manager as well
-                self._null_block = self.block_pool._null_block
-                blocks[i] = self._null_block
+                # It's possible that another manager already allocated a null block
+                # in the shared block pool
+                if self.block_pool._null_block is not None:
+                    self._null_block = self.block_pool._null_block
+                else:
+                    # If not, repurpose the first removed block as the null block
+                    self.block_pool._null_block = removed_blocks[0]
+                    self.block_pool._null_block.is_null = True
+                    # Cache it in the manager as well
+                    self._null_block = self.block_pool._null_block
+                    blocks[i] = self._null_block
             else:
                 # Normal case: call the null_block property to allocate from free queue
                 blocks[i] = self.null_block
