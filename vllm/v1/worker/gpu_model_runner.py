@@ -2693,13 +2693,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampler_output = self._sample(logits, spec_decode_metadata)
 
             def propose_draft_token_ids(
-                    spec_decode_common_attn_metadata,
-                    sampled_token_ids,
-                    hidden_states,
-                    sample_hidden_states,
-                    aux_hidden_states,
-                    spec_decode_metadata,
-                ):
+                sampled_token_ids,
+                spec_decode_common_attn_metadata,
+                hidden_states,
+                sample_hidden_states,
+                aux_hidden_states,
+                spec_decode_metadata,
+            ):
                 assert spec_decode_common_attn_metadata is not None
                 with record_function_or_nullcontext("Draft"):
                     self._draft_token_ids = self.propose_draft_token_ids(
@@ -2737,7 +2737,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if use_padded_batch_for_eagle and input_fits_in_drafter:
                 # EAGLE speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
-                propose_draft_token_ids(sampler_output.sampled_token_ids)
+                propose_draft_token_ids(sampler_output.sampled_token_ids,
+                    spec_decode_common_attn_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    spec_decode_metadata,
+                )
 
             with record_function_or_nullcontext("Bookkeep"):
                 (
@@ -2763,7 +2769,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ):
                 # ngram and other speculative decoding methods use the sampled
                 # tokens on the CPU, so they are run after bookkeeping.
-                propose_draft_token_ids(valid_sampled_token_ids)
+                propose_draft_token_ids(valid_sampled_token_ids,
+                    spec_decode_common_attn_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    spec_decode_metadata,
+                )
 
             with record_function_or_nullcontext("EPLB"):
                 self.eplb_step()
