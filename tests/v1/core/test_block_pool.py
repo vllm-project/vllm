@@ -98,7 +98,3 @@ class TestBlockPoolLazyNullBlock:
         # After null block allocation - should still succeed
         _ = pool.null_block
         assert pool.reset_prefix_cache() is True
-
-
-class TestManagerLazyNullBlock:
-    """Test lazy null block allocation in KV cache managers."""
