@@ -30,7 +30,6 @@ from vllm.utils import (
     bind_kv_cache,
     common_broadcastable_dtype,
     current_stream,
-    deprecate_kwargs,
     get_open_port,
     get_tcp_uri,
     is_lossless_cast,
@@ -42,12 +41,11 @@ from vllm.utils import (
     sha256,
     split_host_port,
     split_zmq_path,
-    supports_kw,
     swap_dict_values,
     unique_filepath,
 )
 
-from ..utils import create_new_process_for_each_test, error_on_warning
+from ..utils import create_new_process_for_each_test
 
 
 @pytest.mark.asyncio
@@ -81,61 +79,6 @@ async def test_merge_async_iterators():
             print("Iterator was cancelled normally")
         except (Exception, asyncio.CancelledError) as e:
             raise AssertionError() from e
-
-
-def test_deprecate_kwargs_always():
-    @deprecate_kwargs("old_arg", is_deprecated=True)
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with pytest.warns(DeprecationWarning, match="'old_arg'"):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-
-def test_deprecate_kwargs_never():
-    @deprecate_kwargs("old_arg", is_deprecated=False)
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with error_on_warning(DeprecationWarning):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-
-def test_deprecate_kwargs_dynamic():
-    is_deprecated = True
-
-    @deprecate_kwargs("old_arg", is_deprecated=lambda: is_deprecated)
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with pytest.warns(DeprecationWarning, match="'old_arg'"):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-    is_deprecated = False
-
-    with error_on_warning(DeprecationWarning):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-
-def test_deprecate_kwargs_additional_message():
-    @deprecate_kwargs("old_arg", is_deprecated=True, additional_message="abcd")
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with pytest.warns(DeprecationWarning, match="abcd"):
-        dummy(old_arg=1)
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -299,7 +242,7 @@ def test_dict_args(parser):
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
-        # Test compile config and compilation level
+        # Test compile config and compilation mode
         "-O.use_inductor=true",
         "-O.backend",
         "custom",
@@ -352,7 +295,7 @@ def test_dict_args(parser):
         },
     }
     assert parsed_args.compilation_config == {
-        "level": 1,
+        "mode": 1,
         "use_inductor": True,
         "backend": "custom",
         "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
@@ -367,7 +310,7 @@ def test_duplicate_dict_args(caplog_vllm, parser):
         "--hf-overrides.key1",
         "val2",
         "-O1",
-        "-O.level",
+        "-O.mode",
         "2",
         "-O3",
     ]
@@ -375,45 +318,12 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     parsed_args = parser.parse_args(args)
     # Should be the last value
     assert parsed_args.hf_overrides == {"key1": "val2"}
-    assert parsed_args.compilation_config == {"level": 3}
+    assert parsed_args.compilation_config == {"mode": 3}
 
     assert len(caplog_vllm.records) == 1
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
-    assert "-O.level" in caplog_vllm.text
-
-
-@pytest.mark.parametrize(
-    "callable,kw_name,requires_kw_only,allow_var_kwargs,is_supported",
-    [
-        # Tests for positional argument support
-        (lambda foo: None, "foo", True, True, False),
-        (lambda foo: None, "foo", False, True, True),
-        # Tests for positional or keyword / keyword only
-        (lambda foo=100: None, "foo", True, True, False),
-        (lambda *, foo: None, "foo", False, True, True),
-        # Tests to make sure the names of variadic params are NOT supported
-        (lambda *args: None, "args", False, True, False),
-        (lambda **kwargs: None, "kwargs", False, True, False),
-        # Tests for if we allow var kwargs to add support
-        (lambda foo: None, "something_else", False, True, False),
-        (lambda foo, **kwargs: None, "something_else", False, True, True),
-        (lambda foo, **kwargs: None, "kwargs", True, True, False),
-        (lambda foo, **kwargs: None, "foo", True, True, False),
-    ],
-)
-def test_supports_kw(
-    callable, kw_name, requires_kw_only, allow_var_kwargs, is_supported
-):
-    assert (
-        supports_kw(
-            callable=callable,
-            kw_name=kw_name,
-            requires_kw_only=requires_kw_only,
-            allow_var_kwargs=allow_var_kwargs,
-        )
-        == is_supported
-    )
+    assert "-O.mode" in caplog_vllm.text
 
 
 @create_new_process_for_each_test()
@@ -861,36 +771,6 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
-
-
-def test_json_count_leaves():
-    """Test json_count_leaves function from jsontree utility."""
-    from vllm.utils.jsontree import json_count_leaves
-
-    # Single leaf values
-    assert json_count_leaves(42) == 1
-    assert json_count_leaves("hello") == 1
-    assert json_count_leaves(None) == 1
-
-    # Empty containers
-    assert json_count_leaves([]) == 0
-    assert json_count_leaves({}) == 0
-    assert json_count_leaves(()) == 0
-
-    # Flat structures
-    assert json_count_leaves([1, 2, 3]) == 3
-    assert json_count_leaves({"a": 1, "b": 2}) == 2
-    assert json_count_leaves((1, 2, 3)) == 3
-
-    # Nested structures
-    nested_dict = {"a": 1, "b": {"c": 2, "d": 3}}
-    assert json_count_leaves(nested_dict) == 3
-
-    nested_list = [1, [2, 3], 4]
-    assert json_count_leaves(nested_list) == 4
-
-    mixed_nested = {"list": [1, 2], "dict": {"x": 3}, "value": 4}
-    assert json_count_leaves(mixed_nested) == 4
 
 
 def test_convert_ids_list_to_tokens():

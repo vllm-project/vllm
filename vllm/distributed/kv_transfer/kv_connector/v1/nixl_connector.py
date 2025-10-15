@@ -241,7 +241,8 @@ class NixlConnector(KVConnectorBase_V1):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        assert self.connector_worker is not None
+        if self.connector_worker is None:
+            return None
         return self.connector_worker.get_kv_connector_stats()
 
     @classmethod
@@ -563,6 +564,7 @@ class NixlConnectorWorker:
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
         self.num_blocks = 0
+        self.enable_permute_local_kv = False
 
         # KV Caches and nixl tracking data.
         self.device_type = current_platform.device_type
@@ -1094,6 +1096,23 @@ class NixlConnectorWorker:
         is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
 
         remote_block_len = nixl_agent_meta.block_lens[0]
+        if nixl_agent_meta.kv_cache_layout != self.kv_cache_layout:
+            if (
+                self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.enable_permute_local_kv
+                and nixl_agent_meta.kv_cache_layout == "HND"
+            ):
+                logger.info(
+                    "Remote is HND and local is NHD, enabled additional permute "
+                    "on local device KV."
+                )
+                self.enable_permute_local_kv = True
+            else:
+                raise RuntimeError(
+                    "Heterogeneous TP expects same kv_cache_layout. "
+                    "Or enable experimental feature to use HND to NHD support by "
+                    "setting 'enable_permute_local_kv'=True in --kv-transfer-config."
+                )
         if self.use_mla or is_kv_replicated:
             # With replicated KV cache, only the number of blocks can differ.
             assert self.block_len_per_layer == nixl_agent_meta.block_lens, (
@@ -1114,7 +1133,10 @@ class NixlConnectorWorker:
                 remote_block_size //= 2
             if tp_ratio > 1:
                 # Heterogeneous TP expects same kv_cache_layout.
-                assert nixl_agent_meta.kv_cache_layout == self.kv_cache_layout
+                if nixl_agent_meta.kv_cache_layout == "NHD":
+                    raise ValueError(
+                        "Heterogeneous TP is not supported for remote with NHD."
+                    )
                 if self.device_type == "xpu":
                     raise ValueError("Heterogeneous TP is not supported on XPU")
 
@@ -1226,6 +1248,41 @@ class NixlConnectorWorker:
                 "d2h",
             )
 
+    def permute_device_kv(self, block_ids: list[int]):
+        """Transforms the layout of received KV cache blocks to the local format.
+
+        This method corrects layout mismatches from direct memory copies by
+        permuting the tensor dimensions.
+
+        - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
+        - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
+
+        Args:
+            block_ids: A list of block IDs to update and permute.
+
+        Implementation:
+        - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
+        - permuted_blocks = x.permute(*inv_order) # transpose n_kv_heads, block_size
+        - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
+
+        """
+        split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
+        inv_order = [0, 2, 1, 3]
+        sample_cache = list(self.device_kv_caches.values())[0][0]
+        target_shape = list(sample_cache.shape)
+        target_shape[0] = -1
+        src_shape = tuple(target_shape[i] for i in inv_order)
+        indices = torch.tensor(block_ids, device=sample_cache.device)
+
+        for _, cache_or_caches in self.device_kv_caches.items():
+            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            for cache in cache_list:
+                blocks_to_update = cache.index_select(0, indices)
+                permuted_blocks = blocks_to_update.reshape(src_shape).permute(
+                    *inv_order
+                )
+                cache.index_copy_(0, indices, permuted_blocks)
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
@@ -1272,6 +1329,15 @@ class NixlConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+        if self.enable_permute_local_kv and len(done_recving) > 0:
+            block_ids = []
+            for req_id in done_recving:
+                meta = self._recving_metadata.pop(req_id)
+                assert meta, f"{req_id} not found in recving_metadata list"
+                block_ids += meta.local_block_ids
+
+            self.permute_device_kv(block_ids)
 
         return done_sending, done_recving
 
