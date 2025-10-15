@@ -201,7 +201,7 @@ class CompilationConfig:
     (it sees a part of the graph). The backend can not be custom for compilation
     level 3, i.e. the backend must be either eager or inductor. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
-    use_inductor_cudagraphs_partition is off. Note that the default options for
+    use_inductor_graph_partition is off. Note that the default options for
     splitting ops are sufficient for piecewise compilation.
     """
     custom_ops: list[str] = field(default_factory=list)
@@ -431,6 +431,7 @@ class CompilationConfig:
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
         factors.append(self.use_inductor)
+        factors.append(self.use_inductor_graph_partition)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
@@ -512,6 +513,16 @@ class CompilationConfig:
 
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
+
+        if (
+            is_torch_equal_or_newer("2.9.0.dev")
+            and "combo_kernels" not in self.inductor_compile_config
+            and "benchmark_combo_kernel" not in self.inductor_compile_config
+        ):
+            # use horizontal fusion, which is useful for fusing qk-norm and
+            # qk-rope when query and key have different shapes.
+            self.inductor_compile_config["combo_kernels"] = True
+            self.inductor_compile_config["benchmark_combo_kernel"] = True
 
         # migrate the deprecated flags
         if not self.use_cudagraph:
