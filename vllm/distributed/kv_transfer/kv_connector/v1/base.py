@@ -44,7 +44,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -101,8 +100,6 @@ class KVConnectorBase_V1(ABC):
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._role = role
-        # FIXME: make prefix cache stats conditional on log_stats
-        self.prefix_cache_stats = PrefixCacheStats()
 
     @property
     def role(self) -> KVConnectorRole:
@@ -434,28 +431,3 @@ class KVConnectorBase_V1(ABC):
         which can implement custom aggregation logic on the data dict.
         """
         return None
-
-    def update_prefix_cache_stats(
-        self, request_num_tokens: int, num_external_tokens: int
-    ) -> None:
-        """
-        Update prefix cache statistics for a request.
-
-        Args:
-            request_num_tokens (int): the number of tokens in the request.
-            num_external_tokens (int): the number of tokens that will be
-                loaded from the external KV cache.
-        """
-        self.prefix_cache_stats.requests += 1
-        self.prefix_cache_stats.queries += request_num_tokens
-        self.prefix_cache_stats.hits += num_external_tokens
-
-    def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
-        """Get (and reset) the prefix cache stats.
-
-        Returns:
-            The current prefix caching stats.
-        """
-        stats = self.prefix_cache_stats
-        self.prefix_cache_stats = PrefixCacheStats()
-        return stats
