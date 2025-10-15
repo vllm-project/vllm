@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from typing import Union
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -156,7 +156,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             w2_blockscale=self.w2_scale,
             w2_alpha=self.g2_alphas,
             masked_m=expert_num_tokens,
-            workspace=workspace2,
+            #workspace=workspace2,
             out=output,
         )
 
@@ -173,7 +173,7 @@ def get_cute_dtype(input: torch.Tensor) -> str:
 
 
 def flashinfer_cutedsl_moe_masked(
-    hidden_states: torch.Tensor,
+    hidden_states: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
     input_global_scale: torch.Tensor,
     w1: torch.Tensor,
     w1_blockscale: torch.Tensor,
@@ -183,7 +183,7 @@ def flashinfer_cutedsl_moe_masked(
     w2_blockscale: torch.Tensor,
     w2_alpha,
     masked_m: torch.Tensor,
-    workspace: torch.Tensor,
+    #workspace: torch.Tensor,
     out: torch.Tensor,
 ):
     """
@@ -191,7 +191,9 @@ def flashinfer_cutedsl_moe_masked(
     kernels.
 
     Args:
-        hidden_states (torch.Tensor): [num_experts, m, k], bf16
+        hidden_states: Either of the following case
+            * torch.Tensor: [num_experts, m, k], bf16
+            * tuple[torch.Tensor, torch.Tensor]: [num_experts, m, k // 2], uint8, [num_experts, m, k // 16], float8_e4m3fn
         input_global_scale (torch.Tensor): (l,)
         w1 (torch.Tensor): fp4 weights, [l, 2 * n, k // 2], uint8
         w1_blockscale (torch.Tensor): blockscale factors, e4m3,
@@ -208,9 +210,9 @@ def flashinfer_cutedsl_moe_masked(
     """
 
     # === Assertions on dtypes ===
-    assert input_global_scale.dtype == torch.float32, (
-        f"input_global_scale must be float32, got {input_global_scale.dtype}"
-    )
+#    assert input_global_scale.dtype == torch.float32, (
+#        f"input_global_scale must be float32, got {input_global_scale.dtype}"
+#    )
     assert w1.dtype == torch.uint8, f"w1 must be uint8, got {w1.dtype}"
     assert w1_blockscale.dtype == torch.float8_e4m3fn, (
         f"w1_blockscale must be float8_e4m3fn, got {w1_blockscale.dtype}"
@@ -231,7 +233,30 @@ def flashinfer_cutedsl_moe_masked(
 
     # === Assertions on shapes ===
     n = w2.shape[-1] * 2  # intermediate dimension
-    num_experts, m, k = hidden_states.shape
+    if isinstance(hidden_states, tuple):
+        assert (
+            input_global_scale is None
+        ), "input_global_scale is needed when input needs quant"
+
+        aq = hidden_states[0].view(torch.uint8)
+        aq_sf = hidden_states[1].view(torch.float8_e4m3fn)
+        m, k_by_2, num_experts = aq.shape
+        k = k_by_2 * 2
+    else:
+        num_experts, m, k = hidden_states.shape
+
+        assert (
+            input_global_scale.dtype == torch.float32
+        ), f"input_global_scale must be float32, got {input_global_scale.dtype}"
+        assert input_global_scale.shape == (
+            num_experts,
+        ), f"input_global_scale must be (l,), got {input_global_scale.shape}"
+
+        aq, aq_sf = scaled_fp4_grouped_quant(
+            hidden_states,
+            masked_m,
+            input_global_scale,
+        )    
 
     assert w1.shape[-2] == 2 * n, f"w1 last-2 dim must be 2*n, got {w1.shape}"
     assert w1.shape[-1] * 2 == k, (
@@ -242,9 +267,9 @@ def flashinfer_cutedsl_moe_masked(
         n // 2,
     ), f"w2 shape mismatch, got {w2.shape[-2:]}, expected {(k, n // 2)}"
 
-    assert input_global_scale.shape == (num_experts,), (
-        f"input_global_scale must be (l,), got {input_global_scale.shape}"
-    )
+#    assert input_global_scale.shape == (num_experts,), (
+#        f"input_global_scale must be (l,), got {input_global_scale.shape}"
+#    )
     assert w1_alpha.shape == (num_experts,), (
         f"w1_alpha must be (l,), got {w1_alpha.shape}"
     )
@@ -255,12 +280,16 @@ def flashinfer_cutedsl_moe_masked(
         f"w2_alpha must be (l,), got {w2_alpha.shape}"
     )
 
-    aq, aq_sf = scaled_fp4_grouped_quantize(
-        hidden_states,
-        masked_m,
-        input_global_scale,
-    )
+#    aq, aq_sf = scaled_fp4_grouped_quantize(
+#        hidden_states,
+#        masked_m,
+#        input_global_scale,
+#    )
 
+#    workspace = workspace.permute(1, 2, 0)  # requirement of kernel
+    workspace = torch.empty(
+        (num_experts, m, n * 2), dtype=torch.bfloat16, device=aq.device
+    )
     workspace = workspace.permute(1, 2, 0)  # requirement of kernel
     sf_vec_size = 16
     assert aq_sf.dtype == torch.float8_e4m3fn
@@ -268,7 +297,8 @@ def flashinfer_cutedsl_moe_masked(
     ab_dtype = "float4_e2m1fn"
     sf_dtype = "float8_e4m3fn"
 
-    c_dtype = get_cute_dtype(hidden_states)
+#    c_dtype = get_cute_dtype(hidden_states)
+    c_dtype = "bfloat16"
 
     # Gemm1
     flashinfer_cutedsl_grouped_gemm_nt_masked(

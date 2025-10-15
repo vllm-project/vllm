@@ -120,11 +120,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         q_dtype = quant_config.quant_dtype
 
         if envs.VLLM_FLASHINFER_MOE_BACKEND == "cutedsl":
-            logger.info_once(
-                "Skip quantization when using FlashInfer CUTEDSL for "
-                "ModelOptNvFp4FusedMoE."
-            )
-            q_dtype = None
+            logger.info_once("do nvfp4 quant!!")
+            #            logger.info_once(
+            #                "Skip quantization when using FlashInfer CUTEDSL for "
+            #                "ModelOptNvFp4FusedMoE."
+            #            )
+            #q_dtype = None
 
         x, x_scales = moe_kernel_quantize_input(
             x,
@@ -167,6 +168,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "DeepEP kernels quantize the inputs in blocks of shape 128"
             )
 
+        use_nvfp4 = False
+        if quant_config.a1_scale.numel()!=1:
+            use_nvfp4 = True
         has_per_token_scales = (
             quant_config.a1_scale.numel() != 1
             if quant_config.a1_scale is not None
@@ -176,9 +180,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 else False
             )
         )
-        assert not has_per_token_scales, (
-            "low_latency kernels doesn't support dispatching per-token scales"
-        )
+        if not use_nvfp4:
+            assert not has_per_token_scales, (
+                "low_latency kernels doesn't support dispatching per-token scales"
+            )
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -195,6 +200,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
+            **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
+            **(
+                dict(x_global_scale=quant_config.a1_scale)
+                if quant_config.a1_scale is not None
+                else dict()
+            ),
             async_finish=False,
             return_recv_hook=True,
         )
