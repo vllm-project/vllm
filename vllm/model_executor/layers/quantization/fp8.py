@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled,
@@ -1201,7 +1202,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."
             assert self.fused_experts is None
-            result = torch.ops.vllm.fused_marlin_moe(
+            result = fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
