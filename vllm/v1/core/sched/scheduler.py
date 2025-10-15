@@ -1049,7 +1049,7 @@ class Scheduler(SchedulerInterface):
                     assert len(set([x.shape[-1] for x in pooling_outputs])) == 1
                     pooling_output = torch.concat(pooling_outputs, dim=0)
 
-                # Add EngineCoreOutput for this generate Request.
+                # Add EngineCoreOutput for this pooling Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
