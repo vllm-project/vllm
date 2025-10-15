@@ -313,7 +313,12 @@ class MultiModalMixin(SupportsMultiModal):
         language model class. Therefore, in order to return a language model vLLM class,
         we use a wrapper to give `self` the same interface as a text model."""
 
-        bases = (base for base in self.__class__.mro() if base is not MultiModalMixin)
+        # Exclude self and object
+        bases = self.__class__.mro()[1:-1]
+        # Keep only classes defined in `vllm.model_executor.models.transformers`
+        bases = [b for b in bases if ".transformers." in b.__module__]
+        # Exclude MultiModalMixin itself
+        bases = [b for b in bases if b is not MultiModalMixin]
 
         class LanguageModel(*bases):
             def __init__(self, multimodal_model):
