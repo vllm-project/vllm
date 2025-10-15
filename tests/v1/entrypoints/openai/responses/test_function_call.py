@@ -138,7 +138,9 @@ async def test_named_tool_use(client: openai.AsyncOpenAI):
         {
             "type": "function",
             "name": "get_weather",
-            "description": "Get current temperature for provided coordinates in celsius.",
+            "description": (
+                "Get current temperature for provided coordinates in celsius."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
