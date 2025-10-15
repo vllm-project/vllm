@@ -5,6 +5,8 @@ import hashlib
 from functools import cached_property
 from typing import Any, Literal, cast
 
+from packaging.version import parse
+from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm import version
@@ -79,25 +81,43 @@ class ObservabilityConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
-        if (
-            self.collect_detailed_traces is not None
-            and len(self.collect_detailed_traces) == 1
-            and "," in self.collect_detailed_traces[0]
-        ):
-            self._parse_collect_detailed_traces()
+    @field_validator("show_hidden_metrics_for_version")
+    @classmethod
+    def _validate_show_hidden_metrics_for_version(cls, value: str | None) -> str | None:
+        if value is not None:
+            # Raises an exception if the string is not a valid version.
+            parse(value)
+        return value
 
-        from vllm.tracing import is_otel_available, otel_import_error_traceback
+    @field_validator("otlp_traces_endpoint")
+    @classmethod
+    def _validate_otlp_traces_endpoint(cls, value: str | None) -> str | None:
+        if value is not None:
+            from vllm.tracing import is_otel_available, otel_import_error_traceback
 
-        if not is_otel_available() and self.otlp_traces_endpoint is not None:
+            if not is_otel_available():
+                raise ValueError(
+                    "OpenTelemetry is not available. Unable to configure "
+                    "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                    f"installed. Original error:\n{otel_import_error_traceback}"
+                )
+        return value
+
+    @field_validator("collect_detailed_traces")
+    @classmethod
+    def _validate_collect_detailed_traces(
+        cls, value: list[DetailedTraceModules] | None
+    ) -> list[DetailedTraceModules] | None:
+        """Handle the legacy case where users might provide a comma-separated
+        string instead of a list of strings."""
+        if value is not None and len(value) == 1 and "," in value[0]:
+            value = cast(list[DetailedTraceModules], value[0].split(","))
+        return value
+
+    @model_validator(mode="after")
+    def _validate_tracing_config(self):
+        if self.collect_detailed_traces and not self.otlp_traces_endpoint:
             raise ValueError(
-                "OpenTelemetry is not available. Unable to configure "
-                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
-                f"installed. Original error:\n{otel_import_error_traceback}"
+                "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
-
-    def _parse_collect_detailed_traces(self):
-        assert isinstance(self.collect_detailed_traces, list)
-        self.collect_detailed_traces = cast(
-            list[DetailedTraceModules], self.collect_detailed_traces[0].split(",")
-        )
+        return self
