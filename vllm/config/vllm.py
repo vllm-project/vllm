@@ -8,6 +8,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import replace
+from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -46,6 +47,23 @@ else:
     QuantizationConfig = Any
 
 logger = init_logger(__name__)
+
+
+class OptimizationLevel(Enum):
+    """Optimization level enum."""
+
+    O0 = 0
+    """00 : No optimization. no compilation, no cudagraphs, no other
+    optimization, just starting up immediately"""
+    O1 = 1
+    """O1: Quick optimizations. Dynamo+Inductor compilation but no
+    cudagraphs"""
+    O2 = 2
+    """O2: Full optimizations. -O1 as well as cudagraphs."""
+    O3 = 3
+    """O3: Full (auto)tuning. -O2 as well as max-autotune, compiling for
+    additional static sizes, etc. - any other time-consuming optimizations."""
+
 
 # PassConfig preset instances for each compilation mode. Default fields set.
 pass_config_none = PassConfig(
@@ -93,6 +111,46 @@ pass_config_enable_fields = [
     "enable_async_tp",
     "enable_fi_allreduce_fusion",
 ]
+
+compilation_config_default_fields = [
+    "mode",
+    "cudagraph_mode",
+    "use_inductor_graph_partition",
+]
+
+vllm_config_default_fields = []
+
+optimization_level_00 = {
+    "pass_config": pass_config_none,
+    "mode": CompilationMode.NONE,
+    "cudagraph_mode": CUDAGraphMode.NONE,
+    "use_inductor_graph_partition": False,
+}
+optimization_level_01 = {
+    "pass_config": pass_config_stock_torch_compile,
+    "mode": CompilationMode.VLLM_COMPILE,
+    "cudagraph_mode": CUDAGraphMode.PIECEWISE,
+    "use_inductor_graph_partition": False,
+}
+optimization_level_02 = {
+    "pass_config": pass_config_dynamo_trace_once,
+    "mode": CompilationMode.VLLM_COMPILE,
+    "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+    "use_inductor_graph_partition": True,
+}
+optimization_level_03 = {
+    "pass_config": pass_config_vllm_compile,
+    "mode": CompilationMode.VLLM_COMPILE,
+    "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+    "use_inductor_graph_partition": True,
+}
+
+optimization_level_to_config = {
+    OptimizationLevel.O0: optimization_level_00,
+    OptimizationLevel.O1: optimization_level_01,
+    OptimizationLevel.O2: optimization_level_02,
+    OptimizationLevel.O3: optimization_level_03,
+}
 
 
 @config
@@ -150,6 +208,11 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
+    optimization_level: OptimizationLevel | None = OptimizationLevel.O2
+    """The optimization level. These levels trade startup time cost for
+    performance, with -O0 having the best startup time and -O3 having the best
+    performance. -02 is used by defult. See  OptimizationLevel for full
+    description."""
 
     def compute_hash(self) -> str:
         """
@@ -309,42 +372,6 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
-    def _set_pass_config_defaults(self) -> None:
-        """Set all PassConfig enable_* flags if they're at default values.
-
-        Args:
-            compilation_mode: Flag to determine with PassConfig to use.
-        """
-
-        current_config = self.compilation_config.pass_config
-
-        for field in pass_config_enable_fields:
-            if getattr(current_config, field) is None:
-                if self.compilation_config.mode == CompilationMode.NONE:
-                    setattr(current_config, field, getattr(pass_config_none, field))
-                elif self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
-                    setattr(current_config, field, getattr(pass_config_stock_torch_compile, field))
-                elif self.compilation_config.mode == CompilationMode.DYNAMO_TRACE_ONCE:
-                    setattr(current_config, field, getattr(pass_config_dynamo_trace_once, field))
-                elif self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-                    setattr(current_config, field, getattr(pass_config_vllm_compile, field))
-                else:
-                    raise ValueError(f"Compilation mode {self.compilation_config.mode} should have been set by this point. post issue upstream.")
-    def _set_cudagraph_mode_defaults(self) -> None:
-        mode = self.compilation_config.mode
-        if self.compilation_config.cudagraph_mode is None:
-            if mode == CompilationMode.NONE:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE 
-            elif mode == CompilationMode.STOCK_TORCH_COMPILE:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-            elif mode == CompilationMode.DYNAMO_TRACE_ONCE:
-                 self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-            elif mode == CompilationMode.VLLM_COMPILE:
-                 self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-            else:
-                raise ValueError(f"Compilation mode {self.compilation_config.mode} should have been set by this point. post issue upstream.")
-
-
     def _apply_optimization_level_defaults(self) -> None:
         """Apply optimization level-specific default configurations.
 
@@ -353,17 +380,22 @@ class VllmConfig:
 
         Optimization Levels:
             - O0 (None): No optimization, fast startup, eager execution
-            - O1 (STOCK_TORCH_COMPILE): Fast compilation (to be implemented)
-            - O2 (DYNAMO_TRACE_ONCE): Full optimization (to be implemented)
-            - O3 (VLLM_COMPILE): Maximum optimization with autotuning (to be implemented)
+            - O1 (STOCK_TORCH_COMPILE): Fast compilation
+            - O2 (DYNAMO_TRACE_ONCE): Full optimization
+            - O3 (VLLM_COMPILE): Maximum optimization with autotuning
         """
-       
-        self._set_pass_config_defaults()
-        self._set_cudagraph_mode_defaults()
-        
-
-
-        # TODO: Implement -O1, -O2, -O3 optimization levels
+        # TODO: Implement model specific paramters,
+        default_config = optimization_level_to_config[self.optimization_level]
+        for element in compilation_config_default_fields:
+            if getattr(self.compilation_config, element) is None:
+                setattr(self.compilation_config, element, default_config[element])
+        for element in pass_config_enable_fields:
+            if getattr(self.compilation_config.pass_config, element) is None:
+                default_element = getattr(default_config["pass_config"], element)
+                setattr(self.compilation_config.pass_config, element, default_element)
+        for element in vllm_config_default_fields:
+            if getattr(self, element) is None:
+                setattr(self, element, default_config["element"])
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
@@ -402,29 +434,10 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        # If the user does not explicitly set a compilation mode, then
-        # we use the default mode. The default mode depends on other
-        # settings (see the below code).
-        if self.compilation_config.mode is None:
-            if envs.VLLM_USE_V1:
-                if (
-                    self.model_config is not None
-                    and not self.model_config.enforce_eager
-                ):
-                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
-                else:
-                    self.compilation_config.mode = CompilationMode.NONE
-
-            else:
-                # NB: Passing both --enforce-eager and a compilation mode
-                # in V0 means the compilation mode wins out.
-                self.compilation_config.mode = CompilationMode.NONE
-        else:
-            assert self.compilation_config.mode >= CompilationMode.NONE
-            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
-
         # Apply optimization level-specific defaults
         self._apply_optimization_level_defaults()
+        assert self.compilation_config.mode >= CompilationMode.NONE
+        assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
         # compilation mode and backend.
