@@ -8,7 +8,6 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from typing import Optional
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
@@ -474,10 +473,10 @@ def apply_gptq_marlin_linear(
     output_size_per_partition: int,
     input_size_per_partition: int,
     is_k_full: bool,
-    input_global_scale: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
+    input_global_scale: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-    input_dtype: Optional[torch.dtype] = None,
+    input_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
@@ -541,10 +540,10 @@ def apply_awq_marlin_linear(
     quant_type: ScalarType,
     output_size_per_partition: int,
     input_size_per_partition: int,
-    input_global_scale: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
+    input_global_scale: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-    input_dtype: Optional[torch.dtype] = None,
+    input_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
@@ -598,10 +597,10 @@ def apply_rtn_marlin_linear(
     quant_type: ScalarType,
     output_size_per_partition: int,
     input_size_per_partition: int,
-    input_global_scale: Optional[torch.Tensor] = None,
+    input_global_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-    input_dtype: Optional[torch.dtype] = None,
+    input_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)

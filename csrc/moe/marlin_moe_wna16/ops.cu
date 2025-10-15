@@ -244,7 +244,7 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
       get_kernel_cache_size(th_config, m_block_size_8, thread_m_blocks, prob_m,
                             prob_n, prob_k, num_bits, group_size, has_act_order,
                             is_k_full, has_zp, is_zp_float, is_a_8bit);
-  return cache_size + 512 <= max_shared_mem;
+  return cache_size <= max_shared_mem;
 }
 
 MarlinFuncPtr get_marlin_kernel(
@@ -284,7 +284,7 @@ exec_config_t determine_exec_config(
 
     if (!is_valid_config(th_config, m_block_size_8, thread_m_blocks, prob_m,
                          prob_n, prob_k, num_bits, group_size, has_act_order,
-                         is_k_full, has_zp, is_zp_float, max_shared_mem,
+                         is_k_full, has_zp, is_zp_float, max_shared_mem - 512,
                          is_a_8bit)) {
       continue;
     }
@@ -307,21 +307,25 @@ exec_config_t determine_exec_config(
 
     if (kernel == MarlinDefault) continue;
 
-    if (thread_m_blocks > 1) {
-      exec_cfg = {1, th_config};
-      break;
-    } else {
-      cudaFuncAttributes attr;
-      cudaFuncGetAttributes(&attr, kernel);
-      int reg_size = max(attr.numRegs, 1) * th_config.num_threads * 4;
-      int allow_count = min(device_max_reg_size / reg_size,
-                            max_shared_mem / (cache_size + 1024));
+    cudaFuncAttributes attr;
+    cudaFuncGetAttributes(&attr, kernel);
+    int reg_size = max(attr.numRegs, 1) * th_config.num_threads * 4;
+    int allow_count = min(device_max_reg_size / reg_size,
+                          max_shared_mem / (cache_size + 1024));
+    if (thread_m_blocks == 1)
       allow_count = max(min(allow_count, 4), 1);
-      if (allow_count > count) {
-        count = allow_count;
-        exec_cfg = {count, th_config};
-      };
+    else
+      allow_count = max(min(allow_count, 2), 1);
+
+    if (prob_n / th_config.thread_n * prob_m * top_k * 4 < sms * allow_count) {
+      allow_count =
+          max(prob_n / th_config.thread_n * prob_m * top_k * 4 / sms, 1);
     }
+
+    if (allow_count > count) {
+      count = allow_count;
+      exec_cfg = {count, th_config};
+    };
   }
 
   return exec_cfg;
@@ -462,7 +466,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   thread_n = thread_tfg.thread_n;
   int blocks = sms * exec_cfg.blocks_per_sm;
   if (exec_cfg.blocks_per_sm > 1)
-    max_shared_mem = max_shared_mem / exec_cfg.blocks_per_sm - 512;
+    max_shared_mem = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
 
   int thread_k_blocks = thread_k / 16;
   int thread_n_blocks = thread_n / 16;
@@ -481,6 +485,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
               ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
               ", max_shared_mem = ", max_shared_mem);
 
+  int sh_cache_size =
+      get_kernel_cache_size(thread_tfg, m_block_size_8, thread_m_blocks, prob_m,
+                            prob_n, prob_k, num_bits, group_size, has_act_order,
+                            is_k_full, has_zp, is_zp_float, is_a_8bit);
+
   auto kernel = get_marlin_kernel(
       a_type, b_type, c_type, s_type, thread_m_blocks, thread_n_blocks,
       thread_k_blocks, m_block_size_8, has_act_order, has_zp, group_blocks,
@@ -498,13 +507,22 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
+
+  int sh_a_max_row = pipe_stages * moe_block_size +
+                     (max_shared_mem - sh_cache_size) / thread_k_blocks /
+                         (is_a_8bit ? 16 : 32);
+  int max_num_stage_groups =
+      ((sh_a_max_row - moe_block_size) / moe_block_size + 1) / pipe_stages;
+  max_num_stage_groups = max(max_num_stage_groups, 1);
+  if (prob_k > thread_k_blocks * 16 * pipe_stages * max_num_stage_groups)
+    max_num_stage_groups = 1;
   // avoid ">>>" being formatted to "> > >"
   // clang-format off
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, is_ep, num_groups, prob_m,
-      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, max_shared_mem);
+      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, max_num_stage_groups);
   // clang-format on
 }
 

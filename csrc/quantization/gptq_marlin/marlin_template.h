@@ -493,11 +493,11 @@ __global__ void Marlin(
   int part1_mn_iters = 0;
   bool in_part2 = false;
 
-  if (global_mn_tiles > gridDim.x) {
-    part2_mn_tiles = global_mn_tiles % gridDim.x;
-    if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
-    part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
-  }
+  // if (global_mn_tiles > gridDim.x) {
+  //   part2_mn_tiles = global_mn_tiles % gridDim.x;
+  //   if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
+  //   part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
+  // }
 
   int iters = div_ceil(k_tiles * part2_mn_tiles, gridDim.x);
 
@@ -524,8 +524,6 @@ __global__ void Marlin(
   int par_id = 0;
   int locks_off = 0;
 
-  // We can easily implement parallel problem execution by just remapping
-  // indices and advancing global pointers
   if (part2_mn_tiles >= gridDim.x) {
     // when part2_mn_tiles >= sms
     // then there are at most $sms$ conflict tile blocks
@@ -596,8 +594,8 @@ __global__ void Marlin(
     if (is_a_8bit && (first_init || slice_col == 0)) {
       __syncthreads();
       int a_s_gl_rd = par_id * 16 * thread_m_blocks + threadIdx.x;
-      cp_async1_pred(&sh_a_s[threadIdx.x], &a_scales_ptr[a_s_gl_rd],
-                     threadIdx.x < prob_m);
+      cp_async1_ca_pred(&sh_a_s[threadIdx.x], &a_scales_ptr[a_s_gl_rd],
+                        threadIdx.x < prob_m);
     }
   };
 
@@ -612,8 +610,8 @@ __global__ void Marlin(
       if (is_a_8bit) {
         __syncthreads();
         int a_s_gl_rd = par_id * 16 * thread_m_blocks + threadIdx.x;
-        cp_async1_pred(&sh_a_s[threadIdx.x], &a_scales_ptr[a_s_gl_rd],
-                       threadIdx.x < prob_m);
+        cp_async1_ca_pred(&sh_a_s[threadIdx.x], &a_scales_ptr[a_s_gl_rd],
+                          threadIdx.x < prob_m);
       }
     }
   };
@@ -893,18 +891,20 @@ __global__ void Marlin(
   FragZP frag_zp;                        // Zero-points in fp16
   FragZP frag_zpf[2];                    // Zero-points in fp16 in HQQ
 
-  #pragma unroll
-  for (int j = 0; j < 2; j++) {
-  #pragma unroll
-    for (int i = 0; i < thread_m_blocks; i++) {
-  #pragma unroll
-      for (int g = 0; g < 4; g++) {
-        frag_c_tmp[i][j][0][g] = 0.0f;
-      }
+  if constexpr (is_a_8bit) {
+    #pragma unroll
+    for (int j = 0; j < 2; j++) {
+    #pragma unroll
+      for (int i = 0; i < thread_m_blocks; i++) {
+    #pragma unroll
+        for (int g = 0; g < 4; g++) {
+          frag_c_tmp[i][j][0][g] = 0.0f;
+        }
 
-  #pragma unroll
-      for (int g = 0; g < 4; g++) {
-        frag_c_tmp[i][j][1][g] = 0.0f;
+    #pragma unroll
+        for (int g = 0; g < 4; g++) {
+          frag_c_tmp[i][j][1][g] = 0.0f;
+        }
       }
     }
   }
@@ -1613,7 +1613,7 @@ __global__ void Marlin(
           } else if constexpr (is_a_8bit) {
             int2* sh_red_int2 = reinterpret_cast<int2*>(sh_red);
             int2* c_int2 = reinterpret_cast<int2*>(C);
-            cp_async2_pred(
+            cp_async2_ca_pred(
                 &sh_red_int2[c_sh_wr + c_sh_wr_delta * i],
                 &c_int2[c_gl_wr + c_gl_wr_delta_o * (i / 2) +
                         c_gl_wr_delta_i * (i % 2)],

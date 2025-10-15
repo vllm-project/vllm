@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions used for tests and benchmarks"""
 
-from typing import Optional
-
 import numpy as np
 import torch
 
@@ -132,8 +130,8 @@ def marlin_quantize(
     quant_type: ScalarType,
     group_size: int,
     act_order: bool,
-    test_perm: Optional[torch.Tensor] = None,
-    input_dtype: Optional[torch.Tensor] = None,
+    test_perm: torch.Tensor | None = None,
+    input_dtype: torch.Tensor | None = None,
 ):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
@@ -179,7 +177,7 @@ def awq_marlin_quantize(
     w: torch.Tensor,
     quant_type: ScalarType,
     group_size: int,
-    input_dtype: Optional[torch.Tensor] = None,
+    input_dtype: torch.Tensor | None = None,
 ):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     size_k, size_n = w.shape

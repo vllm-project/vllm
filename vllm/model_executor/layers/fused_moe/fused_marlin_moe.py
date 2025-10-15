@@ -4,16 +4,15 @@
 
 import torch
 from typing_extensions import override
-from typing import Optional
 
 import vllm._custom_ops as ops
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache, disable_inplace
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
@@ -28,8 +27,8 @@ def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    bias1: Optional[torch.Tensor],
-    bias2: Optional[torch.Tensor],
+    bias1: torch.Tensor | None,
+    bias2: torch.Tensor | None,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     gating_output: torch.Tensor,
@@ -38,22 +37,22 @@ def fused_marlin_moe(
     quant_type_id: int,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    activation: Optional[str] = "silu",
-    expert_map: Optional[torch.Tensor] = None,
-    input_global_scale1: Optional[torch.Tensor] = None,
-    input_global_scale2: Optional[torch.Tensor] = None,
-    global_scale1: Optional[torch.Tensor] = None,
-    global_scale2: Optional[torch.Tensor] = None,
-    g_idx1: Optional[torch.Tensor] = None,
-    g_idx2: Optional[torch.Tensor] = None,
-    sort_indices1: Optional[torch.Tensor] = None,
-    sort_indices2: Optional[torch.Tensor] = None,
-    w1_zeros: Optional[torch.Tensor] = None,
-    w2_zeros: Optional[torch.Tensor] = None,
-    workspace: Optional[torch.Tensor] = None,
+    activation: str | None = "silu",
+    expert_map: torch.Tensor | None = None,
+    input_global_scale1: torch.Tensor | None = None,
+    input_global_scale2: torch.Tensor | None = None,
+    global_scale1: torch.Tensor | None = None,
+    global_scale2: torch.Tensor | None = None,
+    g_idx1: torch.Tensor | None = None,
+    g_idx2: torch.Tensor | None = None,
+    sort_indices1: torch.Tensor | None = None,
+    sort_indices2: torch.Tensor | None = None,
+    w1_zeros: torch.Tensor | None = None,
+    w2_zeros: torch.Tensor | None = None,
+    workspace: torch.Tensor | None = None,
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
-    input_dtype: Optional[torch.dtype] = None,
+    input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     inplace: bool = False,

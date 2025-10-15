@@ -5,7 +5,6 @@
 import torch
 
 import vllm._custom_ops as ops
-from typing import Optional
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
@@ -89,12 +88,12 @@ def apply_fp4_marlin_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    weight_scale_2: Optional[torch.Tensor],
+    weight_scale_2: torch.Tensor | None,
     workspace: torch.Tensor,
     size_n: int,
     size_k: int,
-    bias: Optional[torch.Tensor] = None,
-    input_dtype: Optional[torch.dtype] = None,
+    bias: torch.Tensor | None = None,
+    input_dtype: torch.dtype | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     # For GPUs that lack FP4 hardware support, we can leverage the
@@ -144,7 +143,7 @@ def apply_fp4_marlin_linear(
 
 
 def prepare_fp4_layer_for_marlin(
-    layer: torch.nn.Module, input_dtype: Optional[torch.dtype] = None
+    layer: torch.nn.Module, input_dtype: torch.dtype | None = None
 ) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP4 computation but "
@@ -215,7 +214,7 @@ def prepare_fp4_layer_for_marlin(
 
 
 def prepare_moe_fp4_layer_for_marlin(
-    layer: torch.nn.Module, input_dtype: Optional[torch.dtype] = None
+    layer: torch.nn.Module, input_dtype: torch.dtype | None = None
 ) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP4 computation but "

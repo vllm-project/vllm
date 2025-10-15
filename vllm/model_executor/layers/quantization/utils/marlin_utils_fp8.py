@@ -5,7 +5,6 @@
 import torch
 
 import vllm._custom_ops as ops
-from typing import Optional
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
@@ -45,8 +44,8 @@ def apply_fp8_marlin_linear(
     workspace: torch.Tensor,
     size_n: int,
     size_k: int,
-    bias: Optional[torch.Tensor],
-    input_dtype: Optional[torch.dtype] = None,
+    bias: torch.Tensor | None,
+    input_dtype: torch.dtype | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the
@@ -93,7 +92,7 @@ def apply_fp8_marlin_linear(
 def prepare_fp8_layer_for_marlin(
     layer: torch.nn.Module,
     size_k_first: bool = True,
-    input_dtype: Optional[torch.dtype] = None,
+    input_dtype: torch.dtype | None = None,
 ) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
@@ -188,7 +187,7 @@ def prepare_fp8_layer_for_marlin(
 def prepare_moe_fp8_layer_for_marlin(
     layer: torch.nn.Module,
     size_k_first: bool = True,
-    input_dtype: Optional[torch.dtype] = None,
+    input_dtype: torch.dtype | None = None,
 ) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "

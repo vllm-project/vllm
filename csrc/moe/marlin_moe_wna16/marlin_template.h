@@ -78,7 +78,7 @@ __global__ void Marlin(
     int* locks,             // extra global storage for barrier synchronization
     bool use_atomic_add,    // whether to use atomic add to reduce
     bool use_fp32_reduce,   // whether to use fp32 global reduce
-    int max_shared_mem) {}
+    int max_num_stage_groups) {}
 
 }  // namespace MARLIN_NAMESPACE_NAME
 
@@ -412,7 +412,7 @@ __global__ void Marlin(
     bool has_bias,
     bool use_atomic_add,   // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
-    int max_shared_mem) {
+    int max_num_stage_groups) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
   // `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM
@@ -512,11 +512,11 @@ __global__ void Marlin(
   int part1_mn_iters = 0;
   bool in_part2 = false;
 
-  if (global_mn_tiles > gridDim.x) {
-    part2_mn_tiles = global_mn_tiles % gridDim.x;
-    if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
-    part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
-  }
+  // if (global_mn_tiles > gridDim.x) {
+  //   part2_mn_tiles = global_mn_tiles % gridDim.x;
+  //   if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
+  //   part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
+  // }
 
   int iters = div_ceil(k_tiles * part2_mn_tiles, gridDim.x);
 
@@ -727,9 +727,9 @@ __global__ void Marlin(
     }
     if (is_a_8bit && (first_init || slice_col == 0)) {
       __syncthreads();
-      cp_async1_pred(&sh_a_s[threadIdx.x],
-                     &a_scales_ptr[sh_rd_block_sorted_ids[threadIdx.x]],
-                     threadIdx.x < block_num_valid_tokens);
+      cp_async1_ca_pred(&sh_a_s[threadIdx.x],
+                        &a_scales_ptr[sh_rd_block_sorted_ids[threadIdx.x]],
+                        threadIdx.x < block_num_valid_tokens);
     }
   };
 
@@ -742,9 +742,9 @@ __global__ void Marlin(
       update_next_moe_block_data();
       if (is_a_8bit) {
         __syncthreads();
-        cp_async1_pred(&sh_a_s[threadIdx.x],
-                       &a_scales_ptr[sh_rd_block_sorted_ids[threadIdx.x]],
-                       threadIdx.x < block_num_valid_tokens);
+        cp_async1_ca_pred(&sh_a_s[threadIdx.x],
+                          &a_scales_ptr[sh_rd_block_sorted_ids[threadIdx.x]],
+                          threadIdx.x < block_num_valid_tokens);
       }
     }
   };
@@ -1015,18 +1015,20 @@ __global__ void Marlin(
   FragZP frag_zp;                        // Zero-points in fp16
   FragZP frag_zpf[2];                    // Zero-points in fp16 in HQQ
 
+  if constexpr (is_a_8bit && group_blocks != -1) {
   #pragma unroll
-  for (int j = 0; j < 2; j++) {
+    for (int j = 0; j < 2; j++) {
   #pragma unroll
-    for (int i = 0; i < thread_m_blocks; i++) {
+      for (int i = 0; i < thread_m_blocks; i++) {
   #pragma unroll
-      for (int g = 0; g < 4; g++) {
-        frag_c_tmp[i][j][0][g] = 0.0f;
-      }
+        for (int g = 0; g < 4; g++) {
+          frag_c_tmp[i][j][0][g] = 0.0f;
+        }
 
   #pragma unroll
-      for (int g = 0; g < 4; g++) {
-        frag_c_tmp[i][j][1][g] = 0.0f;
+        for (int g = 0; g < 4; g++) {
+          frag_c_tmp[i][j][1][g] = 0.0f;
+        }
       }
     }
   }

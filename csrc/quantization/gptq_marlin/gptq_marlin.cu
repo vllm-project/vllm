@@ -243,7 +243,7 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
   int cache_size = get_kernel_cache_size(
       th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
       has_act_order, is_k_full, has_zp, is_zp_float);
-  return cache_size + 512 <= max_shared_mem;
+  return cache_size <= max_shared_mem;
 }
 
 MarlinFuncPtr get_marlin_kernel(
@@ -280,7 +280,7 @@ exec_config_t determine_exec_config(
 
     if (!is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
                          num_bits, group_size, has_act_order, is_k_full, has_zp,
-                         is_zp_float, max_shared_mem)) {
+                         is_zp_float, max_shared_mem - 512)) {
       continue;
     }
 
@@ -455,7 +455,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     thread_n = thread_tfg.thread_n;
     int blocks = sms * exec_cfg.blocks_per_sm;
     if (exec_cfg.blocks_per_sm > 1)
-      max_shared_mem_new = max_shared_mem / exec_cfg.blocks_per_sm - 512;
+      max_shared_mem_new = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
 
     int thread_k_blocks = thread_k / 16;
     int thread_n_blocks = thread_n / 16;
