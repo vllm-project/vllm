@@ -39,11 +39,11 @@ class ModernBertEmbeddings(nn.Module):
         self.tok_embeddings = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
-        cands = (
+        eps_candidates = (
             getattr(config, "norm_eps", None),
             getattr(config, "layer_norm_eps", None),
         )
-        eps = next((v for v in cands if v is not None), 1e-5)
+        eps = next((v for v in eps_candidates if v is not None), 1e-5)
         self.norm = nn.LayerNorm(config.hidden_size, eps=eps, bias=config.norm_bias)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
