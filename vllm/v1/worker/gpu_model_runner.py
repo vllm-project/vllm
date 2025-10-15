@@ -2559,7 +2559,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             self.total_step = 1
 
-        cached_valid_sampled_token_ids = []
+        cached_valid_sampled_token_ids: list[list[list[int]]] = []
         final_kv_connector_output = KVConnectorOutput()
         final_kv_connector_output.finished_sending = set()
         final_kv_connector_output.finished_recving = set()
@@ -2772,11 +2772,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_connector_output.finished_recving
                     )
 
-        final_token_ids = None
-        for each_token_ids in cached_valid_sampled_token_ids:
-            if final_token_ids is None:
-                final_token_ids = each_token_ids
-            else:
+        final_token_ids = cached_valid_sampled_token_ids[0]
+        if self.curr_step > 0:
+            for each_token_ids in cached_valid_sampled_token_ids[1:]:
                 _ = [x.extend(y) for x, y in zip(final_token_ids, each_token_ids)]
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,

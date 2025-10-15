@@ -160,8 +160,9 @@ class Scheduler(SchedulerInterface):
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
                 self.use_eagle = True
-                self.num_lookahead_tokens = self.num_spec_tokens + \
-                    (step_num - 1) * (1 + self.num_spec_tokens)
+                self.num_lookahead_tokens = self.num_spec_tokens + (step_num - 1) * (
+                    1 + self.num_spec_tokens
+                )
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -966,9 +967,7 @@ class Scheduler(SchedulerInterface):
                 num_accepted = len(generated_token_ids) - num_steps
                 num_rejected = num_draft_tokens - num_accepted
                 # update because of multi step
-                request.num_computed_tokens += num_tokens_scheduled * (
-                    num_steps - 1
-                )
+                request.num_computed_tokens += num_tokens_scheduled * (num_steps - 1)
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
