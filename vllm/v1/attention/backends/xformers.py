@@ -354,7 +354,7 @@ class XFormersAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         # Cache the input KVs.
         key_cache, value_cache = kv_cache.unbind(0)

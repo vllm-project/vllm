@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -328,7 +328,7 @@ class BlockPool:
             )
         return True
 
-    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: tuple[Sequence[KVCacheBlock], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.

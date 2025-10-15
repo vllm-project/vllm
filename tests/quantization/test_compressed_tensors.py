@@ -697,7 +697,8 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
 @pytest.mark.parametrize(
     "args",
     [
-        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", CompressedTensorsW4A16Fp4),
+        # TODO: Enable once model is available again
+        # ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", CompressedTensorsW4A16Fp4),
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4),
     ],
 )
