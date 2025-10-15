@@ -311,7 +311,7 @@ exec_config_t determine_exec_config(
     cudaFuncGetAttributes(&attr, kernel);
     int reg_size = max(attr.numRegs, 1) * th_config.num_threads * 4;
     int allow_count = min(device_max_reg_size / reg_size,
-                          max_shared_mem / (cache_size + 1024));
+                          max_shared_mem / (cache_size + 1536));
     if (thread_m_blocks == 1)
       allow_count = max(min(allow_count, 4), 1);
     else
@@ -516,6 +516,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   max_num_stage_groups = max(max_num_stage_groups, 1);
   if (prob_k > thread_k_blocks * 16 * pipe_stages * max_num_stage_groups)
     max_num_stage_groups = 1;
+  max_num_stage_groups = 1;
   // avoid ">>>" being formatted to "> > >"
   // clang-format off
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
