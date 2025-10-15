@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.compilation.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     DeviceConfig,
     ModelConfig,
     PassConfig,
@@ -400,7 +401,7 @@ def test_async_tp_pass_correctness(
         common_args.append("--enforce-eager")
 
     compilation_config = {
-        "level": 3,
+        "mode": CompilationMode.VLLM_COMPILE,
         "compile_sizes": [2, 4, 8],
         "splitting_ops": [],
         "pass_config": {"enable_async_tp": async_tp_enabled},

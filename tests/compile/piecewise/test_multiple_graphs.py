@@ -5,6 +5,7 @@ Test (piecewise) compilation with a simple model where multiple submodules
 are compiled and graph captured separately.
 """
 
+import pytest
 import torch
 from torch import nn
 
@@ -13,7 +14,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
@@ -190,16 +191,22 @@ def run_model(
         return output.cpu()
 
 
-def test_multi_graph_piecewise_compile_outputs_equal():
+@pytest.mark.parametrize("use_inductor_graph_partition", [False, True])
+def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
+    if use_inductor_graph_partition:
+        # FIXME(luka/boyuan): this currently fails
+        pytest.skip("Inductor graph partition not supported with multi-graph")
+
     outputs = []
 
-    # piecewise compile
+    # vllmcompile compile
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=use_inductor_graph_partition,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -220,23 +227,31 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     # static tensor addresses
     inputs = torch.randn(BATCH_SIZE, MLP_SIZE).cuda()
 
-    with compilation_counter.expect(
-        num_graphs_seen=2,  # two graphs for the model
-        num_piecewise_graphs_seen=6,
+    if use_inductor_graph_partition:
+        # Splitting happens at Inductor lowering level,
+        # total piecewise fx graphs is equal to total graphs
+        num_piecewise_fx = 2
+        num_piecewise_capturable_fx = 2
+    else:
         # attn_one, attn_two each has 3 piecewise graphs
         # (pre attn, post attn, silly_attention) each
-        num_piecewise_capturable_graphs_seen=4,
+        num_piecewise_fx = 6
         # attn_one, attn_two has pre attn and post attn each, total=4
-        num_backend_compilations=4,  # num_piecewise_capturable_graphs_seen
-        num_cudagraph_captured=8,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_piecewise_capturable_fx = 4
+
+    with compilation_counter.expect(
+        num_graphs_seen=2,  # two graphs for the model
+        num_piecewise_graphs_seen=num_piecewise_fx,
+        num_piecewise_capturable_graphs_seen=num_piecewise_capturable_fx,
+        num_backend_compilations=num_piecewise_capturable_fx,
+        num_cudagraph_captured=8,  # num_cudagraph_sizes * num_partitions
     ):
         outputs.append(run_model(vllm_config, model, inputs, cudagraph_runtime_mode))
 
     # no compile or cudagraph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.NO_COMPILATION,
+            mode=CompilationMode.NONE,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.NONE
@@ -265,9 +280,10 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     # piecewise compile without CUDA graph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=False,
             splitting_ops=["silly::attention"],
+            use_inductor_graph_partition=use_inductor_graph_partition,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -286,9 +302,9 @@ def test_multi_graph_piecewise_compile_outputs_equal():
 
     with compilation_counter.expect(
         num_graphs_seen=2,
-        num_piecewise_graphs_seen=6,
-        num_piecewise_capturable_graphs_seen=4,
-        num_backend_compilations=4,
+        num_piecewise_graphs_seen=num_piecewise_fx,
+        num_piecewise_capturable_graphs_seen=num_piecewise_capturable_fx,
+        num_backend_compilations=num_piecewise_capturable_fx,
         num_cudagraph_captured=0,  # no cudagraph captured
     ):
         outputs.append(run_model(vllm_config, model, inputs, cudagraph_runtime_mode))

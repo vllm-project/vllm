@@ -2979,13 +2979,14 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
         requests = []
         token_mismatch_total = 0
         for _ in range(num_prefixes):
-            prefix_tokens = _generate_exact_length_tokens(prefix_len)
+            prefix_tokens, prefix_mismatch = _generate_exact_length_tokens(prefix_len)
+            token_mismatch_total += prefix_mismatch
 
             for _ in range(prompts_per_prefix):
-                suffix_tokens, token_mistmatch = _generate_exact_length_tokens(
+                suffix_tokens, suffix_mismatch = _generate_exact_length_tokens(
                     suffix_len
                 )
-                token_mismatch_total += token_mistmatch
+                token_mismatch_total += suffix_mismatch
                 combined_tokens = prefix_tokens + suffix_tokens
                 prompt = tokenizer.decode(combined_tokens)
                 prompt_len = len(combined_tokens)
