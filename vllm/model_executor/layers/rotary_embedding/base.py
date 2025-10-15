@@ -14,7 +14,7 @@ from .rocm_aiter_rope_ops import (
 
 
 @CustomOp.register("rotary_embedding")
-class RotaryEmbedding(CustomOp):
+class RotaryEmbeddingBase(CustomOp):
     """Original rotary positional embedding."""
 
     def __init__(
@@ -85,6 +85,21 @@ class RotaryEmbedding(CustomOp):
             or self.cos_sin_cache.dtype != query.dtype
         ):
             self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
+
+
+class RotaryEmbedding(RotaryEmbeddingBase):
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(
+            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+        )
 
     def forward_native(
         self,
