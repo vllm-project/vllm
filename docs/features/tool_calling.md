@@ -352,6 +352,16 @@ Supported models:
 
 Flags: `--tool-call-parser qwen3_xml`
 
+### Olmo 3 Models (`olmo3`)
+
+Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).
+
+Supported models:
+
+* TODO (will be updated after Olmo 3 release)
+
+Flags: `--tool-call-parser olmo3`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
