@@ -71,8 +71,8 @@ class TestModel(torch.nn.Module):
                 act_quant_group_shape=group_shape,
             )
 
-        self.enable_rms_norm = self.norm[0].enabled()
-        self.enable_quant_fp8 = self.fp8_linear.quant_fp8.enabled()
+        self.enable_rms_norm_custom_op = self.norm[0].enabled()
+        self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
 
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly
@@ -107,12 +107,16 @@ class TestModel(torch.nn.Module):
     def ops_in_model_before(self):
         return (
             [QUANT_OPS[self.quant_key]]
-            if self.enable_quant_fp8
+            if self.enable_quant_fp8_custom_op
             else [torch.ops.aten.reciprocal]
         )
 
     def ops_in_model_before_partial(self):
-        return [RMS_OP, RMS_ADD_OP] if self.enable_rms_norm else [torch.ops.aten.rsqrt]
+        return (
+            [RMS_OP, RMS_ADD_OP]
+            if self.enable_rms_norm_custom_op
+            else [torch.ops.aten.rsqrt]
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -120,8 +124,8 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("static", [True, False])
-@pytest.mark.parametrize("enable_rms_norm", [True, False])
-@pytest.mark.parametrize("enable_quant_fp8", [True, False])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize("enable_quant_fp8_custom_op", [True, False])
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
 @pytest.mark.parametrize(
@@ -136,8 +140,8 @@ def test_fusion_rmsnorm_quant(
     num_tokens,
     eps,
     static,
-    enable_rms_norm,
-    enable_quant_fp8,
+    enable_rms_norm_custom_op,
+    enable_quant_fp8_custom_op,
     cuda_force_torch,
 ):
     torch.set_default_device("cuda")
@@ -146,9 +150,9 @@ def test_fusion_rmsnorm_quant(
     maybe_create_device_identity()  # needed for certain non-cutlass fp8 paths
 
     custom_ops = []
-    if enable_rms_norm:
+    if enable_rms_norm_custom_op:
         custom_ops.append("+rms_norm")
-    if enable_quant_fp8:
+    if enable_quant_fp8_custom_op:
         custom_ops.append("+quant_fp8")
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
@@ -195,7 +199,7 @@ def test_fusion_rmsnorm_quant(
         # there's a risk that the fused add doesn't get included in the
         # replacement and only the rms part gets fused with quant.
         # Hence, we check only 2 add nodes are left (final fused rmsnorm add).
-        if not enable_rms_norm:
+        if not enable_rms_norm_custom_op:
             n_add_nodes = lambda g: sum(1 for _ in find_op_nodes(torch.ops.aten.add, g))
             # 7 = 1 (RMS) + 3x2 (3xRMS_ADD, 2 each)
             assert n_add_nodes(backend.graph_pre_pass) == 7

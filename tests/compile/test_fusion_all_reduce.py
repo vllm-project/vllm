@@ -194,7 +194,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "test_model, enable_quant_fp8",
+    "test_model, enable_quant_fp8_custom_op",
     [
         (TestAllReduceRMSNormModel, False),
         (TestAllReduceRMSNormStaticQuantFP8Model, True),
@@ -206,7 +206,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("enable_rms_norm", [True, False])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 @pytest.mark.skipif(
     not find_spec("flashinfer")
@@ -220,8 +220,8 @@ def test_all_reduce_fusion_pass_replace(
     seq_len: int,
     hidden_size: int,
     dtype: torch.dtype,
-    enable_rms_norm,
-    enable_quant_fp8,
+    enable_rms_norm_custom_op,
+    enable_quant_fp8_custom_op,
 ):
     num_processes = 2
     if (
@@ -243,8 +243,8 @@ def test_all_reduce_fusion_pass_replace(
                 seq_len,
                 hidden_size,
                 dtype,
-                enable_rms_norm,
-                enable_quant_fp8,
+                enable_rms_norm_custom_op,
+                enable_quant_fp8_custom_op,
             ),
             nprocs=nprocs,
         )
@@ -260,8 +260,8 @@ def all_reduce_fusion_pass_on_test_model(
     seq_len: int,
     hidden_size: int,
     dtype: torch.dtype,
-    enable_rms_norm,
-    enable_quant_fp8,
+    enable_rms_norm_custom_op,
+    enable_quant_fp8_custom_op,
 ):
     current_platform.seed_everything(0)
 
@@ -284,9 +284,9 @@ def all_reduce_fusion_pass_on_test_model(
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     custom_ops = []
-    if enable_rms_norm:
+    if enable_rms_norm_custom_op:
         custom_ops.append("+rms_norm")
-    if enable_quant_fp8:
+    if enable_quant_fp8_custom_op:
         custom_ops.append("+quant_fp8")
 
     vllm_config = VllmConfig(
