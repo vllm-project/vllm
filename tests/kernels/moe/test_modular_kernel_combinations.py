@@ -96,6 +96,8 @@ def rank_worker(
     exceptions = []
     count = 0
 
+    torch.set_printoptions(profile="full")
+
     for m, topk in product(Ms, TOPKs):
         # override m and topk
         config = copy.deepcopy(base_config)
@@ -122,7 +124,6 @@ def rank_worker(
                 atol = 3e-2
                 rtol = 3e-2
 
-            torch.set_printoptions(profile="full")
             # print(f"REF = {ref_out}")
             # print(f"OUT = {mk_out}")
 
@@ -153,12 +154,12 @@ def run(config: Config, verbose: bool):
     )
 
 
-if False:
-    Ms = [32, 64]
+if True:
+    Ms = [32, 64, 256]
     # hidden sizes, making this too large will cause fp4 tests to fail.
     # Also needs to be a multiple of 1024 for deep_gemm.
-    Ks = [2048]
-    Ns = [1024]
+    Ks = [512, 2048]
+    Ns = [128, 1024]
     TOPKs = [4, 1]
     Es = [32]
     DTYPEs = [torch.bfloat16]
@@ -169,6 +170,15 @@ else:
     Ns = [128]
     TOPKs = [4, 1]
     Es = [8]
+    DTYPEs = [torch.bfloat16]
+    FUSED_MOE_CHUNK_SIZEs = [None]
+
+if False:
+    Ms = [32]
+    Ks = [512]
+    Ns = [128]
+    TOPKs = [4]
+    Es = [32]
     DTYPEs = [torch.bfloat16]
     FUSED_MOE_CHUNK_SIZEs = [None]
 
@@ -295,7 +305,7 @@ def test_modular_kernel_combinations_multigpu(
     verbosity = pytestconfig.getoption("verbose")
 
     if verbosity > 0:
-        print(f"\nTesting {config}\n")
+        print(f"\nTesting {config.describe()}\n")
 
     run(config, verbosity > 0)
 
