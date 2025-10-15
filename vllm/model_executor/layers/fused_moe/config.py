@@ -7,7 +7,8 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank, get_context_model_parallel_rank
+from vllm.distributed import (get_context_model_parallel_rank, get_dp_group,
+                              get_tensor_model_parallel_rank)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
@@ -604,7 +605,8 @@ class FusedMoEParallelConfig:
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): `tp_size` pa use_ep = (dp_size_ * tp_size_ssed into the FusedMoE constructor.
+            tp_size_ (int): `tp_size` pa use_ep = (dp_size_ * tp_size_ssed into
+                the FusedMoE constructor.
             dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.

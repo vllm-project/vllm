@@ -5,7 +5,7 @@ from typing import Union
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group, get_cp_group
+from vllm.distributed import get_cp_group, get_dcp_group
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
@@ -92,18 +92,21 @@ class BlockTable:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * self.dcp_world_size * self.cp_world_size
+            virtual_block_size = self.block_size * self.dcp_world_size * \
+                self.cp_world_size
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    positions // virtual_block_size)
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
-            self.current_rank = self.dcp_world_size * self.cp_rank + self.dcp_rank
-            mask = (virtual_block_offsets %
-                    (self.dcp_world_size * self.cp_world_size) == self.current_rank)
+            self.current_rank = self.dcp_world_size * self.cp_rank + \
+                self.dcp_rank
+            mask = (virtual_block_offsets % (self.dcp_world_size * \
+                self.cp_world_size) == self.current_rank)
             # Calculate local block_offsets
-            block_offsets = virtual_block_offsets // (self.dcp_world_size * self.cp_world_size)
+            block_offsets = virtual_block_offsets // \
+                (self.dcp_world_size * self.cp_world_size)
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local
@@ -147,8 +150,12 @@ class BlockTable:
                             device=self.device,
                             pin_memory=self.pin_memory)
 
-    def get_split_computed_tokens(self, num_computed_tokens: np.ndarray) -> list[list[list[int]]]:
-        "Splits computed token counts across dcp and sp dimensions for distributed allocation."
+    def get_split_computed_tokens(self, num_computed_tokens: np.ndarray) \
+    -> list[list[list[int]]]:
+        """
+        Splits computed token counts across dcp and sp dimensions for
+        distributed allocation.
+        """
         num_requests = len(num_computed_tokens)
         num_computed_tokens_of_dcp_sp = [[
             [0] * self.dcp_world_size for _ in range(self.cp_world_size)

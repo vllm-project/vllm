@@ -192,6 +192,14 @@ class CudaPlatformBase(Platform):
                 "compatible. Set the all_to_all backend to deepep_low_latency "
                 "to use those kernels instead.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        
+        if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                and parallel_config.context_parallel_size > 1):
+            logger.info(
+                "Context Parallel: disabling cudagraphs since CP."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            
 
     @classmethod
     def get_current_memory_usage(cls,

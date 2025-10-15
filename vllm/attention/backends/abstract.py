@@ -264,6 +264,9 @@ class AttentionImpl(ABC, Generic[T]):
     dcp_world_size: int
     dcp_rank: int
 
+    cp_world_size: int
+    cp_rank: int
+
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)

@@ -13,9 +13,9 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
-from vllm.distributed import (get_dp_group, get_ep_group,
+from vllm.distributed import (get_context_model_parallel_world_size,
+                              get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
-                              get_context_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
