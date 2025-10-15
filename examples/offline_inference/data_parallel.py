@@ -88,6 +88,11 @@ def parse_args():
         help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
     )
     parser.add_argument(
+        "--enable-dbo",
+        action="store_true",
+        help=("Enable microbatched execution"),
+    )
+    parser.add_argument(
         "--compilation-config",
         type=int,
         help=("Compilation optimization (O) level 0-3."),
@@ -96,6 +101,13 @@ def parse_args():
         "--quantization",
         type=str,
     )
+    parser.add_argument(
+        "--disable-expert-parallel",
+        dest="enable_expert_parallel",
+        action="store_false",
+        help="Disable expert parallel (default: enabled).",
+    )
+    parser.set_defaults(enable_expert_parallel=True)
     return parser.parse_args()
 
 
@@ -108,11 +120,13 @@ def main(
     dp_master_port,
     GPUs_per_dp_rank,
     enforce_eager,
+    enable_expert_parallel,
     trust_remote_code,
     max_num_seqs,
     max_model_len,
     compilation_config,
     gpu_memory_utilization,
+    enable_dbo,
     quantization,
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
@@ -162,11 +176,12 @@ def main(
         model=model,
         tensor_parallel_size=GPUs_per_dp_rank,
         enforce_eager=enforce_eager,
-        enable_expert_parallel=True,
+        enable_expert_parallel=enable_expert_parallel,
         trust_remote_code=trust_remote_code,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
+        enable_dbo=enable_dbo,
         quantization=quantization,
         compilation_config=compilation_config,
     )
@@ -222,11 +237,13 @@ if __name__ == "__main__":
                 dp_master_port,
                 tp_size,
                 args.enforce_eager,
+                args.enable_expert_parallel,
                 args.trust_remote_code,
                 args.max_num_seqs,
                 args.max_model_len,
                 args.compilation_config,
                 args.gpu_memory_utilization,
+                args.enable_dbo,
                 args.quantization,
             ),
         )
