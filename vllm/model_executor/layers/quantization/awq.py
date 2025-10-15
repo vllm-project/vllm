@@ -123,7 +123,8 @@ class AWQConfig(QuantizationConfig):
                 "modules_to_not_convert": self.modules_to_not_convert,
             }
             awq_marlin_config = AWQMarlinConfig.from_config(
-                marlin_compatible_config_dict)
+                marlin_compatible_config_dict
+            )
             return AWQMarlinMoEMethod(awq_marlin_config, layer.moe_config)
         return None
 

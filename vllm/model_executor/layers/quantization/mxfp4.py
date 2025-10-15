@@ -32,9 +32,12 @@ from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype)
+    get_marlin_input_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
@@ -194,8 +197,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.moe = moe
         self.mxfp4_backend = get_mxfp4_backend()
         self.marlin_input_dtype = None
-        self.max_capture_size = get_current_vllm_config(
-        ).compilation_config.max_capture_size
+        self.max_capture_size = (
+            get_current_vllm_config().compilation_config.max_capture_size
+        )
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
             "No MXFP4 MoE backend (FlashInfer/Marlin/Triton) available."
@@ -352,8 +356,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            prepare_moe_fp4_layer_for_marlin(
-                layer, input_dtype=self.marlin_input_dtype)
+            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
         elif (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
@@ -971,7 +974,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 activation=activation,
                 expert_map=expert_map,
-                input_dtype=self.marlin_input_dtype)
+                input_dtype=self.marlin_input_dtype,
+            )
 
         assert _can_support_mxfp4(
             use_grouped_topk,

@@ -47,11 +47,16 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    flashinfer_cutlass_moe_fp8, get_flashinfer_moe_backend,
-    register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
-    select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
+    flashinfer_cutlass_moe_fp8,
+    get_flashinfer_moe_backend,
+    register_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights,
+    select_cutlass_fp8_gemm_impl,
+    swap_w13_to_w31,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype)
+    get_marlin_input_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     is_fp4_marlin_supported,
@@ -899,10 +904,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if skip_layer:
                 return None
-            moe_quant_method = ModelOptNvFp4FusedMoE(self, layer.moe_config,
-                                                     layer)
-            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(
-                prefix)
+            moe_quant_method = ModelOptNvFp4FusedMoE(self, layer.moe_config, layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
         return None
 
@@ -1090,7 +1093,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
                 bias=bias,
-                input_dtype=self.marlin_input_dtype)
+                input_dtype=self.marlin_input_dtype,
+            )
 
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
@@ -1725,7 +1729,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                input_dtype=self.marlin_input_dtype)
+                input_dtype=self.marlin_input_dtype,
+            )
 
         elif self.fused_experts is not None:
             assert (

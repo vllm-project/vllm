@@ -39,15 +39,23 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_marlin_supported, check_moe_marlin_supports_layer,
-    get_marlin_input_dtype, marlin_act_int8_process_scales,
-    marlin_make_workspace_new, marlin_moe_permute_scales, marlin_permute_bias,
-    marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           GroupQuantScaleParameter,
-                                           PackedColumnParameter,
-                                           PackedvLLMParameter,
-                                           RowvLLMParameter)
+    check_marlin_supported,
+    check_moe_marlin_supports_layer,
+    get_marlin_input_dtype,
+    marlin_act_int8_process_scales,
+    marlin_make_workspace_new,
+    marlin_moe_permute_scales,
+    marlin_permute_bias,
+    marlin_repeat_scales_on_all_ranks,
+    verify_marlin_supported,
+)
+from vllm.model_executor.parameter import (
+    ChannelQuantScaleParameter,
+    GroupQuantScaleParameter,
+    PackedColumnParameter,
+    PackedvLLMParameter,
+    RowvLLMParameter,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
@@ -240,18 +248,22 @@ class GPTQMarlinConfig(QuantizationConfig):
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
-                    "Falling back to Moe WNA16 kernels.")
-                return MoeWNA16Config.from_config(
-                    self.full_config).get_quant_method(layer, prefix)
-            moe_quant_method = get_moe_quant_method(self, layer, prefix,
-                                                    GPTQMarlinMoEMethod)
+                    "Falling back to Moe WNA16 kernels."
+                )
+                return MoeWNA16Config.from_config(self.full_config).get_quant_method(
+                    layer, prefix
+                )
+            moe_quant_method = get_moe_quant_method(
+                self, layer, prefix, GPTQMarlinMoEMethod
+            )
             if moe_quant_method is None:
                 return None
             moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
 
-        quant_method = get_linear_quant_method(self, layer, prefix,
-                                               GPTQMarlinLinearMethod)
+        quant_method = get_linear_quant_method(
+            self, layer, prefix, GPTQMarlinLinearMethod
+        )
         if quant_method is None:
             return None
         quant_method.input_dtype = get_marlin_input_dtype(prefix)
@@ -500,15 +512,14 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ):
         layer.input_dtype = self.input_dtype
-        is_a_8bit = self.input_dtype is not None and \
-            self.input_dtype.itemsize == 1
+        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_type == scalar_types.uint4b8, \
+            assert self.quant_type == scalar_types.uint4b8, (
                 "W8A8-INT8 is not supported by marlin kernel."
+            )
 
-        intermediate_size_full = extra_weight_attrs.pop(
-            "intermediate_size_full")
+        intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
 
         self.is_k_full = (not self.quant_config.desc_act) or (
             intermediate_size_per_partition == intermediate_size_full
@@ -531,10 +542,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer.num_groups_w13 = scales_size13
         layer.num_groups_w2 = scales_size2
 
-        extra_weight_attrs.update({
-            "quant_method": strategy,
-            "is_transposed": True
-        })
+        extra_weight_attrs.update({"quant_method": strategy, "is_transposed": True})
         # Fused gate_up_proj (column parallel)
         w13_qweight = torch.nn.Parameter(
             torch.empty(
@@ -651,12 +659,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        is_a_8bit = self.input_dtype is not None and \
-            self.input_dtype.itemsize == 1
+        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_type == scalar_types.uint4b8, \
+            assert self.quant_type == scalar_types.uint4b8, (
                 "W8A8-INT8 is not supported by marlin kernel."
+            )
 
         if self.input_dtype == torch.float8_e4m3fn:
             ops.marlin_int4_fp8_preprocess(layer.w13_qweight, inplace=True)
@@ -712,7 +720,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w13_qweight.shape[1] * self.quant_config.pack_factor,
             layer.w13_qweight.shape[2],
             self.quant_config.quant_type.size_bits,
-            is_a_8bit=is_a_8bit)
+            is_a_8bit=is_a_8bit,
+        )
         replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
         marlin_w2_qweight = ops.gptq_marlin_moe_repack(
             layer.w2_qweight,
@@ -720,7 +729,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w2_qweight.shape[1] * self.quant_config.pack_factor,
             layer.w2_qweight.shape[2],
             self.quant_config.quant_type.size_bits,
-            is_a_8bit=is_a_8bit)
+            is_a_8bit=is_a_8bit,
+        )
         replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
         # Repack scales
         marlin_w13_scales = marlin_moe_permute_scales(
@@ -728,14 +738,16 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             size_k=layer.intermediate_size_per_partition,
             size_n=layer.w13_scales.shape[2],
             group_size=self.quant_config.group_size,
-            is_a_8bit=is_a_8bit)
+            is_a_8bit=is_a_8bit,
+        )
         if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
-            marlin_w13_scales, w13_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w13_scales)
+            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w13_scales
+            )
             layer.register_parameter(
                 "w13_input_global_scale",
-                torch.nn.Parameter(w13_input_global_scale,
-                                   requires_grad=False))
+                torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
+            )
 
         replace_parameter(layer, "w13_scales", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
@@ -748,13 +760,16 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             ),
             size_n=layer.w2_scales.shape[2],
             group_size=self.quant_config.group_size,
-            is_a_8bit=is_a_8bit)
+            is_a_8bit=is_a_8bit,
+        )
         if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
-            marlin_w2_scales, w2_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w2_scales)
+            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w2_scales
+            )
             layer.register_parameter(
                 "w2_input_global_scale",
-                torch.nn.Parameter(w2_input_global_scale, requires_grad=False))
+                torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
+            )
 
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
@@ -839,4 +854,5 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             sort_indices2=layer.w2_g_idx_sort_indices,
             workspace=layer.workspace,
             is_k_full=self.is_k_full,
-            input_dtype=self.input_dtype)
+            input_dtype=self.input_dtype,
+        )

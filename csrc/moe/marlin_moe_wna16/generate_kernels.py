@@ -11,7 +11,7 @@ import jinja2
 ARCHS = []
 SUPPORT_FP8 = False
 for arch in sys.argv[1].split(","):
-    arch = arch[:arch.index(".") + 2].replace(".", "")
+    arch = arch[: arch.index(".") + 2].replace(".", "")
     arch = int(arch)
     if arch >= 89:
         SUPPORT_FP8 = True
@@ -21,27 +21,32 @@ FILE_HEAD_COMMENT = """
 // clang-format off
 """.lstrip()
 
-FILE_HEAD = FILE_HEAD_COMMENT + """
+FILE_HEAD = (
+    FILE_HEAD_COMMENT
+    + """
 #include "kernel.h"
 #include "marlin_template.h"
 
 namespace MARLIN_NAMESPACE_NAME {
 """
+)
 
-TEMPLATE = ("template __global__ void Marlin<"
-            "{{a_type_id}}, "
-            "{{b_type_id}}, "
-            "{{c_type_id}}, "
-            "{{s_type_id}}, "
-            "{{threads}}, "
-            "{{thread_m_blocks}}, "
-            "{{thread_n_blocks}}, "
-            "{{thread_k_blocks}}, "
-            "{{m_block_size_8}}, "
-            "{{stages}}, "
-            "{{group_blocks}}, "
-            "{{is_zp_float}}>"
-            "( MARLIN_KERNEL_PARAMS );")
+TEMPLATE = (
+    "template __global__ void Marlin<"
+    "{{a_type_id}}, "
+    "{{b_type_id}}, "
+    "{{c_type_id}}, "
+    "{{s_type_id}}, "
+    "{{threads}}, "
+    "{{thread_m_blocks}}, "
+    "{{thread_n_blocks}}, "
+    "{{thread_k_blocks}}, "
+    "{{m_block_size_8}}, "
+    "{{stages}}, "
+    "{{group_blocks}}, "
+    "{{is_zp_float}}>"
+    "( MARLIN_KERNEL_PARAMS );"
+)
 
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128)]
 
@@ -53,28 +58,28 @@ QUANT_CONFIGS = [
         "b_type": "kU4",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT4
     {
         "b_type": "kU4B8",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 0, 2, 4, 8]
+        "group_blocks": [-1, 0, 2, 4, 8],
     },
     # AWQ-INT8
     {
         "b_type": "kU8B128",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 0, 2, 4, 8]
+        "group_blocks": [-1, 0, 2, 4, 8],
     },
     # FP8
     {
         "b_type": "kFE4M3fn",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 8]
+        "group_blocks": [-1, 8],
     },
     # NVFP4
     {
@@ -82,7 +87,7 @@ QUANT_CONFIGS = [
         "s_type": "kFE4M3fn",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [1]
+        "group_blocks": [1],
     },
     # MXFP4
     {
@@ -91,7 +96,7 @@ QUANT_CONFIGS = [
         "s_type": "kFE8M0fnu",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [2]
+        "group_blocks": [2],
     },
     # AWQ-INT4 with INT8 activation
     {
@@ -99,7 +104,7 @@ QUANT_CONFIGS = [
         "b_type": "kU4",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT4 with INT8 activation
     {
@@ -107,7 +112,7 @@ QUANT_CONFIGS = [
         "b_type": "kU4B8",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT4 with FP8 activation
     {
@@ -115,7 +120,7 @@ QUANT_CONFIGS = [
         "b_type": "kU4B8",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # AWQ-INT4 with FP8 activation
     {
@@ -123,7 +128,7 @@ QUANT_CONFIGS = [
         "b_type": "kU4",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # MXFP4 with FP8 activation
     {
@@ -133,8 +138,8 @@ QUANT_CONFIGS = [
         "s_type": "kFE8M0fnu",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [2]
-    }
+        "group_blocks": [2],
+    },
 ]
 
 
@@ -167,8 +172,8 @@ def generate_new_kernels():
                 result_dict[(a_type, b_type, c_type)] = []
 
             for group_blocks, m_blocks, thread_configs in itertools.product(
-                    all_group_blocks, all_m_blocks, all_thread_configs):
-
+                all_group_blocks, all_m_blocks, all_thread_configs
+            ):
                 thread_k, thread_n, threads = thread_configs
 
                 if threads == 256:
@@ -190,7 +195,7 @@ def generate_new_kernels():
                     "m_block_size_8": "true" if m_blocks == 0.5 else "false",
                     "stages": "pipe_stages",
                     "group_blocks": group_blocks,
-                    "is_zp_float": "false"
+                    "is_zp_float": "false",
                 }
 
                 result_dict[(a_type, b_type, c_type)].append(config)
@@ -206,19 +211,22 @@ def generate_new_kernels():
                 b_type_id=f"vllm::{b_type}.id()",
                 c_type_id=f"vllm::{c_type}.id()",
                 s_type_id=f"vllm::{s_type}.id()",
-                **config)
+                **config,
+            )
             all_template_str_list.append(template_str)
 
             conditions = [
-                f"a_type == vllm::{a_type}", f"b_type == vllm::{b_type}",
-                f"c_type == vllm::{c_type}", f"s_type == vllm::{s_type}",
+                f"a_type == vllm::{a_type}",
+                f"b_type == vllm::{b_type}",
+                f"c_type == vllm::{c_type}",
+                f"s_type == vllm::{s_type}",
                 f"threads == {config['threads']}",
                 f"thread_m_blocks == {config['thread_m_blocks']}",
                 f"thread_n_blocks == {config['thread_n_blocks']}",
                 f"thread_k_blocks == {config['thread_k_blocks']}",
                 f"m_block_size_8 == {config['m_block_size_8']}",
                 f"group_blocks == {config['group_blocks']}",
-                f"is_zp_float == {config['is_zp_float']}"
+                f"is_zp_float == {config['is_zp_float']}",
             ]
             conditions = " && ".join(conditions)
 
@@ -232,14 +240,19 @@ def generate_new_kernels():
                 "{{s_type_id}}, {{threads}}, {{thread_m_blocks}}, "
                 "{{thread_n_blocks}}, {{thread_k_blocks}}, "
                 "{{m_block_size_8}}, {{stages}}, {{group_blocks}}, "
-                "{{is_zp_float}}>;")
+                "{{is_zp_float}}>;"
+            )
 
-            kernel_selector_str += jinja2.Template(kernel_template2).render(
-                a_type_id=f"vllm::{a_type}.id()",
-                b_type_id=f"vllm::{b_type}.id()",
-                c_type_id=f"vllm::{c_type}.id()",
-                s_type_id=f"vllm::{s_type}.id()",
-                **config) + "\n"
+            kernel_selector_str += (
+                jinja2.Template(kernel_template2).render(
+                    a_type_id=f"vllm::{a_type}.id()",
+                    b_type_id=f"vllm::{b_type}.id()",
+                    c_type_id=f"vllm::{c_type}.id()",
+                    s_type_id=f"vllm::{s_type}.id()",
+                    **config,
+                )
+                + "\n"
+            )
 
         file_content = FILE_HEAD + "\n\n"
         file_content += "\n\n".join(all_template_str_list) + "\n\n}\n"
@@ -257,10 +270,10 @@ def generate_new_kernels():
         kernel_selector_str += (
             "else if (a_type == vllm::kFE4M3fn)\n"
             "  TORCH_CHECK(false, "
-            "\"marlin kernel with fp8 activation is not built.\");")
+            '"marlin kernel with fp8 activation is not built.");'
+        )
 
-    with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"),
-              "w") as f:
+    with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"), "w") as f:
         f.write(kernel_selector_str)
 
 

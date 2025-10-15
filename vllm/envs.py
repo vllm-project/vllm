@@ -1053,13 +1053,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     == "1",
     # Whether to use marlin kernel in mxfp4 quantization method
-    "VLLM_MXFP4_USE_MARLIN":
-    lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
-
+    "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
+    ),
     # The activation dtype for marlin kernel
-    "VLLM_MARLIN_INPUT_DTYPE":
-    lambda: os.environ.get("VLLM_MARLIN_INPUT_DTYPE", None),
-
+    "VLLM_MARLIN_INPUT_DTYPE": lambda: os.environ.get("VLLM_MARLIN_INPUT_DTYPE", None),
     # Whether to turn on the outlines cache for V0
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.

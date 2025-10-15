@@ -17,8 +17,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.moe.utils import fused_moe
-from tests.kernels.utils import (opcheck, stack_and_dev, torch_experts,
-                                 torch_moe)
+from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import set_forward_context
@@ -60,69 +59,60 @@ TOP_KS = [2, 6]
 
 MOE_MARLIN_QUANT_TEST_CONFIGS = [
     # AWQ-INT4
-    {
-        "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8]
-    },
+    {"b_type": scalar_types.uint4, "group_blocks": [-1, 2, 4, 8]},
     # GPTQ-INT4
     {
         "b_type": scalar_types.uint4b8,
         "support_act_order": True,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT8
     {
         "b_type": scalar_types.uint8b128,
         "support_act_order": True,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # FP8
-    {
-        "b_type": scalar_types.float8_e4m3fn,
-        "group_blocks": [-1, 8]
-    },
+    {"b_type": scalar_types.float8_e4m3fn, "group_blocks": [-1, 8]},
     # NVFP4
-    {
-        "b_type": scalar_types.float4_e2m1f,
-        "group_blocks": [1]
-    },
+    {"b_type": scalar_types.float4_e2m1f, "group_blocks": [1]},
     # MXFP4
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float4_e2m1f,
-        "group_blocks": [2]
+        "group_blocks": [2],
     },
     # AWQ-INT4 with INT8 activation
     {
         "a_type": [scalar_types.int8],
         "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT4 with INT8 activation
     {
         "a_type": [scalar_types.int8],
         "b_type": scalar_types.uint4b8,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT4 with FP8 activation
     {
         "a_type": [scalar_types.float8_e4m3fn],
         "b_type": scalar_types.uint4b8,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # AWQ-INT4 with FP8 activation
     {
         "a_type": [scalar_types.float8_e4m3fn],
         "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # MXFP4 with FP8 activation
     {
         "a_type": [scalar_types.float8_e4m3fn],
         "b_type": scalar_types.float4_e2m1f,
         "c_type": [scalar_types.bfloat16],
-        "group_blocks": [2]
-    }
+        "group_blocks": [2],
+    },
 ]
 
 FUSED_MOE_MNK_FACTORS = [
@@ -578,13 +568,32 @@ def marlin_moe_generate_valid_test_cases():
     act_order_list = [True, False]
     is_k_full_list = [True, False]
 
-    all_combinations = itertools.product(MOE_MARLIN_QUANT_TEST_CONFIGS, m_list,
-                                         n_list, k_list, e_list, topk_list,
-                                         ep_size_list, act_order_list,
-                                         is_k_full_list)
+    all_combinations = itertools.product(
+        MOE_MARLIN_QUANT_TEST_CONFIGS,
+        m_list,
+        n_list,
+        k_list,
+        e_list,
+        topk_list,
+        ep_size_list,
+        act_order_list,
+        is_k_full_list,
+    )
 
-    def is_invalid(a_type, b_type, c_type, group_blocks, m, n, k, e, topk,
-                   ep_size, act_order, is_k_full):
+    def is_invalid(
+        a_type,
+        b_type,
+        c_type,
+        group_blocks,
+        m,
+        n,
+        k,
+        e,
+        topk,
+        ep_size,
+        act_order,
+        is_k_full,
+    ):
         group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
         if group_size > 0 and k % group_size != 0:
             return False
@@ -606,14 +615,17 @@ def marlin_moe_generate_valid_test_cases():
 
         f16_types = [scalar_types.float16]
         inner_combinations = itertools.product(
-            quant_test_config.get("a_type",
-                                  f16_types), [quant_test_config["b_type"]],
+            quant_test_config.get("a_type", f16_types),
+            [quant_test_config["b_type"]],
             quant_test_config.get("c_type", f16_types),
-            quant_test_config["group_blocks"])
+            quant_test_config["group_blocks"],
+        )
 
         for sub_case in inner_combinations:
-            if sub_case[0] == scalar_types.float8_e4m3fn and \
-                    not current_platform.has_device_capability(89):
+            if (
+                sub_case[0] == scalar_types.float8_e4m3fn
+                and not current_platform.has_device_capability(89)
+            ):
                 continue
             args = sub_case + (m, n, k) + case[4:]
             if is_invalid(*args):
@@ -622,12 +634,28 @@ def marlin_moe_generate_valid_test_cases():
 
 
 @pytest.mark.flaky(reruns=2)
-@pytest.mark.parametrize(("a_type, b_type, c_type, group_blocks,"
-                          "m, n, k, e, topk, ep_size, act_order, is_k_full"),
-                         marlin_moe_generate_valid_test_cases())
+@pytest.mark.parametrize(
+    (
+        "a_type, b_type, c_type, group_blocks,"
+        "m, n, k, e, topk, ep_size, act_order, is_k_full"
+    ),
+    marlin_moe_generate_valid_test_cases(),
+)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
-def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
-                          topk, ep_size, act_order, is_k_full):
+def test_fused_marlin_moe(
+    a_type,
+    b_type,
+    c_type,
+    group_blocks,
+    m,
+    n,
+    k,
+    e,
+    topk,
+    ep_size,
+    act_order,
+    is_k_full,
+):
     torch.cuda.manual_seed(0)
     has_zp = b_type in [scalar_types.uint4, scalar_types.uint8]
 
@@ -672,27 +700,31 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
     for i in range(w1.shape[0]):
         if b_type == scalar_types.float4_e2m1f:
             if group_size == 16:
-                w_ref1, qweight1, scales1, global_scale1 = \
-                    rand_marlin_weight_nvfp4_like(w1[i],group_size,
-                                                  input_dtype=a_dtype)
+                w_ref1, qweight1, scales1, global_scale1 = (
+                    rand_marlin_weight_nvfp4_like(
+                        w1[i], group_size, input_dtype=a_dtype
+                    )
+                )
                 global_scale1_l.append(global_scale1)
             else:
-                w_ref1, qweight1, scales1 = \
-                    rand_marlin_weight_mxfp4_like(w1[i], group_size,
-                                                  input_dtype=a_dtype)
+                w_ref1, qweight1, scales1 = rand_marlin_weight_mxfp4_like(
+                    w1[i], group_size, input_dtype=a_dtype
+                )
 
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
             scales1_l.append(scales1)
         elif b_type == scalar_types.float8_e4m3fn:
             w_ref1, qweight1, scales1 = marlin_quant_fp8_torch(
-                w1[i], group_size, input_dtype=a_dtype)
+                w1[i], group_size, input_dtype=a_dtype
+            )
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
             scales1_l.append(scales1)
         elif has_zp:
             w_ref1, qweight1, scales1, zeros1 = awq_marlin_quantize(
-                w1[i].transpose(1, 0), b_type, group_size, input_dtype=a_dtype)
+                w1[i].transpose(1, 0), b_type, group_size, input_dtype=a_dtype
+            )
 
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
@@ -700,10 +732,14 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
             zeros1_l.append(zeros1)
         else:
             test_perm = torch.randperm(k)
-            w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = \
-                marlin_quantize(w1[i].transpose(1, 0), b_type,
-                                group_size, act_order, test_perm,
-                                input_dtype=a_dtype)
+            w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = marlin_quantize(
+                w1[i].transpose(1, 0),
+                b_type,
+                group_size,
+                act_order,
+                test_perm,
+                input_dtype=a_dtype,
+            )
 
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
@@ -730,27 +766,31 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
     for i in range(w2.shape[0]):
         if b_type == scalar_types.float4_e2m1f:
             if group_size == 16:
-                w_ref2, qweight2, scales2, global_scale2 = \
-                    rand_marlin_weight_nvfp4_like(w2[i], group_size,
-                                                  input_dtype=a_dtype)
+                w_ref2, qweight2, scales2, global_scale2 = (
+                    rand_marlin_weight_nvfp4_like(
+                        w2[i], group_size, input_dtype=a_dtype
+                    )
+                )
                 global_scale2_l.append(global_scale2)
             else:
-                w_ref2, qweight2, scales2 = \
-                    rand_marlin_weight_mxfp4_like(w2[i], group_size,
-                                                  input_dtype=a_dtype)
+                w_ref2, qweight2, scales2 = rand_marlin_weight_mxfp4_like(
+                    w2[i], group_size, input_dtype=a_dtype
+                )
 
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
             scales2_l.append(scales2)
         elif b_type == scalar_types.float8_e4m3fn:
             w_ref2, qweight2, scales2 = marlin_quant_fp8_torch(
-                w2[i], group_size, input_dtype=a_dtype)
+                w2[i], group_size, input_dtype=a_dtype
+            )
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
             scales2_l.append(scales2)
         elif has_zp:
             w_ref2, qweight2, scales2, zeros2 = awq_marlin_quantize(
-                w2[i].transpose(1, 0), b_type, group_size, input_dtype=a_dtype)
+                w2[i].transpose(1, 0), b_type, group_size, input_dtype=a_dtype
+            )
 
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
@@ -758,10 +798,14 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
             zeros2_l.append(zeros2)
         else:
             test_perm = torch.randperm(n)
-            w_ref2, qweight2, scales2, g_idx2, sort_indices2, _ = \
-                marlin_quantize(w2[i].transpose(1, 0), b_type,
-                                group_size, act_order, test_perm,
-                                input_dtype=a_dtype)
+            w_ref2, qweight2, scales2, g_idx2, sort_indices2, _ = marlin_quantize(
+                w2[i].transpose(1, 0),
+                b_type,
+                group_size,
+                act_order,
+                test_perm,
+                input_dtype=a_dtype,
+            )
 
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
@@ -786,10 +830,10 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
             a_scales1_factor = 1 / 4096 * scales1.max().float()
             a_scales2_factor = 1 / 4096 * scales2.max().float()
 
-            scales1 = (scales1 / scales1.max() * 4096)
+            scales1 = scales1 / scales1.max() * 4096
             scales1 = scales1.round().to(torch.int16).view(dtype)
 
-            scales2 = (scales2 / scales2.max() * 4096)
+            scales2 = scales2 / scales2.max() * 4096
             scales2 = scales2.round().to(torch.int16).view(dtype)
         else:
             a_scales1_factor = None
@@ -801,15 +845,17 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
     with set_current_vllm_config(vllm_config):
         score = torch.softmax(score, dim=-1, dtype=torch.float32)
         topk_weight, topk_ids = torch.topk(score, topk)
-        torch_output = torch_experts(a,
-                                     w_ref1,
-                                     w_ref2,
-                                     topk_weight=topk_weight,
-                                     topk_ids=topk_ids,
-                                     global_num_experts=e,
-                                     expert_map=e_map,
-                                     quant_dtype=a_dtype,
-                                     per_act_token_quant=True)
+        torch_output = torch_experts(
+            a,
+            w_ref1,
+            w_ref2,
+            topk_weight=topk_weight,
+            topk_ids=topk_ids,
+            global_num_experts=e,
+            expert_map=e_map,
+            quant_dtype=a_dtype,
+            per_act_token_quant=True,
+        )
 
     marlin_output = torch.ops.vllm.fused_marlin_moe(
         a,
@@ -836,7 +882,8 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
         w2_zeros=zeros2,
         input_dtype=a_dtype,
         quant_type_id=b_type.id,
-        is_k_full=is_k_full)
+        is_k_full=is_k_full,
+    )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
 

@@ -10,7 +10,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
-    per_token_quant_int8)
+    per_token_quant_int8,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -298,12 +299,9 @@ def get_scale_perms():
     return scale_perm, scale_perm_single
 
 
-def marlin_permute_scales(s: torch.Tensor,
-                          size_k: int,
-                          size_n: int,
-                          group_size: int,
-                          is_a_8bit: bool = False) -> torch.Tensor:
-
+def marlin_permute_scales(
+    s: torch.Tensor, size_k: int, size_n: int, group_size: int, is_a_8bit: bool = False
+) -> torch.Tensor:
     scale_perm, scale_perm_single = get_scale_perms()
     if group_size < size_k and group_size != -1 and not is_a_8bit:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
@@ -328,11 +326,9 @@ def marlin_act_int8_process_scales(s: torch.Tensor):
     return s, a_scales_scale_factor
 
 
-def marlin_moe_permute_scales(s: torch.Tensor,
-                              size_k: int,
-                              size_n: int,
-                              group_size: int,
-                              is_a_8bit: bool = False):
+def marlin_moe_permute_scales(
+    s: torch.Tensor, size_k: int, size_n: int, group_size: int, is_a_8bit: bool = False
+):
     num_experts = s.shape[0]
     output = torch.empty(
         (num_experts, s.shape[1], s.shape[2]),
@@ -341,16 +337,13 @@ def marlin_moe_permute_scales(s: torch.Tensor,
     )
 
     for e in range(num_experts):
-        output[e] = marlin_permute_scales(s[e], size_k, size_n, group_size,
-                                          is_a_8bit)
+        output[e] = marlin_permute_scales(s[e], size_k, size_n, group_size, is_a_8bit)
     return output
 
 
-def marlin_zero_points(zp: torch.Tensor,
-                       size_k: int,
-                       size_n: int,
-                       num_bits: int,
-                       is_a_8bit: bool = False) -> torch.Tensor:
+def marlin_zero_points(
+    zp: torch.Tensor, size_k: int, size_n: int, num_bits: int, is_a_8bit: bool = False
+) -> torch.Tensor:
     # Permute zero-points in a similar way to scales, but do not use the
     # "single" permutation, since zero-points are applied on every MMA
     scale_perm, _ = get_scale_perms()
@@ -372,11 +365,13 @@ def marlin_zero_points(zp: torch.Tensor,
     return zp
 
 
-def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor,
-                              size_k: int,
-                              size_n: int,
-                              num_bits: int,
-                              is_a_8bit: bool = False) -> torch.Tensor:
+def awq_to_marlin_zero_points(
+    q_zp_packed: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    is_a_8bit: bool = False,
+) -> torch.Tensor:
     # AWQ zero-points are quantized and packed on the column dim.
     # In addition, the values are permuted based on dequantizer.
     # Here we undo both of these, and then apply marlin permutation
@@ -398,11 +393,13 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor,
     return marlin_zp
 
 
-def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor,
-                                  size_k: int,
-                                  size_n: int,
-                                  num_bits: int,
-                                  is_a_8bit: bool = False):
+def moe_awq_to_marlin_zero_points(
+    q_zp_packed: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    is_a_8bit: bool = False,
+):
     num_experts = q_zp_packed.shape[0]
     output = torch.empty(
         (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
@@ -410,8 +407,9 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor,
         dtype=q_zp_packed.dtype,
     )
     for e in range(num_experts):
-        output[e] = awq_to_marlin_zero_points(q_zp_packed[e], size_k, size_n,
-                                              num_bits, is_a_8bit)
+        output[e] = awq_to_marlin_zero_points(
+            q_zp_packed[e], size_k, size_n, num_bits, is_a_8bit
+        )
     return output
 
 
@@ -464,88 +462,99 @@ def should_use_atomic_add_reduce(
 
 
 def apply_gptq_marlin_linear(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        weight_zp: torch.Tensor,
-        g_idx: torch.Tensor,
-        g_idx_sort_indices: torch.Tensor,
-        workspace: torch.Tensor,
-        wtype: ScalarType,
-        output_size_per_partition: int,
-        input_size_per_partition: int,
-        is_k_full: bool,
-        input_global_scale: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-        input_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_zp: torch.Tensor,
+    g_idx: torch.Tensor,
+    g_idx_sort_indices: torch.Tensor,
+    workspace: torch.Tensor,
+    wtype: ScalarType,
+    output_size_per_partition: int,
+    input_size_per_partition: int,
+    is_k_full: bool,
+    input_global_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+    input_dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (output_size_per_partition, )
+    out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
-                                                  n=output_size_per_partition,
-                                                  k=reshaped_x.size(1),
-                                                  device=input.device,
-                                                  dtype=input.dtype)
+    use_atomic_add = should_use_atomic_add_reduce(
+        m=reshaped_x.size(0),
+        n=output_size_per_partition,
+        k=reshaped_x.size(1),
+        device=input.device,
+        dtype=input.dtype,
+    )
 
     a_scales = None
     if input_dtype == torch.int8:
-        assert wtype == scalar_types.uint4b8, \
+        assert wtype == scalar_types.uint4b8, (
             "W8A8-INT8 is not supported by marlin kernel."
+        )
         reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
         a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
-        assert wtype == scalar_types.uint4b8, \
+        assert wtype == scalar_types.uint4b8, (
             "INT8 weight + FP8 activation is not supported."
+        )
         reshaped_x, a_scales = ops.scaled_fp8_quant(
-            reshaped_x, use_per_token_if_dynamic=True)
+            reshaped_x, use_per_token_if_dynamic=True
+        )
 
-    output = ops.gptq_marlin_gemm(reshaped_x,
-                                  None,
-                                  weight,
-                                  bias,
-                                  weight_scale,
-                                  a_scales,
-                                  None,
-                                  weight_zp,
-                                  g_idx,
-                                  g_idx_sort_indices,
-                                  workspace,
-                                  wtype,
-                                  size_m=reshaped_x.shape[0],
-                                  size_n=output_size_per_partition,
-                                  size_k=input_size_per_partition,
-                                  is_k_full=is_k_full,
-                                  use_atomic_add=use_atomic_add,
-                                  use_fp32_reduce=use_fp32_reduce,
-                                  is_zp_float=False)
+    output = ops.gptq_marlin_gemm(
+        reshaped_x,
+        None,
+        weight,
+        bias,
+        weight_scale,
+        a_scales,
+        None,
+        weight_zp,
+        g_idx,
+        g_idx_sort_indices,
+        workspace,
+        wtype,
+        size_m=reshaped_x.shape[0],
+        size_n=output_size_per_partition,
+        size_k=input_size_per_partition,
+        is_k_full=is_k_full,
+        use_atomic_add=use_atomic_add,
+        use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
+    )
 
     return output.reshape(out_shape)
 
 
 def apply_awq_marlin_linear(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        weight_zp: torch.Tensor,
-        g_idx: torch.Tensor,
-        g_idx_sort_indices: torch.Tensor,
-        workspace: torch.Tensor,
-        quant_type: ScalarType,
-        output_size_per_partition: int,
-        input_size_per_partition: int,
-        input_global_scale: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-        input_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_zp: torch.Tensor,
+    g_idx: torch.Tensor,
+    g_idx_sort_indices: torch.Tensor,
+    workspace: torch.Tensor,
+    quant_type: ScalarType,
+    output_size_per_partition: int,
+    input_size_per_partition: int,
+    input_global_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+    input_dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (output_size_per_partition, )
+    out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
-                                                  n=output_size_per_partition,
-                                                  k=reshaped_x.size(1),
-                                                  device=input.device,
-                                                  dtype=input.dtype)
+    use_atomic_add = should_use_atomic_add_reduce(
+        m=reshaped_x.size(0),
+        n=output_size_per_partition,
+        k=reshaped_x.size(1),
+        device=input.device,
+        dtype=input.dtype,
+    )
 
     a_scales = None
     if input_dtype == torch.int8:
@@ -553,25 +562,28 @@ def apply_awq_marlin_linear(
         a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
         reshaped_x, a_scales = ops.scaled_fp8_quant(
-            reshaped_x, use_per_token_if_dynamic=True)
+            reshaped_x, use_per_token_if_dynamic=True
+        )
 
-    output = ops.gptq_marlin_gemm(reshaped_x,
-                                  None,
-                                  weight,
-                                  bias,
-                                  weight_scale,
-                                  a_scales,
-                                  None,
-                                  weight_zp,
-                                  g_idx,
-                                  g_idx_sort_indices,
-                                  workspace,
-                                  quant_type,
-                                  size_m=reshaped_x.shape[0],
-                                  size_n=output_size_per_partition,
-                                  size_k=input_size_per_partition,
-                                  use_atomic_add=use_atomic_add,
-                                  use_fp32_reduce=use_fp32_reduce,
-                                  is_zp_float=False)
+    output = ops.gptq_marlin_gemm(
+        reshaped_x,
+        None,
+        weight,
+        bias,
+        weight_scale,
+        a_scales,
+        None,
+        weight_zp,
+        g_idx,
+        g_idx_sort_indices,
+        workspace,
+        quant_type,
+        size_m=reshaped_x.shape[0],
+        size_n=output_size_per_partition,
+        size_k=input_size_per_partition,
+        use_atomic_add=use_atomic_add,
+        use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
+    )
 
     return output.reshape(out_shape)

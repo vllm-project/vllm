@@ -38,62 +38,62 @@ def fp8_fused_exponent_bias_into_scales(scales):
 
 
 def apply_fp8_marlin_linear(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        workspace: torch.Tensor,
-        size_n: int,
-        size_k: int,
-        bias: Optional[torch.Tensor],
-        input_dtype: Optional[torch.dtype] = None,
-        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    workspace: torch.Tensor,
+    size_n: int,
+    size_k: int,
+    bias: Optional[torch.Tensor],
+    input_dtype: Optional[torch.dtype] = None,
+    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP8 quantization
 
     reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (size_n, )
+    out_shape = input.shape[:-1] + (size_n,)
 
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
-                                                  n=size_n,
-                                                  k=size_k,
-                                                  device=input.device,
-                                                  dtype=input.dtype)
+    use_atomic_add = should_use_atomic_add_reduce(
+        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
+    )
 
     inputs = reshaped_x
     a_scales = None
     if input_dtype is not None and input_dtype.itemsize == 1:
         if input_dtype != torch.float8_e4m3fn:
-            raise RuntimeError(
-                "FP8 weight + INT8 activation is not supported.")
+            raise RuntimeError("FP8 weight + INT8 activation is not supported.")
 
-        inputs, a_scales = ops.scaled_fp8_quant(inputs,
-                                                use_per_token_if_dynamic=True)
+        inputs, a_scales = ops.scaled_fp8_quant(inputs, use_per_token_if_dynamic=True)
 
-    output = ops.gptq_marlin_gemm(a=reshaped_x,
-                                  c=None,
-                                  b_q_weight=weight,
-                                  b_bias=bias,
-                                  b_scales=weight_scale,
-                                  a_scales=a_scales,
-                                  global_scale=None,
-                                  b_zeros=None,
-                                  g_idx=None,
-                                  perm=None,
-                                  workspace=workspace,
-                                  b_q_type=scalar_types.float8_e4m3fn,
-                                  size_m=reshaped_x.size(0),
-                                  size_n=size_n,
-                                  size_k=size_k,
-                                  use_atomic_add=use_atomic_add,
-                                  use_fp32_reduce=use_fp32_reduce)
+    output = ops.gptq_marlin_gemm(
+        a=reshaped_x,
+        c=None,
+        b_q_weight=weight,
+        b_bias=bias,
+        b_scales=weight_scale,
+        a_scales=a_scales,
+        global_scale=None,
+        b_zeros=None,
+        g_idx=None,
+        perm=None,
+        workspace=workspace,
+        b_q_type=scalar_types.float8_e4m3fn,
+        size_m=reshaped_x.size(0),
+        size_n=size_n,
+        size_k=size_k,
+        use_atomic_add=use_atomic_add,
+        use_fp32_reduce=use_fp32_reduce,
+    )
 
     return output.reshape(out_shape)
 
 
 def prepare_fp8_layer_for_marlin(
-        layer: torch.nn.Module,
-        size_k_first: bool = True,
-        input_dtype: Optional[torch.dtype] = None) -> None:
+    layer: torch.nn.Module,
+    size_k_first: bool = True,
+    input_dtype: Optional[torch.dtype] = None,
+) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
@@ -171,10 +171,9 @@ def prepare_fp8_layer_for_marlin(
         # size_n may not divisible by block_size[0]
         scales = scales[:, :part_size_n]
 
-    marlin_scales = marlin_permute_scales(s=scales,
-                                          size_k=part_size_k,
-                                          size_n=part_size_n,
-                                          group_size=group_size)
+    marlin_scales = marlin_permute_scales(
+        s=scales, size_k=part_size_k, size_n=part_size_n, group_size=group_size
+    )
     if input_dtype != torch.float8_e4m3fn:
         marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
     layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
@@ -186,9 +185,10 @@ def prepare_fp8_layer_for_marlin(
 
 
 def prepare_moe_fp8_layer_for_marlin(
-        layer: torch.nn.Module,
-        size_k_first: bool = True,
-        input_dtype: Optional[torch.dtype] = None) -> None:
+    layer: torch.nn.Module,
+    size_k_first: bool = True,
+    input_dtype: Optional[torch.dtype] = None,
+) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
@@ -355,18 +355,22 @@ def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
 
     packed_weight = pack_fp8_to_int32(fp8_weight, False).T.contiguous()
     perm = torch.empty(0, dtype=torch.int, device=device)
-    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=packed_weight,
-                                            perm=perm,
-                                            size_k=size_k,
-                                            size_n=size_n,
-                                            num_bits=8,
-                                            is_a_8bit=is_a_8bit)
+    marlin_qweight = ops.gptq_marlin_repack(
+        b_q_weight=packed_weight,
+        perm=perm,
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=8,
+        is_a_8bit=is_a_8bit,
+    )
 
-    marlin_scales = marlin_permute_scales(s=scales.T,
-                                          size_k=size_k,
-                                          size_n=size_n,
-                                          group_size=group_size,
-                                          is_a_8bit=is_a_8bit)
+    marlin_scales = marlin_permute_scales(
+        s=scales.T,
+        size_k=size_k,
+        size_n=size_n,
+        group_size=group_size,
+        is_a_8bit=is_a_8bit,
+    )
 
     marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
 

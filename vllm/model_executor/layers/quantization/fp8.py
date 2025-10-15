@@ -64,7 +64,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     validate_fp8_block_shape,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype)
+    get_marlin_input_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
@@ -300,8 +301,7 @@ class Fp8Config(QuantizationConfig):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             moe_quant_method = Fp8MoEMethod(self, layer)
-            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(
-                prefix)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -354,8 +354,10 @@ class Fp8LinearMethod(LinearMethodBase):
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.marlin_input_dtype = None
-        self.use_marlin = (not current_platform.has_device_capability(89)
-                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        self.use_marlin = (
+            not current_platform.has_device_capability(89)
+            or envs.VLLM_TEST_FORCE_FP8_MARLIN
+        )
         # Disable marlin for rocm
         if current_platform.is_rocm():
             self.use_marlin = False
@@ -526,9 +528,9 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         if self.use_marlin:
-            prepare_fp8_layer_for_marlin(layer,
-                                         size_k_first,
-                                         input_dtype=self.marlin_input_dtype)
+            prepare_fp8_layer_for_marlin(
+                layer, size_k_first, input_dtype=self.marlin_input_dtype
+            )
             # Activations not quantized for marlin.
             del layer.input_scale
             return
@@ -551,7 +553,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
                 input_dtype=self.marlin_input_dtype,
-                bias=bias)
+                bias=bias,
+            )
 
         if self.block_quant:
             assert self.weight_block_size is not None
@@ -952,7 +955,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         if self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype)
+                layer, False, input_dtype=self.marlin_input_dtype
+            )
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale

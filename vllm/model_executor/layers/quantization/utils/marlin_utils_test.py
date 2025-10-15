@@ -30,20 +30,16 @@ class MarlinWorkspace:
         self.scratch = torch.zeros(max_workspace_size, dtype=torch.int, device="cuda")
 
 
-def marlin_permute_weights(q_w,
-                           size_k,
-                           size_n,
-                           perm,
-                           tile=GPTQ_MARLIN_TILE,
-                           is_a_8bit=False):
+def marlin_permute_weights(
+    q_w, size_k, size_n, perm, tile=GPTQ_MARLIN_TILE, is_a_8bit=False
+):
     assert q_w.shape == (size_k, size_n)
     assert size_k % tile == 0, f"size_k = {size_k}, tile = {tile}"
     assert size_n % tile == 0, f"size_k = {size_n}, tile = {tile}"
 
     if is_a_8bit:
         # Permute weights to 32x32 marlin tiles
-        q_w = q_w.reshape(
-            (size_k // (tile * 2), tile * 2, size_n // tile, tile))
+        q_w = q_w.reshape((size_k // (tile * 2), tile * 2, size_n // tile, tile))
     else:
         # Permute weights to 16x64 marlin tiles
         q_w = q_w.reshape((size_k // tile, tile, size_n // tile, tile))
@@ -57,11 +53,7 @@ def marlin_permute_weights(q_w,
 
 def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit=False):
     # Permute
-    q_w = marlin_permute_weights(q_w,
-                                 size_k,
-                                 size_n,
-                                 perm,
-                                 is_a_8bit=is_a_8bit)
+    q_w = marlin_permute_weights(q_w, size_k, size_n, perm, is_a_8bit=is_a_8bit)
 
     # Pack
     pack_factor = get_pack_factor(num_bits)
@@ -86,14 +78,14 @@ def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
             col = i // 4
             for block in [0, 1]:
                 for row in [
-                        4 * (i % 4),
-                        4 * (i % 4) + 1,
-                        4 * (i % 4) + 2,
-                        4 * (i % 4) + 3,
-                        4 * (i % 4 + 4),
-                        4 * (i % 4 + 4) + 1,
-                        4 * (i % 4 + 4) + 2,
-                        4 * (i % 4 + 4) + 3,
+                    4 * (i % 4),
+                    4 * (i % 4) + 1,
+                    4 * (i % 4) + 2,
+                    4 * (i % 4) + 3,
+                    4 * (i % 4 + 4),
+                    4 * (i % 4 + 4) + 1,
+                    4 * (i % 4 + 4) + 2,
+                    4 * (i % 4 + 4) + 3,
                 ]:
                     perm1.append(16 * row + col + 8 * block)
             for j in range(2):
@@ -104,10 +96,10 @@ def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
             col = i // 4
             for block in [0, 1]:
                 for row in [
-                        2 * (i % 4),
-                        2 * (i % 4) + 1,
-                        2 * (i % 4 + 4),
-                        2 * (i % 4 + 4) + 1,
+                    2 * (i % 4),
+                    2 * (i % 4) + 1,
+                    2 * (i % 4 + 4),
+                    2 * (i % 4 + 4) + 1,
                 ]:
                     perm1.append(16 * row + col + 8 * block)
             for j in range(4):
@@ -133,13 +125,14 @@ def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
     return perm
 
 
-def marlin_quantize(w: torch.Tensor,
-                    quant_type: ScalarType,
-                    group_size: int,
-                    act_order: bool,
-                    test_perm: Optional[torch.Tensor] = None,
-                    input_dtype: Optional[torch.Tensor] = None):
-
+def marlin_quantize(
+    w: torch.Tensor,
+    quant_type: ScalarType,
+    group_size: int,
+    act_order: bool,
+    test_perm: Optional[torch.Tensor] = None,
+    input_dtype: Optional[torch.Tensor] = None,
+):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
     size_k, size_n = w.shape
@@ -163,20 +156,12 @@ def marlin_quantize(w: torch.Tensor,
 
     # Reformat to marlin
     weight_perm = get_weight_perm(num_bits, is_a_8bit)
-    marlin_q_w = marlin_weights(q_w,
-                                size_k,
-                                size_n,
-                                num_bits,
-                                weight_perm,
-                                is_a_8bit=is_a_8bit)
-    marlin_s = marlin_permute_scales(s,
-                                     size_k,
-                                     size_n,
-                                     group_size,
-                                     is_a_8bit=is_a_8bit)
+    marlin_q_w = marlin_weights(
+        q_w, size_k, size_n, num_bits, weight_perm, is_a_8bit=is_a_8bit
+    )
+    marlin_s = marlin_permute_scales(s, size_k, size_n, group_size, is_a_8bit=is_a_8bit)
 
-    if input_dtype == torch.float8_e4m3fn and \
-            quant_type == scalar_types.uint4b8:
+    if input_dtype == torch.float8_e4m3fn and quant_type == scalar_types.uint4b8:
         ops.marlin_int4_fp8_preprocess(marlin_q_w, inplace=True)
         marlin_s = marlin_s * 512
 
@@ -188,11 +173,12 @@ def marlin_quantize(w: torch.Tensor,
     return res_list
 
 
-def awq_marlin_quantize(w: torch.Tensor,
-                        quant_type: ScalarType,
-                        group_size: int,
-                        input_dtype: Optional[torch.Tensor] = None):
-
+def awq_marlin_quantize(
+    w: torch.Tensor,
+    quant_type: ScalarType,
+    group_size: int,
+    input_dtype: Optional[torch.Tensor] = None,
+):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     size_k, size_n = w.shape
 
@@ -212,27 +198,18 @@ def awq_marlin_quantize(w: torch.Tensor,
         repeated_zp = zp.repeat_interleave(group_size, 0)
         q_w_old = q_w
         q_w = q_w_old - repeated_zp
-        q_w[q_w < 0] = (15 - q_w_old[q_w < 0])
+        q_w[q_w < 0] = 15 - q_w_old[q_w < 0]
         s = s * 512
 
     # Reformat to marlin
     weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
-    marlin_q_w = marlin_weights(q_w,
-                                size_k,
-                                size_n,
-                                quant_type.size_bits,
-                                weight_perm,
-                                is_a_8bit=is_a_8bit)
-    marlin_s = marlin_permute_scales(s,
-                                     size_k,
-                                     size_n,
-                                     group_size,
-                                     is_a_8bit=is_a_8bit)
-    marlin_zp = marlin_zero_points(zp,
-                                   num_groups,
-                                   size_n,
-                                   quant_type.size_bits,
-                                   is_a_8bit=is_a_8bit)
+    marlin_q_w = marlin_weights(
+        q_w, size_k, size_n, quant_type.size_bits, weight_perm, is_a_8bit=is_a_8bit
+    )
+    marlin_s = marlin_permute_scales(s, size_k, size_n, group_size, is_a_8bit=is_a_8bit)
+    marlin_zp = marlin_zero_points(
+        zp, num_groups, size_n, quant_type.size_bits, is_a_8bit=is_a_8bit
+    )
 
     # Create result
     res_list = [w_ref, marlin_q_w, marlin_s, marlin_zp]

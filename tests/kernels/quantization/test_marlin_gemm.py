@@ -4,6 +4,7 @@
 
 Run `pytest tests/kernels/quantization/test_marlin_gemm.py`.
 """
+
 import itertools
 
 import pytest
@@ -13,15 +14,25 @@ from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES)
+    GPTQ_MARLIN_24_MAX_PARALLEL,
+    GPTQ_MARLIN_24_MIN_THREAD_N,
+    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES,
+    GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES,
+)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
-    per_token_quant_int8)
+    per_token_quant_int8,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    marlin_make_empty_g_idx, marlin_make_workspace_new, marlin_permute_bias,
-    marlin_permute_scales, query_marlin_supported_quant_types)
+    marlin_make_empty_g_idx,
+    marlin_make_workspace_new,
+    marlin_permute_bias,
+    marlin_permute_scales,
+    query_marlin_supported_quant_types,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    rand_marlin_weight_mxfp4_like, rand_marlin_weight_nvfp4_like)
+    rand_marlin_weight_mxfp4_like,
+    rand_marlin_weight_nvfp4_like,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch,
 )
@@ -36,7 +47,12 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    awq_pack, gptq_pack, gptq_quantize_weights, quantize_weights, sort_weights)
+    awq_pack,
+    gptq_pack,
+    gptq_quantize_weights,
+    quantize_weights,
+    sort_weights,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -70,69 +86,60 @@ DTYPES = [torch.float16, torch.bfloat16]
 
 DENSE_MARLIN_QUANT_TEST_CONFIGS = [
     # AWQ-INT4
-    {
-        "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8]
-    },
+    {"b_type": scalar_types.uint4, "group_blocks": [-1, 2, 4, 8]},
     # GPTQ-INT4
     {
         "b_type": scalar_types.uint4b8,
         "support_act_order": True,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT8
     {
         "b_type": scalar_types.uint8b128,
         "support_act_order": True,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # FP8
-    {
-        "b_type": scalar_types.float8_e4m3fn,
-        "group_blocks": [-1, 8]
-    },
+    {"b_type": scalar_types.float8_e4m3fn, "group_blocks": [-1, 8]},
     # NVFP4
-    {
-        "b_type": scalar_types.float4_e2m1f,
-        "group_blocks": [1]
-    },
+    {"b_type": scalar_types.float4_e2m1f, "group_blocks": [1]},
     # MXFP4
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float4_e2m1f,
-        "group_blocks": [2]
+        "group_blocks": [2],
     },
     # AWQ-INT4 with INT8 activation
     {
         "a_type": [scalar_types.int8],
         "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT4 with INT8 activation
     {
         "a_type": [scalar_types.int8],
         "b_type": scalar_types.uint4b8,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT4 with FP8 activation
     {
         "a_type": [scalar_types.float8_e4m3fn],
         "b_type": scalar_types.uint4b8,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # AWQ-INT4 with FP8 activation
     {
         "a_type": [scalar_types.float8_e4m3fn],
         "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8]
+        "group_blocks": [-1, 2, 4, 8],
     },
     # MXFP4 with FP8 activation
     {
         "a_type": [scalar_types.float8_e4m3fn],
         "b_type": scalar_types.float4_e2m1f,
         "c_type": [scalar_types.bfloat16],
-        "group_blocks": [2]
-    }
+        "group_blocks": [2],
+    },
 ]
 
 
@@ -146,42 +153,41 @@ def rand_data(shape, dtype=torch.float16):
     return torch.randn(shape, dtype=dtype, device="cuda")
 
 
-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
-                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
 def test_marlin_int4_fp8_preprocess_without_zp():
-    qweight_unpacked = torch.randint(0,
-                                     16,
-                                     size=(2048, 2048),
-                                     dtype=torch.int32,
-                                     device="cuda")
+    qweight_unpacked = torch.randint(
+        0, 16, size=(2048, 2048), dtype=torch.int32, device="cuda"
+    )
     qweight_packed = qweight_unpacked[:, ::2] * 16 + qweight_unpacked[:, 1::2]
     qweight_packed = qweight_packed.to(torch.int8).view(torch.int32)
 
     cuda_res = ops.marlin_int4_fp8_preprocess(qweight_packed)
 
-    torch_res = torch.where(qweight_unpacked >= 8, qweight_unpacked - 8,
-                            15 - qweight_unpacked)
+    torch_res = torch.where(
+        qweight_unpacked >= 8, qweight_unpacked - 8, 15 - qweight_unpacked
+    )
     torch_res = torch_res[:, ::2] * 16 + torch_res[:, 1::2]
     torch_res = torch_res.to(torch.int8).view(torch.int32)
 
     assert (cuda_res == torch_res).all()
 
 
-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
-                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
 def test_marlin_int4_fp8_preprocess_awq():
     group_size = 128
 
-    qweight_unpacked = torch.randint(0,
-                                     16,
-                                     size=(2048, 2048),
-                                     dtype=torch.int32,
-                                     device="cuda")
-    qzeros_unpacked = torch.randint(0,
-                                    16,
-                                    size=(2048 // group_size, 2048),
-                                    dtype=torch.int32,
-                                    device="cuda")
+    qweight_unpacked = torch.randint(
+        0, 16, size=(2048, 2048), dtype=torch.int32, device="cuda"
+    )
+    qzeros_unpacked = torch.randint(
+        0, 16, size=(2048 // group_size, 2048), dtype=torch.int32, device="cuda"
+    )
 
     qweight_packed = qweight_unpacked[:, ::2] * 16 + qweight_unpacked[:, 1::2]
     qweight_packed = qweight_packed.to(torch.int8).view(torch.int32)
@@ -199,17 +205,19 @@ def test_marlin_int4_fp8_preprocess_awq():
     assert (cuda_res == torch_res).all()
 
 
-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
-                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("quant_type",
-                         query_marlin_supported_quant_types(False, False))
+@pytest.mark.parametrize("quant_type", query_marlin_supported_quant_types(False, False))
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_a_8bit", [True, False])
 @pytest.mark.parametrize("nk_factors", MARLIN_REPACK_NK_FACTORS)
-def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, act_order, is_a_8bit,
-                            nk_factors):
+def test_gptq_marlin_repack(
+    k_chunk, n_chunk, quant_type, act_order, is_a_8bit, nk_factors
+):
     n_factor, k_factor = nk_factors
 
     size_k = k_chunk * k_factor
@@ -249,17 +257,19 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, act_order, is_a_8bit,
 
     # Pack to Marlin format
     weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
-    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
-                                  weight_perm, is_a_8bit)
+    marlin_q_w_1 = marlin_weights(
+        q_w, size_k, size_n, quant_type.size_bits, weight_perm, is_a_8bit
+    )
 
-    opcheck(torch.ops._C.gptq_marlin_repack,
-            (q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits,
-             is_a_8bit))
+    opcheck(
+        torch.ops._C.gptq_marlin_repack,
+        (q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit),
+    )
 
     # Run Marlin repack GPU kernel
-    marlin_q_w_2 = ops.gptq_marlin_repack(q_w_gptq, sort_indices, size_k,
-                                          size_n, quant_type.size_bits,
-                                          is_a_8bit)
+    marlin_q_w_2 = ops.gptq_marlin_repack(
+        q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit
+    )
     torch.cuda.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
@@ -271,12 +281,10 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, act_order, is_a_8bit,
 )
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
-@pytest.mark.parametrize("quant_type",
-                         query_marlin_supported_quant_types(True))
+@pytest.mark.parametrize("quant_type", query_marlin_supported_quant_types(True))
 @pytest.mark.parametrize("is_a_8bit", [True, False])
 @pytest.mark.parametrize("nk_factors", MARLIN_REPACK_NK_FACTORS)
-def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, is_a_8bit,
-                           nk_factors):
+def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, is_a_8bit, nk_factors):
     n_factor, k_factor = nk_factors
 
     size_k = k_chunk * k_factor
@@ -297,35 +305,56 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, is_a_8bit,
 
     # Pack to Marlin format
     weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
-    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
-                                  weight_perm, is_a_8bit)
+    marlin_q_w_1 = marlin_weights(
+        q_w, size_k, size_n, quant_type.size_bits, weight_perm, is_a_8bit
+    )
 
-    opcheck(torch.ops._C.awq_marlin_repack,
-            (q_w_awq, size_k, size_n, quant_type.size_bits, is_a_8bit))
+    opcheck(
+        torch.ops._C.awq_marlin_repack,
+        (q_w_awq, size_k, size_n, quant_type.size_bits, is_a_8bit),
+    )
 
     # Run Marlin repack GPU kernel
-    marlin_q_w_2 = ops.awq_marlin_repack(q_w_awq, size_k, size_n,
-                                         quant_type.size_bits, is_a_8bit)
+    marlin_q_w_2 = ops.awq_marlin_repack(
+        q_w_awq, size_k, size_n, quant_type.size_bits, is_a_8bit
+    )
     torch.cuda.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
 
 def marlin_generate_valid_test_cases():
-    all_combinations = itertools.product(DENSE_MARLIN_QUANT_TEST_CONFIGS,
-                                         MNK_FACTORS, MARLIN_N_CHUNKS,
-                                         MARLIN_K_CHUNKS, ACT_ORDER_OPTS,
-                                         K_FULL_OPTS, USE_ATOMIC_ADD_OPTS,
-                                         USE_FP32_REDUCE_OPTS)
+    all_combinations = itertools.product(
+        DENSE_MARLIN_QUANT_TEST_CONFIGS,
+        MNK_FACTORS,
+        MARLIN_N_CHUNKS,
+        MARLIN_K_CHUNKS,
+        ACT_ORDER_OPTS,
+        K_FULL_OPTS,
+        USE_ATOMIC_ADD_OPTS,
+        USE_FP32_REDUCE_OPTS,
+    )
 
-    def is_invalid(a_type, b_type, c_type, group_blocks, size_m, size_n,
-                   size_k, act_order, is_k_full, use_atomic_add,
-                   use_fp32_reduce):
+    def is_invalid(
+        a_type,
+        b_type,
+        c_type,
+        group_blocks,
+        size_m,
+        size_n,
+        size_k,
+        act_order,
+        is_k_full,
+        use_atomic_add,
+        use_fp32_reduce,
+    ):
         if use_atomic_add:
             if use_fp32_reduce:
                 return False
-            if c_type == scalar_types.bfloat16 and \
-                    torch.cuda.get_device_capability()[0] < 9:
+            if (
+                c_type == scalar_types.bfloat16
+                and torch.cuda.get_device_capability()[0] < 9
+            ):
                 return False
 
         group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
@@ -353,14 +382,17 @@ def marlin_generate_valid_test_cases():
 
         f16_types = [scalar_types.float16, scalar_types.bfloat16]
         inner_combinations = itertools.product(
-            quant_test_config.get("a_type",
-                                  f16_types), [quant_test_config["b_type"]],
+            quant_test_config.get("a_type", f16_types),
+            [quant_test_config["b_type"]],
             quant_test_config.get("c_type", f16_types),
-            quant_test_config["group_blocks"])
+            quant_test_config["group_blocks"],
+        )
 
         for sub_case in inner_combinations:
-            if sub_case[0] == scalar_types.float8_e4m3fn and \
-                    not current_platform.has_device_capability(89):
+            if (
+                sub_case[0] == scalar_types.float8_e4m3fn
+                and not current_platform.has_device_capability(89)
+            ):
                 continue
             args = sub_case + (size_m, size_n, size_k) + case[4:]
             if is_invalid(*args):
@@ -368,12 +400,18 @@ def marlin_generate_valid_test_cases():
     return cases
 
 
-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
-                    reason="Marlin is not supported on this GPU type.")
-@pytest.mark.parametrize(("a_type, b_type, c_type, group_blocks,"
-                          "size_m, size_n, size_k, act_order, is_k_full,"
-                          "use_atomic_add, use_fp32_reduce"),
-                         marlin_generate_valid_test_cases())
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize(
+    (
+        "a_type, b_type, c_type, group_blocks,"
+        "size_m, size_n, size_k, act_order, is_k_full,"
+        "use_atomic_add, use_fp32_reduce"
+    ),
+    marlin_generate_valid_test_cases(),
+)
 def test_gptq_marlin_gemm(
     a_type,
     b_type,
@@ -410,13 +448,13 @@ def test_gptq_marlin_gemm(
 
     if b_type == scalar_types.float4_e2m1f:
         if group_size == 16:
-            w_ref, marlin_q_w, marlin_s, marlin_s2 = \
-                rand_marlin_weight_nvfp4_like(b_weight.T, group_size,
-                                              input_dtype=a_dtype)
+            w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_nvfp4_like(
+                b_weight.T, group_size, input_dtype=a_dtype
+            )
         else:
-            w_ref, marlin_q_w, marlin_s = \
-                rand_marlin_weight_mxfp4_like(b_weight.T, group_size,
-                                              input_dtype=a_dtype)
+            w_ref, marlin_q_w, marlin_s = rand_marlin_weight_mxfp4_like(
+                b_weight.T, group_size, input_dtype=a_dtype
+            )
             marlin_s2 = None
 
         g_idx = None
@@ -424,20 +462,23 @@ def test_gptq_marlin_gemm(
         marlin_zp = None
     elif b_type == scalar_types.float8_e4m3fn:
         w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(
-            b_weight.T, group_size, input_dtype=a_dtype)
+            b_weight.T, group_size, input_dtype=a_dtype
+        )
         g_idx = None
         sort_indices = None
         marlin_zp = None
         marlin_s2 = None
     elif has_zp:
         w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
-            b_weight, b_type, group_size, input_dtype=a_dtype)
+            b_weight, b_type, group_size, input_dtype=a_dtype
+        )
         g_idx = None
         sort_indices = None
         marlin_s2 = None
     else:
         w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
-            b_weight, b_type, group_size, act_order, input_dtype=a_dtype)
+            b_weight, b_type, group_size, act_order, input_dtype=a_dtype
+        )
 
         marlin_zp = None
         marlin_s2 = None
@@ -452,11 +493,10 @@ def test_gptq_marlin_gemm(
         if group_size != -1:
             a_scales = a_scales / 4096 * marlin_s.max()
             a_scales = a_scales.float()
-            marlin_s = (marlin_s / marlin_s.max() * 4096)
+            marlin_s = marlin_s / marlin_s.max() * 4096
             marlin_s = marlin_s.round().to(torch.int16).view(dtype)
     elif a_type == scalar_types.float8_e4m3fn:
-        a_input, a_scales = ops.scaled_fp8_quant(a_input,
-                                                 use_per_token_if_dynamic=True)
+        a_input, a_scales = ops.scaled_fp8_quant(a_input, use_per_token_if_dynamic=True)
         a_input_ref = a_input.to(a_scales.dtype) * a_scales.view(-1, 1)
         a_input_ref = a_input_ref.to(dtype)
     else:
