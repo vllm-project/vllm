@@ -237,7 +237,6 @@ async def test_fetch_video_http_with_dynamic_loader(
         assert metadata_sync["video_backend"] == "opencv_dynamic"
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     "case",
     [
@@ -332,7 +331,6 @@ async def test_fetch_video_http_with_dynamic_loader(
         ),
     ],
 )
-# yapf: enable
 def test_allocate_gpu_mm_processors(case):
     mm_processor_device = case["mm_processor_device"]
     mm_processor_count = case["mm_processor_count"]
@@ -350,7 +348,6 @@ def test_allocate_gpu_mm_processors(case):
     assert gpu_allocation == expected_gpu_allocation
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     "case",
     [
