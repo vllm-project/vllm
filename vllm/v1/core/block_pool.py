@@ -160,11 +160,28 @@ class BlockPool:
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
-        self.null_block = self.free_block_queue.popleft()
-        self.null_block.is_null = True
+        # Use lazy allocation to avoid consuming a block when not needed.
+        self._null_block: KVCacheBlock | None = None
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
+
+    @property
+    def null_block(self) -> KVCacheBlock:
+        """Lazy allocation of null block only when first accessed.
+
+        This avoids consuming a block from the pool when null blocks are not
+        needed (e.g., for FullAttentionManager which never uses null blocks).
+        """
+        if self._null_block is None:
+            if self.free_block_queue.num_free_blocks == 0:
+                raise RuntimeError(
+                    "Cannot allocate null block: no free blocks available. "
+                    "Consider increasing the number of GPU blocks."
+                )
+            self._null_block = self.free_block_queue.popleft()
+            self._null_block.is_null = True
+        return self._null_block
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -370,11 +387,13 @@ class BlockPool:
             False otherwise.
         """
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-        if num_used_blocks != 1:  # The null block is always marked as used
+        # Account for null block only if it's allocated
+        expected_used_blocks = 1 if self._null_block is not None else 0
+        if num_used_blocks != expected_used_blocks:
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet",
-                num_used_blocks - 1,
+                num_used_blocks - expected_used_blocks,
             )
             return False
 
@@ -407,8 +426,9 @@ class BlockPool:
             The KV cache usage (between 0.0 and 1.0).
         """
 
-        # Subtract 1 to account for null block.
-        total_gpu_blocks = self.num_gpu_blocks - 1
+        # Subtract 1 to account for null block if it's allocated.
+        null_block_overhead = 1 if self._null_block is not None else 0
+        total_gpu_blocks = self.num_gpu_blocks - null_block_overhead
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)

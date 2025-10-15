@@ -59,7 +59,16 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
-        self._null_block = block_pool.null_block
+        # Store reference to block_pool for lazy null block access
+        self.block_pool = block_pool
+        self._null_block = None  # Lazy initialization
+
+    @property
+    def null_block(self) -> KVCacheBlock:
+        """Lazy access to null block. Only allocates when first accessed."""
+        if self._null_block is None:
+            self._null_block = self.block_pool.null_block
+        return self._null_block
 
     def get_num_blocks_to_allocate(
         self,
@@ -319,7 +328,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._null_block = block_pool.null_block
 
     @classmethod
     def find_longest_cache_hit(
@@ -397,13 +405,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block:
+            if blocks[i] == self.null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
             removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
+            blocks[i] = self.null_block
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -422,7 +430,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
-        self._null_block = block_pool.null_block
 
     @classmethod
     def find_longest_cache_hit(
@@ -531,13 +538,13 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         removed_blocks: list[KVCacheBlock] = []
         # we need to keep the last block to get the previous hash key
         for i in range(first_useful_block_idx - 1, -1, -1):
-            if blocks[i] == self._null_block:
+            if blocks[i] == self.null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
             removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
+            blocks[i] = self.null_block
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
