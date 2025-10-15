@@ -226,8 +226,10 @@ class ModelConfig:
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
     enable_mm_embeds: bool = False
-    """Enable passing multimodal embeddings (content type `image_embeds`).
-    Currently only enforced for the OpenAI-compatible server.
+    """If `True`, enables passing multimodal embeddings:
+    for `LLM` class, this refers to tensor inputs under `multi_modal_data`;
+    for the OpenAI-compatible server, this refers to chat messages with content
+    `"type": "*_embeds"`.
 
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
