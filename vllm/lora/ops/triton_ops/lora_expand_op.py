@@ -10,7 +10,7 @@ https://arxiv.org/abs/2310.18547
 import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
-from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
+from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
@@ -201,12 +201,21 @@ def _lora_expand(
     NUM_SLICES = len(lora_b_weights)
 
     # Triton kernel configs.
-    BLOCK_M = 64
-    BLOCK_N = 128
-    BLOCK_K = 16
-    NUM_WARPS = 4
-    NUM_CTAS = 1
-    NUM_STAGES = 2
+    kernel_config = get_lora_op_configs(
+        op_type="expand",
+        max_loras=MAX_LORAS,
+        batch=M,
+        hidden_size=MAX_N,
+        rank=K,
+        num_slices=NUM_SLICES,
+        add_inputs=add_inputs,
+    )
+    BLOCK_M = kernel_config["block_m"]
+    BLOCK_N = kernel_config["block_n"]
+    BLOCK_K = kernel_config["block_k"]
+    NUM_WARPS = kernel_config["num_warps"]
+    NUM_CTAS = kernel_config["num_ctas"]
+    NUM_STAGES = kernel_config["num_stages"]
 
     EVEN_K = K % BLOCK_K == 0  # type: ignore
 
