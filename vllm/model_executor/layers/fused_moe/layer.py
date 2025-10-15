@@ -46,7 +46,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import disable_graph_partition, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import cdiv, direct_register_custom_op, has_deep_ep, has_pplx, round_up
@@ -1900,17 +1900,19 @@ class FusedMoE(CustomOp):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            topk_weights, topk_ids = grouped_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-            )
+
+            with disable_graph_partition():
+                topk_weights, topk_ids = grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    scoring_func=scoring_func,
+                    routed_scaling_factor=routed_scaling_factor,
+                    e_score_correction_bias=e_score_correction_bias,
+                )
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif e_score_correction_bias is not None:
