@@ -520,7 +520,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         )
 
-        # Ephemeral state transferred between execute_model_only() and sample_tokens().
+        # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
 
     def reset_mm_cache(self) -> None:
@@ -2599,7 +2599,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         execute_model_state = self.execute_model_state
         if execute_model_state is None:
             raise RuntimeError(
-                "State error: sample_tokens() must be called after execute_model_only()"
+                "State error: sample_tokens() must only be called "
+                "after execute_model() returns None"
             )
         self.execute_model_state = None
         scheduler_output = execute_model_state.scheduler_output

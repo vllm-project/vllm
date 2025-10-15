@@ -205,7 +205,7 @@ class KVOutputAggregator:
         result_future: Future[ModelRunnerOutput | None] = Future()
 
         outputs: list[ModelRunnerOutput | None] = [None] * len(output_futures)
-        remaining: list[int] = [len(output_futures)]
+        remaining = len(output_futures)
 
         def make_callback(idx):
             def callback(fut):
@@ -220,8 +220,9 @@ class KVOutputAggregator:
                     result_future.set_exception(e)
 
                 # this check assumes io_thread_pool uses a single thread
-                remaining[0] -= 1
-                if not remaining[0]:
+                nonlocal remaining
+                remaining -= 1
+                if not remaining:
                     result_future.set_result(self.aggregate(outputs, output_rank))
 
             return callback
