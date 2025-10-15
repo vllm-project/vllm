@@ -116,7 +116,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
                 self.all2all_manager = FlashInferAllToAllManager(self.cpu_group)
                 logger.info("Using Flashinfer all2allv manager.")
-            elif all2all_backend == "mori":
+            elif self.all2all_backend == "mori":
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(self.cpu_group)
