@@ -591,6 +591,7 @@ class NixlConnectorWorker:
 
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
+        self.kv_transfer_config = vllm_config.kv_transfer_config
 
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
@@ -742,7 +743,7 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-        self.kv_info = self.TpKVTopology(
+        self.kv_topo = self.TpKVTopology(
             tp_size=self.world_size,
             tp_rank=self.tp_rank,
             remote_tp_size=self._tp_size,  # shared state
@@ -795,7 +796,7 @@ class NixlConnectorWorker:
 
         # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
-        p_remote_rank = self.kv_info.get_target_remote_rank(remote_tp_size)
+        p_remote_rank = self.kv_topo.get_target_remote_rank(remote_tp_size)
         path = make_zmq_path("tcp", host, port + p_remote_rank)
         logger.debug(
             "Querying metadata on path: %s at remote rank %s", path, p_remote_rank
@@ -1156,7 +1157,7 @@ class NixlConnectorWorker:
         )
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
-        replicates_kv_cache = self.kv_info.replicates_kv_cache(engine_id)
+        replicates_kv_cache = self.kv_topo.replicates_kv_cache(engine_id)
 
         # Create dst descs and xfer side handles. TP workers have same #blocks
         # so we only register once per engine_id.
@@ -1170,7 +1171,7 @@ class NixlConnectorWorker:
 
         # Number of D TP workers reading from a single P TP worker. This is
         # 1 when P and D `--tensor-parallel-size` match.
-        tp_ratio = self.kv_info.tp_ratio_from_engine_id(engine_id)
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(engine_id)
 
         ### Register remote agent memory regions
         blocks_data = []
@@ -1231,16 +1232,14 @@ class NixlConnectorWorker:
         # TODO We may eventually want to skip enforcing the same attn backend.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
-        tp_ratio = self.kv_info.tp_ratio_from_engine_id(remote_engine_id)
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
         assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
         assert not self._use_pallas or tp_ratio == 1, (
             "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
         )
-        if (tp_ratio > 1 and not self.use_mla and \
-            nixl_agent_meta.kv_cache_layout != self.kv_cache_layout):
+        if not self.use_mla and nixl_agent_meta.kv_cache_layout != self.kv_cache_layout:
             if (
-                self.vllm_config.kv_transfer_config is not None
-                and self.vllm_config.kv_transfer_config.enable_permute_local_kv
+                self.kv_transfer_config.enable_permute_local_kv
                 and nixl_agent_meta.kv_cache_layout == "HND"
             ):
                 logger.info(
@@ -1257,7 +1256,7 @@ class NixlConnectorWorker:
 
         # Block len can only vary across layers when using MLA.
         remote_block_len = nixl_agent_meta.block_lens[0]
-        if self.use_mla or self.kv_info.is_kv_replicated(remote_engine_id):
+        if self.use_mla or self.kv_topo.is_kv_replicated(remote_engine_id):
             # With replicated KV cache, only the number of blocks can differ.
             assert self.block_len_per_layer == nixl_agent_meta.block_lens, (
                 "KV cache sizes must match between P and D when replicated"
@@ -1586,14 +1585,14 @@ class NixlConnectorWorker:
 
         # Number of D TP workers that will read from dst P. Propagate tp_ratio
         # on notification so that dst worker can wait before freeing blocks.
-        tp_ratio = self.kv_info.tp_ratio_from_engine_id(dst_engine_id)
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(dst_engine_id)
         notif_id = f"{request_id}:{tp_ratio}".encode()
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            remote_rank = self.kv_info.get_target_remote_rank_from_engine_id(
+            remote_rank = self.kv_topo.get_target_remote_rank_from_engine_id(
                 dst_engine_id
             )
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
