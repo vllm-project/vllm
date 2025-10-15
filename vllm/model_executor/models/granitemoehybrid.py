@@ -411,7 +411,7 @@ class GraniteMoeHybridModel(nn.Module):
         # (param_name, weight_name, expert_id, shard_id)
         # layers.0.block_sparse_moe.expert_0.input_linear.input_scale
         ckpt_gate_proj_name="gate_proj"
-        ckpt_down_proj_name="output_linear"
+        ckpt_down_proj_name="down_proj"
         ckpt_up_proj_name="up_proj"
         num_experts=self.config.num_local_experts
         num_redundant_experts=0
@@ -484,11 +484,12 @@ class GraniteMoeHybridModel(nn.Module):
                 if ((name_mapped.endswith(".bias")
                         or name_mapped.endswith("_bias"))
                         and name_mapped not in params_dict):
-                    # Hacky. Skip bias because there shouldn't be bias in the first place. Bug from quark.
+                    # Skip bias which shouldn't be in the quantized parameters.
                     return name_mapped
 
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
+                success= False
 
                 if weight_loader is not None:
                    success = weight_loader(param,
@@ -518,7 +519,6 @@ class GraniteMoeHybridModel(nn.Module):
                 #weight_loader(p, loaded_weight)
                 _load(scale_name, loaded_weight)
                 loaded_params.add(scale_name)
-                print(f"Load cache scale: {scale_name}",n,p)
                 continue
 
             if _load_quant_expert(n, p):
