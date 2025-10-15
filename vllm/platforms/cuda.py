@@ -53,7 +53,7 @@ def _get_backend_priorities(
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.attention.backends.registry import _Backend
 
-    if device_capability >= DeviceCapability(10, 0):
+    if device_capability == DeviceCapability(10, 0):
         return {
             # non-MLA backends
             _Backend.FLASHINFER: 0,
