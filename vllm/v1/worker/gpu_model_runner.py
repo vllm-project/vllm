@@ -78,13 +78,13 @@ from vllm.utils import (
     GiB_bytes,
     cdiv,
     check_use_alibi,
-    get_dtype_size,
     is_pin_memory_available,
     length_from_prompt_token_ids_or_embeds,
     round_up,
     supports_dynamo,
 )
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (

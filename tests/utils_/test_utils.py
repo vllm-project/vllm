@@ -28,12 +28,10 @@ from vllm.utils import (
     MemorySnapshot,
     PlaceholderModule,
     bind_kv_cache,
-    common_broadcastable_dtype,
     current_stream,
     deprecate_kwargs,
     get_open_port,
     get_tcp_uri,
-    is_lossless_cast,
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
@@ -46,6 +44,7 @@ from vllm.utils import (
     swap_dict_values,
     unique_filepath,
 )
+from vllm.utils.torch_utils import common_broadcastable_dtype, is_lossless_cast
 
 from ..utils import create_new_process_for_each_test, error_on_warning
 
