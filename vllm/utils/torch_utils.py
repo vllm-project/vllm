@@ -5,6 +5,19 @@ from collections.abc import Collection
 
 import torch
 
+STR_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
+    "half": torch.half,
+    "bfloat16": torch.bfloat16,
+    "float": torch.float,
+    "fp8": torch.uint8,
+    "fp8_e4m3": torch.uint8,
+    "fp8_e5m2": torch.uint8,
+    "int8": torch.int8,
+    "fp8_inc": torch.float8_e4m3fn,
+    "fp8_ds_mla": torch.uint8,
+}
+
 
 @contextlib.contextmanager
 def set_default_torch_dtype(dtype: torch.dtype):
@@ -76,3 +89,138 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
         dtypes,
         key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
     )
+
+
+def _generate_random_fp8(
+    tensor: torch.Tensor,
+    low: float,
+    high: float,
+) -> None:
+    # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
+    # it may occur Inf or NaN if we directly use torch.randint
+    # to generate random data for fp8 data.
+    # For example, s.11111.00 in fp8e5m2 format represents Inf.
+    #     | E4M3        | E5M2
+    # -----|-------------|-------------------
+    # Inf | N/A         | s.11111.00
+    # NaN | s.1111.111  | s.11111.{01,10,11}
+    from vllm import _custom_ops as ops
+
+    tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
+    tensor_tmp.uniform_(low, high)
+    ops.convert_fp8(tensor, tensor_tmp)
+    del tensor_tmp
+
+
+def get_kv_cache_torch_dtype(
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
+) -> torch.dtype:
+    if isinstance(cache_dtype, str):
+        if cache_dtype == "auto":
+            if isinstance(model_dtype, str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
+                torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
+            elif isinstance(model_dtype, torch.dtype):
+                torch_dtype = model_dtype
+            else:
+                raise ValueError(f"Invalid model dtype: {model_dtype}")
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
+            torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        else:
+            raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
+    elif isinstance(cache_dtype, torch.dtype):
+        torch_dtype = cache_dtype
+    else:
+        raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
+    return torch_dtype
+
+
+def create_kv_caches_with_random_flash(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
+    cache_layout: str | None = "NHD",
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    from vllm.platforms import current_platform
+
+    current_platform.seed_everything(seed)
+
+    dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    assert cache_layout in ("NHD", "HND")
+    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
+
+    kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i] for i in stride_order)
+    scale = head_size**-0.5
+
+    key_caches: list[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
+
+    for _ in range(num_layers):
+        key_value_cache = torch.empty(
+            size=kv_cache_allocation_shape, dtype=dtype, device=device
+        ).permute(*stride_order)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == "fp8":
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(f"Does not support key cache of type {cache_dtype}")
+        key_caches.append(key_value_cache[:, 0])
+        value_caches.append(key_value_cache[:, 1])
+    return key_caches, value_caches
+
+
+def create_kv_caches_with_random(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+    from vllm.platforms import current_platform
+
+    current_platform.seed_everything(seed)
+
+    dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+
+    scale = head_size**-0.5
+    x = 16 // torch.tensor([], dtype=dtype).element_size()
+    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
+    key_caches: list[torch.Tensor] = []
+    for _ in range(num_layers):
+        key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device=device)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_cache.uniform_(-scale, scale)
+        elif cache_dtype == "fp8":
+            _generate_random_fp8(key_cache, -scale, scale)
+        else:
+            raise ValueError(f"Does not support key cache of type {cache_dtype}")
+        key_caches.append(key_cache)
+
+    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    value_caches: list[torch.Tensor] = []
+    for _ in range(num_layers):
+        value_cache = torch.empty(size=value_cache_shape, dtype=dtype, device=device)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            value_cache.uniform_(-scale, scale)
+        elif cache_dtype == "fp8":
+            _generate_random_fp8(value_cache, -scale, scale)
+        else:
+            raise ValueError(f"Does not support value cache of type {cache_dtype}")
+        value_caches.append(value_cache)
+    return key_caches, value_caches
