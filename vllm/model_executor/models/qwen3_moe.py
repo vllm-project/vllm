@@ -77,6 +77,7 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+device_module = torch.get_device_module()
 
 
 class Qwen3MoeMLP(nn.Module):
@@ -305,7 +306,6 @@ class Qwen3MoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
-        device_module = torch.get_device_module()
         if self.alt_stream is not None:
             current_stream = device_module.current_stream()
             self.alt_stream.wait_stream(current_stream)
@@ -433,7 +433,7 @@ class Qwen3MoeModel(nn.Module):
         )
         alt_stream = None
         if current_platform.is_cuda() or current_platform.is_out_of_tree():
-            alt_stream = torch.get_device_module().Stream()
+            alt_stream = device_module.Stream()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Qwen3MoeDecoderLayer(vllm_config=vllm_config, prefix=prefix, alt_stream=alt_stream),

@@ -50,6 +50,7 @@ from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
+device_module = torch.get_device_module()
 
 
 class Qwen3Attention(nn.Module):
@@ -147,7 +148,6 @@ class Qwen3Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
-        device_module = torch.get_device_module()
         if self.alt_stream is not None:
             current_stream = device_module.current_stream()
             self.alt_stream.wait_stream(current_stream)
@@ -271,7 +271,7 @@ class Qwen3Model(Qwen2Model):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         alt_stream = None
         if current_platform.is_cuda() or current_platform.is_out_of_tree():
-            alt_stream = torch.get_device_module().Stream()
+            alt_stream = device_module.Stream()
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, decoder_layer_type=Qwen3DecoderLayer, alt_stream=alt_stream,
         )
