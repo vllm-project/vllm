@@ -149,7 +149,7 @@ def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [
         "<|im_start|>system<|im_end|>\n<|im_start|>user\n<|image_pad|><|im_end|>\n<|im_start|>assistant\n"
-        for question in questions
+        for _ in questions
     ]
 
     engine_args = EngineArgs(
