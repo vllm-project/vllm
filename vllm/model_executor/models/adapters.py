@@ -13,7 +13,10 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.transformers_utils.config import get_hf_file_bytes, get_hf_file_to_dict
+from vllm.transformers_utils.config import (
+    get_hf_file_bytes,
+    try_get_dense_modules,
+)
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
@@ -35,43 +38,25 @@ _GENERATE_SUFFIXES = [
 def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
     """Load Sentence-Transformers Dense projection layers."""
 
+    dense_modules = try_get_dense_modules(
+        model_config.model, revision=model_config.revision
+    )
+
+    if dense_modules is None:
+        return
+
     try:
-        modules = get_hf_file_to_dict(
-            "modules.json", model_config.model, model_config.revision
-        )
-        if not modules:
-            return None
-
-        if isinstance(modules, dict):
-            modules = modules.get("modules", [])
-
-        dense_modules = [
-            m for m in modules if m.get("type") == "sentence_transformers.models.Dense"
-        ]
-        if not dense_modules:
-            return None
-
         layers = []
-        for module in dense_modules:
-            folder = module.get("path", "")
-
-            config_path = f"{folder}/config.json" if folder else "config.json"
-            layer_config = get_hf_file_to_dict(
-                config_path, model_config.model, model_config.revision
-            )
-            if not layer_config:
-                continue
-
+        for layer_config in dense_modules:
+            folder = layer_config["folder"]
             linear = nn.Linear(
-                layer_config.get("in_features", 768),
-                layer_config.get("out_features", 768),
+                layer_config["in_features"],
+                layer_config["out_features"],
                 bias=layer_config.get("bias", True),
                 dtype=model_config.head_dtype,
             )
-
             if not _load_dense_weights(linear, folder, model_config):
                 continue
-
             layers.append(linear)
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
@@ -265,7 +250,7 @@ def as_embedding_model(cls: _T) -> _T:
 
             self.pooler = DispatchPooler(
                 {
-                    "encode": Pooler.for_encode(pooler_config),
+                    "token_embed": Pooler.for_token_embed(pooler_config),
                     "embed": Pooler.for_embed(pooler_config),
                 },
             )
@@ -294,64 +279,48 @@ def as_seq_cls_model(cls: _T) -> _T:
     # Lazy import
     from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.model_executor.layers.pooler import (
-        ClassifierPooler,
         DispatchPooler,
         Pooler,
-        PoolingMethod,
-        PoolingType,
     )
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.sequence import IntermediateTensors
 
-    from .utils import get_model_hidden_size, maybe_prefix
+    from .utils import maybe_prefix
 
     class ModelForSequenceClassification(
         _create_pooling_model_cls(cls), SupportsCrossEncoding
     ):
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             config = vllm_config.model_config.hf_config
+            model_config = vllm_config.model_config
             quant_config = vllm_config.quant_config
-            hidden_size = get_model_hidden_size(config)
 
             self.score = ReplicatedLinear(
-                hidden_size,
+                model_config.hidden_size,
                 config.num_labels,
                 bias=False,
-                params_dtype=torch.float32,
+                params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
+                return_bias=False,
                 prefix=maybe_prefix(prefix, "score"),
             )
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            pooling_type_str = pooler_config.pooling_type
-            assert pooling_type_str is not None
-            pooling_type = PoolingType[pooling_type_str]
-
             self.pooler = DispatchPooler(
                 {
-                    "encode": Pooler.for_encode(pooler_config),
-                    "classify": ClassifierPooler(
-                        pooling=PoolingMethod.from_pooling_type(pooling_type),
-                        classifier=self._classifier,
-                        act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                            vllm_config.model_config
-                        ),
+                    "token_classify": Pooler.for_token_classify(
+                        pooler_config, classifier=self.score
                     ),
-                    "score": ClassifierPooler(
-                        pooling=PoolingMethod.from_pooling_type(pooling_type),
-                        classifier=self._classifier,
-                        act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                            vllm_config.model_config
-                        ),
+                    "classify": Pooler.for_classify(
+                        pooler_config, classifier=self.score, act_fn="classify"
+                    ),
+                    "score": Pooler.for_classify(
+                        pooler_config, classifier=self.score, act_fn="score"
                     ),
                 }
             )
-
-        def _classifier(self, x: torch.Tensor):
-            x, _ = self.score(x.float())
-            return x
 
         def forward(
             self,
@@ -408,7 +377,11 @@ def as_reward_model(cls: _T) -> _T:
             assert pooler_config is not None
 
             self.pooler = DispatchPooler(
-                {"encode": Pooler.for_encode(pooler_config)},
+                {
+                    "token_classify": Pooler.for_token_classify(
+                        pooler_config=pooler_config
+                    )
+                }
             )
 
     ModelForReward.__name__ = _get_pooling_model_name(cls.__name__, "ForReward")
