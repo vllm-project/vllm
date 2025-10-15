@@ -26,8 +26,14 @@ python examples/offline_inference/pooling/embed_jina_embeddings_v3.py
 python examples/offline_inference/pooling/embed_matryoshka_fy.py
 ```
 
+## Named Entity Recognition (NER) usage
+
+```bash
+python examples/offline_inference/pooling/ner.py
+```
+
 ## Qwen3 reranker usage
 
 ```bash
-python qwen3_reranker.py
+python examples/offline_inference/pooling/qwen3_reranker.py
 ```
