@@ -460,7 +460,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         "cu_seqlens": 0,
         "rotary_pos_emb": 0,
         "seqlens": 0,
-    }
+    },
+    mark_unbacked_dims={"seqlens": 0},
 )
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
@@ -703,7 +704,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
-
         self.blocks = nn.ModuleList(
             [
                 Qwen2_5_VisionBlock(
