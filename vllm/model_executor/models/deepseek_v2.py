@@ -796,7 +796,7 @@ class Indexer(nn.Module):
             self.n_head,
             bias=False,
             quant_config=None,
-            prefix=f"{prefix}.weights_proj"
+            prefix=f"{prefix}.weights_proj",
         )
         self.softmax_scale = self.head_dim**-0.5
 
