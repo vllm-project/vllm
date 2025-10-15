@@ -12,6 +12,9 @@ import torch
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.moe.fused_batched_moe import (
+    invoke_moe_batched_triton_kernel,
+)
 from vllm.model_executor.layers.moe.fused_moe import invoke_fused_moe_kernel
 from vllm.triton_utils import tl
 from vllm.utils import deep_gemm as vllm_deep_gemm
@@ -205,6 +208,73 @@ def run_triton_group_gemm_contiguous_bf16(
     torch.testing.assert_close(output, reference_output)
 
 
+def run_triton_group_gemm_masked_bf16(
+    expected_group_batch_size: int,
+    num_groups: int,
+    output_size: int,
+    input_size: int,
+):
+    weight = torch.randn(
+        num_groups,
+        output_size,
+        input_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    group_batch_size = [
+        int(expected_group_batch_size * random.uniform(0.7, 1.3))
+        for _ in range(num_groups)
+    ]
+    batch_size = sum(group_batch_size)
+    group_batch_size = torch.tensor(
+        group_batch_size,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    x = torch.randn(
+        num_groups,
+        batch_size,
+        input_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    ground_truth_output = torch.einsum("gmk, gnk -> gmn", x, weight)
+    output = torch.zeros(
+        num_groups,
+        batch_size,
+        output_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    config = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 8,
+    }
+    invoke_moe_batched_triton_kernel(
+        A=x,
+        B=weight,
+        C=output,
+        expert_num_tokens=group_batch_size,
+        compute_type=tl.bfloat16,
+        A_scale=None,
+        B_scale=None,
+        B_zp=None,
+        use_fp8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        config=config,
+        per_act_token_quant=False,
+    )
+    for i in range(num_groups):
+        torch.testing.assert_close(
+            output[i, : group_batch_size[i]],
+            ground_truth_output[i, : group_batch_size[i]],
+        )
+
+
 # run_batched_deepgemm_masked_fp8(512, 8, 1024, 512)
 run_batched_deepgemm_masked_bf16(512, 8, 1024, 512)
 run_triton_group_gemm_contiguous_bf16(512, 8, 1024, 512, 4)
+run_triton_group_gemm_masked_bf16(512, 8, 1024, 512)
