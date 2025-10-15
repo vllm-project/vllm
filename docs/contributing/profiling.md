@@ -242,7 +242,7 @@ The lite profiler is a lightweight, minimal-overhead profiling tool designed for
 
 ### How It Works
 
-The lite profiler uses context managers to time code blocks and writes timing data to a log file with minimal overhead (~50KB buffer). After execution completes, it generates an aggregate summary report showing time spent in different pipeline stages.
+The lite profiler uses context managers to time code blocks and writes timing data to a log file with minimal overhead. After execution completes, it uses the logs from the log file to generate an aggregate summary report showing time spent in different pipeline stages. Currently, its enabled for both the `vllm bench throughput` and `vllm bench latency` commands. 
 
 ### Environment Variable
 

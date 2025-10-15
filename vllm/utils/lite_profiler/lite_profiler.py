@@ -66,6 +66,10 @@ def _write_log_entry(name: str, elapsed_ns: int) -> None:
         if directory:
             os.makedirs(directory, exist_ok=True)
         # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
+        # Currently, we are flushing the file handle after every write. This
+        # is done to ensure safety so that there is no data leakage.
+        # TODO: We can optimise this further, to ensure performance overhead
+        # can be reduced in future.
         _log_file = open(_LOG_PATH, "a", buffering=1)
         atexit.register(_log_file.close)
 
