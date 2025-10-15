@@ -307,7 +307,7 @@ def get_logits_processors(
 def get_json_schema_from_tool(
     tool_choice: str | ToolChoice | ChatCompletionNamedToolChoiceParam,
     tools: list[Tool | ChatCompletionToolsParam] | None,
-) -> str | dict | BaseModel | None:
+) -> str | dict | None:
     if tool_choice in ("none", None) or tools is None:
         return None
     if (not isinstance(tool_choice, str)) and isinstance(tool_choice, ToolChoice):
