@@ -616,12 +616,12 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_visual_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_visual_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_visual_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
