@@ -192,6 +192,7 @@ class EplbState:
         """
         Build the initial EPLB state.
         """
+        print("eplb_config", parallel_config.eplb_config)
         physical_to_logical_map_list = cls.build_initial_global_physical_to_logical_map(
             model.num_routed_experts,
             model.num_redundant_experts,
