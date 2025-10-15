@@ -161,6 +161,16 @@ class MatcherQuantFP8(MatcherCustomOp):
         assert quant_key.scale2 is None
         self.quant_fp8 = QuantFP8(quant_key.scale.static, quant_key.scale.group_shape)
 
+    def inputs(self):
+        input = self.empty(5, 16)
+        if self.quant_key.scale.static:
+            # Static quantization needs input and scale
+            scale = self.empty_f32(1, 1)
+            return [input, scale]
+        else:
+            # Dynamic quantization only needs input
+            return [input]
+
     def forward_custom(
         self,
         input: torch.Tensor,
