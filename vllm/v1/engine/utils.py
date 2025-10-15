@@ -487,10 +487,6 @@ class CoreEngineActorManager:
                     pg_bundles = []
                 else:
                     bundles = device_bundle * world_size + [{"CPU": 1.0}]
-                    assert not pg_bundles, (
-                        f"pg_bundles should be empty for {pack_strategy} "
-                        f"strategy, but got {pg_bundles}"
-                    )
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
