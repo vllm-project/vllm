@@ -78,6 +78,27 @@ def base64_encoded_image(local_asset_server) -> dict[str, str]:
     }
 
 
+def dummy_messages_from_image_url(
+    image_urls: str | list[str],
+    content_text: str = "What's in this image?",
+):
+    if isinstance(image_urls, str):
+        image_urls = [image_urls]
+
+    return [
+        {
+            "role": "user",
+            "content": [
+                *(
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                    for image_url in image_urls
+                ),
+                {"type": "text", "text": content_text},
+            ],
+        }
+    ]
+
+
 def get_hf_prompt_tokens(model_name, content, image_url):
     processor = AutoProcessor.from_pretrained(
         model_name, trust_remote_code=True, num_crops=4
@@ -107,15 +128,7 @@ async def test_single_chat_session_image(
     client: openai.AsyncOpenAI, model_name: str, image_url: str
 ):
     content_text = "What's in this image?"
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": image_url}},
-                {"type": "text", "text": content_text},
-            ],
-        }
-    ]
+    messages = dummy_messages_from_image_url(image_url, content_text)
 
     max_completion_tokens = 10
     # test single completion
@@ -188,15 +201,8 @@ async def test_error_on_invalid_image_url_type(
 async def test_single_chat_session_image_beamsearch(
     client: openai.AsyncOpenAI, model_name: str, image_url: str
 ):
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": image_url}},
-                {"type": "text", "text": "What's in this image?"},
-            ],
-        }
-    ]
+    content_text = "What's in this image?"
+    messages = dummy_messages_from_image_url(image_url, content_text)
 
     chat_completion = await client.chat.completions.create(
         model=model_name,
@@ -226,20 +232,10 @@ async def test_single_chat_session_image_base64encoded(
     base64_encoded_image: dict[str, str],
 ):
     content_text = "What's in this image?"
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"  # noqa: E501
-                    },
-                },
-                {"type": "text", "text": content_text},
-            ],
-        }
-    ]
+    messages = dummy_messages_from_image_url(
+        f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}",
+        content_text,
+    )
 
     max_completion_tokens = 10
     # test single completion
@@ -293,20 +289,10 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     raw_image_url = TEST_IMAGE_ASSETS[image_idx]
     expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"  # noqa: E501
-                    },
-                },
-                {"type": "text", "text": "What's in this image?"},
-            ],
-        }
-    ]
+    messages = dummy_messages_from_image_url(
+        f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
+    )
+
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
@@ -326,15 +312,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
 async def test_chat_streaming_image(
     client: openai.AsyncOpenAI, model_name: str, image_url: str
 ):
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": image_url}},
-                {"type": "text", "text": "What's in this image?"},
-            ],
-        }
-    ]
+    messages = dummy_messages_from_image_url(image_url)
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -381,18 +359,7 @@ async def test_chat_streaming_image(
 async def test_multi_image_input(
     client: openai.AsyncOpenAI, model_name: str, image_urls: list[str]
 ):
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *(
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                    for image_url in image_urls
-                ),
-                {"type": "text", "text": "What's in this image?"},
-            ],
-        }
-    ]
+    messages = dummy_messages_from_image_url(image_urls)
 
     if len(image_urls) > MAXIMUM_IMAGES:
         with pytest.raises(openai.BadRequestError):  # test multi-image input
