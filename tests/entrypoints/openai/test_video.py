@@ -57,7 +57,7 @@ def base64_encoded_video() -> dict[str, str]:
 
 def dummy_messages_from_video_url(
     video_urls: str | list[str],
-    content_text: str = "What's in this video",
+    content_text: str = "What's in this video?",
 ):
     if isinstance(video_urls, str):
         video_urls = [video_urls]
