@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig, CompilationMode
 from vllm.distributed import cleanup_dist_env_and_memory
 
 from ...utils import fork_new_process_for_each_test
@@ -75,14 +75,12 @@ def test_kv_sharing_fast_prefill(
         # This allows vLLM compilation backend to handle allocating and
         # managing buffers for cudagraph
         cudagraph_copy_inputs=True,
-        level=CompilationLevel.PIECEWISE
+        mode=CompilationMode.VLLM_COMPILE
         if not enforce_eager
-        else CompilationLevel.NO_COMPILATION,
+        else CompilationMode.NONE,
     )
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Make scheduling deterministic for reproducibility
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 

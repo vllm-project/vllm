@@ -4,15 +4,14 @@ import asyncio
 import io
 import math
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
-from typing import Callable, Literal, Optional, TypeVar, Union, cast
+from typing import Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -40,7 +39,7 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
-SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
+SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 T = TypeVar("T", bound=SpeechToTextResponse)
 
 logger = init_logger(__name__)
@@ -53,17 +52,16 @@ class OpenAISpeechToText(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -74,8 +72,10 @@ class OpenAISpeechToText(OpenAIServing):
         self.task_type = task_type
 
         self.asr_config = self.model_cls.get_speech_to_text_config(
-            model_config, task_type
+            self.model_config, task_type
         )
+
+        self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
@@ -143,7 +143,7 @@ class OpenAISpeechToText(OpenAIServing):
         raw_request: Request,
         response_class: type[T],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
-    ) -> Union[T, AsyncGenerator[str, None], ErrorResponse]:
+    ) -> T | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
         error_check_ret = await self._check_model(request)
@@ -184,9 +184,7 @@ class OpenAISpeechToText(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        list_result_generator: Optional[list[AsyncGenerator[RequestOutput, None]]] = (
-            None
-        )
+        list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
         try:
             # Unlike most decoder-only models, whisper generation length is not
             # constrained by the size of the input audio, which is mapped to a
@@ -255,13 +253,10 @@ class OpenAISpeechToText(OpenAIServing):
         request_metadata: RequestResponseMetadata,
         audio_duration_s: float,
         chunk_object_type: Literal["translation.chunk", "transcription.chunk"],
-        response_stream_choice_class: Union[
-            type[TranscriptionResponseStreamChoice],
-            type[TranslationResponseStreamChoice],
-        ],
-        stream_response_class: Union[
-            type[TranscriptionStreamResponse], type[TranslationStreamResponse]
-        ],
+        response_stream_choice_class: type[TranscriptionResponseStreamChoice]
+        | type[TranslationResponseStreamChoice],
+        stream_response_class: type[TranscriptionStreamResponse]
+        | type[TranslationStreamResponse],
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
@@ -269,9 +264,7 @@ class OpenAISpeechToText(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        include_usage = (
-            request.stream_include_usage if request.stream_include_usage else False
-        )
+        include_usage = self.enable_force_include_usage or request.stream_include_usage
         include_continuous_usage = (
             request.stream_continuous_usage_stats
             if include_usage and request.stream_continuous_usage_stats

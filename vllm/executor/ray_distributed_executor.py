@@ -4,8 +4,9 @@
 import asyncio
 import os
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import cloudpickle
 import msgspec
@@ -19,12 +20,11 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (
-    _run_task_with_lock,
     get_distributed_init_method,
     get_ip,
     get_open_port,
-    make_async,
 )
+from vllm.utils.async_utils import make_async
 from vllm.v1.outputs import SamplerOutput
 
 if ray is not None:
@@ -71,7 +71,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
-        self.forward_dag: Optional[ray.dag.CompiledDAG] = None
+        self.forward_dag: ray.dag.CompiledDAG | None = None
         if envs.VLLM_USE_V1:
             # V1 uses SPMD worker and compiled DAG
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
@@ -114,10 +114,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self._init_workers_ray(placement_group)
 
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
-        self.output_decoder = msgspec.msgpack.Decoder(Optional[list[SamplerOutput]])
+        self.output_decoder = msgspec.msgpack.Decoder(list[SamplerOutput] | None)
         self.use_v1 = envs.VLLM_USE_V1
 
-        self.pp_locks: Optional[list[asyncio.Lock]] = None
+        self.pp_locks: list[asyncio.Lock] | None = None
         if not self.use_ray_compiled_dag:
             self.driver_exec_method = make_async(self.driver_worker.execute_method)
 
@@ -162,7 +162,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
-        self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
+        self.driver_dummy_worker: RayWorkerWrapper | None = None
         # The remaining workers are the actual ray actors.
         self.workers: list[RayWorkerWrapper] = []
 
@@ -216,7 +216,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rpc_rank=rank)
+                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
+                    vllm_config=self.vllm_config, rpc_rank=rank
+                )
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -224,7 +226,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rpc_rank=rank)
+                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
+                    vllm_config=self.vllm_config, rpc_rank=rank
+                )
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(
@@ -302,7 +306,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 continue
             worker_node_and_gpu_ids.append(
                 ray.get(worker.get_node_and_gpu_ids.remote())
-            )  # type: ignore
+            )  # type: ignore[attr-defined]
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_gpus = defaultdict(list)  # node id -> list of gpu ids
@@ -432,8 +436,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 self.non_driver_workers.append(worker)
 
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[list[SamplerOutput]]:
+        self, execute_model_req: ExecuteModelRequest | None
+    ) -> list[SamplerOutput] | None:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
@@ -463,10 +467,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _run_workers(
         self,
-        method: Union[str, Callable],
+        method: str | Callable,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        max_concurrent_workers: Optional[int] = None,
+        max_concurrent_workers: int | None = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers. Can be used in the following
@@ -494,7 +498,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if async_run_tensor_parallel_workers_only:
             ray_workers = self.non_driver_workers
         ray_worker_outputs = [
-            worker.execute_method.remote(sent_method, *args, **kwargs)
+            worker.execute_method.remote(  # type: ignore[attr-defined]
+                sent_method, *args, **kwargs
+            )
             for worker in ray_workers
         ]
 
@@ -683,7 +689,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         return self.output_decoder.decode(output)
 
     async def _driver_execute_model_async(
-        self, execute_model_req: Optional[ExecuteModelRequest] = None
+        self, execute_model_req: ExecuteModelRequest | None = None
     ) -> list[SamplerOutput]:
         assert not self.use_ray_spmd_worker, (
             "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1"
@@ -714,7 +720,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             tasks.append(
                 asyncio.create_task(
                     _run_task_with_lock(
-                        driver_worker.execute_method.remote,
+                        driver_worker.execute_method.remote,  # type: ignore[attr-defined]
                         self.pp_locks[pp_rank],
                         "execute_model",
                         execute_model_req,
@@ -732,7 +738,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             "worker loop is disabled for VLLM_USE_RAY_SPMD_WORKER=1"
         )
         coros = [
-            worker.execute_method.remote("start_worker_execution_loop")
+            worker.execute_method.remote("start_worker_execution_loop")  # type: ignore[attr-defined]
             for worker in self.non_driver_workers
         ]
         return await asyncio.gather(*coros)
@@ -741,3 +747,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Assume that the Ray workers are healthy.
         # TODO: check the health of the Ray workers
         return
+
+
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args, **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)

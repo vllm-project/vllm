@@ -20,14 +20,15 @@ Args:
 
 import subprocess
 import sys
-from typing import Optional
 
 import regex as re
 
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/distributed",
     "vllm/entrypoints",
+    "vllm/executor",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
@@ -43,9 +44,7 @@ SEPARATE_GROUPS = [
     "tests",
     "vllm/attention",
     "vllm/compilation",
-    "vllm/distributed",
     "vllm/engine",
-    "vllm/executor",
     "vllm/inputs",
     "vllm/lora",
     "vllm/model_executor",
@@ -96,8 +95,8 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
 
 def mypy(
     targets: list[str],
-    python_version: Optional[str],
-    follow_imports: Optional[str],
+    python_version: str | None,
+    follow_imports: str | None,
     file_group: str,
 ) -> int:
     """

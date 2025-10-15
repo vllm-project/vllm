@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import deep_ep
 import torch
@@ -67,28 +67,31 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        self.handles: list[Optional[tuple]] = [None, None]
+        self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
+    def output_is_reduced(self) -> bool:
+        return True
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return self.max_tokens_per_rank
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
 
     def _do_quant(
         self,
-        x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_fp8_dispatch:
             block_k = (
                 quant_config.block_shape[1]
@@ -134,7 +137,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[Callable, mk.ReceiverType]:
@@ -197,9 +200,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def _receiver(
         self,
-        expert_x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        expert_x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         expert_num_tokens: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
+        a1_scale: torch.Tensor | None,
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
@@ -217,7 +220,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:

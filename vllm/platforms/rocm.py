@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -140,8 +137,8 @@ def use_rocm_custom_paged_attention(
     max_seq_len: int,
     sliding_window: int,
     kv_cache_dtype: str,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    sinks: Optional[torch.Tensor] = None,
+    alibi_slopes: torch.Tensor | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -276,6 +273,9 @@ class RocmPlatform(Platform):
             )
 
         if envs.VLLM_USE_V1:
+            if selected_backend == _Backend.FLEX_ATTENTION:
+                logger.info("Using FlexAttention backend on V1 engine.")
+                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
             if (
                 envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
             ) or selected_backend == _Backend.ROCM_AITER_FA:
@@ -317,7 +317,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
@@ -417,7 +417,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(device)[0]
@@ -474,37 +474,6 @@ class RocmPlatform(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
-    def stateless_init_device_torch_dist_pg(
-        cls,
-        backend: str,
-        prefix_store: PrefixStore,
-        group_rank: int,
-        group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
-        assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(
-            prefix_store, group_rank, group_size, backend_options
-        )
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-        pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
-
-    @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
 
@@ -515,8 +484,8 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()
                 gpu_name = cls.get_device_name()

@@ -27,7 +27,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
@@ -42,7 +42,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -80,7 +80,7 @@ class Dots1MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
@@ -117,7 +117,7 @@ class Dots1MoE(nn.Module):
     def __init__(
         self,
         config: Dots1Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -145,7 +145,21 @@ class Dots1MoE(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
-        self.experts = FusedMoE(
+        if config.n_shared_experts is not None:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            self.shared_experts = Dots1MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+            )
+        else:
+            self.shared_experts = None
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -163,29 +177,19 @@ class Dots1MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias,
         )
 
-        if config.n_shared_experts is not None:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-            self.shared_experts = Dots1MLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                reduce_results=False,
-                prefix=f"{prefix}.shared_experts",
-            )
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = (
             self.experts(hidden_states=hidden_states, router_logits=router_logits)
             * self.routed_scaling_factor
         )
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+
+        if self.shared_experts is not None:
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_dim)
@@ -199,10 +203,10 @@ class Dots1Attention(nn.Module):
         num_kv_heads: int,
         config: Dots1Config,
         rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -285,8 +289,8 @@ class Dots1DecoderLayer(nn.Module):
         config: Dots1Config,
         prefix: str,
         model_config: ModelConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -334,7 +338,7 @@ class Dots1DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
@@ -399,9 +403,9 @@ class Dots1Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -426,7 +430,7 @@ class Dots1Model(nn.Module):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return FusedMoE.make_expert_params_mapping(
+        return SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -542,9 +546,9 @@ class Dots1ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids,
             positions,
@@ -556,7 +560,7 @@ class Dots1ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

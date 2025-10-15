@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Radio vision model configuration"""
 
-from typing import Optional, Union
-
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
@@ -60,9 +58,9 @@ class RadioConfig(PretrainedConfig):
         initializer_factor: float = 1.0,
         hidden_act: str = "gelu",
         max_img_size: int = 2048,
-        norm_mean: Union[tuple[float, float, float], list] = OPENAI_CLIP_MEAN,
-        norm_std: Union[tuple[float, float, float], list] = OPENAI_CLIP_STD,
-        reg_tokens: Optional[int] = None,
+        norm_mean: tuple[float, float, float] | list = OPENAI_CLIP_MEAN,
+        norm_std: tuple[float, float, float] | list = OPENAI_CLIP_STD,
+        reg_tokens: int | None = None,
         **kwargs,
     ):
         self.model_name = model_name
