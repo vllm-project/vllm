@@ -2737,7 +2737,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if use_padded_batch_for_eagle and input_fits_in_drafter:
                 # EAGLE speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
-                propose_draft_token_ids(sampler_output.sampled_token_ids,
+                propose_draft_token_ids(
+                    sampler_output.sampled_token_ids,
                     spec_decode_common_attn_metadata,
                     hidden_states,
                     sample_hidden_states,
@@ -2769,7 +2770,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ):
                 # ngram and other speculative decoding methods use the sampled
                 # tokens on the CPU, so they are run after bookkeeping.
-                propose_draft_token_ids(valid_sampled_token_ids,
+                propose_draft_token_ids(
+                    valid_sampled_token_ids,
                     spec_decode_common_attn_metadata,
                     hidden_states,
                     sample_hidden_states,
@@ -2794,7 +2796,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         final_token_ids = cached_valid_sampled_token_ids[0]
         if self.curr_step > 0:
             for each_token_ids in cached_valid_sampled_token_ids[1:]:
-                _ = [x.extend(y) for x, y in zip(final_token_ids, each_token_ids)]
+                for x, y in zip(final_token_ids, each_token_ids):
+                    x.extend(y)
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
