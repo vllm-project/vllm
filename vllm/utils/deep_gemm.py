@@ -69,28 +69,37 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
 
 
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
-_grouped_impl: Callable[..., Any] | None = None
-_grouped_masked_impl: Callable[..., Any] | None = None
+_fp8_grouped_impl: Callable[..., Any] | None = None
+_fp8_grouped_masked_impl: Callable[..., Any] | None = None
 _fp8_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
+_bf16_grouped_impl: Callable[..., Any] | None = None
+_bf16_grouped_masked_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
-    global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
+    global _fp8_gemm_nt_impl
+    global _fp8_grouped_impl
+    global _fp8_grouped_masked_impl
+    global _fp8_mqa_logits_impl
+    global _fp8_paged_mqa_logits_impl
+    global _bf16_grouped_impl
+    global _bf16_grouped_masked_impl
     global _get_paged_mqa_logits_metadata_impl
     global _get_mn_major_tma_aligned_tensor_impl
 
     # fast path
     if (
         _fp8_gemm_nt_impl is not None
-        or _grouped_impl is not None
-        or _grouped_masked_impl is not None
+        or _fp8_grouped_impl is not None
+        or _fp8_grouped_masked_impl is not None
         or _fp8_mqa_logits_impl is not None
         or _fp8_paged_mqa_logits_impl is not None
+        or _bf16_grouped_impl is not None
+        or _bf16_grouped_masked_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
     ):
         return
@@ -108,8 +117,10 @@ def _lazy_init() -> None:
     _dg = importlib.import_module("deep_gemm")
 
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
-    _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
-    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    _fp8_grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
+    _fp8_grouped_masked_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_masked", None)
+    _bf16_grouped_impl = getattr(_dg, "m_grouped_bf16_gemm_nt_contiguous", None)
+    _bf16_grouped_masked_impl = getattr(_dg, "m_grouped_bf16_gemm_nt_masked", None)
     _fp8_mqa_logits_impl = getattr(_dg, "fp8_mqa_logits", None)
     _fp8_paged_mqa_logits_impl = getattr(_dg, "fp8_paged_mqa_logits", None)
     _get_paged_mqa_logits_metadata_impl = getattr(
@@ -148,20 +159,34 @@ def fp8_gemm_nt(*args, **kwargs):
 
 def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
     _lazy_init()
-    if _grouped_impl is None:
+    if _fp8_grouped_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_impl(
+    return _fp8_grouped_impl(
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
     )
 
 
 def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     _lazy_init()
-    if _grouped_masked_impl is None:
+    if _fp8_grouped_masked_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_masked_impl(
+    return _fp8_grouped_masked_impl(
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
     )
+
+
+def m_grouped_bf16_gemm_nt_contiguous(*args, **kwargs):
+    _lazy_init()
+    if _bf16_grouped_impl is None:
+        return _missing(*args, **kwargs)
+    return _bf16_grouped_impl(*args, **kwargs)
+
+
+def bf16_m_grouped_gemm_nt_masked(*args, **kwargs):
+    _lazy_init()
+    if _bf16_grouped_masked_impl is None:
+        return _missing(*args, **kwargs)
+    return _bf16_grouped_masked_impl(*args, **kwargs)
 
 
 def fp8_mqa_logits(
