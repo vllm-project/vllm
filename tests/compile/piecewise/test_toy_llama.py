@@ -21,7 +21,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
@@ -356,13 +356,13 @@ def test_toy_llama(
     )
 
     compile_config_no_compile = CompilationConfig(
-        level=CompilationLevel.NO_COMPILATION,
+        level=CompilationMode.NONE,
         cudagraph_mode=CUDAGraphMode.NONE,
         backend="eager",
     )
 
     compile_config_no_split = CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
+        level=CompilationMode.VLLM_COMPILE,
         use_inductor_graph_partition=use_inductor_graph_partition,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         backend=backend,
@@ -458,14 +458,14 @@ def benchmark():
     for piecewise in [False, True]:
         if piecewise:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 use_cudagraph=True,
                 splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
 
