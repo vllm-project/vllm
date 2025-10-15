@@ -5,7 +5,7 @@ import os
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import _is_torch_equal
+from vllm.utils import is_torch_equal
 
 logger = init_logger(__name__)
 
@@ -90,7 +90,7 @@ def memory_plan_reuse_patched(self):
     assert len(planning_states) == 0
 
 
-if _is_torch_equal("2.9.0"):
+if is_torch_equal("2.9.0"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
 
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
