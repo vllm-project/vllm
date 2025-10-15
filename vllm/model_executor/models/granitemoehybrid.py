@@ -410,9 +410,9 @@ class GraniteMoeHybridModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         # layers.0.block_sparse_moe.expert_0.input_linear.input_scale
-        ckpt_gate_proj_name="input_linear1"
+        ckpt_gate_proj_name="gate_proj"
         ckpt_down_proj_name="output_linear"
-        ckpt_up_proj_name="input_linear2"
+        ckpt_up_proj_name="up_proj"
         num_experts=self.config.num_local_experts
         num_redundant_experts=0
 
