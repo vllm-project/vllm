@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 import torch
 
-from vllm.config.cache import BlockSize
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.platforms.interface import DeviceCapability
+
+if TYPE_CHECKING:
+    from vllm.config.cache import BlockSize
+    from vllm.platforms.interface import DeviceCapability
 
 
 class AttentionType:
