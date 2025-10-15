@@ -144,7 +144,7 @@ def _get_lora_b_ptr(
 
 
 @functools.lru_cache
-def load_v1_op_config(op_type: str,
+def load_lora_op_config(op_type: str,
                       add_inputs: Optional[bool]) -> Optional[Dict]:
     
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
