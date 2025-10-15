@@ -96,7 +96,7 @@ def test_models(
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
     prompts, _, _ = prep_prompts(4, (800, 801))
-    kwargs_ref = {"max_model_len": 8192}
+    kwargs_ref = {"max_model_len": 8192, "enforce_eager": True}
     kwargs_test = {"model_impl": "transformers", **kwargs_ref}
     check_implementation(
         vllm_runner,
@@ -156,6 +156,7 @@ def test_quantization(
     with vllm_runner(
         model,
         model_impl="auto",
+        enforce_eager=True,
         **quantization_kwargs,  # type: ignore[arg-type]
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
@@ -165,6 +166,7 @@ def test_quantization(
     with vllm_runner(
         model,
         model_impl="transformers",
+        enforce_eager=True,
         **quantization_kwargs,  # type: ignore[arg-type]
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
