@@ -297,10 +297,3 @@ async def collect_from_async_generator(iterator: AsyncGenerator[T, None]) -> lis
     async for item in iterator:
         items.append(item)
     return items
-
-
-# TODO: Remove once we V0 executor is gone
-async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args, **kwargs):
-    """Utility function to run async task in a lock"""
-    async with lock:
-        return await task(*args, **kwargs)
