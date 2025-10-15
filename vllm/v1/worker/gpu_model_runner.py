@@ -1926,15 +1926,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if (
-            self.scheduler_config.chunked_prefill_enabled
-            and "encode" in supported_tasks
-        ):
-            supported_tasks.remove("encode")
+        if self.scheduler_config.chunked_prefill_enabled:
+            if "token_embed" in supported_tasks:
+                supported_tasks.remove("token_embed")
+            if "token_classify" in supported_tasks:
+                supported_tasks.remove("token_classify")
 
             logger.debug_once(
                 "Chunked prefill is not supported with "
-                "encode task which using ALL pooling. "
+                "token_embed and token_classify tasks "
+                "which using ALL pooling. "
                 "Please turn off chunked prefill by "
                 "`--no-enable-chunked-prefill` before using it."
             )
