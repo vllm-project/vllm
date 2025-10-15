@@ -951,6 +951,7 @@ steps:
   - vllm/v1/worker/
   - tests/compile/test_basic_correctness.py
   - tests/compile/test_wrapper.py
+  - tests/compile/test_fusions_e2e.py
   - tests/distributed/
   - tests/entrypoints/llm/test_collective_rpc.py
   - tests/v1/distributed
@@ -964,6 +965,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
+  - pytest -v -s ./compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - pytest -v -s distributed/test_sequence_parallel.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
@@ -1122,10 +1124,10 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - pytest -v -s tests/distributed/test_context_parallel.py
-    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
+    - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
 
 ##### RL Integration Tests #####
 - label: Prime-RL Integration Test # 15min
