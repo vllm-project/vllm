@@ -6,7 +6,7 @@ import os
 import platform
 import random
 import sys
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
@@ -294,7 +294,7 @@ class Platform:
 
     @classmethod
     def pre_register_and_update(
-        cls, parser: "FlexibleArgumentParser" | None = None
+        cls, parser: Optional["FlexibleArgumentParser"] = None
     ) -> None:
         """
         Do some pre-registration or update action for the current platform.
@@ -491,7 +491,7 @@ class Platform:
     def validate_request(
         cls,
         prompt: "PromptType",
-        params: "SamplingParams" | "PoolingParams",
+        params: Union["SamplingParams", "PoolingParams"],
         processed_inputs: "ProcessorInputs",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
