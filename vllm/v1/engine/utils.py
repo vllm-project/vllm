@@ -161,9 +161,9 @@ class CoreEngineProcManager:
                 b'',  # Empty frame separator
                 dead_message.encode('utf-8')
             ])
-            print(f"Sent message to ClientGuard: {dead_message}")
+            logger.info("Sent message to ClientGuard: %s", dead_message)
         except Exception as e:
-            print(f"Failed to send message: {e}")
+            logger.error("Failed to send message: %s", e)
 
     def close(self):
         """Shutdown all procs."""

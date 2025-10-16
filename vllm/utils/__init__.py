@@ -236,10 +236,10 @@ class AsyncMicrobatchTokenizer:
     """
 
     def __init__(
-        self,
-        tokenizer,
-        max_batch_size: int = 32,
-        batch_wait_timeout_s: float = 0.002,
+            self,
+            tokenizer,
+            max_batch_size: int = 32,
+            batch_wait_timeout_s: float = 0.002,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_batch_size = max_batch_size
@@ -250,7 +250,7 @@ class AsyncMicrobatchTokenizer:
             tuple,
             asyncio.Queue[
                 tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
-            ],
+                ],
         ] = {}
         self._batcher_tasks: list[asyncio.Task] = []
 
@@ -274,10 +274,10 @@ class AsyncMicrobatchTokenizer:
 
     # === Internal helpers ===
     def _get_queue(
-        self, loop: asyncio.AbstractEventLoop, key: tuple
+            self, loop: asyncio.AbstractEventLoop, key: tuple
     ) -> asyncio.Queue[
         tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
-    ]:
+        ]:
         """Get the request queue for the given operation key, creating a new
         queue and batcher task if needed."""
         queue = self._queues.get(key)
@@ -416,9 +416,9 @@ class AsyncMicrobatchTokenizer:
 
     def __del__(self):
         if (
-            (tasks := getattr(self, "_batcher_tasks", None))
-            and (loop := getattr(self, "_loop", None))
-            and not loop.is_closed()
+                (tasks := getattr(self, "_batcher_tasks", None))
+                and (loop := getattr(self, "_loop", None))
+                and not loop.is_closed()
         ):
 
             def cancel_tasks():
@@ -454,7 +454,7 @@ def in_loop(event_loop: AbstractEventLoop) -> bool:
 
 
 def make_async(
-    func: Callable[P, T], executor: concurrent.futures.Executor | None = None
+        func: Callable[P, T], executor: concurrent.futures.Executor | None = None
 ) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
@@ -472,7 +472,7 @@ def make_async(
 
 
 async def merge_async_iterators(
-    *iterators: AsyncGenerator[T, None],
+        *iterators: AsyncGenerator[T, None],
 ) -> AsyncGenerator[tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
@@ -717,7 +717,7 @@ def update_environment_variables(envs: dict[str, str]):
 def chunk_list(lst: list[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
     for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
+        yield lst[i: i + chunk_size]
 
 
 def cdiv(a: int, b: int) -> int:
@@ -748,9 +748,9 @@ def round_down(x: int, y: int) -> int:
 
 
 def _generate_random_fp8(
-    tensor: torch.Tensor,
-    low: float,
-    high: float,
+        tensor: torch.Tensor,
+        low: float,
+        high: float,
 ) -> None:
     # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
     # it may occur Inf or NaN if we directly use torch.randint
@@ -769,8 +769,8 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-    cache_dtype: str | torch.dtype | None,
-    model_dtype: str | torch.dtype | None = None,
+        cache_dtype: str | torch.dtype | None,
+        model_dtype: str | torch.dtype | None = None,
 ) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -792,16 +792,16 @@ def get_kv_cache_torch_dtype(
 
 
 def create_kv_caches_with_random_flash(
-    num_blocks: int,
-    block_size: int,
-    num_layers: int,
-    num_heads: int,
-    head_size: int,
-    cache_dtype: str | torch.dtype | None,
-    model_dtype: str | torch.dtype | None = None,
-    seed: int | None = None,
-    device: str | None = "cuda",
-    cache_layout: str | None = "NHD",
+        num_blocks: int,
+        block_size: int,
+        num_layers: int,
+        num_heads: int,
+        head_size: int,
+        cache_dtype: str | torch.dtype | None,
+        model_dtype: str | torch.dtype | None = None,
+        seed: int | None = None,
+        device: str | None = "cuda",
+        cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
 
@@ -813,7 +813,7 @@ def create_kv_caches_with_random_flash(
     stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
 
     kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i] for i in stride_order)
-    scale = head_size**-0.5
+    scale = head_size ** -0.5
 
     key_caches: list[torch.Tensor] = []
     value_caches: list[torch.Tensor] = []
@@ -834,15 +834,15 @@ def create_kv_caches_with_random_flash(
 
 
 def create_kv_caches_with_random(
-    num_blocks: int,
-    block_size: int,
-    num_layers: int,
-    num_heads: int,
-    head_size: int,
-    cache_dtype: str | torch.dtype | None,
-    model_dtype: str | torch.dtype | None = None,
-    seed: int | None = None,
-    device: str | None = "cuda",
+        num_blocks: int,
+        block_size: int,
+        num_layers: int,
+        num_heads: int,
+        head_size: int,
+        cache_dtype: str | torch.dtype | None,
+        model_dtype: str | torch.dtype | None = None,
+        seed: int | None = None,
+        device: str | None = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
@@ -854,7 +854,7 @@ def create_kv_caches_with_random(
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
-    scale = head_size**-0.5
+    scale = head_size ** -0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
     key_caches: list[torch.Tensor] = []
@@ -924,11 +924,11 @@ class DeviceMemoryProfiler:
 
 
 def make_ndarray_with_pad(
-    x: list[list[T]],
-    pad: T,
-    dtype: npt.DTypeLike,
-    *,
-    max_len: int | None = None,
+        x: list[list[T]],
+        pad: T,
+        dtype: npt.DTypeLike,
+        *,
+        max_len: int | None = None,
 ) -> npt.NDArray:
     """
     Make a padded array from 2D inputs.
@@ -949,13 +949,13 @@ def make_ndarray_with_pad(
 
 
 def make_tensor_with_pad(
-    x: list[list[T]],
-    pad: T,
-    dtype: torch.dtype,
-    *,
-    max_len: int | None = None,
-    device: str | torch.device | None = None,
-    pin_memory: bool = False,
+        x: list[list[T]],
+        pad: T,
+        dtype: torch.dtype,
+        *,
+        max_len: int | None = None,
+        device: str | torch.device | None = None,
+        pin_memory: bool = False,
 ) -> torch.Tensor:
     """
     Make a padded tensor from 2D inputs.
@@ -974,10 +974,10 @@ def make_tensor_with_pad(
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
-    target_device: str | torch.device,
-    pin_memory: bool,
+        data: list,
+        dtype: torch.dtype,
+        target_device: str | torch.device,
+        pin_memory: bool,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
@@ -1021,9 +1021,9 @@ def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
     src_info = torch.finfo(src_dtype)
     tgt_info = torch.finfo(tgt_dtype)
     return (
-        src_info.min >= tgt_info.min
-        and src_info.max <= tgt_info.max
-        and src_info.resolution >= tgt_info.resolution
+            src_info.min >= tgt_info.min
+            and src_info.max <= tgt_info.max
+            and src_info.resolution >= tgt_info.resolution
     )
 
 
@@ -1051,10 +1051,10 @@ def as_iter(obj: T | Iterable[T]) -> Iterable[T]:
 
 # `collections` helpers
 def is_list_of(
-    value: object,
-    typ: type[T] | tuple[type[T], ...],
-    *,
-    check: Literal["first", "all"] = "first",
+        value: object,
+        typ: type[T] | tuple[type[T], ...],
+        *,
+        check: Literal["first", "all"] = "first",
 ) -> TypeIs[list[T]]:
     if not isinstance(value, list):
         return False
@@ -1267,9 +1267,9 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def deprecate_args(
-    start_index: int,
-    is_deprecated: bool | Callable[[], bool] = True,
-    additional_message: str | None = None,
+        start_index: int,
+        is_deprecated: bool | Callable[[], bool] = True,
+        additional_message: str | None = None,
 ) -> Callable[[F], F]:
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
@@ -1285,7 +1285,7 @@ def deprecate_args(
         @wraps(fn)
         def inner(*args, **kwargs):
             if is_deprecated():
-                deprecated_args = pos_kws[start_index : len(args)]
+                deprecated_args = pos_kws[start_index: len(args)]
                 if deprecated_args:
                     msg = (
                         f"The positional arguments {deprecated_args} are "
@@ -1307,9 +1307,9 @@ def deprecate_args(
 
 
 def deprecate_kwargs(
-    *kws: str,
-    is_deprecated: bool | Callable[[], bool] = True,
-    additional_message: str | None = None,
+        *kws: str,
+        is_deprecated: bool | Callable[[], bool] = True,
+        additional_message: str | None = None,
 ) -> Callable[[F], F]:
     deprecated_kws = set(kws)
 
@@ -1399,7 +1399,7 @@ def xpu_is_initialized() -> bool:
 
 
 def cuda_get_device_properties(
-    device, names: Sequence[str], init_cuda=False
+        device, names: Sequence[str], init_cuda=False
 ) -> tuple[Any, ...]:
     """Get specified CUDA device property values without initializing CUDA in
     the current process."""
@@ -1414,7 +1414,7 @@ def cuda_get_device_properties(
 
 
 def weak_bind(
-    bound_method: Callable[..., Any],
+        bound_method: Callable[..., Any],
 ) -> Callable[..., None]:
     """Make an instance method that weakly references
     its associated instance and no-ops once that
@@ -1515,8 +1515,8 @@ class FlexibleArgumentParser(ArgumentParser):
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (
-                    hasattr(namespace, dest := action.dest)
-                    and getattr(namespace, dest) != action.default
+                        hasattr(namespace, dest := action.dest)
+                        and getattr(namespace, dest) != action.default
                 ):
                     logger.warning_once("argument '%s' is deprecated", dest)
             return namespace, args
@@ -1573,7 +1573,7 @@ class FlexibleArgumentParser(ArgumentParser):
                 for action in group._group_actions:
                     # search option name
                     if any(
-                        search_keyword in opt.lower() for opt in action.option_strings
+                            search_keyword in opt.lower() for opt in action.option_strings
                     ):
                         matched_actions.append(action)
             if matched_actions:
@@ -1616,9 +1616,9 @@ class FlexibleArgumentParser(ArgumentParser):
         return formatter.format_help()
 
     def parse_args(  # type: ignore[override]
-        self,
-        args: list[str] | None = None,
-        namespace: Namespace | None = None,
+            self,
+            args: list[str] | None = None,
+            namespace: Namespace | None = None,
     ):
         if args is None:
             args = sys.argv[1:]
@@ -1691,9 +1691,9 @@ class FlexibleArgumentParser(ArgumentParser):
                 mode = arg[3:] if arg[2] == "=" else arg[2:]
                 processed_args.append(f"-O.mode={mode}")
             elif (
-                arg == "-O"
-                and i + 1 < len(args)
-                and args[i + 1] in {"0", "1", "2", "3"}
+                    arg == "-O"
+                    and i + 1 < len(args)
+                    and args[i + 1] in {"0", "1", "2", "3"}
             ):
                 # Convert -O <n> to -O.mode <n>
                 processed_args.append("-O.mode")
@@ -1712,8 +1712,8 @@ class FlexibleArgumentParser(ArgumentParser):
             return nested_dict
 
         def recursive_dict_update(
-            original: dict[str, Any],
-            update: dict[str, Any],
+                original: dict[str, Any],
+                update: dict[str, Any],
         ) -> set[str]:
             """Recursively updates a dictionary with another dictionary.
             Returns a set of duplicate keys that were overwritten.
@@ -1842,7 +1842,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # of cli > config > defaults
         if args[0].startswith("-"):
             # No sub command (e.g., api_server entry point)
-            args = config_args + args[0:index] + args[index + 2 :]
+            args = config_args + args[0:index] + args[index + 2:]
         elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith("-")
             model_in_config = any(arg == "--model" for arg in config_args)
@@ -1856,17 +1856,17 @@ class FlexibleArgumentParser(ArgumentParser):
             if model_in_cli:
                 # Model specified as positional arg, keep CLI version
                 args = (
-                    [args[0]]
-                    + [args[1]]
-                    + config_args
-                    + args[2:index]
-                    + args[index + 2 :]
+                        [args[0]]
+                        + [args[1]]
+                        + config_args
+                        + args[2:index]
+                        + args[index + 2:]
                 )
             else:
                 # No model in CLI, use config if available
-                args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
+                args = [args[0]] + config_args + args[1:index] + args[index + 2:]
         else:
-            args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
+            args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
         return args
 
@@ -1934,11 +1934,11 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args, **kwarg
 
 @lru_cache
 def supports_kw(
-    callable: Callable[..., object],
-    kw_name: str,
-    *,
-    requires_kw_only: bool = False,
-    allow_var_kwargs: bool = True,
+        callable: Callable[..., object],
+        kw_name: str,
+        *,
+        requires_kw_only: bool = False,
+        allow_var_kwargs: bool = True,
 ) -> bool:
     """Check if a keyword is a valid kwarg for a callable; if requires_kw_only
     disallows kwargs names that can also be positional arguments.
@@ -1962,13 +1962,13 @@ def supports_kw(
         is_sig_param = param_val.kind in passable_kw_types
         # We want kwargs only, but this is passable as a positional arg
         if (
-            requires_kw_only
-            and is_sig_param
-            and param_val.kind != inspect.Parameter.KEYWORD_ONLY
+                requires_kw_only
+                and is_sig_param
+                and param_val.kind != inspect.Parameter.KEYWORD_ONLY
         ):
             return False
         if (requires_kw_only and param_val.kind == inspect.Parameter.KEYWORD_ONLY) or (
-            not requires_kw_only and is_sig_param
+                not requires_kw_only and is_sig_param
         ):
             return True
 
@@ -1980,19 +1980,19 @@ def supports_kw(
         # Ref: https://docs.python.org/3/library/inspect.html#inspect.Signature.parameters
         last_param = params[next(reversed(params))]  # type: ignore
         return (
-            last_param.kind == inspect.Parameter.VAR_KEYWORD
-            and last_param.name != kw_name
+                last_param.kind == inspect.Parameter.VAR_KEYWORD
+                and last_param.name != kw_name
         )
 
     return False
 
 
 def get_allowed_kwarg_only_overrides(
-    callable: Callable[..., object],
-    overrides: Mapping[str, object] | None,
-    *,
-    requires_kw_only: bool = True,
-    allow_var_kwargs: bool = False,
+        callable: Callable[..., object],
+        overrides: Mapping[str, object] | None,
+        *,
+        requires_kw_only: bool = True,
+        allow_var_kwargs: bool = False,
 ) -> dict[str, Any]:
     """
     Given a callable which has one or more keyword only params and a dict
@@ -2059,7 +2059,7 @@ def supports_dynamo() -> bool:
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return (
-        is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
+            is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
     )
 
 
@@ -2151,10 +2151,10 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: torch.Tensor
-    | list[torch.Tensor]
-    | tuple[torch.Tensor]
-    | IntermediateTensors,
+        tensors: torch.Tensor
+                 | list[torch.Tensor]
+                 | tuple[torch.Tensor]
+                 | IntermediateTensors,
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
@@ -2438,13 +2438,13 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
 def direct_register_custom_op(
-    op_name: str,
-    op_func: Callable,
-    mutates_args: list[str] | None = None,
-    fake_impl: Callable | None = None,
-    target_lib: Library | None = None,
-    dispatch_key: str | None = None,
-    tags: tuple[torch.Tag, ...] = (),
+        op_name: str,
+        op_func: Callable,
+        mutates_args: list[str] | None = None,
+        fake_impl: Callable | None = None,
+        target_lib: Library | None = None,
+        dispatch_key: str | None = None,
+        tags: tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -2561,8 +2561,8 @@ class MemorySnapshot:
         self.free_memory, self.total_memory = torch.cuda.mem_get_info()
         shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
         if (
-            current_platform.is_cuda()
-            and current_platform.get_device_capability() in shared_sysmem_device_mem_sms
+                current_platform.is_cuda()
+                and current_platform.get_device_capability() in shared_sysmem_device_mem_sms
         ):
             # On UMA (Orin, Thor and Spark) platform,
             # where both CPU and GPU rely on system memory,
@@ -2628,7 +2628,7 @@ class MemoryProfilingResult:
 
 @contextlib.contextmanager
 def memory_profiling(
-    baseline_snapshot: MemorySnapshot, weights_memory: int
+        baseline_snapshot: MemorySnapshot, weights_memory: int
 ) -> Generator[MemoryProfilingResult, None, None]:
     """Memory profiling context manager.
     baseline_snapshot: the memory snapshot before the current vLLM instance.
@@ -2704,7 +2704,7 @@ def memory_profiling(
     non_torch_memory = result.non_torch_increase
     peak_activation_memory = result.torch_peak_increase
     result.non_kv_cache_memory = (
-        non_torch_memory + peak_activation_memory + result.weights_memory
+            non_torch_memory + peak_activation_memory + result.weights_memory
     )  # noqa
 
 
@@ -2781,12 +2781,12 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
-    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
-    path: str,
-    socket_type: Any,
-    bind: bool | None = None,
-    identity: bytes | None = None,
-    linger: int | None = None,
+        ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
+        path: str,
+        socket_type: Any,
+        bind: bool | None = None,
+        identity: bytes | None = None,
+        linger: int | None = None,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2794,13 +2794,13 @@ def make_zmq_socket(
     socket = ctx.socket(socket_type)
 
     # Calculate buffer size based on system memory
-    total_mem = mem.total / 1024**3
-    available_mem = mem.available / 1024**3
+    total_mem = mem.total / 1024 ** 3
+    available_mem = mem.available / 1024 ** 3
     # For systems with substantial memory (>32GB total, >16GB available):
     # - Set a large 0.5GB buffer to improve throughput
     # For systems with less memory:
     # - Use system default (-1) to avoid excessive memory consumption
-    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
+    buf_size = int(0.5 * 1024 ** 3) if total_mem > 32 and available_mem > 16 else -1
 
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
@@ -2838,11 +2838,11 @@ def make_zmq_socket(
 
 @contextlib.contextmanager
 def zmq_socket_ctx(
-    path: str,
-    socket_type: Any,
-    bind: bool | None = None,
-    linger: int = 0,
-    identity: bytes | None = None,
+        path: str,
+        socket_type: Any,
+        bind: bool | None = None,
+        linger: int = 0,
+        identity: bytes | None = None,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
@@ -2903,9 +2903,9 @@ def get_mp_context():
 
 
 def bind_kv_cache(
-    ctx: dict[str, Any],
-    kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
-    shared_kv_cache_layers: dict[str, str] | None = None,
+        ctx: dict[str, Any],
+        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+        shared_kv_cache_layers: dict[str, str] | None = None,
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2928,11 +2928,11 @@ def bind_kv_cache(
         layer_name
         for layer_name in ctx
         if (
-            hasattr(ctx[layer_name], "attn_type")
-            and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)
-        )
-        and ctx[layer_name].kv_sharing_target_layer_name is None
+                   hasattr(ctx[layer_name], "attn_type")
+                   and ctx[layer_name].attn_type
+                   in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)
+           )
+           and ctx[layer_name].kv_sharing_target_layer_name is None
     ]
     layer_index_sorted = sorted(
         set(extract_layer_index(layer_name) for layer_name in layer_need_kv_cache)
@@ -2952,10 +2952,10 @@ def bind_kv_cache(
 
 
 def run_method(
-    obj: Any,
-    method: str | bytes | Callable,
-    args: tuple[Any],
-    kwargs: dict[str, Any],
+        obj: Any,
+        method: str | bytes | Callable,
+        args: tuple[Any],
+        kwargs: dict[str, Any],
 ) -> Any:
     """
     Run a method of an object with the given arguments and keyword arguments.
@@ -3065,10 +3065,10 @@ class LazyLoader(types.ModuleType):
     """
 
     def __init__(
-        self,
-        local_name: str,
-        parent_module_globals: dict[str, Any],
-        name: str,
+            self,
+            local_name: str,
+            parent_module_globals: dict[str, Any],
+            name: str,
     ):
         self._local_name = local_name
         self._parent_module_globals = parent_module_globals
@@ -3171,24 +3171,24 @@ def cprofile(save_file: str | None = None, enabled: bool = True):
 def check_use_alibi(model_config: ModelConfig) -> bool:
     cfg = model_config.hf_text_config
     return (
-        getattr(cfg, "alibi", False)  # Falcon
-        or (
-            "BloomForCausalLM" in getattr(model_config.hf_config, "architectures", [])
-        )  # Bloom
-        or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
-        or (
-            hasattr(cfg, "attn_config")  # MPT
-            and (
-                (
-                    isinstance(cfg.attn_config, dict)
-                    and cfg.attn_config.get("alibi", False)
-                )
-                or (
-                    not isinstance(cfg.attn_config, dict)
-                    and getattr(cfg.attn_config, "alibi", False)
-                )
+            getattr(cfg, "alibi", False)  # Falcon
+            or (
+                    "BloomForCausalLM" in getattr(model_config.hf_config, "architectures", [])
+            )  # Bloom
+            or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
+            or (
+                    hasattr(cfg, "attn_config")  # MPT
+                    and (
+                            (
+                                    isinstance(cfg.attn_config, dict)
+                                    and cfg.attn_config.get("alibi", False)
+                            )
+                            or (
+                                    not isinstance(cfg.attn_config, dict)
+                                    and getattr(cfg.attn_config, "alibi", False)
+                            )
+                    )
             )
-        )
     )
 
 
@@ -3307,7 +3307,7 @@ def has_tilelang() -> bool:
 
 
 def set_process_title(
-    name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
+        name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
 ) -> None:
     """
     Set the current process title to a specific name with an
@@ -3373,8 +3373,8 @@ def decorate_logs(process_name: str | None = None) -> None:
 
 
 def length_from_prompt_token_ids_or_embeds(
-    prompt_token_ids: list[int] | None,
-    prompt_embeds: torch.Tensor | None,
+        prompt_token_ids: list[int] | None,
+        prompt_embeds: torch.Tensor | None,
 ) -> int:
     """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
@@ -3428,6 +3428,7 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
             return p
         i += 1
 
+
 def generate_identity():
     """
     Generate a unique identity for ZMQ ROUTER node
@@ -3437,7 +3438,8 @@ def generate_identity():
     """
     # Get local IP address
     try:
-        # Create a temporary socket to connect to external server for getting local exit IP
+        # Create a temporary socket to connect to
+        # external server for getting local exit IP
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))  # Connect to public DNS server
             ip_address = s.getsockname()[0]
@@ -3448,7 +3450,8 @@ def generate_identity():
     # Get current process PID
     pid = os.getpid()
 
-    # Get current timestamp (in milliseconds) to ensure uniqueness within the same second
+    # Get current timestamp (in milliseconds) to
+    # ensure uniqueness within the same second
     timestamp = int(time.time() * 1000)
 
     # Combine into string identifier
@@ -3457,16 +3460,18 @@ def generate_identity():
     # Convert to byte type and return (ZMQ requires identity to be in byte type)
     return identity_str.encode('utf-8')
 
+
 def generate_unique_numbers(n):
-    numbers = []
-    for _ in range(n):
+    numbers = set()
+    while len(numbers) < n:
         # Timestamp (in milliseconds) + random number to ensure uniqueness
-        unique_num = int(time.time() * 1000) + random.randint(0, 999)
-        # Avoid duplicates in extreme cases (e.g., generating multiple in the same millisecond)
+        unique_num = int(time.time() * 1000) + random.randint(0, 10 * n)
+        # Avoid duplicates in extreme cases
         while unique_num in numbers:
             unique_num += 1
-        numbers.append(unique_num)
+        numbers.add(unique_num)
     return numbers
+
 
 def generate_identity_group(peer1, peer2, use, n):
     """
