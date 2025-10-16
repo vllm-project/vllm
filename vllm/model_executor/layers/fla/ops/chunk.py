@@ -125,6 +125,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             # Variable-length inputs collapse the batch dimension during preprocessing,
             # so the kernel already emits a linearised chunk stream in ``states[:, i]``.
             # Flattening mirrors the metadata builder's chunk enumeration order.
+            # Last three axes of h are [H, K, V], producing [num_chunks_total, H, K, V]
             intermediate_states = h.reshape(-1, *h.shape[-3:])
         return o.to(q.dtype), final_state, intermediate_states
 
