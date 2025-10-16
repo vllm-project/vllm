@@ -171,7 +171,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         cls,
         data: bytes,
         num_frames: int = -1,
-        fps: int = 2,
+        fps: int = -1,
         max_duration: int = 300,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
@@ -205,17 +205,15 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             original_fps = 30
 
         duration = total_frames_num / original_fps
+        
+        # Determine target number of samples:
+        max_samples = total_frames_num
+        if num_frames > 0:  # Hard upper bound
+            max_samples = min(num_frames, max_samples)
+        if fps > 0:  # If fps is provided, use it to limit the number of samples
+            max_samples = min(max_samples, math.floor(duration * fps))
+        max_samples = max(1, max_samples)  # to make sure we have at least one sample
 
-        # Determine target number of samples
-        if num_frames > 0:
-            # Hard upper bound
-            max_samples = int(num_frames)
-        else:
-            # No cap -> sample at desired fps
-            max_samples = int(max(1, math.floor(duration * fps)))
-
-        # Clamp to available frames if count is known
-        max_samples = max(1, min(max_samples, total_frames_num))
 
         # Uniform coverage of the entire timeline within the cap
         # Use linspace over [0, total_frames-1]
