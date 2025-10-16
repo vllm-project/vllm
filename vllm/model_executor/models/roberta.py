@@ -15,7 +15,6 @@ from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     Pooler,
     PoolingParamsUpdate,
-    build_output,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -194,37 +193,34 @@ class M3SparsePooler(Pooler):
         self.eos_token_id = eos_token_id
 
     def get_supported_tasks(self) -> set[PoolingTask]:
-        return {"embed-sparse"}
+        return {"token_embed", "embed-sparse"}
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        hidden_states: torch.Tensor,
         pooling_metadata: V1PoolingMetadata,
     ) -> PoolerOutput:
-        assert isinstance(pooling_metadata, V1PoolingMetadata), (
-            "BGE-M3 sparse embeddding are only support with V1"
+        token_results = torch.squeeze(
+            torch.relu(self.sparse_linear(hidden_states)), dim=0
         )
-        assert isinstance(hidden_states, list)
 
         pooled_outputs = []
 
-        for i, hidden_state in enumerate(hidden_states):
-            pooled_data = torch.squeeze(
-                torch.relu(self.sparse_linear(hidden_state)), dim=0
-            )
-            token_ids = pooling_metadata.prompt_token_ids[
-                i, : pooling_metadata.prompt_lens[i]
-            ]
+        start = 0
+        for i, prompt_len in enumerate(pooling_metadata.prompt_lens):
+            pooled_data = token_results[start : start + prompt_len]
+            token_ids = pooling_metadata.prompt_token_ids[i]
             if token_ids[0] == self.bos_token_id:
                 pooled_data = pooled_data[1:]
             if token_ids[-1] == self.eos_token_id:
                 pooled_data = pooled_data[:-1]
+            start += prompt_len
             pooled_outputs.append(pooled_data.squeeze())
 
-        return PoolerOutput(outputs=build_output(pooled_outputs))
+        return pooled_outputs
 
 
 def filter_secondary_weights(
@@ -270,9 +266,11 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         self.sparse_linear = nn.Linear(self.hidden_size, 1)
         return DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
                 "embed": Pooler.for_embed(pooler_config),
                 "embed-sparse": M3SparsePooler(
+                    self.sparse_linear, self.bos_token_id, self.eos_token_id
+                ),
+                "token_embed": M3SparsePooler(
                     self.sparse_linear, self.bos_token_id, self.eos_token_id
                 ),
             }
