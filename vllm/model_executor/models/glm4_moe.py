@@ -26,7 +26,7 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
@@ -81,7 +81,7 @@ class Glm4MoeMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
@@ -118,7 +118,7 @@ class Glm4MoE(nn.Module):
     def __init__(
         self,
         config: Glm4MoeConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ):
@@ -234,14 +234,14 @@ class Glm4MoeAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 131072,
-        head_dim: Optional[int] = None,
+        head_dim: int | None = None,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
         use_qk_norm: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -334,8 +334,8 @@ class Glm4MoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Glm4MoeConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
@@ -395,7 +395,7 @@ class Glm4MoeDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -462,9 +462,9 @@ class Glm4MoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -704,9 +704,9 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -715,7 +715,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -729,7 +729,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
 def get_spec_layer_idx_from_weight_name(
     config: Glm4MoeConfig, weight_name: str
-) -> Optional[int]:
+) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (
         config.num_nextn_predict_layers > 0
     ):

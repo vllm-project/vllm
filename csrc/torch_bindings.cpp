@@ -33,11 +33,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   ops.def(
-      "silu_mul_fp8_quant_deep_gemm_cuda(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s, int group_size, "
-      "bool use_ue8m0, int num_parallel_tokens) -> ()");
-  ops.impl("silu_mul_fp8_quant_deep_gemm_cuda", torch::kCUDA,
-           &silu_mul_fp8_quant_deep_gemm_cuda);
+      "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
+      "y_q, Tensor! y_s,"
+      "bool use_ue8m0) -> ()");
+  ops.impl("persistent_masked_m_silu_mul_quant", torch::kCUDA,
+           &persistent_masked_m_silu_mul_quant);
 
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);

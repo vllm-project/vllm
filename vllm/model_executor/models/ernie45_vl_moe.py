@@ -25,7 +25,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
@@ -74,7 +74,7 @@ logger = init_logger(__name__)
 
 
 class Ernie4_5_VLMoeMLP(Ernie4_5_MoeMLP):
-    def __init__(self, shared_experts: Optional[torch.nn.Module] = None, **kwargs):
+    def __init__(self, shared_experts: torch.nn.Module | None = None, **kwargs):
         super().__init__(**kwargs)
         self.shared_experts = shared_experts
 
@@ -91,15 +91,15 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: Optional[int] = None,
+        head_dim: int | None = None,
         rope_theta: float = 500000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         freq_allocation: int = 20,
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -192,7 +192,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -341,7 +341,10 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             # text and vision modals input
             visual_token_mask = visual_token_mask.repeat(1, self.hidden_size).bool()
             text_token_mask = ~visual_token_mask
-            final_hidden_states = torch.zeros_like(hidden_states)
+            final_experts_hidden_states = torch.zeros_like(hidden_states)
+            final_shared_ouput = (
+                torch.zeros_like(hidden_states) if self.has_shared_experts else None
+            )
 
             text_hidden_states = hidden_states[text_token_mask].reshape(
                 -1, self.hidden_size
@@ -353,16 +356,26 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             text_router_logits, _ = self.text_experts_gate(
                 text_hidden_states.to(dtype=torch.float32)
             )
-            final_hidden_states[text_token_mask] = self.text_experts(
+            text_shared_ouput, text_experts_output = self.text_experts(
                 hidden_states=text_hidden_states, router_logits=text_router_logits
-            ).flatten()
+            )
+            final_experts_hidden_states[text_token_mask] = text_experts_output.flatten()
+            if self.has_shared_experts:
+                final_shared_ouput[text_token_mask] = text_shared_ouput.flatten()
 
             vision_router_logits, _ = self.vision_experts_gate(
                 vision_hidden_states.to(dtype=torch.float32)
             )
-            final_hidden_states[visual_token_mask] = self.vision_experts(
+            vision_shared_ouput, vision_experts_output = self.vision_experts(
                 hidden_states=vision_hidden_states, router_logits=vision_router_logits
-            ).flatten()
+            )
+            final_experts_hidden_states[visual_token_mask] = (
+                vision_experts_output.flatten()
+            )
+            if self.has_shared_experts:
+                final_shared_ouput[visual_token_mask] = vision_shared_ouput.flatten()
+
+            final_hidden_states = (final_shared_ouput, final_experts_hidden_states)
         else:
             # only text modal input
             text_router_logits, _ = self.text_experts_gate(
@@ -374,7 +387,11 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             )
 
         if self.has_shared_experts:
+            # for shared_experts model
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+        else:
+            # for not shared_experts model
+            final_hidden_states = final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = (
@@ -390,8 +407,8 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -463,8 +480,8 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        visual_token_mask: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
+        visual_token_mask: torch.Tensor | None,
         **kwargs: object,
     ) -> torch.Tensor:
         # Self Attention
@@ -551,11 +568,11 @@ class Ernie4_5_VLMoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        visual_token_mask: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        visual_token_mask: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -632,10 +649,10 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -644,7 +661,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
