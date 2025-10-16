@@ -7,10 +7,12 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.plugins
+from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.fusion import (
     QUANT_OPS,
     FusedRMSQuantKey,
 )
+from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.compilation.rocm_aiter_rmsnorm_fusion import (
@@ -94,6 +96,12 @@ class TestModel(torch.nn.Module):
             (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, True)]),
         ]
 
+    def ops_in_model(self):
+        return [torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default]
+
+    def ops_not_in_model(self):
+        return []
+
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64])
@@ -129,6 +137,7 @@ def test_fusion_rmsnorm_quant(
         cleanup_pass = PostCleanupPass(vllm_config)
 
         backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+
         model = TestModel(hidden_size, eps)
 
         # First dimension dynamic
@@ -138,6 +147,7 @@ def test_fusion_rmsnorm_quant(
         result = model(x)
 
         model2 = torch.compile(model, backend=backend)
+
         result2 = model2(x)
 
         ATOL, RTOL = (1e-2, 1e-2)
@@ -151,3 +161,67 @@ def test_fusion_rmsnorm_quant(
 
         # In post-nodes, fused kernels should be there and fp8 quant should not
         backend.check_after_ops(model.ops_in_model_after())
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [64])
+@pytest.mark.parametrize("num_tokens", [257])
+@pytest.mark.parametrize("eps", [1e-6])
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Only test on ROCm")
+def test_fix_functionalization(
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    eps: float,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(1)
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
+            custom_ops=["+rms_norm", "+quant_fp8"],
+            pass_config=PassConfig(enable_fusion=True, enable_noop=True),
+        )
+    )
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "1")
+
+        # Reshape pass is needed for the fusion pass to work
+        noop_pass = NoOpEliminationPass(vllm_config)
+        fusion_pass = RMSNormAiterQuantFusionPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        passes = [noop_pass, fusion_pass, cleanup_pass]
+        func_pass = FixFunctionalizationPass(vllm_config)
+
+        backend_no_func = TestBackend(*passes)
+        backend_func = TestBackend(*passes, func_pass)
+
+        model = TestModel(hidden_size, eps)
+
+        # First dimension dynamic
+        x = torch.rand(num_tokens, hidden_size)
+
+        torch.compile(model, backend=backend_no_func)(x)
+        torch.compile(model, backend=backend_func)(x)
+
+        # check if the functionalization pass is applied
+        for op in model.ops_in_model():
+            find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
+            assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
+
+        # make sure the ops were all de-functionalized
+        found = dict()
+        for node in backend_func.graph_post_pass.nodes:
+            for op in model.ops_in_model():
+                if is_func(node, op):
+                    found[op] = True
+            for op in model.ops_not_in_model():
+                if is_func(node, op):
+                    found[op] = True
+        assert all(found[op] for op in model.ops_in_model())
+        assert all(not found.get(op) for op in model.ops_not_in_model())
