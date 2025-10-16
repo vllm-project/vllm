@@ -330,3 +330,23 @@ def activation_without_mul(activation: str) -> str:
 @functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
+
+
+def reorder_gate_up_to_halves(t: torch.Tensor, axis: int) -> torch.Tensor:
+    """
+    Treat dimension `axis` as interleaved [g0,u0,g1,u1,...] and reorder to
+    [g..., u...]. Always returns contiguous.
+    """
+    if axis < 0:
+        axis += t.ndim
+    size = t.shape[axis]
+    if size % 2 != 0:
+        return t.contiguous()
+    moved = axis != t.ndim - 1
+    if moved:
+        t = t.movedim(axis, -1)
+    shape = t.shape
+    t = t.reshape(shape[:-1] + (shape[-1] // 2, 2))
+    t = torch.cat([t[..., 0], t[..., 1]], dim=-1)
+    t = t.movedim(-1, axis).contiguous() if moved else t.contiguous()
+    return t

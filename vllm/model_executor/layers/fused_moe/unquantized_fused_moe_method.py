@@ -262,6 +262,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 else:
                     layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
+                if getattr(layer, "is_weights_interleaved", False):
+                    from vllm.model_executor.layers.fused_moe.utils import (
+                        reorder_gate_up_to_halves,
+                    )
+
+                    layer.w13_weight.copy_(
+                        reorder_gate_up_to_halves(layer.w13_weight, axis=1)
+                    )
+                    if hasattr(layer, "w13_bias"):
+                        layer.w13_bias.copy_(
+                            reorder_gate_up_to_halves(layer.w13_bias, axis=-1)
+                        )
+                    layer.is_weights_interleaved = False
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
 
     def apply(
