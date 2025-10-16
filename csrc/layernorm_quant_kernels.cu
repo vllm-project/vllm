@@ -229,6 +229,8 @@ void fused_add_rms_norm_static_fp8_quant(
     double epsilon) {
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(residual.is_contiguous());
+  TORCH_CHECK(residual.scalar_type() == input.scalar_type());
+  TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
