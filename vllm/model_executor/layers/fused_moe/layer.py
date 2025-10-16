@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
@@ -37,9 +38,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
-)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
@@ -84,13 +82,20 @@ else:
         return topk_ids
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    grouped_topk as default_grouped_topk,
+)
 
-if is_rocm_aiter_moe_enabled():
+grouped_topk_func = default_grouped_topk
+
+if rocm_aiter_ops.is_fused_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
-        rocm_aiter_grouped_topk as grouped_topk,
+        rocm_aiter_grouped_topk,
     )
-else:
-    from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+
+    grouped_topk_func = rocm_aiter_grouped_topk
+
+
 if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
@@ -320,7 +325,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
 
@@ -465,13 +471,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Padding the weight for better performance on ROCm
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
-        # Lazy import to avoid importing triton.
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            shuffle_weights,
-        )
 
         if self.rocm_aiter_moe_enabled:
-            shuffled_w13, shuffled_w2 = shuffle_weights(
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data
             )
 
@@ -1900,7 +1902,7 @@ class FusedMoE(CustomOp):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            topk_weights, topk_ids = grouped_topk(
+            topk_weights, topk_ids = grouped_topk_func(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
                 topk=top_k,
