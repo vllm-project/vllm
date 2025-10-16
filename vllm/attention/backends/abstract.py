@@ -122,11 +122,13 @@ class AttentionBackend(ABC):
         )
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[BlockSize]:
+    def get_supported_block_sizes(cls) -> list["BlockSize"]:
         return []
 
     @classmethod
-    def supports_block_size(cls, block_size: BlockSize | None) -> bool:
+    def supports_block_size(cls, block_size: "BlockSize | None") -> bool:
+        from vllm.config.cache import BlockSize
+
         if block_size is None:
             return True
         try:
