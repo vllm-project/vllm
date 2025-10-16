@@ -111,7 +111,7 @@ class AttentionBackend(ABC):
         return (not supported_dtypes) or dtype in supported_dtypes
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+    def get_supported_kv_cache_dtypes(cls) -> list["CacheDType"]:
         return ["auto"]
 
     @classmethod
