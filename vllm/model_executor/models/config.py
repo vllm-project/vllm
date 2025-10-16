@@ -304,14 +304,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             "Mamba2ForCausalLM",
             "NemotronHForCausalLM",
             "Zamba2ForCausalLM",
+        ]
+        GDN_MODELS = [
             "Qwen3NextForCausalLM",
         ]
         if cache_config.enable_prefix_caching:
-            if model_config.architecture in MAMBA2_MODELS:
+            if model_config.architecture in MAMBA2_MODELS + GDN_MODELS:
+                layer_type = (
+                    "Mamba2" if model_config.architecture in MAMBA2_MODELS else "GDN"
+                )
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba2 layers is experimental. "
-                    "Please report any issues you may observe."
+                    "Its support for %s layers is experimental. "
+                    "Please report any issues you may observe.",
+                    layer_type,
                 )
             else:
                 logger.info(
