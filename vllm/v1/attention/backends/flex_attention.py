@@ -43,6 +43,32 @@ create_block_mask_compiled = torch.compile(
     create_block_mask, fullgraph=True, mode="reduce-overhead"
 )
 flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
+_COMPUTE_Q_BLOCKS_SUPPORTED = is_torch_equal_or_newer("2.9.0.dev0")
+
+
+def _block_mask_from_kv_blocks(
+    *,
+    seq_lengths: tuple[int, int],
+    kv_num_blocks: torch.Tensor,
+    kv_indices: torch.Tensor,
+    full_kv_num_blocks: torch.Tensor | None,
+    full_kv_indices: torch.Tensor | None,
+    block_size: tuple[int, int],
+    mask_mod: _mask_mod_signature | None,
+) -> BlockMask:
+    """Common helper to build BlockMask without duplicating kwargs logic."""
+    kwargs: dict[str, object] = {
+        "seq_lengths": seq_lengths,
+        "kv_num_blocks": kv_num_blocks,
+        "kv_indices": kv_indices,
+        "full_kv_num_blocks": full_kv_num_blocks,
+        "full_kv_indices": full_kv_indices,
+        "BLOCK_SIZE": block_size,
+        "mask_mod": mask_mod,
+    }
+    if _COMPUTE_Q_BLOCKS_SUPPORTED:
+        kwargs["compute_q_blocks"] = False
+    return BlockMask.from_kv_blocks(**kwargs)
 
 
 def _create_dense_block_mask(
@@ -67,13 +93,13 @@ def _create_dense_block_mask(
         (1, 1, num_q_blocks), num_kv_blocks, dtype=torch.int32, device=device
     )
 
-    return BlockMask.from_kv_blocks(
+    return _block_mask_from_kv_blocks(
         seq_lengths=(num_q_blocks * q_block_size, num_kv_blocks * kv_block_size),
         kv_num_blocks=kv_num_blocks,
         kv_indices=kv_indices,
         full_kv_num_blocks=None,
         full_kv_indices=None,
-        BLOCK_SIZE=(q_block_size, kv_block_size),
+        block_size=(q_block_size, kv_block_size),
         mask_mod=mask_mod,
     )
 
@@ -103,15 +129,41 @@ def _slice_block_mask_capacity(
         else capacity.full_kv_indices[..., :q_blocks, :kv_blocks].contiguous()
     )
 
-    return BlockMask.from_kv_blocks(
+    return _block_mask_from_kv_blocks(
         seq_lengths=(q_len_aligned, kv_len_aligned),
         kv_num_blocks=kv_num_blocks,
         kv_indices=kv_indices,
         full_kv_num_blocks=full_kv_num_blocks,
         full_kv_indices=full_kv_indices,
-        BLOCK_SIZE=capacity.BLOCK_SIZE,
+        block_size=capacity.BLOCK_SIZE,
         mask_mod=capacity.mask_mod,
     )
+
+
+def _get_safe_q_len_for_dummy_run(
+    attn_metadata: "FlexAttentionMetadata", requested_len: int | None
+) -> int:
+    """Clamp dummy q-len to a small, block-aligned shape for CUDA graphs."""
+    block = max(getattr(attn_metadata, "q_block_size", 1), 1)
+    if requested_len is None or requested_len <= 0:
+        return block
+    return max(1, min(block, requested_len))
+
+
+def _get_safe_kv_len_for_dummy_run(
+    attn_metadata: "FlexAttentionMetadata", requested_len: int | None
+) -> int:
+    """Clamp dummy kv-len to a safe size while respecting block alignment."""
+    block = max(getattr(attn_metadata, "kv_block_size", 1), 1)
+    if requested_len is None or requested_len <= 0:
+        safe_len = block
+    else:
+        safe_len = max(block, min(block, requested_len))
+
+    capacity = getattr(attn_metadata, "block_mask_capacity", None)
+    if capacity is not None:
+        safe_len = min(safe_len, capacity.seq_lengths[1])
+    return max(1, safe_len)
 
 
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
@@ -597,20 +649,15 @@ class FlexAttentionMetadata:
         ).to(torch.int32)
 
         kv_num_blocks = (kv_indices >= 0).sum(dim=-1).to(torch.int32)
-        block_mask_kwargs = {
-            "seq_lengths": (self.num_actual_tokens, self.total_cache_tokens),
-            "kv_num_blocks": kv_num_blocks[None, None],
-            "kv_indices": kv_indices[None, None],
-            "full_kv_num_blocks": None,
-            "full_kv_indices": None,
-            "BLOCK_SIZE": (self.q_block_size, self.kv_block_size),
-            "mask_mod": self.mask_mod,
-        }
-
-        # compute_q_blocks parameter is available in PyTorch 2.9+
-        if is_torch_equal_or_newer("2.9.0.dev0"):
-            block_mask_kwargs["compute_q_blocks"] = False
-        return BlockMask.from_kv_blocks(**block_mask_kwargs)
+        return _block_mask_from_kv_blocks(
+            seq_lengths=(self.num_actual_tokens, self.total_cache_tokens),
+            kv_num_blocks=kv_num_blocks[None, None],
+            kv_indices=kv_indices[None, None],
+            full_kv_num_blocks=None,
+            full_kv_indices=None,
+            block_size=(self.q_block_size, self.kv_block_size),
+            mask_mod=self.mask_mod,
+        )
 
     def _get_effective_mask_mod(self) -> _mask_mod_signature | None:
         """Return the mask_mod to use for block-mask materialization."""
@@ -736,13 +783,13 @@ class FlexAttentionMetadata:
             (1, 1, num_q_blocks), num_kv_blocks, dtype=torch.int32, device=device
         )
 
-        block_mask = BlockMask.from_kv_blocks(
+        block_mask = _block_mask_from_kv_blocks(
             seq_lengths=(q_len, kv_len),
             kv_num_blocks=kv_num_blocks,
             kv_indices=kv_indices,
             full_kv_num_blocks=None,
             full_kv_indices=None,
-            BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
+            block_size=(self.q_block_size, self.kv_block_size),
             mask_mod=mask_mod,
         )
         return block_mask
@@ -1075,6 +1122,10 @@ class FlexAttentionImpl(AttentionImpl):
             or doc_ids is None
             or doc_ids.numel() == 0
         )
+        capturing = (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+        use_dummy_shapes = is_dummy_run or capturing
 
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
@@ -1138,15 +1189,21 @@ class FlexAttentionImpl(AttentionImpl):
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
-        # Shrink tensors during CUDA graph capture to avoid memory explosion
-        if is_dummy_run:
-            query, key_tensor, value_tensor, num_actual_tokens = (
-                _shrink_tensors_for_dummy_run(
-                    query, key_tensor, value_tensor, num_actual_tokens, attn_metadata
-                )
+        if use_dummy_shapes:
+            # During CUDA graph warmup there are no real tokens yet. Keeping
+            # tensors sized to the full KV cache capacity would explode memory
+            # usage, so shrink them to a minimal representative shape.
+            dummy_q_len = _get_safe_q_len_for_dummy_run(attn_metadata, query.size(-2))
+            dummy_kv_len = _get_safe_kv_len_for_dummy_run(
+                attn_metadata, key_tensor.size(-2)
             )
 
-        # Get actual tensor dimensions and ensure block mask capacity
+            query = query[:, :, :dummy_q_len, :]
+            key_tensor = key_tensor[:, :, :dummy_kv_len, :]
+            value_tensor = value_tensor[:, :, :dummy_kv_len, :]
+            num_actual_tokens = dummy_q_len
+
+        # Align the cached block_mask with the actual query/KV lengths.
         actual_q_len = query.size(-2)
         actual_kv_len = key_tensor.size(-2)
 
@@ -1154,20 +1211,23 @@ class FlexAttentionImpl(AttentionImpl):
             actual_q_len, actual_kv_len
         )
 
-        # Align tensors to block mask dimensions
         target_q_len, target_kv_len = block_mask.seq_lengths
         original_num_actual_tokens = num_actual_tokens
 
-        query, key_tensor, value_tensor, num_actual_tokens = (
-            _align_tensors_to_block_mask(
-                query,
-                key_tensor,
-                value_tensor,
-                num_actual_tokens,
-                target_q_len,
-                target_kv_len,
-            )
-        )
+        if query.size(-2) < target_q_len:
+            pad_q = target_q_len - query.size(-2)
+            query = F.pad(query, (0, 0, 0, pad_q))
+        elif query.size(-2) > target_q_len:
+            query = query[:, :, :target_q_len, :]
+            num_actual_tokens = min(num_actual_tokens, target_q_len)
+
+        if key_tensor.size(-2) < target_kv_len:
+            pad_kv = target_kv_len - key_tensor.size(-2)
+            key_tensor = F.pad(key_tensor, (0, 0, 0, pad_kv))
+            value_tensor = F.pad(value_tensor, (0, 0, 0, pad_kv))
+        elif key_tensor.size(-2) > target_kv_len:
+            key_tensor = key_tensor[:, :, :target_kv_len, :]
+            value_tensor = value_tensor[:, :, :target_kv_len, :]
 
         attn_metadata.block_mask = block_mask
         block_m, block_n = block_mask.BLOCK_SIZE
@@ -1195,120 +1255,6 @@ class FlexAttentionImpl(AttentionImpl):
             out[:original_num_actual_tokens]
         )
         return output
-
-
-def _get_safe_kv_len_for_dummy_run(
-    key_tensor: torch.Tensor,
-    attn_metadata: "FlexAttentionMetadata",
-    max_safe_kv_len: int = 8192,
-) -> int:
-    """Get a safe KV length for dummy run during CUDA graph capture.
-
-    For multimodal models, the KV cache can be very large (including encoder cache),
-    but during CUDA graph capture we only need a small representative size.
-
-    Args:
-        key_tensor: The key tensor from KV cache
-        attn_metadata: Attention metadata containing cache info
-        max_safe_kv_len: Maximum safe length to use (default: 8192)
-
-    Returns:
-        A safe KV length that won't cause memory issues
-    """
-    kv_block = getattr(attn_metadata, "kv_block_size", 16) or 16
-    actual_kv_len = key_tensor.size(-2)
-
-    # For decoder self-attention, use block-aligned minimal size
-    # This avoids the issue where encoder cache inflates the KV length
-    if hasattr(attn_metadata, "total_cache_tokens"):
-        # Use a small multiple of kv_block_size, capped at max_safe_kv_len
-        safe_kv_len = min(kv_block * 16, max_safe_kv_len)
-        return max(kv_block, min(actual_kv_len, safe_kv_len))
-
-    # Fallback: use minimal block size
-    return max(1, min(actual_kv_len, kv_block))
-
-
-def _shrink_tensors_for_dummy_run(
-    query: torch.Tensor,
-    key_tensor: torch.Tensor,
-    value_tensor: torch.Tensor,
-    num_actual_tokens: int,
-    attn_metadata: "FlexAttentionMetadata",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Shrink tensors to minimal size during CUDA graph capture dummy run.
-
-    During CUDA graph warmup, there are no real tokens yet. Keeping tensors
-    sized to the full KV cache capacity would explode memory usage, so we
-    shrink them to a minimal representative shape.
-
-    Args:
-        query: Query tensor (B, H, Q, D)
-        key_tensor: Key tensor (B, H, KV, D)
-        value_tensor: Value tensor (B, H, KV, D)
-        num_actual_tokens: Number of actual tokens
-        attn_metadata: Attention metadata
-
-    Returns:
-        Tuple of (query, key_tensor, value_tensor, num_actual_tokens)
-    """
-    q_block = getattr(attn_metadata, "q_block_size", 16) or 16
-
-    # Shrink query to minimal size
-    dummy_q_len = max(1, min(query.size(-2), q_block))
-    query = query[:, :, :dummy_q_len, :]
-
-    # Shrink KV to safe size (not just kv_block, but considering multimodal)
-    dummy_kv_len = _get_safe_kv_len_for_dummy_run(key_tensor, attn_metadata)
-    key_tensor = key_tensor[:, :, :dummy_kv_len, :]
-    value_tensor = value_tensor[:, :, :dummy_kv_len, :]
-
-    num_actual_tokens = dummy_q_len
-
-    return query, key_tensor, value_tensor, num_actual_tokens
-
-
-def _align_tensors_to_block_mask(
-    query: torch.Tensor,
-    key_tensor: torch.Tensor,
-    value_tensor: torch.Tensor,
-    num_actual_tokens: int,
-    target_q_len: int,
-    target_kv_len: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Align query/key/value tensors to the block mask dimensions.
-
-    Pad or truncate tensors to match the block mask's expected dimensions.
-
-    Args:
-        query: Query tensor (B, H, Q, D)
-        key_tensor: Key tensor (B, H, KV, D)
-        value_tensor: Value tensor (B, H, KV, D)
-        num_actual_tokens: Number of actual tokens
-        target_q_len: Target query length from block mask
-        target_kv_len: Target KV length from block mask
-
-    Returns:
-        Tuple of (query, key_tensor, value_tensor, num_actual_tokens)
-    """
-    # Align query tensor
-    if query.size(-2) < target_q_len:
-        pad_q = target_q_len - query.size(-2)
-        query = F.pad(query, (0, 0, 0, pad_q))
-    elif query.size(-2) > target_q_len:
-        query = query[:, :, :target_q_len, :]
-        num_actual_tokens = min(num_actual_tokens, target_q_len)
-
-    # Align key/value tensors
-    if key_tensor.size(-2) < target_kv_len:
-        pad_kv = target_kv_len - key_tensor.size(-2)
-        key_tensor = F.pad(key_tensor, (0, 0, 0, pad_kv))
-        value_tensor = F.pad(value_tensor, (0, 0, 0, pad_kv))
-    elif key_tensor.size(-2) > target_kv_len:
-        key_tensor = key_tensor[:, :, :target_kv_len, :]
-        value_tensor = value_tensor[:, :, :target_kv_len, :]
-
-    return query, key_tensor, value_tensor, num_actual_tokens
 
 
 def get_kernel_options(
