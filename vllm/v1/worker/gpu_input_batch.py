@@ -12,7 +12,8 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import length_from_prompt_token_ids_or_embeds, swap_dict_values
+from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.collections import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (

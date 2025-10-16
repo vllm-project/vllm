@@ -28,7 +28,7 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils import is_list_of
+from vllm.utils.collections import is_list_of
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
