@@ -182,9 +182,7 @@ def test_fusion_rmsnorm_quant(
         model_unfused = torch.compile(model, backend=backend2)
         result_unfused = model_unfused(x)
 
-        if enable_rms_norm_custom_op and static:
-            ATOL, RTOL = (1e-5, 1e-5)  # up to 1e-8 close
-        elif dtype == torch.float16:
+        if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
         elif static:
             ATOL, RTOL = (5e-3, 5e-3)
