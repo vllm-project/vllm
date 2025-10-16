@@ -578,7 +578,7 @@ steps:
 
 - label: AMD LM Eval Large Models
   mirror_hardwares: [amdproduction]
-  agent_pool: mi325_2
+  agent_pool: mi325_8
   num_gpus: 8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
