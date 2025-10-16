@@ -267,6 +267,10 @@ def parse_chat_input(chat_msg) -> list[Message]:
             Author.new(Role.TOOL, f"functions.{name}"), content
         ).with_channel("commentary")
         return [msg]
+    # system message
+    if role == "system":
+        msg = Message.from_dict(chat_msg)
+        return [msg]
 
     # Default: user/assistant/system messages with content
     content = chat_msg.get("content", "")

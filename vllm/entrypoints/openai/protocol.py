@@ -375,10 +375,14 @@ class ResponsesRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Dictates whether or not to return messages as part of the "
-            "response object. Currently only supported for non-streaming "
+            "response object. Currently only supported for"
             "non-background and gpt-oss only. "
         ),
     )
+    # similar to input_messages / output_messages in ResponsesResponse
+    # we take in previous_input_messages (ie in harmony format)
+    # this cannot be used in conjunction with previous_response_id
+    previous_input_messages: list[Any] | None = None
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {

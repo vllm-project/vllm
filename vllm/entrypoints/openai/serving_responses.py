@@ -49,6 +49,7 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -246,6 +247,13 @@ class OpenAIServingResponses(OpenAIServing):
                     "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
                     "the vLLM server."
                 ),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if request.previous_input_messages and request.previous_response_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Only one of `previous_input_messages` and "
+                "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
         return None
@@ -904,7 +912,33 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: ResponsesResponse | None,
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
-        if prev_response is None:
+        if prev_response is None and request.previous_input_messages:
+            import fbvscode
+
+            fbvscode.set_trace()
+            for message in request.previous_input_messages:
+                # Handle both OpenAIHarmonyMessage objects and dictionary inputs
+                if isinstance(message, OpenAIHarmonyMessage):
+                    message_role = message.author.role
+                    # Don't use the previous system or developer messages
+                    if (
+                        message_role == OpenAIHarmonyRole.SYSTEM
+                        or message_role == OpenAIHarmonyRole.DEVELOPER
+                    ):
+                        continue
+                    messages.append(message)
+                else:
+                    # Convert dictionary to harmony message using parse_chat_input
+                    from vllm.entrypoints.harmony_utils import parse_chat_input
+
+                    harmony_messages = parse_chat_input(message)
+                    for harmony_msg in harmony_messages:
+                        message_role = harmony_msg.author.role
+                        # Don't use the previous system or developer messages
+                        # if message_role == OpenAIHarmonyRole.SYSTEM or message_role == OpenAIHarmonyRole.DEVELOPER:
+                        #     continue
+                        messages.append(harmony_msg)
+        elif prev_response is None:
             # New conversation.
             tool_types = [tool.type for tool in request.tools]
             # Allow the MCP Tool type to enable built in tools if the

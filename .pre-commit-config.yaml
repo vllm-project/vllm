@@ -49,7 +49,7 @@ repos:
     files: ^requirements/test\.(in|txt)$
   - id: mypy-local
     name: Run mypy for local Python installation
-    entry: python tools/pre_commit/mypy.py 0 "local"
+    entry: fbpython tools/pre_commit/mypy.py 0 "local"
     stages: [pre-commit] # Don't run in CI
     <<: &mypy_common
       language: python
