@@ -116,10 +116,6 @@ class ARCOffloadingManager(OffloadingManager):
                 t1_size = len(self.t1)
                 t2_size = len(self.t2)
 
-                if t1_size == 0 and t2_size == 0:
-                    # cannot evict enough blocks, cache is full of in-use items
-                    return None
-
                 evict_from_t1 = False
                 if t1_size == 0:
                     evict_from_t1 = False
