@@ -780,6 +780,15 @@ class VllmConfig:
                     env_path,
                 )
             self.compilation_config.debug_dump_path = env_path
+        if (
+            self.compilation_config.backend == "eager"
+            or self.compilation_config.mode == CompilationMode.NONE
+        ):
+            logger.warning(
+                "Warning Compilation was disabled by user settings,"
+                "Optimizations settings that are only active during"
+                "compiliation will be ignored."
+            )
 
         def has_blocked_weights():
             if self.quant_config is not None:
