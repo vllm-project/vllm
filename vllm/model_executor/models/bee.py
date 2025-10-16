@@ -65,7 +65,7 @@ class BeeProcessingInfo(LlavaNextProcessingInfo):
         # Get max_num_patches from vision_aspect_ratio config
         hf_config = self.get_hf_config()
         vision_aspect_ratio = getattr(hf_config, "vision_aspect_ratio", "anyres_max_9")
-        max_num_patches = int(vision_aspect_ratio.removeprefix("anyres_max_"))
+        max_num_patches = int(vision_aspect_ratio.replace("anyres_max_", ""))
 
         ratio = math.sqrt(
             current_height * current_width / (max_num_patches * npatches**2)
