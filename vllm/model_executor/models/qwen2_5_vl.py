@@ -51,7 +51,6 @@ from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
     vit_xformers_attn_wrapper,
 )
-from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
@@ -453,7 +452,6 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
-@set_model_tag("Qwen2_5_VisionBlock")
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
@@ -522,7 +520,6 @@ class Qwen2_5_VisionBlock(nn.Module):
         return x
 
 
-@set_model_tag("Qwen2_5_VisionPatchEmbed")
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
@@ -554,7 +551,6 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         return x
 
 
-@set_model_tag("Qwen2_5_VisionPatchMerger")
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
@@ -669,13 +665,18 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
+        # TODO[@lucaskabela]: Investigate fixing this usage
+        # see https://github.com/vllm-project/vllm/issues/27044
+        # DO NOT MOVE THIS IMPORT
+        from vllm.compilation.backends import set_model_tag
 
-        self.patch_embed = Qwen2_5_VisionPatchEmbed(
-            patch_size=patch_size,
-            temporal_patch_size=temporal_patch_size,
-            in_channels=in_channels,
-            hidden_size=self.hidden_size,
-        )
+        with set_model_tag("Qwen2_5_VisionPatchEmbed"):
+            self.patch_embed = Qwen2_5_VisionPatchEmbed(
+                patch_size=patch_size,
+                temporal_patch_size=temporal_patch_size,
+                in_channels=in_channels,
+                hidden_size=self.hidden_size,
+            )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -704,32 +705,36 @@ class Qwen2_5_VisionTransformer(nn.Module):
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
-        self.blocks = nn.ModuleList(
-            [
-                Qwen2_5_VisionBlock(
-                    dim=self.hidden_size,
-                    num_heads=self.num_heads,
-                    mlp_hidden_dim=vision_config.intermediate_size,
-                    act_fn=get_act_and_mul_fn(vision_config.hidden_act),
-                    norm_layer=norm_layer,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.blocks.{layer_idx}",
-                    use_data_parallel=use_data_parallel,
-                    attn_backend=self.attn_backend,
-                    use_upstream_fa=use_upstream_fa,
-                )
-                for layer_idx in range(depth)
-            ]
-        )
-        self.merger = Qwen2_5_VisionPatchMerger(
-            d_model=vision_config.out_hidden_size,
-            context_dim=self.hidden_size,
-            norm_layer=norm_layer,
-            spatial_merge_size=self.spatial_merge_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.merger",
-            use_data_parallel=use_data_parallel,
-        )
+
+        with set_model_tag("Qwen2_5_VisionBlock"):
+            self.blocks = nn.ModuleList(
+                [
+                    Qwen2_5_VisionBlock(
+                        dim=self.hidden_size,
+                        num_heads=self.num_heads,
+                        mlp_hidden_dim=vision_config.intermediate_size,
+                        act_fn=get_act_and_mul_fn(vision_config.hidden_act),
+                        norm_layer=norm_layer,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.blocks.{layer_idx}",
+                        use_data_parallel=use_data_parallel,
+                        attn_backend=self.attn_backend,
+                        use_upstream_fa=use_upstream_fa,
+                    )
+                    for layer_idx in range(depth)
+                ]
+            )
+
+        with set_model_tag("Qwen2_5_VisionPatchMerger"):
+            self.merger = Qwen2_5_VisionPatchMerger(
+                d_model=vision_config.out_hidden_size,
+                context_dim=self.hidden_size,
+                norm_layer=norm_layer,
+                spatial_merge_size=self.spatial_merge_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.merger",
+                use_data_parallel=use_data_parallel,
+            )
 
     @property
     def dtype(self) -> torch.dtype:
