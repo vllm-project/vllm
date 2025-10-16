@@ -11,6 +11,7 @@ import time
 import warnings
 from typing import Any
 
+import numpy as np
 import torch
 import uvloop
 from tqdm import tqdm
@@ -35,6 +36,13 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils.asyncio import merge_async_iterators
+
+
+def create_warmup_prompt(prompt_len: int) -> TokensPrompt:
+    """Create a random warmup prompt."""
+    return TokensPrompt(
+        prompt_token_ids=np.random.randint(100, size=prompt_len).tolist()
+    )
 
 
 def run_vllm(
@@ -84,6 +92,13 @@ def run_vllm(
         lora_requests = [request.lora_request for request in requests]
 
     use_beam_search = False
+
+    # Warmup: send a single random prompt
+    llm.generate(
+        [create_warmup_prompt(requests[0].prompt_len)],
+        sampling_params[0],
+        use_tqdm=False,
+    )
 
     outputs = None
     if not use_beam_search:
@@ -159,6 +174,14 @@ def run_vllm_chat(
                 detokenize=not disable_detokenize,
             )
         )
+
+    # Warmup: send a single random prompt
+    llm.generate(
+        [create_warmup_prompt(requests[0].prompt_len)],
+        sampling_params[0],
+        use_tqdm=False,
+    )
+
     start = time.perf_counter()
     if do_profile:
         llm.start_profile()
@@ -222,6 +245,14 @@ async def run_vllm_async(
                 )
             )
             lora_requests.append(request.lora_request)
+
+        # Warmup: send a single random prompt
+        async for _ in llm.generate(
+            create_warmup_prompt(requests[0].prompt_len),
+            sampling_params[0],
+            request_id="warmup",
+        ):
+            pass
 
         generators = []
         start = time.perf_counter()
