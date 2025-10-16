@@ -70,7 +70,7 @@ class BeeProcessingInfo(LlavaNextProcessingInfo):
         max_num_patches = int(
             vision_aspect_ratio.removeprefix("anyres_max_")
         )
-        
+
         ratio = math.sqrt(current_height * current_width / (max_num_patches * npatches**2))
         if ratio > 1.1:
             height_factor = int(current_height // ratio)
