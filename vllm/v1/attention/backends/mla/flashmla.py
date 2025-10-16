@@ -13,10 +13,12 @@ from vllm.attention.ops.flashmla import (
     is_flashmla_dense_supported,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_kernel_override_batch_invariant,
 )
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -52,9 +54,29 @@ class FlashMLABackend(MLACommonBackend):
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
 
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
         return [64]
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto", "fp8", "fp8_e4m3"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
+        return [64]
+
+    @classmethod
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(9, 0)
+
+    @classmethod
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(10, 3)
 
 
 @dataclass

@@ -19,8 +19,10 @@ from vllm.attention.ops.flashmla import (
     get_mla_metadata,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
@@ -69,6 +71,30 @@ class FlashMLASparseBackend(AttentionBackend):
     def get_impl_cls() -> type["FlashMLASparseImpl"]:
         return FlashMLASparseImpl
 
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto", "fp8_ds_mla"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
+        return [64]
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(10, 0)
+
+    @classmethod
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(10, 3)
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -83,14 +109,6 @@ class FlashMLASparseBackend(AttentionBackend):
             return (num_blocks, block_size, 656)
         else:
             return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
 
 
 @dataclass
