@@ -75,6 +75,7 @@ _fp8_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
+_get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
@@ -83,7 +84,7 @@ def _lazy_init() -> None:
     global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
     global _get_mn_major_tma_aligned_tensor_impl
-
+    global _get_mk_alignment_for_contiguous_layout_impl
     # fast path
     if (
         _fp8_gemm_nt_impl is not None
@@ -92,6 +93,7 @@ def _lazy_init() -> None:
         or _fp8_mqa_logits_impl is not None
         or _fp8_paged_mqa_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
+        or _get_mk_alignment_for_contiguous_layout_impl is not None
     ):
         return
 
@@ -118,12 +120,24 @@ def _lazy_init() -> None:
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None
     )
+    _get_mk_alignment_for_contiguous_layout_impl = getattr(
+        _dg, "get_mk_alignment_for_contiguous_layout", None
+    )
 
 
 def get_num_sms() -> int:
     _lazy_init()
     _dg = importlib.import_module("deep_gemm")
     return int(_dg.get_num_sms())
+
+
+@functools.cache
+def get_mk_alignment_for_contiguous_layout() -> list[int]:
+    _lazy_init()
+    if _get_mk_alignment_for_contiguous_layout_impl is None:
+        return _missing()
+    mk_align_size = _get_mk_alignment_for_contiguous_layout_impl()
+    return [mk_align_size, mk_align_size]
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
@@ -338,4 +352,5 @@ __all__ = [
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
+    "get_mk_alignment_for_contiguous_layout",
 ]
