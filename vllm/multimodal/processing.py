@@ -484,8 +484,11 @@ _M = TypeVar("_M", bound=_HasModalityAttr | _HasModalityProp)
 
 
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
-    """Convenience function to apply [`full_groupby`][vllm.utils.full_groupby]
-    based on modality."""
+    """
+    Convenience function to apply
+    [`full_groupby`][vllm.utils.collections.full_groupby]
+    based on modality.
+    """
     return full_groupby(values, key=lambda x: x.modality)
 
 
