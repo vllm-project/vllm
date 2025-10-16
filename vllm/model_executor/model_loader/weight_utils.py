@@ -34,7 +34,7 @@ from vllm.model_executor.layers.quantization import (
     get_quantization_config,
 )
 from vllm.platforms import current_platform
-from vllm.utils.importlib import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer

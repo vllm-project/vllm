@@ -35,7 +35,7 @@ from vllm.utils import (
     set_process_title,
 )
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
-from vllm.utils.importlib import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,

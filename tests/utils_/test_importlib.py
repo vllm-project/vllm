@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from vllm.utils.importlib import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 
 def _raises_module_not_found():

@@ -14,7 +14,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.logger import init_logger
 from vllm.utils import STR_BACKEND_ENV_VAR
-from vllm.utils.importlib import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 

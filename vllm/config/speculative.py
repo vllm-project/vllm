@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils.importlib import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig

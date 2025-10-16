@@ -22,7 +22,7 @@ from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
-from vllm.utils.importlib import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .monitor import start_monitoring_torch_compile
 

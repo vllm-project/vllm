@@ -39,7 +39,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils.importlib import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 try:
     from datasets import load_dataset

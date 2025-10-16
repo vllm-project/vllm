@@ -19,7 +19,7 @@ from vllm.utils import (
     update_environment_variables,
     warn_for_unimplemented_methods,
 )
-from vllm.utils.importlib import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:

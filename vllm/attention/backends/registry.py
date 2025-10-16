@@ -4,7 +4,7 @@
 
 import enum
 
-from vllm.utils.importlib import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 
 class _Backend(enum.Enum):

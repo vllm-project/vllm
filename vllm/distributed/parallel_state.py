@@ -54,7 +54,7 @@ from vllm.utils import (
     get_distributed_init_method,
     supports_custom_op,
 )
-from vllm.utils.importlib import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 
 @dataclass

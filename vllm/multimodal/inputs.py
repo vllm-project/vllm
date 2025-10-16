@@ -23,7 +23,7 @@ import numpy as np
 from typing_extensions import NotRequired, TypeVar, deprecated
 
 from vllm.utils.collections import full_groupby, is_list_of
-from vllm.utils.importlib import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 
 if TYPE_CHECKING:
