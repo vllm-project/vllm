@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pickle import PickleBuffer
 from threading import Event
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import torch
@@ -33,6 +33,9 @@ from vllm.utils import (
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
 )
+
+if TYPE_CHECKING:
+    from _typeshed import SizedBuffer
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
@@ -513,7 +516,7 @@ class MessageQueue:
     def enqueue(self, obj, timeout: float | None = None):
         """Write to message queue with optional timeout (in seconds)"""
         assert self._is_writer, "Only writers can enqueue"
-        oob_buffers = []
+        all_buffers: list[SizedBuffer] = [b""]
         total_bytes = 6  # 2 bytes for oob buffer count, 4 for main buffer size
 
         def oob_callback(buf: PickleBuffer) -> bool:
@@ -521,31 +524,25 @@ class MessageQueue:
             if len(raw_buf) < 1024 * 1024:
                 # In-line buffers smaller than 1MiB.
                 return True
-            oob_buffers.append(raw_buf)
+            all_buffers.append(raw_buf)
             nonlocal total_bytes
             total_bytes += len(raw_buf) + 4
             return False
 
-        serialized_obj = pickle.dumps(
+        all_buffers[0] = pickle.dumps(
             obj, protocol=pickle.HIGHEST_PROTOCOL, buffer_callback=oob_callback
         )
         if self.n_local_reader > 0:
-            main_buf_len = len(serialized_obj)
-            total_bytes += main_buf_len
-            if total_bytes >= self.buffer.max_chunk_bytes:
+            if total_bytes + len(all_buffers[0]) >= self.buffer.max_chunk_bytes:
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 1  # overflow
-                self.local_socket.send_multipart(
-                    (serialized_obj, *oob_buffers), copy=False
-                )
+                self.local_socket.send_multipart(all_buffers, copy=False)
             else:
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 0  # not overflow
-                    buf[1:3] = to_bytes_big(len(oob_buffers), 2)  # oob buffer count
-                    buf[3:7] = to_bytes_big(main_buf_len, 4)  # size of main buffer
-                    offset = 7 + main_buf_len
-                    buf[7:offset] = serialized_obj
-                    for buffer in oob_buffers:
+                    offset = 3
+                    buf[1:offset] = to_bytes_big(len(all_buffers), 2)  # oob buf count
+                    for buffer in all_buffers:
                         buf_len = len(buffer)
                         # prepend each buffer with 4 bytes containing its size.
                         buf_offset = offset + 4
@@ -553,9 +550,7 @@ class MessageQueue:
                         buf[buf_offset : (offset := buf_offset + buf_len)] = buffer
 
         if self.n_remote_reader > 0:
-            self.remote_socket.send_multipart(
-                (serialized_obj, *oob_buffers), copy=False
-            )
+            self.remote_socket.send_multipart(all_buffers, copy=False)
 
     def dequeue(
         self,
@@ -568,17 +563,15 @@ class MessageQueue:
             with self.acquire_read(timeout, cancel, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
-                    buf_count = from_bytes_big(buf[1:3])
-                    main_buf_len = from_bytes_big(buf[3:7])
-                    offset = 7 + main_buf_len
-                    main_buf = buf[7:offset]
-                    oob_buffers = []
+                    offset = 3
+                    buf_count = from_bytes_big(buf[1:offset])
+                    all_buffers = []
                     for i in range(buf_count):
                         buf_offset = offset + 4
                         buf_len = from_bytes_big(buf[offset:buf_offset])
                         offset = buf_offset + buf_len
-                        oob_buffers.append(buf[buf_offset:offset])
-                    obj = pickle.loads(main_buf, buffers=oob_buffers)
+                        all_buffers.append(buf[buf_offset:offset])
+                    obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
