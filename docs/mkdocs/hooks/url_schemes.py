@@ -61,7 +61,7 @@ def on_page_markdown(
             return match.group(0)
 
         # Files and directories have different URL schemes on GitHub
-        slug = "tree/main" if path.is_dir() else "/blob/main"
+        slug = "tree/main" if path.is_dir() else "blob/main"
 
         path = path.relative_to(ROOT_DIR)
         url = f"https://github.com/vllm-project/vllm/{slug}/{path}"
