@@ -1722,7 +1722,7 @@ def selective_scan_fwd(
     has_initial_state: torch.Tensor | None,
     ssm_states: torch.Tensor,
     pad_slot_id: int,
-    intermediate_states: Optional[torch.Tensor] = None,
+    intermediate_states: torch.Tensor | None = None,
     block_size: int = 256,  # TODO(Josephasafg): Make this optional
     max_blocks: int = 0,  # TODO(Josephasafg): Make this optional
 ):

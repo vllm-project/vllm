@@ -28,7 +28,7 @@ class Mamba1AttentionMetadata:
     query_start_loc_p: torch.Tensor
     state_indices_tensor: torch.Tensor
     seq_lens: torch.Tensor
-    has_initial_states_p: Optional[torch.Tensor]
+    has_initial_states_p: torch.Tensor | None
     num_prefills: int
     num_prefill_tokens: int
     num_decodes: int
@@ -149,7 +149,7 @@ class Mamba1AttentionMetadataBuilder(
                     num_reqs - num_prefills : num_reqs
                 ]
 
-        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs:
+        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs and self.compilation_config.full_cuda_graph:
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
             )
