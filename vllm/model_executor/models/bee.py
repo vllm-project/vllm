@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -23,13 +22,12 @@ from .utils import WeightsMapper
 
 
 class BeeProcessingInfo(LlavaNextProcessingInfo):
-
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(**kwargs)
-    
+
     def _get_num_unpadded_features(
         self,
         *,
@@ -41,7 +39,7 @@ class BeeProcessingInfo(LlavaNextProcessingInfo):
     ) -> tuple[int, int]:
         """Override to use correct max_num_patches from vision_aspect_ratio."""
         import math
-        
+
         current_height = npatches * num_patch_height
         current_width = npatches * num_patch_width
 
@@ -66,12 +64,12 @@ class BeeProcessingInfo(LlavaNextProcessingInfo):
 
         # Get max_num_patches from vision_aspect_ratio config
         hf_config = self.get_hf_config()
-        vision_aspect_ratio = getattr(hf_config, 'vision_aspect_ratio', 'anyres_max_9')
-        max_num_patches = int(
-            vision_aspect_ratio.removeprefix("anyres_max_")
-        )
+        vision_aspect_ratio = getattr(hf_config, "vision_aspect_ratio", "anyres_max_9")
+        max_num_patches = int(vision_aspect_ratio.removeprefix("anyres_max_"))
 
-        ratio = math.sqrt(current_height * current_width / (max_num_patches * npatches**2))
+        ratio = math.sqrt(
+            current_height * current_width / (max_num_patches * npatches**2)
+        )
         if ratio > 1.1:
             height_factor = int(current_height // ratio)
             width_factor = int(current_width // ratio)
@@ -82,7 +80,6 @@ class BeeProcessingInfo(LlavaNextProcessingInfo):
 
 
 class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         image_token = "<image>"
@@ -93,18 +90,16 @@ class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features(
-        )
+        target_width, target_height = self.info.get_image_size_with_most_features()
 
         image_overrides = mm_options.get("image") if mm_options else None
 
         return {
-            "image":
-            self._get_dummy_images(
+            "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
@@ -114,11 +109,9 @@ class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
 
 
 class BeeMultiModalProjector(nn.Module):
-
     def __init__(self, config):
         super().__init__()
-        self.pre_norm = nn.LayerNorm(config.vision_config.hidden_size,
-                                     eps=1e-06)
+        self.pre_norm = nn.LayerNorm(config.vision_config.hidden_size, eps=1e-06)
         self.linear_1 = nn.Linear(
             config.vision_config.hidden_size,
             config.text_config.hidden_size * 4,
@@ -155,7 +148,8 @@ class BeeForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
             "model.multi_modal_projector.": "multi_modal_projector.",
             "model.image_newline": "image_newline",
             "lm_head.": "language_model.lm_head.",
-        })
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
