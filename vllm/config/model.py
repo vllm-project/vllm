@@ -1763,29 +1763,7 @@ class ModelConfig:
             True if model is MOE.
             False otherwise.
         """
-        # Get text config (handles multimodal models)
-        assert hasattr(self, "hf_config")
-
-        text_config = self.hf_config.get_text_config()
-
-        # Check for MoE (Mixture of Experts) indicators
-        num_expert_names = [
-            "num_experts",  # Jamba
-            "moe_num_experts",  # Dbrx
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-
-        num_experts = getattr_iter(text_config, num_expert_names, 0)
-
-        # Handle list case (e.g., Ernie VL)
-        is_moe_model = False
-        if isinstance(num_experts, list):
-            is_moe_model = max(num_experts) > 1
-        else:
-            is_moe_model = num_experts > 1
-
-        return is_moe_model
+        return self.get_num_experts() > 1
 
     def is_quantized(self) -> bool:
         """
