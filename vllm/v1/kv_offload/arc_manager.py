@@ -47,8 +47,8 @@ class ARCOffloadingManager(OffloadingManager):
         blocks = []
         for block_hash in block_hashes:
             block = self.t1.get(block_hash) or self.t2.get(block_hash)
-            assert block is not None, f"Block {block_hash} not found in cache"
-            assert block.is_ready, f"Block {block_hash} is not ready for reading"
+            assert block is not None, f"Block {block_hash!r} not found in cache"
+            assert block.is_ready, f"Block {block_hash!r} is not ready for reading"
 
             block.ref_cnt += 1
             blocks.append(block)
@@ -77,8 +77,8 @@ class ARCOffloadingManager(OffloadingManager):
     def complete_load(self, block_hashes: Iterable[BlockHash]):
         for block_hash in block_hashes:
             block = self.t1.get(block_hash) or self.t2.get(block_hash)
-            assert block is not None, f"Block {block_hash} not found"
-            assert block.ref_cnt > 0, f"Block {block_hash} ref_cnt is already 0"
+            assert block is not None, f"Block {block_hash!r} not found"
+            assert block.ref_cnt > 0, f"Block {block_hash!r} ref_cnt is already 0"
 
             block.ref_cnt -= 1
 
