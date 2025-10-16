@@ -1738,11 +1738,7 @@ class ModelConfig:
         self,
     ) -> bool:
         """
-        Parse model configuration to determine if sequence parallel is needed.
-
-        Returns:
-            True if model is MOE.
-            False otherwise.
+        Parse model configuration to determine if it is MOE.
         """
         return self.get_num_experts() > 1
 
