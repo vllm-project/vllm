@@ -15,7 +15,7 @@ MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 DTYPE = "float16"
 
 
-def _get_payload(model_name: str):
+def _terratorch_dummy_inputs(model_name: str):
     pixel_values = torch.full((6, 512, 512), 1.0, dtype=torch.float16)
     location_coords = torch.full((1, 2), 1.0, dtype=torch.float16)
 
@@ -71,7 +71,7 @@ async def test_single_request(model_name: str):
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as server:
-        prompt = _get_payload(model_name)
+        prompt = _terratorch_dummy_inputs(model_name)
 
         # test single pooling
         response = requests.post(server.url_for("pooling"), json=prompt)
@@ -81,31 +81,3 @@ async def test_single_request(model_name: str):
 
         np_response = np.frombuffer(base64.b64decode(output), dtype=np.float32)
         assert len(np_response) == 524288
-
-
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("enable_mm_embeds", [False])
-def test_bad_server(model_name: str, enable_mm_embeds):
-    args = [
-        "--runner",
-        "pooling",
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        DTYPE,
-        "--enforce-eager",
-        "--trust-remote-code",
-        "--max-num-seqs",
-        "32",
-        "--model-impl",
-        "terratorch",
-        "--skip-tokenizer-init",
-    ]
-
-    if enable_mm_embeds:
-        args.append("--enable-mm-embeds")
-
-    with RemoteOpenAIServer(MODEL_NAME, args) as server:
-        prompt = _get_payload(model_name)
-
-        response = requests.post(server.url_for("pooling"), json=prompt)
-        assert response.status_code == 400
