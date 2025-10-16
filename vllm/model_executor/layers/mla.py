@@ -4,10 +4,20 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import envs
 from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
+
+
+def is_aiter_mla_rope_flush_cache_fusion_enabled() -> bool:
+    return (
+        current_platform.is_rocm()
+        and envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_MLA
+    )
 
 
 @dataclass
@@ -104,6 +114,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         )
 
         self.prefix = prefix
+        self.mla_attn.impl.rotary_emb = self.rotary_emb
 
     def forward_native(
         self,
@@ -147,9 +158,10 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
+        if not is_aiter_mla_rope_flush_cache_fusion_enabled():
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
@@ -158,6 +170,9 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             q,
             kv_c_normed,
             k_pe,
+            positions=(
+                positions if is_aiter_mla_rope_flush_cache_fusion_enabled() else None
+            ),
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
         return self.o_proj(attn_out)[0]
