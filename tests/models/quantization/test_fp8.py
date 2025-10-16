@@ -9,6 +9,7 @@ Note: these tests will only pass on L4 GPU.
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
 from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR
 
@@ -68,6 +69,11 @@ def test_models(
 
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
         pytest.skip(f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
+
+    if not flash_attn_supports_fp8():
+        pytest.skip(
+            f"{kv_cache_dtype} is not supported on this GPU type with {backend} attention."
+        )
 
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
