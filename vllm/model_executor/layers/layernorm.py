@@ -79,15 +79,15 @@ def rocm_aiter_rms_norm_impl(
 
 
 def rocm_aiter_rmsnorm2d_fwd_with_add_impl(
+    output: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
+    residual_out: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> None:
     import aiter as rocm_aiter
 
-    residual_out = torch.empty_like(residual)
-    output = torch.empty_like(x)
     rocm_aiter.rmsnorm2d_fwd_with_add(
         output,  # output
         x,  # input
@@ -96,7 +96,6 @@ def rocm_aiter_rmsnorm2d_fwd_with_add_impl(
         weight,
         variance_epsilon,
     )
-    return output, residual_out
 
 
 def rocm_aiter_rms_norm_fake(
@@ -106,12 +105,14 @@ def rocm_aiter_rms_norm_fake(
 
 
 def rocm_aiter_rmsnorm2d_fwd_with_add_fake(
+    output: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
+    residual_out: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x), torch.empty_like(residual)
+) -> None:
+    pass
 
 
 if current_platform.is_rocm():
@@ -124,25 +125,9 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
         op_func=rocm_aiter_rmsnorm2d_fwd_with_add_impl,
+        mutates_args=["output", "residual_out"],
         fake_impl=rocm_aiter_rmsnorm2d_fwd_with_add_fake,
     )
-
-
-def dispatch_rocm_rmsnorm_func(with_fused_add: bool, dtype: torch.dtype):
-    use_aiter = is_rocm_aiter_rmsnorm_enabled() and dtype in [
-        torch.float16,
-        torch.bfloat16,
-    ]
-
-    if use_aiter and with_fused_add:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add
-    if use_aiter:
-        return torch.ops.vllm.rocm_aiter_rms_norm
-
-    # fall back to CUDA implementation
-    if with_fused_add:
-        return fused_add_rms_norm
-    return rms_norm
 
 
 @CustomOp.register("rms_norm")
@@ -177,13 +162,10 @@ class RMSNorm(CustomOp):
             self.weight = nn.Parameter(self.weight)
         weight_dtype = self.weight.data.dtype
 
-        if current_platform.is_rocm():
-            self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
-                with_fused_add=False, dtype=weight_dtype
-            )
-            self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
-                with_fused_add=True, dtype=weight_dtype
-            )
+        self.rocm_use_aiter = is_rocm_aiter_rmsnorm_enabled() and weight_dtype in [
+            torch.float16,
+            torch.bfloat16,
+        ]
 
     def forward_native(
         self,
@@ -251,12 +233,26 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         add_residual = residual is not None
-        if add_residual:
-            return self.rocm_norm_func_with_add(
-                x, residual, self.weight.data, self.variance_epsilon
-            )
-        else:
-            return self.rocm_norm_func(x, self.weight.data, self.variance_epsilon)
+        if self.rocm_use_aiter:
+            if add_residual:
+                residual_out = torch.empty_like(residual)
+                output = torch.empty_like(x)
+
+                torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
+                    output,
+                    x,
+                    residual,
+                    residual_out,
+                    self.weight.data,
+                    self.variance_epsilon,
+                )
+                return output, residual_out
+            else:
+                return torch.ops.vllm.rocm_aiter_rms_norm(
+                    x, self.weight.data, self.variance_epsilon
+                )
+
+        return self.forward_cuda(x, residual)
 
     def forward_xpu(
         self,

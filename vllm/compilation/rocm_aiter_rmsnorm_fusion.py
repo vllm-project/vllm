@@ -52,14 +52,12 @@ def rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
     weight: torch.Tensor,
     y_scale: torch.Tensor,
     epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> None:
     import aiter as rocm_aiter
 
     rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
         out, input, y_scale, weight, epsilon, use_model_sensitive_rmsnorm=0
     )
-
-    return out, y_scale
 
 
 def rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
@@ -68,21 +66,20 @@ def rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     weight: torch.Tensor,
     y_scale: torch.Tensor,
     epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return out, y_scale
+) -> None:
+    pass
 
 
 def rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
     out: torch.Tensor,
     input: torch.Tensor,
     residual: torch.Tensor,
+    residual_out: torch.Tensor,
     weight: torch.Tensor,
     y_scale: torch.Tensor,
     epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> None:
     import aiter as rocm_aiter
-
-    residual_out = torch.empty_like(residual)
 
     rocm_aiter.rmsnorm2d_fwd_with_add_dynamicquant(
         out,
@@ -95,18 +92,17 @@ def rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
         use_model_sensitive_rmsnorm=0,
     )
 
-    return out, residual_out, y_scale
-
 
 def rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
     out: torch.Tensor,
     input: torch.Tensor,
     residual: torch.Tensor,
+    residual_out: torch.Tensor,
     weight: torch.Tensor,
     y_scale: torch.Tensor,
     epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return out, torch.empty_like(residual), y_scale
+) -> None:
+    pass
 
 
 if current_platform.is_rocm():
@@ -121,7 +117,7 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
         op_func=rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
-        mutates_args=["out", "y_scale"],
+        mutates_args=["out", "residual_out", "y_scale"],
         fake_impl=rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
@@ -193,13 +189,16 @@ class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            return self.FUSED_OP(
+            at = auto_functionalized(
+                self.FUSED_OP,
                 out=result,
                 input=input,
                 weight=weight,
                 y_scale=scale,
                 epsilon=self.epsilon,
             )
+
+            return at[1], at[2]
 
         inputs = [
             torch.empty(5, 4, device="cuda", dtype=self.quant_dtype),  # result
@@ -252,44 +251,57 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
     def register(self, pm_pass):
         def pattern(
             result: torch.Tensor,
+            rms_result: torch.Tensor,
             input: torch.Tensor,
             residual: torch.Tensor,
+            residual_out: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            rms_out, residual_out = self.ROCM_AITER_RMS_ADD_OP(
+            at = auto_functionalized(
+                self.ROCM_AITER_RMS_ADD_OP,
+                output=rms_result,
                 x=input,
                 residual=residual,
+                residual_out=residual_out,
                 weight=weight,
                 variance_epsilon=self.epsilon,
             )
 
-            at = auto_functionalized(
-                self.QUANT_OP, result=result, input=rms_out, scale=scale, scale_ub=None
+            at1 = auto_functionalized(
+                self.QUANT_OP, result=result, input=at[1], scale=scale, scale_ub=None
             )
 
-            return at[1], residual_out, at[2]
+            return at1[1], at[2], at1[2]
 
         def replacement(
             result: torch.Tensor,
+            rms_result: torch.Tensor,
             input: torch.Tensor,
             residual: torch.Tensor,
+            residual_out: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            return self.FUSED_OP(
+            at = auto_functionalized(
+                self.FUSED_OP,
                 out=result,
                 input=input,
                 residual=residual,
+                residual_out=residual_out,
                 weight=weight,
                 y_scale=scale,
                 epsilon=self.epsilon,
             )
+            # result, residual, scale
+            return at[1], at[2], at[3]
 
         inputs = [
             torch.empty(5, 4, device="cuda", dtype=self.quant_dtype),  # result
+            empty_bf16(5, 4),  # result_rms
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
+            empty_bf16(5, 4),  # residual_out
             empty_bf16(1, 5),  # weight
             empty_fp32(1, 1),  # scale
         ]

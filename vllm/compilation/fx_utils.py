@@ -64,29 +64,8 @@ def find_getitem(node: fx.Node, idx: int) -> fx.Node:
 
 
 # An auto-functionalization-aware utility for finding nodes with a specific op
-def find_op_nodes(
-    op: OpOverload, graph: fx.Graph, target_op_only: bool = False
-) -> Iterator[fx.Node]:
-    """
-    Yields all nodes in the graph that call the given op.
-        op (OpOverload):
-            The operator overload to match within the FX graph.
-        graph (fx.Graph):
-            The FX graph to search for nodes calling the specified operator.
-        target_op_only (bool):
-            If True, only yields nodes that directly call the specified operator.
-            If False, also yields nodes that call
-            the operator via auto_functionalized.
-            This is useful when `op`
-            is a mutable or custom-registered operator
-            that does not have an auto-functionalized version.
-    """
-
-    # op can be mutable by default, not using auto_functionalized.
-    # op like aiter_rmsnorm_fused_dynamic_quant has mutable schema
-    # by default directly registered on vllm namespace.
-    # it is not auto functionalized.
-    if not op._schema.is_mutable or target_op_only:
+def find_op_nodes(op: OpOverload, graph: fx.Graph) -> Iterator[fx.Node]:
+    if not op._schema.is_mutable:
         yield from graph.find_nodes(op="call_function", target=op)
 
     for n in graph.find_nodes(op="call_function", target=auto_functionalized):

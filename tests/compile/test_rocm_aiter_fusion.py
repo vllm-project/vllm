@@ -81,21 +81,17 @@ class TestModel(torch.nn.Module):
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
-    def ops_in_model_before(self) -> Sequence[tuple[OpOverload, bool]]:
-        # find fp8 quant ops in the model before fusion using
-        # its funcationalized version (without directly targeting the function).
-        return [(QUANT_OPS[self.key], False)]
+    def ops_in_model_before(self) -> Sequence[OpOverload]:
+        return [(QUANT_OPS[self.key])]
 
-    def ops_in_model_after(self) -> Sequence[tuple[OpOverload, bool]]:
-        # find aiter rmsnorm fused ops in the model
-        # after fusion by directly targeting the function.
+    def ops_in_model_after(self) -> Sequence[OpOverload]:
         ROCM_AITER_FUSED_OPS = (
             FusedAddRMSNormAiterDynamicQuantPattern.ROCM_AITER_FUSED_OPS
             | RMSNormAiterDynamicQuantPattern.ROCM_AITER_FUSED_OPS
         )
         return [
-            (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, False)], True),
-            (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, True)], True),
+            (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, False)]),
+            (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, True)]),
         ]
 
 
@@ -151,7 +147,7 @@ def test_fusion_rmsnorm_quant(
         assert fusion_pass.matched_count == 2
 
         # In pre-nodes, fp8 quant should be there and fused kernels should not
-        backend.check_before_fused_auto_custom_ops(model.ops_in_model_before())
+        backend.check_before_ops(model.ops_in_model_before())
 
         # In post-nodes, fused kernels should be there and fp8 quant should not
-        backend.check_after_fused_auto_custom_ops(model.ops_in_model_after())
+        backend.check_after_ops(model.ops_in_model_after())
