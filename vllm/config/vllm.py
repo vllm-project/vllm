@@ -35,12 +35,12 @@ from .load import LoadConfig
 from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
-from .optimization import OptimizationLevel, build_defaults
+from .optimization import OptimizationLevel
 from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config
+from .utils import SupportsHash, config, resolve_config_value
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -296,41 +296,143 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
-    def _apply_optimization_level_defaults(self, default_config: dict) -> None:
-        """Apply optimization level-specific default configurations.
+    def _build_defaults(self):
+        """Build optimization level-specific default configurations.
 
-        Configures defaults for -O0 through -O3 based on compilation level.
-        Only sets values not explicitly configured by the user.
+        Returns configuration dict for the current optimization level (O0-O3).
+        Supports static values or callables for conditional defaults:
+            e.g., lambda cfg: cfg.model_config.is_quantized()
+        """
+        is_quantized = False
+        is_sequential = False
+        if self.model_config is not None:
+            is_quantized = self.model_config.is_quantized()
+            is_sequential = not self.model_config.is_model_moe()
+        optimization_level_00 = {
+            "general": {
+                "pass_config": {
+                    "enable_noop": False,
+                    "enable_fusion": False,
+                    "enable_fi_allreduce_fusion": False,
+                },
+                "mode": CompilationMode.NONE,
+                "cudagraph_mode": CUDAGraphMode.NONE,
+                "use_inductor_graph_partition": False,
+            },
+            "is_quantized": {"pass_config": {"enable_attn_fusion": False}},
+            "is_sequential": {
+                "pass_config": {
+                    "enable_sequence_parallelism": False,
+                    "enable_async_tp": False,
+                }
+            },
+        }
+        optimization_level_01 = {
+            "general": {
+                "pass_config": {
+                    "enable_noop": True,
+                    "enable_fusion": True,
+                    "enable_fi_allreduce_fusion": False,
+                },
+                "mode": CompilationMode.VLLM_COMPILE,
+                "cudagraph_mode": CUDAGraphMode.PIECEWISE,
+                "use_inductor_graph_partition": False,
+            },
+            "is_quantized": {"pass_config": {"enable_attn_fusion": False}},
+            "is_sequential": {
+                "pass_config": {
+                    "enable_sequence_parallelism": False,
+                    "enable_async_tp": False,
+                }
+            },
+        }
+        optimization_level_02 = {
+            "general": {
+                "pass_config": {
+                    "enable_noop": True,
+                    "enable_fusion": True,
+                    "enable_fi_allreduce_fusion": True,
+                },
+                "mode": CompilationMode.VLLM_COMPILE,
+                "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+                "use_inductor_graph_partition": True,
+            },
+            "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
+            "is_sequential": {
+                "pass_config": {
+                    "enable_sequence_parallelism": is_sequential,
+                    "enable_async_tp": is_sequential,
+                }
+            },
+        }
+        optimization_level_03 = {
+            "general": {
+                "pass_config": {
+                    "enable_noop": True,
+                    "enable_fusion": True,
+                    "enable_fi_allreduce_fusion": True,
+                },
+                "mode": CompilationMode.VLLM_COMPILE,
+                "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+                "use_inductor_graph_partition": True,
+            },
+            "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
+            "is_sequential": {
+                "pass_config": {
+                    "enable_sequence_parallelism": is_sequential,
+                    "enable_async_tp": is_sequential,
+                }
+            },
+        }
+        optimization_level_to_config = {
+            OptimizationLevel.O0: optimization_level_00,
+            OptimizationLevel.O1: optimization_level_01,
+            OptimizationLevel.O2: optimization_level_02,
+            OptimizationLevel.O3: optimization_level_03,
+        }
+        return optimization_level_to_config[self.optimization_level]
 
-        Optimization Levels:
-            - (None): No optimization, fast startup, eager execution
-            - (STOCK_TORCH_COMPILE): Fast compilation
-            - (DYNAMO_TRACE_ONCE): Full optimization
-            - (VLLM_COMPILE): Maximum optimization with autotuning
+    def _set_config_default(self, config_obj: Any, key: str, value: Any) -> None:
+        """Set config attribute to default if not already set by user.
 
         Args:
-            default_config: The default configuration dictionary based on the
-            optimization level, generated by build_defaults().
+            config_obj: Configuration object to update.
+            key: Attribute name.
+            value: Default value (static or callable).
         """
-        # Apply optimization level default if not set by user.
+        if getattr(config_obj, key) is None:
+            setattr(config_obj, key, resolve_config_value(value, self))
+
+    def _apply_optimization_level_defaults(self, default_config: dict) -> None:
+        """Apply optimization level defaults (O0-O3) to compilation config.
+
+        Configures defaults based on optimization level. Only sets values
+        not explicitly configured by the user. Supports callable defaults
+        (lambdas/functions) that take VllmConfig as input and return the
+        appropriate value.
+
+        Optimization Levels:
+            - O0 (None): No optimization, fast startup, eager execution
+            - O1 (STOCK_TORCH_COMPILE): Fast compilation
+            - O2 (DYNAMO_TRACE_ONCE): Full optimization
+            - O3 (VLLM_COMPILE): Maximum optimization with autotuning
+        """
         for k, v in default_config["general"].items():
             if k == "pass_config":
                 for pass_k, pass_v in default_config["general"]["pass_config"].items():
-                    if getattr(self.compilation_config.pass_config, pass_k) is None:
-                        setattr(self.compilation_config.pass_config, pass_k, pass_v)
+                    self._set_config_default(
+                        self.compilation_config.pass_config, pass_k, pass_v
+                    )
             else:
-                if getattr(self.compilation_config, k) is None:
-                    setattr(self.compilation_config, k, v)
+                self._set_config_default(self.compilation_config, k, v)
 
         assert self.optimization_level is not None
 
         for k, v in default_config["is_quantized"]["pass_config"].items():
-            if getattr(self.compilation_config.pass_config, k) is None:
-                setattr(self.compilation_config.pass_config, k, v)
+            self._set_config_default(self.compilation_config.pass_config, k, v)
 
         for k, v in default_config["is_sequential"]["pass_config"].items():
-            if getattr(self.compilation_config.pass_config, k) is None:
-                setattr(self.compilation_config.pass_config, k, v)
+            self._set_config_default(self.compilation_config.pass_config, k, v)
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
@@ -382,9 +484,7 @@ class VllmConfig:
             self.optimization_level = OptimizationLevel.O0
 
         # Apply optimization level-specific defaults
-        default_config = build_defaults(
-            optimization_level=self.optimization_level, model_config=self.model_config
-        )
+        default_config = self._build_defaults()
         self._apply_optimization_level_defaults(default_config)
         assert self.compilation_config.mode >= CompilationMode.NONE
         assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
