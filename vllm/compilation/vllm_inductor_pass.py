@@ -11,7 +11,7 @@ import torch
 from torch._dynamo.utils import lazy_format_graph_code
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from .inductor_pass import InductorPass
@@ -20,23 +20,10 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class SimplifiedCompilationConfig:
+class InductorCompilationConfig:
     splitting_ops: list[str] | None = None
     use_inductor_graph_partition: bool = False
     compile_sizes: list[int | str] | None = None
-
-
-def copy_necessary_config_for_pass(
-    config: CompilationConfig,
-) -> SimplifiedCompilationConfig:
-    """Get only the necessary CompilationConfig for the inductor pass, since
-    full `CompilationConfig` contains pointer to model which is unsafe.
-    """
-    return SimplifiedCompilationConfig(
-        splitting_ops=config.splitting_ops,
-        use_inductor_graph_partition=config.use_inductor_graph_partition,
-        compile_sizes=config.compile_sizes,
-    )
 
 
 class VllmInductorPass(InductorPass):
@@ -49,8 +36,12 @@ class VllmInductorPass(InductorPass):
     """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):
-        self.compilation_config = copy_necessary_config_for_pass(
-            config.compilation_config
+        # Get only the necessary CompilationConfig for the inductor pass, since
+        # full `CompilationConfig` contains pointer to model which is unsafe.
+        self.compilation_config = InductorCompilationConfig(
+            splitting_ops=config.splitting_ops,
+            use_inductor_graph_partition=config.use_inductor_graph_partition,
+            compile_sizes=config.compile_sizes,
         )
         self.pass_config = config.compilation_config.pass_config
         self.model_dtype = config.model_config.dtype if config.model_config else None
