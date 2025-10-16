@@ -351,6 +351,6 @@ def run_triton_group_gemm_masked_bf16(
 
 # run_batched_deepgemm_masked_fp8(512, 8, 1024, 512)
 run_batched_deepgemm_contiguous_bf16(512, 8, 1024, 512)
-# run_batched_deepgemm_masked_bf16(512, 8, 1024, 512)
-# run_triton_group_gemm_contiguous_bf16(512, 8, 1024, 512, 4)
-# run_triton_group_gemm_masked_bf16(512, 8, 1024, 512)
+run_batched_deepgemm_masked_bf16(512, 8, 1024, 512)
+run_triton_group_gemm_contiguous_bf16(512, 8, 1024, 512, 4)
+run_triton_group_gemm_masked_bf16(512, 8, 1024, 512)
