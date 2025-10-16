@@ -932,23 +932,27 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
-
         self.marlin_input_dtype = None
-        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
-            assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
-            self.backend = "flashinfer-trtllm"
-        elif has_flashinfer():
-            self.backend = "flashinfer-cutlass"
-        elif cutlass_fp4_supported():
-            self.backend = "cutlass"
-        elif is_fp4_marlin_supported():
-            self.backend = "marlin"
-        else:
+
+        self.backend = "none"
+        if envs.VLLM_NVFP4_GEMM_BACKEND is None:
+            if has_flashinfer():
+                self.backend = "flashinfer-cutlass"
+            elif cutlass_fp4_supported():
+                self.backend = "cutlass"
+            elif is_fp4_marlin_supported():
+                self.backend = "marlin"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
+            self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
+            assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
+
+        if self.backend == "none":
             raise ValueError(
-                "Current platform does not support NVFP4"
-                " quantization. Please use Blackwell and"
-                " above."
+                "No valid NVFP4 GEMM backend found. "
+                "Please check your platform capability."
             )
+
+        logger.info_once(f"Using {self.backend} for NVFP4 GEMM")
 
     def create_weights(
         self,
@@ -1118,11 +1122,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
-        if self.backend == "flashinfer-trtllm":
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
-        elif self.backend == "flashinfer-cutlass":
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
+        if self.backend.startswith("flashinfer-"):
+            backend_name = self.backend[len("flashinfer-") :]
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
+            assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
 
         if bias is not None:
@@ -1552,23 +1556,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w2_input_scale_quant
         else:
             # Non-TRT-LLM processing (Cutlass or non-flashinfer)
-            assert layer.w13_weight_scale.shape[2] % 16 == 0, (
-                "Expected weight_scale.dim(1) to be divisible by 16"
-            )
-            assert layer.w13_weight_scale.dtype == torch.float8_e4m3fn, (
-                "Weight Blockscale must be represented as FP8-E4M3"
-            )
             w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
             layer.w13_weight_scale = Parameter(
                 w13_blockscale_swizzled, requires_grad=False
             )
 
-            assert layer.w2_weight_scale.shape[2] % 16 == 0, (
-                "Expected weight_scale.dim(1) to be divisible by 16"
-            )
-            assert layer.w2_weight_scale.dtype == torch.float8_e4m3fn, (
-                "Weight Blockscale must be represented as FP8-E4M3"
-            )
             w2_blockscale_swizzled = swizzle_blockscale(layer.w2_weight_scale)
             layer.w2_weight_scale = Parameter(
                 w2_blockscale_swizzled, requires_grad=False
