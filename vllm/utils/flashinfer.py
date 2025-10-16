@@ -5,15 +5,14 @@
 Users of vLLM should always import **only** these wrappers.
 """
 
-from __future__ import annotations
-
 import contextlib
 import functools
 import importlib
 import importlib.util
 import os
 import shutil
-from typing import Any, Callable, NoReturn
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 import requests
 import torch

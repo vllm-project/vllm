@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
-from typing import Optional, cast
+from typing import cast
 
 import numpy as np
 import pytest
@@ -1003,7 +1003,7 @@ class DummyProcessor:
         self,
         a: int = 0,
         c: int = 0,
-        return_tensors: Optional[str] = None,
+        return_tensors: str | None = None,
     ) -> dict[str, int]:
         return dict(a=a, c=c)
 

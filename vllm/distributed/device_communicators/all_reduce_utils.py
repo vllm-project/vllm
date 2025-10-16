@@ -10,7 +10,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from itertools import product
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -86,7 +86,7 @@ def producer(
     producer_queue,
     consumer_queue,
     result_queue,
-    cuda_visible_devices: Optional[str] = None,
+    cuda_visible_devices: str | None = None,
 ):
     if cuda_visible_devices is not None:
         update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
@@ -120,7 +120,7 @@ def consumer(
     producer_queue,
     consumer_queue,
     result_queue,
-    cuda_visible_devices: Optional[str] = None,
+    cuda_visible_devices: str | None = None,
 ):
     if cuda_visible_devices is not None:
         update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
@@ -253,7 +253,7 @@ def can_actually_p2p(
 #  e.g. used by different vllm engines. The device id in the cache file is a
 #  **local** device id, i.e. from 0 to num_dev-1, where num_dev is the number
 #  of visible devices in the vllm engine.
-_gpu_p2p_access_cache: Optional[dict[str, bool]] = None
+_gpu_p2p_access_cache: dict[str, bool] | None = None
 
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
@@ -34,8 +33,8 @@ def ref_paged_attn(
     kv_lens: list[int],
     block_tables: torch.Tensor,
     scale: float,
-    sliding_window: Optional[int] = None,
-    soft_cap: Optional[float] = None,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -103,11 +102,11 @@ def test_flash_attn_with_paged_kv(
     head_size: int,
     dtype: torch.dtype,
     block_size: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     num_blocks: int,
-    sliding_window: Optional[int],
+    sliding_window: int | None,
     fa_version: int,
-    q_dtype: Optional[torch.dtype],
+    q_dtype: torch.dtype | None,
 ) -> None:
     torch.set_default_device("cuda")
     if not is_fa_version_supported(fa_version):
@@ -221,13 +220,13 @@ def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
-    sliding_window: Optional[int],
+    sliding_window: int | None,
     dtype: torch.dtype,
     block_size: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     num_blocks: int,
     fa_version: int,
-    q_dtype: Optional[torch.dtype],
+    q_dtype: torch.dtype | None,
 ) -> None:
     torch.set_default_device("cuda")
     if not is_fa_version_supported(fa_version):

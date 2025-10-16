@@ -7,7 +7,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import Literal, Optional, Union, cast
+from typing import Literal, cast
 
 import torch
 
@@ -136,7 +136,7 @@ class KVOutputAggregator:
         # Aggregate kv_connector_output from all workers
 
         def update_finished_set(
-            req_ids: Optional[set[str]],
+            req_ids: set[str] | None,
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
         ) -> None:
@@ -151,21 +151,21 @@ class KVOutputAggregator:
         aggregated_kv_connector_stats = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
-            output = model_runner_output.kv_connector_output
-            if not output:
+            kv_output = model_runner_output.kv_connector_output
+            if not kv_output:
                 continue
             update_finished_set(
-                output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending, self._send_remaining_count, finished_sending
             )
             update_finished_set(
-                output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving, self._recv_remaining_count, finished_recving
             )
 
             # Aggregate kv_connector_stats from all workers.
             if aggregated_kv_connector_stats is None:
                 # Use the first worker's kv_connector_stats as accumulator.
-                aggregated_kv_connector_stats = output.kv_connector_stats
-            elif kv_connector_stats := output.kv_connector_stats:
+                aggregated_kv_connector_stats = kv_output.kv_connector_stats
+            elif kv_connector_stats := kv_output.kv_connector_stats:
                 if aggregated_kv_connector_stats is None:
                     aggregated_kv_connector_stats = kv_connector_stats
                 else:
@@ -176,7 +176,7 @@ class KVOutputAggregator:
                         aggregated_kv_connector_stats.aggregate(kv_connector_stats)
                     )
 
-            invalid_block_ids |= output.invalid_block_ids
+            invalid_block_ids |= kv_output.invalid_block_ids
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -197,7 +197,7 @@ class KVOutputAggregator:
         to the respective list of outputs."""
         result_future: Future[ModelRunnerOutput] = Future()
 
-        outputs: list[Optional[ModelRunnerOutput]] = [None] * len(output_futures)
+        outputs: list[ModelRunnerOutput | None] = [None] * len(output_futures)
 
         def make_callback(idx):
             def callback(fut):
@@ -230,8 +230,8 @@ class KVOutputAggregator:
 def _make_src_and_dst_indices(
     src_block_ids: list[int],
     dst_block_ids: list[int],
-    src_device: Union[torch.device, str],
-    dst_device: Union[torch.device, str],
+    src_device: torch.device | str,
+    dst_device: torch.device | str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     src_indices = torch.tensor(src_block_ids, device=src_device, dtype=torch.int64)
     dst_indices = torch.tensor(dst_block_ids, device=dst_device, dtype=torch.int64)

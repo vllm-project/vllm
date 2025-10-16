@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions used for tests and benchmarks"""
 
-from typing import Optional
-
 import numpy as np
 import torch
 
@@ -100,7 +98,7 @@ def marlin_quantize(
     quant_type: ScalarType,
     group_size: int,
     act_order: bool,
-    test_perm: Optional[torch.Tensor] = None,
+    test_perm: torch.Tensor | None = None,
 ):
     size_k, size_n = w.shape
     num_bits = quant_type.size_bits

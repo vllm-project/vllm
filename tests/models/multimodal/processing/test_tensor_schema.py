@@ -4,12 +4,13 @@ import tempfile
 from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import partial
-from typing import Any, Union
+from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
 import torch.nn as nn
-from mistral_common.protocol.instruct.messages import ImageChunk, TextChunk, UserMessage
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
@@ -54,15 +55,15 @@ REPO_ID_TO_SKIP = {
 }
 
 ImageInput = list[Image.Image]
-VideoInput = Union[
-    list[Image.Image], list[np.ndarray], list[tuple[np.ndarray, dict[str, Any]]]
-]
+VideoInput: TypeAlias = (
+    list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
+)
 AudioInput = list[tuple[np.ndarray, int]]
 
 
 def _resize_data(
-    _data: Union[Image.Image, np.ndarray], size_factor: float
-) -> Union[Image.Image, np.ndarray]:
+    _data: Image.Image | np.ndarray, size_factor: float
+) -> Image.Image | np.ndarray:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
@@ -87,8 +88,8 @@ def _resize_data(
 
 
 def resize_mm_data(
-    data: Union[ImageInput, VideoInput, AudioInput], size_factors: tuple[float, ...]
-) -> Union[ImageInput, VideoInput, AudioInput]:
+    data: ImageInput | VideoInput | AudioInput, size_factors: tuple[float, ...]
+) -> ImageInput | VideoInput | AudioInput:
     size_factors = size_factors[: len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]

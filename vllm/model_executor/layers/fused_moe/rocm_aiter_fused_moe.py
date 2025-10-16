@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import cache
-from typing import Optional
 
 import torch
 
@@ -53,13 +52,13 @@ def rocm_aiter_asm_moe_tkw1_impl(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    fc1_scale: torch.Tensor | None = None,
+    fc2_scale: torch.Tensor | None = None,
+    fc1_smooth_scale: torch.Tensor | None = None,
+    fc2_smooth_scale: torch.Tensor | None = None,
     a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    expert_mask: Optional[torch.Tensor] = None,
+    per_tensor_quant_scale: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
 ) -> torch.Tensor:
     from aiter import ActivationType
@@ -90,13 +89,13 @@ def rocm_aiter_asm_moe_tkw1_fake(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    fc1_scale: torch.Tensor | None = None,
+    fc2_scale: torch.Tensor | None = None,
+    fc1_smooth_scale: torch.Tensor | None = None,
+    fc2_smooth_scale: torch.Tensor | None = None,
     a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    expert_mask: Optional[torch.Tensor] = None,
+    per_tensor_quant_scale: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
@@ -206,14 +205,14 @@ def rocm_aiter_fused_moe_impl(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    expert_mask: Optional[torch.Tensor] = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
     quant_method: int = QuantMethod.NO.value,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -244,14 +243,14 @@ def rocm_aiter_fused_moe_fake(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    expert_mask: Optional[torch.Tensor] = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
     quant_method: int = QuantMethod.NO.value,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -300,7 +299,7 @@ def rocm_aiter_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     token = hidden_states.shape[0]
     device = hidden_states.device
@@ -342,8 +341,8 @@ def rocm_aiter_fused_experts(
     topk_ids: torch.Tensor,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
-    expert_map: Optional[torch.Tensor] = None,
-    quant_config: Optional[FusedMoEQuantConfig] = None,
+    expert_map: torch.Tensor | None = None,
+    quant_config: FusedMoEQuantConfig | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG

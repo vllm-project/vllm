@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -19,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled,
 )
@@ -333,7 +335,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
@@ -350,21 +352,21 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.fused_experts is None
 
         if enable_eplb:
@@ -401,7 +403,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             )
         if self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."
-            return torch.ops.vllm.fused_marlin_moe(
+            return fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -568,7 +570,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         return ocp_mx_moe_quant_config(
             quant_dtype=self.input_dtype,
             weight_dtype=self.weight_dtype,
@@ -587,21 +589,21 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.fused_experts is None
 
         if enable_eplb:
