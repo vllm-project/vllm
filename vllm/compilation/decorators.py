@@ -6,7 +6,8 @@ import hashlib
 import inspect
 import os
 import sys
-from typing import Callable, Optional, TypeVar, Union, overload
+from collections.abc import Callable
+from typing import TypeVar, overload
 from unittest.mock import patch
 
 import torch
@@ -17,7 +18,7 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
+from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import resolve_obj_by_qualname, supports_dynamo
@@ -61,14 +62,14 @@ def _should_ignore_torch_compile(cls) -> bool:
 @overload
 def support_torch_compile(
     *,
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> Callable[[_T], _T]: ...
 
 
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]],
+    dynamic_arg_dims: dict[str, int | list[int]] | None,
 ) -> Callable[[_T], _T]: ...
 
 
@@ -77,11 +78,11 @@ def support_torch_compile(cls: _T) -> _T: ...
 
 
 def support_torch_compile(
-    cls: Optional[_T] = None,
+    cls: _T | None = None,
     *,
-    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
-) -> Union[Callable[[_T], _T], _T]:
+    dynamic_arg_dims: dict[str, int | list[int]] | None = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
+) -> Callable[[_T], _T] | _T:
     """
     A decorator to add support for compiling the forward method of a class.
 
@@ -147,9 +148,9 @@ def support_torch_compile(
             for k, v in sig.parameters.items():
                 if v.annotation in [
                     torch.Tensor,
-                    Optional[torch.Tensor],
+                    torch.Tensor | None,
                     IntermediateTensors,
-                    Optional[IntermediateTensors],
+                    IntermediateTensors | None,
                 ]:
                     inferred_dynamic_arg_dims[k] = 0
 
@@ -209,8 +210,8 @@ def _verify_source_unchanged(source_info, vllm_config) -> None:
 
 def _support_torch_compile(
     cls: _T,
-    dynamic_arg_dims: dict[str, Union[int, list[int]]],
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    dynamic_arg_dims: dict[str, int | list[int]],
+    enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -232,11 +233,11 @@ def _support_torch_compile(
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
         enable_compile = enable_if is None or enable_if(vllm_config)
-        # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
+        # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = (
-            vllm_config.compilation_config.level
-            in [CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS]
+            vllm_config.compilation_config.mode
+            in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
             or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile
@@ -246,7 +247,7 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level
+            self, compilation_mode=vllm_config.compilation_config.mode
         )
 
     cls.__init__ = __init__

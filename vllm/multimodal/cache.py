@@ -5,17 +5,17 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from multiprocessing.synchronize import Lock as LockType
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
 import torch
-from typing_extensions import TypeAlias, override
+from typing_extensions import override
 
+import vllm.envs as envs
 from vllm.distributed.device_communicators.shm_object_storage import (
     MsgpackSerde,
     SingleWriterShmObjectStorage,
     SingleWriterShmRingBuffer,
 )
-from vllm.envs import VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, MiB_bytes
 from vllm.utils.cache import CacheInfo, LRUCache
@@ -85,14 +85,14 @@ class MultiModalProcessorCacheItemMetadata:
         self.prompt_updates = prompt_updates
 
 
-MultiModalCacheValue = Union[
-    MultiModalProcessorCacheItem,
-    MultiModalProcessorCacheItemMetadata,
-    MultiModalKwargsItems,
-    MultiModalKwargsItem,
-    MultiModalKwargs,
-    Mapping[str, NestedTensors],
-]
+MultiModalCacheValue: TypeAlias = (
+    MultiModalProcessorCacheItem
+    | MultiModalProcessorCacheItemMetadata
+    | MultiModalKwargsItems
+    | MultiModalKwargsItem
+    | MultiModalKwargs
+    | Mapping[str, NestedTensors]
+)
 
 _V = TypeVar("_V", bound=MultiModalCacheValue)
 
@@ -256,13 +256,13 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         raise NotImplementedError
 
 
-MultiModalProcessorCacheInItem: TypeAlias = Optional[
-    tuple[MultiModalKwargsItem, Sequence["ResolvedPromptUpdate"]]
-]
+MultiModalProcessorCacheInItem: TypeAlias = (
+    tuple[MultiModalKwargsItem, Sequence["ResolvedPromptUpdate"]] | None
+)
 
 
 MultiModalProcessorCacheOutItem: TypeAlias = tuple[
-    Optional[MultiModalKwargsItem], Sequence["ResolvedPromptUpdate"]
+    MultiModalKwargsItem | None, Sequence["ResolvedPromptUpdate"]
 ]
 
 
@@ -436,7 +436,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
             create=True,  # sender is the writer
         )
         self._shm_cache = SingleWriterShmObjectStorage(
@@ -575,7 +575,7 @@ def _enable_mm_input_shm_cache(vllm_config: "VllmConfig") -> bool:
 def processor_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
-) -> Optional[BaseMultiModalProcessorCache]:
+) -> BaseMultiModalProcessorCache | None:
     """Return a `BaseMultiModalProcessorCache`, if enabled."""
     model_config = vllm_config.model_config
 
@@ -602,7 +602,7 @@ def processor_only_cache_from_config(
 
 
 class BaseMultiModalReceiverCache(
-    BaseMultiModalCache[Optional[MultiModalKwargsItem], MultiModalKwargsItem]
+    BaseMultiModalCache[MultiModalKwargsItem | None, MultiModalKwargsItem]
 ):
     """The required interface for caches on P1."""
 
@@ -640,7 +640,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
     @override
     def get_and_update_item(
         self,
-        mm_item: Optional[MultiModalKwargsItem],
+        mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
@@ -678,7 +678,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
             create=False,  # Server is a reader
         )
         self._shm_cache = SingleWriterShmObjectStorage(
@@ -692,7 +692,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     @override
     def get_and_update_item(
         self,
-        mm_item: Optional[MultiModalKwargsItem],
+        mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
         assert mm_item is not None, f"Expected an address item for {mm_hash=}"
@@ -711,7 +711,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 def engine_receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
-) -> Optional[BaseMultiModalReceiverCache]:
+) -> BaseMultiModalReceiverCache | None:
     """
     This is used in the engine process.
     Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
@@ -735,7 +735,7 @@ def worker_receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
     shared_worker_lock: LockType,
-) -> Optional[BaseMultiModalReceiverCache]:
+) -> BaseMultiModalReceiverCache | None:
     """
     This is used in the worker process.
     Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and

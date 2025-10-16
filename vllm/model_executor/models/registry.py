@@ -14,11 +14,11 @@ import subprocess
 import sys
 import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Set
+from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Optional, TypeVar, Union
+from typing import TypeVar
 
 import torch.nn as nn
 import transformers
@@ -44,7 +44,6 @@ from .interfaces import (
     supports_multimodal_raw_input_only,
     supports_pp,
     supports_transcription,
-    supports_v0_only,
 )
 from .interfaces_base import (
     get_default_pooling_type,
@@ -61,9 +60,6 @@ _TEXT_GENERATION_MODELS = {
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
-    "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
-    "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
-    "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     # baichuan-7b, upper case 'C' in the class name
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
@@ -88,8 +84,10 @@ _TEXT_GENERATION_MODELS = {
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
-    "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
+    "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
+    "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
+    "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
     "FlexOlmoForCausalLM": ("flex_olmo", "FlexOlmoForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
@@ -127,11 +125,12 @@ _TEXT_GENERATION_MODELS = {
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
-    "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
-    "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
+    "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
+    "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
+    "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
@@ -172,6 +171,7 @@ _TEXT_GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
+    "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
@@ -478,7 +478,6 @@ class _ModelInfo:
     has_noops: bool
     supports_transcription: bool
     supports_transcription_only: bool
-    supports_v0_only: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -503,7 +502,6 @@ class _ModelInfo:
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only
             ),
-            supports_v0_only=supports_v0_only(model),
             has_noops=has_noops(model),
         )
 
@@ -583,7 +581,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             # file not changed, use cached _ModelInfo properties
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
-            logger.exception(
+            logger.debug(
                 ("Cached model info for class %s.%s error. "),
                 self.module_name,
                 self.class_name,
@@ -654,7 +652,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
-) -> Optional[type[nn.Module]]:
+) -> type[nn.Module] | None:
     from vllm.platforms import current_platform
 
     current_platform.verify_model_arch(model_arch)
@@ -669,7 +667,7 @@ def _try_load_model_cls(
 def _try_inspect_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
-) -> Optional[_ModelInfo]:
+) -> _ModelInfo | None:
     try:
         return model.inspect_model_cls()
     except Exception:
@@ -688,7 +686,7 @@ class _ModelRegistry:
     def register_model(
         self,
         model_arch: str,
-        model_cls: Union[type[nn.Module], str],
+        model_cls: type[nn.Module] | str,
     ) -> None:
         """
         Register an external model to be used in vLLM.
@@ -756,13 +754,13 @@ class _ModelRegistry:
             f"Supported architectures: {all_supported_archs}"
         )
 
-    def _try_load_model_cls(self, model_arch: str) -> Optional[type[nn.Module]]:
+    def _try_load_model_cls(self, model_arch: str) -> type[nn.Module] | None:
         if model_arch not in self.models:
             return None
 
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
-    def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
+    def _try_inspect_model_cls(self, model_arch: str) -> _ModelInfo | None:
         if model_arch not in self.models:
             return None
 
@@ -772,7 +770,7 @@ class _ModelRegistry:
         self,
         architecture: str,
         model_config: ModelConfig,
-    ) -> Optional[str]:
+    ) -> str | None:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
 
@@ -862,7 +860,7 @@ class _ModelRegistry:
 
     def inspect_model_cls(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> tuple[_ModelInfo, str]:
         if isinstance(architectures, str):
@@ -914,7 +912,7 @@ class _ModelRegistry:
 
     def resolve_model_cls(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> tuple[type[nn.Module], str]:
         if isinstance(architectures, str):
@@ -968,7 +966,7 @@ class _ModelRegistry:
 
     def is_text_generation_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -976,7 +974,7 @@ class _ModelRegistry:
 
     def is_pooling_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -984,7 +982,7 @@ class _ModelRegistry:
 
     def is_cross_encoder_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -992,7 +990,7 @@ class _ModelRegistry:
 
     def is_multimodal_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1000,7 +998,7 @@ class _ModelRegistry:
 
     def is_multimodal_raw_input_only_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1008,7 +1006,7 @@ class _ModelRegistry:
 
     def is_pp_supported_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1016,7 +1014,7 @@ class _ModelRegistry:
 
     def model_has_inner_state(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1024,7 +1022,7 @@ class _ModelRegistry:
 
     def is_attention_free_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1032,7 +1030,7 @@ class _ModelRegistry:
 
     def is_hybrid_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1040,7 +1038,7 @@ class _ModelRegistry:
 
     def is_noops_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1048,7 +1046,7 @@ class _ModelRegistry:
 
     def is_transcription_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1056,19 +1054,11 @@ class _ModelRegistry:
 
     def is_transcription_only_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_transcription_only
-
-    def is_v1_compatible(
-        self,
-        architectures: Union[str, list[str]],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return not model_cls.supports_v0_only
 
 
 ModelRegistry = _ModelRegistry(
