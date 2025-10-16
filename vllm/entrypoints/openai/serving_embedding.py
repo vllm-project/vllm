@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, cast
 
-import numpy as np
 import torch
 from fastapi import Request
-from typing_extensions import assert_never, override
+from typing_extensions import override
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    EMBED_DTYPE_TO_TORCH_DTYPE,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -29,35 +28,21 @@ from vllm.entrypoints.openai.serving_engine import (
     TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.utils import encoding_pooling_output
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (
-    EmbeddingOutput,
     EmbeddingRequestOutput,
     PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.utils import chunk_list
+from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.collections import chunk_list
 
 logger = init_logger(__name__)
-
-
-def _get_embedding(
-    output: EmbeddingOutput,
-    encoding_format: Literal["float", "base64"],
-) -> list[float] | str:
-    if encoding_format == "float":
-        return output.embedding
-    elif encoding_format == "base64":
-        # Force to use float32 for base64 encoding
-        # to match the OpenAI python client behavior
-        embedding_bytes = np.array(output.embedding, dtype="float32").tobytes()
-        return base64.b64encode(embedding_bytes).decode("utf-8")
-
-    assert_never(encoding_format)
 
 
 class EmbeddingMixin(OpenAIServing):
@@ -83,6 +68,12 @@ class EmbeddingMixin(OpenAIServing):
     ) -> ErrorResponse | None:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
+            if ctx.request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
+                return self.create_error_response(
+                    f"embed_dtype={ctx.request.embed_dtype!r} is not supported. "
+                    f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
+                )
+
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             tokenizer = await self.engine_client.get_tokenizer()
@@ -137,12 +128,10 @@ class EmbeddingMixin(OpenAIServing):
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
         for idx, final_res in enumerate(final_res_batch_checked):
-            embedding_res = EmbeddingRequestOutput.from_base(final_res)
-
             item = EmbeddingResponseData(
                 index=idx,
-                embedding=_get_embedding(
-                    embedding_res.outputs, ctx.request.encoding_format
+                embedding=encoding_pooling_output(
+                    final_res, ctx.request.encoding_format, ctx.request.embed_dtype
                 ),
             )
             prompt_token_ids = final_res.prompt_token_ids
@@ -398,8 +387,6 @@ class EmbeddingMixin(OpenAIServing):
                     ctx, engine_prompt, pooling_params, trace_headers, i
                 )
                 generators.append(generator)
-
-            from vllm.utils import merge_async_iterators
 
             ctx.result_generator = merge_async_iterators(*generators)
 
