@@ -143,26 +143,6 @@ def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# LightOnOCR
-def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    prompts = [
-        "<|im_start|>system<|im_end|>\n<|im_start|>user\n<|image_pad|><|im_end|>\n<|im_start|>assistant\n"
-        for _ in questions
-    ]
-
-    engine_args = EngineArgs(
-        model="lightonai/LightOnOCR-1B",
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -744,6 +724,26 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         model="moonshotai/Kimi-VL-A3B-Instruct",
         trust_remote_code=True,
         max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# LightOnOCR
+def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [
+        "<|im_start|>system<|im_end|>\n<|im_start|>user\n<|image_pad|><|im_end|>\n<|im_start|>assistant\n"
+        for _ in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -1710,7 +1710,6 @@ model_example_map = {
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
     "dots_ocr": run_dots_ocr,
-    "lightonocr": run_lightonocr,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "ernie45_vl": run_ernie45_vl,
@@ -1729,6 +1728,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "lightonocr": run_lightonocr,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
