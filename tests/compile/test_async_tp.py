@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
+from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import (
@@ -228,6 +229,54 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
 
+class TestBmmFP8RSModel(_BaseScaledMMModel):
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the bmm_fp8 + reduce scatter in the FX graph
+        """
+        fp8_input = input.to(FP8_DTYPE)
+        scale_a = torch.ones(1, dtype=torch.float32, device=input.device)
+        scale_b = torch.ones(1, dtype=torch.float32, device=input.device)
+
+        bmm_out = flashinfer_scaled_fp8_mm(
+            fp8_input, self.weight, scale_a, scale_b, self.dtype
+        )
+
+        reduce_scatter = tensor_model_parallel_reduce_scatter(bmm_out, dim=0)
+        return reduce_scatter
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.bmm_fp8.default, torch.ops.vllm.reduce_scatter.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.patched_fused_scaled_matmul_reduce_scatter.default]
+
+
+class TestAGBmmFP8Model(_BaseScaledMMModel):
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the all gather + bmm_fp8 in the FX graph
+        """
+        fp8_input = input.to(FP8_DTYPE)
+        all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
+
+        # FlashInfer BMM FP8 - pattern will handle unsqueeze and reshape
+        scale_a = torch.tensor(1.0, dtype=torch.float32, device=input.device)
+        scale_b = torch.tensor(1.0, dtype=torch.float32, device=input.device)
+
+        bmm_out = flashinfer_scaled_fp8_mm(
+            all_gather, self.weight, scale_a, scale_b, self.dtype
+        )
+
+        return bmm_out
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_gather.default, torch.ops.vllm.bmm_fp8.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model",
@@ -238,6 +287,8 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         TestAGScaledMMModel,
         TestCutlassScaledMMRSModel,
         TestAGCutlassScaledMMModel,
+        TestBmmFP8RSModel,
+        TestAGBmmFP8Model,
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
@@ -261,6 +312,8 @@ def test_async_tp_pass_replace(
             TestAGScaledMMModel,
             TestCutlassScaledMMRSModel,
             TestAGCutlassScaledMMModel,
+            TestBmmFP8RSModel,
+            TestAGBmmFP8Model,
         )
         and dtype == torch.float16
     ):
@@ -268,6 +321,11 @@ def test_async_tp_pass_replace(
             "Only bf16 high precision output types are supported for "
             "per-token (row-wise) scaling"
         )
+
+    if test_model in (TestBmmFP8RSModel, TestAGBmmFP8Model) and not (
+        has_flashinfer() and current_platform.has_device_capability(100)
+    ):
+        pytest.skip("Flashinfer not available.")
 
     num_processes = 2
 

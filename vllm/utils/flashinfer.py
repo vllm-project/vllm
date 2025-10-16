@@ -357,7 +357,8 @@ if has_flashinfer():
     ) -> torch.Tensor:
         from flashinfer import bmm_fp8 as bmm_fp8_
 
-        return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
+        result = bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
+        return result.reshape(A.shape[1], B.shape[2])
 
     @torch.library.register_fake(
         "vllm::bmm_fp8",
@@ -370,9 +371,7 @@ if has_flashinfer():
         dtype: torch.dtype,
         backend: str,
     ) -> torch.Tensor:
-        return torch.empty(
-            A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
-        )
+        return torch.empty(A.shape[1], B.shape[2], dtype=dtype, device=A.device)
 
 
 def flashinfer_scaled_fp4_mm(
@@ -427,7 +426,7 @@ def flashinfer_scaled_fp8_mm(
         scale_b,
         out_dtype,
         "auto",
-    ).view(a.shape[0], b.shape[1])
+    )
 
     if bias is not None:
         output = output + bias

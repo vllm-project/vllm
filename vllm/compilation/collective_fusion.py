@@ -22,10 +22,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+from vllm.utils.flashinfer import has_flashinfer
 
 from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
-from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .vllm_inductor_pass import (
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -398,6 +402,139 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
         )
 
 
+class BmmFP8ReduceScatterPattern(BasePattern):
+    def get_inputs(self):
+        input = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        mm_weight = (
+            torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+            .contiguous()
+            .transpose(0, 1)
+        )
+        scale_a = torch.empty([1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1], device=self.device, dtype=torch.float32)
+        return [input, mm_weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            input_3d = torch.ops.aten.unsqueeze.default(input, 0)
+            weight_3d = torch.ops.aten.unsqueeze.default(weight, 0)
+
+            bmm_fp8 = torch.ops.vllm.bmm_fp8.default(
+                input_3d,
+                weight_3d,
+                scale_a,
+                scale_b,
+                self.dtype,
+                "auto",  # backend
+            )
+
+            reduce_scatter = torch.ops.vllm.reduce_scatter.default(
+                bmm_fp8,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+            return reduce_scatter
+
+        def replacement(
+            input: torch.Tensor,
+            mat2: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            # Calculate output shape: input @ mat2 with scatter_dim reduced
+            output_shape = [*input.shape[:-1], mat2.shape[1]]
+            scatter_dim = 0
+            gemm_rs = torch.ops.vllm.patched_fused_scaled_matmul_reduce_scatter(
+                input,
+                mat2,
+                scale_a,
+                scale_b,
+                "avg",
+                scatter_dim,  # orig_scatter_dim
+                scatter_dim,  # scatter_dim_after_maybe_reshape
+                self.tp.device_group.group_name,
+                output_shape,
+                None,  # bias
+                None,  # result_scale
+                self.dtype,  # out_dtype
+                False,  # use_fast_accum
+            )
+
+            return gemm_rs
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class AllGatherBmmFP8Pattern(BasePattern):
+    def get_inputs(self):
+        x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
+        weight = (
+            torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+            .contiguous()
+            .transpose(0, 1)
+        )
+        scale_a = torch.empty([], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([], device=self.device, dtype=torch.float32)
+        return [x, weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
+            )
+
+            all_gather_3d = torch.ops.aten.unsqueeze.default(all_gather, 0)
+            weight_3d = torch.ops.aten.unsqueeze.default(weight, 0)
+
+            bmm_fp8 = torch.ops.vllm.bmm_fp8.default(
+                all_gather_3d,
+                weight_3d,
+                scale_a,
+                scale_b,
+                self.dtype,
+                "auto",  # backend
+            )
+
+            return bmm_fp8
+
+        def replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_scaled_matmul(  # noqa
+                x,
+                [weight],
+                scale_a,
+                [scale_b],
+                gather_dim=0,
+                biases=[None],
+                result_scales=[None],
+                out_dtypes=[self.dtype],
+                use_fast_accum=[False],
+                group_name=self.tp.device_group.group_name,
+            )
+            return mm_outputs
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class AsyncTPPass(VllmPatternMatcherPass):
     @enable_fake_mode
     def __init__(self, config: VllmConfig):
@@ -429,6 +566,14 @@ class AsyncTPPass(VllmPatternMatcherPass):
             AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
                 self.patterns
             )
+
+            if has_flashinfer() and current_platform.has_device_capability(100):
+                BmmFP8ReduceScatterPattern(self.model_dtype, self.device).register(
+                    self.patterns
+                )
+                AllGatherBmmFP8Pattern(self.model_dtype, self.device).register(
+                    self.patterns
+                )
 
         self.dump_patterns(config, self.patterns)
 
