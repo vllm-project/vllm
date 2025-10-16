@@ -37,29 +37,19 @@ from argparse import (
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
 )
-from collections import UserDict, defaultdict
+from collections import defaultdict
 from collections.abc import (
     Callable,
     Collection,
     Generator,
-    Hashable,
-    Iterable,
     Iterator,
-    Mapping,
     Sequence,
 )
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Generic,
-    Literal,
-    TextIO,
-    TypeVar,
-)
+from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -78,7 +68,7 @@ import zmq.asyncio
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
-from typing_extensions import Never, TypeIs, assert_never
+from typing_extensions import Never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -169,9 +159,6 @@ def set_default_torch_num_threads(num_threads: int):
 
 T = TypeVar("T")
 U = TypeVar("U")
-
-_K = TypeVar("_K", bound=Hashable)
-_V = TypeVar("_V")
 
 
 class Device(enum.Enum):
@@ -419,12 +406,6 @@ def update_environment_variables(envs: dict[str, str]):
                 v,
             )
         os.environ[k] = v
-
-
-def chunk_list(lst: list[T], chunk_size: int):
-    """Yield successive chunk_size chunks from lst."""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
 
 
 def cdiv(a: int, b: int) -> int:
@@ -741,53 +722,6 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
         dtypes,
         key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
     )
-
-
-def as_list(maybe_list: Iterable[T]) -> list[T]:
-    """Convert iterable to list, unless it's already a list."""
-    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
-
-
-def as_iter(obj: T | Iterable[T]) -> Iterable[T]:
-    if isinstance(obj, str) or not isinstance(obj, Iterable):
-        return [obj]  # type: ignore[list-item]
-    return obj
-
-
-# `collections` helpers
-def is_list_of(
-    value: object,
-    typ: type[T] | tuple[type[T], ...],
-    *,
-    check: Literal["first", "all"] = "first",
-) -> TypeIs[list[T]]:
-    if not isinstance(value, list):
-        return False
-
-    if check == "first":
-        return len(value) == 0 or isinstance(value[0], typ)
-    elif check == "all":
-        return all(isinstance(v, typ) for v in value)
-
-    assert_never(check)
-
-
-def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
-    """Flatten a list of lists to a single list."""
-    return [item for sublist in lists for item in sublist]
-
-
-def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
-    """
-    Unlike [`itertools.groupby`][], groups are not broken by
-    non-contiguous data.
-    """
-    groups = defaultdict[_K, list[_V]](list)
-
-    for value in values:
-        groups[key(value)].append(value)
-
-    return groups.items()
 
 
 # TODO: This function can be removed if transformer_modules classes are
@@ -1576,50 +1510,6 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
-
-
-# Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping[str, T], Generic[T]):
-    def __init__(self, factory: dict[str, Callable[[], T]]):
-        self._factory = factory
-        self._dict: dict[str, T] = {}
-
-    def __getitem__(self, key: str) -> T:
-        if key not in self._dict:
-            if key not in self._factory:
-                raise KeyError(key)
-            self._dict[key] = self._factory[key]()
-        return self._dict[key]
-
-    def __setitem__(self, key: str, value: Callable[[], T]):
-        self._factory[key] = value
-
-    def __iter__(self):
-        return iter(self._factory)
-
-    def __len__(self):
-        return len(self._factory)
-
-
-class ClassRegistry(UserDict[type[T], _V]):
-    def __getitem__(self, key: type[T]) -> _V:
-        for cls in key.mro():
-            if cls in self.data:
-                return self.data[cls]
-
-        raise KeyError(key)
-
-    def __contains__(self, key: object) -> bool:
-        return self.contains(key)
-
-    def contains(self, key: object, *, strict: bool = False) -> bool:
-        if not isinstance(key, type):
-            return False
-
-        if strict:
-            return key in self.data
-
-        return any(cls in self.data for cls in key.mro())
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -2586,22 +2476,6 @@ class LazyLoader(types.ModuleType):
         if self._module is None:
             self._module = self._load()
         return dir(self._module)
-
-
-def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
-    """
-    Helper function to swap values for two keys
-    """
-    v1 = obj.get(key1)
-    v2 = obj.get(key2)
-    if v1 is not None:
-        obj[key2] = v1
-    else:
-        obj.pop(key2, None)
-    if v2 is not None:
-        obj[key1] = v2
-    else:
-        obj.pop(key1, None)
 
 
 @contextlib.contextmanager
