@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 import torch
 from typing_extensions import override
 
+import vllm.envs as envs
 from vllm.distributed.device_communicators.shm_object_storage import (
     MsgpackSerde,
     SingleWriterShmObjectStorage,
     SingleWriterShmRingBuffer,
 )
-from vllm.envs import VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, MiB_bytes
 from vllm.utils.cache import CacheInfo, LRUCache
@@ -436,7 +436,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
             create=True,  # sender is the writer
         )
         self._shm_cache = SingleWriterShmObjectStorage(
@@ -678,7 +678,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
         ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
-            name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
             create=False,  # Server is a reader
         )
         self._shm_cache = SingleWriterShmObjectStorage(

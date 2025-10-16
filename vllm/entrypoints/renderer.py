@@ -17,7 +17,7 @@ from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import AsyncMicrobatchTokenizer
+from vllm.utils.asyncio import AsyncMicrobatchTokenizer
 
 
 @dataclass(frozen=True)
