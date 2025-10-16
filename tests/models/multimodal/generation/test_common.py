@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from vllm.platforms import current_platform
-from vllm.utils import identity
+from vllm.utils.functools import identity
 
 from ....conftest import (
     IMAGE_ASSETS,
