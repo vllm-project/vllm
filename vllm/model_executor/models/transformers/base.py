@@ -149,7 +149,7 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
         # Input embeddings
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
-            # Some models use embedding scales
+            # Some models scale embeddings inside the input embedding layer
             self.embed_scale = getattr(input_embeddings, "embed_scale", None)
             names = ("embedding_size", "hidden_size")
             embedding_dim = getattr_iter(self.text_config, names, None)
@@ -380,6 +380,16 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
             input_ids = input_ids[None, ...]
         if inputs_embeds is not None:
             inputs_embeds = inputs_embeds[None, ...]
+
+        # If the model scales embeddings inside the input embedding layer we must
+        # ensure they are scaled here since VocabParallelEmbedding will not do it
+        if (
+            self.embed_scale is not None
+            and input_ids is not None
+            and inputs_embeds is None
+        ):
+            inputs_embeds = self.get_input_embeddings(input_ids)
+            input_ids = None
 
         if self.model_config.uses_mrope:
             position_ids = positions[:, None]
