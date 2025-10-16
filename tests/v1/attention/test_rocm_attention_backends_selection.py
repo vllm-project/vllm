@@ -244,7 +244,7 @@ def test_mla_backend_selection(
     importlib.reload(envs)
 
     # Mock is_aiter_mla_enabled based on env vars and block_size
-    aiter_enabled = env_vars.get("VLLM_ROCM_USE_AITER") == "1" and block_size == 1
+    aiter_enabled = env_vars.get("VLLM_ROCM_USE_AITER") == "1"
     with patch(
         "vllm.v1.attention.backends.mla.rocm_aiter_mla.is_aiter_mla_enabled",
         return_value=aiter_enabled,
