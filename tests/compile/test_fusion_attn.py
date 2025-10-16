@@ -14,6 +14,7 @@ from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
+from vllm.compilation.matcher_utils import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -28,6 +29,7 @@ from vllm.config import (
 )
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
@@ -305,7 +307,6 @@ def test_attention_quant_pattern(
     backend: _Backend,
     use_inductor_graph_partition: bool,
     dist_init,
-    caplog_vllm,
 ):
     """Test AttentionStaticQuantPattern fusion pass"""
     if backend == _Backend.FLASHINFER and (
@@ -423,7 +424,7 @@ def test_attention_quant_pattern(
             )
 
     # Check attn fusion support
-    quant_key = model_class.quant_key
+    quant_key: QuantKey = model_class.quant_key
     attn_fusion_supported = [
         layer.impl.fused_output_quant_supported(quant_key)
         for key, layer in vllm_config.compilation_config.static_forward_context.items()
@@ -431,6 +432,17 @@ def test_attention_quant_pattern(
     assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
         "All layers should support attention fusion"
     )
+
+    # Check quantization ops in the graph before and after fusion
+    quant_op = (
+        torch.ops.aten.reciprocal
+        if "-quant_fp8" in custom_ops_list
+        else QUANT_OPS[quant_key]
+    )
+
+    # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
+    # Only output quant ops are fused into attention.
+    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Quant)
 
     # access the underlying `AttnFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)

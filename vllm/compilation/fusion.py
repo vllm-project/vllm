@@ -128,7 +128,9 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
 
-            result = torch.empty_like(input, dtype=self.quant_dtype)
+            result = torch.empty(
+                input.shape, device=input.device, dtype=self.quant_dtype
+            )
             at = auto_functionalized(
                 self.FUSED_OP,
                 result=result,
