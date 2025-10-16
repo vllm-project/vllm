@@ -1147,6 +1147,7 @@ class Scheduler(SchedulerInterface):
                         num_cached_tokens=request.num_cached_tokens,
                     )
                 )
+                self._free_request(request)
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1652,7 +1653,32 @@ class Scheduler(SchedulerInterface):
                 total_affected_tokens,
             )
             all_affected_req_ids = async_affected_req_ids | sync_affected_req_ids
-            self.finish_requests(all_affected_req_ids, RequestStatus.FINISHED_ERROR)
+
+            # mark requests as finished and remove from queues. importantly:
+            # don't free yet as outputs will be created in update_from_output
+            running_requests_to_remove = set()
+            waiting_requests_to_remove = []
+
+            for req_id in all_affected_req_ids:
+                request = self.requests.get(req_id)
+                if request is None or request.is_finished():
+                    continue
+
+                # track which queue the request was in BEFORE changing status
+                if request.status == RequestStatus.RUNNING:
+                    running_requests_to_remove.add(request)
+                else:
+                    waiting_requests_to_remove.append(request)
+
+                # mark finished
+                request.status = RequestStatus.FINISHED_ERROR
+
+            # remove
+            if running_requests_to_remove:
+                self.running = remove_all(self.running, running_requests_to_remove)
+            if waiting_requests_to_remove:
+                self.waiting.remove_requests(waiting_requests_to_remove)
+
             return all_affected_req_ids
         else:
             logger.warning(
