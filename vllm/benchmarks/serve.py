@@ -1230,6 +1230,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "the ready check will be skipped.",
     )
 
+    parser.add_argument(
+        "--extra-body",
+        help="A JSON string representing extra body parameters to include "
+        "in each request."
+        'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
+        type=json.loads,
+        default=None,
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1330,6 +1339,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     else:
         sampling_params = {}
 
+    extra_body = args.extra_body or {}
+    extra_body = {**sampling_params, **extra_body}
+
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
@@ -1355,7 +1367,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
         extra_headers=headers,
-        extra_body=sampling_params,
+        extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
