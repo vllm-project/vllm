@@ -6,7 +6,7 @@ When performing an inference with IO Processor plugins, the prompt type is defin
 
 ## Writing an IO Processor Plugin
 
-IO Processor plugins implement the `IOProcessor` interface (<gh-file:vllm/plugins/io_processors/interface.py>):
+IO Processor plugins implement the [`IOProcessor`][vllm.plugins.io_processors.interface.IOProcessor] interface:
 
 ```python
 IOProcessorInput = TypeVar("IOProcessorInput")
@@ -67,9 +67,9 @@ The `parse_request` method is used for validating the user prompt and converting
 The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
 The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
 
-The `output_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorResponse` type that is then returned by the API Server. The implementation of the `/io_processor_pooling` serving endpoint is available here <gh-file:vllm/entrypoints/openai/serving_pooling_with_io_plugin.py>.
+The `output_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorResponse` type that is then returned by the API Server. The implementation of the `/io_processor_pooling` serving endpoint is available here [vllm/entrypoints/openai/serving_pooling_with_io_plugin.py](../../vllm/entrypoints/openai/serving_pooling_with_io_plugin.py).
 
-An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/christian-pinto/prithvi_io_processor_plugin). Please, also refer to our online (<gh-file:examples/online_serving/prithvi_geospatial_mae.py>) and offline (<gh-file:examples/offline_inference/prithvi_geospatial_mae_io_processor.py>) inference examples.
+An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/christian-pinto/prithvi_io_processor_plugin). Please, also refer to our online ([examples/online_serving/prithvi_geospatial_mae.py](../../examples/online_serving/prithvi_geospatial_mae.py)) and offline ([examples/offline_inference/prithvi_geospatial_mae_io_processor.py](../../examples/offline_inference/prithvi_geospatial_mae_io_processor.py)) inference examples.
 
 ## Using an IO Processor plugin
 
