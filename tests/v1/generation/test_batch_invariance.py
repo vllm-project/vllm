@@ -59,12 +59,15 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     # Pick a random template
     base_prompt = random.choice(prompt_templates)
 
-    # Add some padding to vary the length if needed
-    if min_words > 50:
+    if max_words < min_words:
+        max_words = min_words
+    target_words = random.randint(min_words, max_words)
+
+    if target_words > 50:
         # For longer prompts, repeat context
         padding_text = (
             " This is an interesting topic that deserves more explanation. "
-            * (min_words // 50)
+            * (target_words // 50)
         )
         base_prompt = base_prompt + padding_text
 
