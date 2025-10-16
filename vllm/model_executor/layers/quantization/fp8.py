@@ -15,7 +15,7 @@ from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -356,7 +356,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # Disable marlin for rocm
         if current_platform.is_rocm():
             self.use_marlin = False
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             self.use_marlin = False
 
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
@@ -540,7 +540,7 @@ class Fp8LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # If batch invariant mode is enabled, dequantize and use BF16 compute
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             # Dequantize FP8 weights to BF16
             weight_fp8 = layer.weight.to(torch.bfloat16)
             weight_scale = layer.weight_scale.to(torch.bfloat16)
