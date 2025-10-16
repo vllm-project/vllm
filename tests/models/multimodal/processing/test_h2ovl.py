@@ -3,7 +3,6 @@
 """Tests for H2OVL's multimodal preprocessing kwargs."""
 
 from collections.abc import Mapping
-from typing import Optional
 
 import pytest
 from PIL import Image
@@ -149,7 +148,7 @@ def test_processor_override(
     size_factors: list[int],
     min_dynamic_patch: int,
     max_dynamic_patch: int,
-    dynamic_image_size: Optional[bool],
+    dynamic_image_size: bool | None,
     kwargs_on_init: bool,
 ):
     mm_processor_kwargs = {

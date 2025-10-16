@@ -4,7 +4,7 @@
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Any, Generic, Optional, Union
+from typing import Any, Generic
 
 import torch
 from typing_extensions import TypeVar
@@ -41,11 +41,11 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
-    cumulative_logprob: Optional[float]
-    logprobs: Optional[SampleLogprobs]
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    lora_request: Optional[LoRARequest] = None
+    cumulative_logprob: float | None
+    logprobs: SampleLogprobs | None
+    finish_reason: str | None = None
+    stop_reason: int | str | None = None
+    lora_request: LoRARequest | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -108,19 +108,19 @@ class RequestOutput:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[list[int]],
-        prompt_logprobs: Optional[PromptLogprobs],
+        prompt: str | None,
+        prompt_token_ids: list[int] | None,
+        prompt_logprobs: PromptLogprobs | None,
         outputs: list[CompletionOutput],
         finished: bool,
-        metrics: Optional[Union[RequestMetrics, RequestStateStats]] = None,
-        lora_request: Optional[LoRARequest] = None,
-        encoder_prompt: Optional[str] = None,
-        encoder_prompt_token_ids: Optional[list[int]] = None,
-        num_cached_tokens: Optional[int] = None,
+        metrics: RequestMetrics | RequestStateStats | None = None,
+        lora_request: LoRARequest | None = None,
+        encoder_prompt: str | None = None,
+        encoder_prompt_token_ids: list[int] | None = None,
+        num_cached_tokens: int | None = None,
         *,
-        multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
-        kv_transfer_params: Optional[dict[str, Any]] = None,
+        multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,

@@ -23,7 +23,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import cached_property
-from typing import Union
 
 import PIL
 import torch
@@ -104,9 +103,10 @@ class OvisProcessor(ProcessorMixin):
     def __call__(
         self,
         images: ImageInput = None,
-        text: Union[
-            TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]
-        ] = None,
+        text: TextInput
+        | PreTokenizedInput
+        | list[TextInput]
+        | list[PreTokenizedInput] = None,
         **kwargs: Unpack[OvisProcessorKwargs],
     ) -> BatchFeature:
         """
