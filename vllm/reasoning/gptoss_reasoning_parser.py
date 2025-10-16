@@ -153,5 +153,5 @@ class GptOssReasoningParser(ReasoningParser):
 
                 return func_tag
         else:
-            # TODO (Hanchen)add reasoning tags on top of original in the future
+            # There is potential risk for appending the tag to the original tag
             return original_tag
