@@ -10,6 +10,11 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
+hopper_only = pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="Batch invariance tests only supported on Hopper (SM90)",
+)
+
 
 @pytest.fixture(autouse=True)
 def enable_batch_invariant_mode():
@@ -66,10 +71,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     return base_prompt
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability(90),
-    reason="Batch invariance tests only supported on Hopper (SM90)",
-)
+@hopper_only
 @pytest.mark.timeout(1000)
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
     """
@@ -214,10 +216,7 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability(90),
-    reason="Batch invariance tests only supported on Hopper (SM90)",
-)
+@hopper_only
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Requires CUDA to match production inference path.",
@@ -436,10 +435,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
         pytest.fail(msg)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability(90),
-    reason="Batch invariance tests only supported on Hopper (SM90)",
-)
+@hopper_only
 def test_simple_generation():
     """
     Simple test that runs the model with a basic prompt and prints the output.
@@ -485,10 +481,7 @@ def test_simple_generation():
             llm.shutdown()
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability(90),
-    reason="Batch invariance tests only supported on Hopper (SM90)",
-)
+@hopper_only
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Requires CUDA to match production inference path.",
@@ -707,10 +700,7 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
             os.environ["VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT"] = old_value
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability(90),
-    reason="Batch invariance tests only supported on Hopper (SM90)",
-)
+@hopper_only
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Requires CUDA to match production inference path.",
