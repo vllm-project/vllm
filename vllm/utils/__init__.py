@@ -521,17 +521,6 @@ def make_tensor_with_pad(
     return tensor
 
 
-def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
-    target_device: str | torch.device,
-    pin_memory: bool,
-) -> torch.Tensor:
-    """Asynchronously create a tensor and copy it from host to device."""
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
-
-
 def as_list(maybe_list: Iterable[T]) -> list[T]:
     """Convert iterable to list, unless it's already a list."""
     return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
@@ -674,60 +663,6 @@ def find_nccl_include_paths() -> list[str] | None:
             out.append(p)
             seen.add(p)
     return out or None
-
-
-prev_set_stream = torch.cuda.set_stream
-
-_current_stream_tls = threading.local()
-
-
-def _patched_set_stream(stream: torch.cuda.Stream) -> None:
-    _current_stream_tls.value = stream
-    prev_set_stream(stream)
-
-
-torch.cuda.set_stream = _patched_set_stream
-
-
-class _StreamPlaceholder:
-    def __init__(self):
-        self.synchronize = lambda: None
-
-
-def current_stream() -> torch.cuda.Stream:
-    """
-    replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
-    it turns out that `torch.cuda.current_stream()` is quite expensive,
-    as it will construct a new stream object at each call.
-    here we patch `torch.cuda.set_stream` to keep track of the current stream
-    directly, so that we can avoid calling `torch.cuda.current_stream()`.
-
-    the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
-    from C/C++ code.
-    """
-    from vllm.platforms import current_platform
-
-    if not hasattr(_current_stream_tls, "value") or _current_stream_tls.value is None:
-        # when this function is called before any stream is set,
-        # we return the default stream.
-        # On ROCm using the default 0 stream in combination with RCCL
-        # is hurting performance. Therefore creating a dedicated stream
-        # per process
-        if current_platform.is_rocm():
-            # torch.cuda.set_stream here is the alias of _pathed_set_stream
-            torch.cuda.set_stream(torch.cuda.Stream())
-        elif current_platform.is_cpu():
-            _current_stream_tls.value = _StreamPlaceholder()
-        else:
-            current_stream = current_platform.current_stream
-            if current_stream is not None:
-                _current_stream_tls.value = current_stream()
-            else:
-                raise ValueError(
-                    "Fail to set current stream, current platform "
-                    "may not support current_stream with torch API"
-                )
-    return _current_stream_tls.value
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:

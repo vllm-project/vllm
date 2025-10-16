@@ -26,7 +26,6 @@ from vllm.utils import (
     MemorySnapshot,
     PlaceholderModule,
     bind_kv_cache,
-    current_stream,
     get_open_port,
     get_tcp_uri,
     join_host_port,
@@ -39,7 +38,11 @@ from vllm.utils import (
     swap_dict_values,
     unique_filepath,
 )
-from vllm.utils.torch_utils import common_broadcastable_dtype, is_lossless_cast
+from vllm.utils.torch_utils import (
+    common_broadcastable_dtype,
+    current_stream,
+    is_lossless_cast,
+)
 
 from ..utils import create_new_process_for_each_test
 
