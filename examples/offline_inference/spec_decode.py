@@ -136,14 +136,18 @@ def main():
         prompts = get_custom_mm_prompts(args.num_prompts)
     ic(len(prompts))
 
+    # manually specify the speculative token tree
     if args.spec_token_tree is not None:
         assert args.spec_token_tree_depth is None and args.spec_token_tree_branching is None, \
             "If using spec_token_tree, cannot also use spec token tree depth+branching"
         spec_token_tree = ast.literal_eval(args.spec_token_tree)
         assert args.num_spec_tokens == len(spec_token_tree), f'expected `len(spec_token_tree) == num_spec_tokens` but got {len(spec_token_tree)=} and {args.num_spec_tokens=}'
         spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
-    elif args.spec_token_tree_depth is not None and args.spec_token_tree_branching is not None:
+    # construct a complete speculative token tree from depth, branch args
+    elif args.spec_token_tree_depth is not None or args.spec_token_tree_branching is not None and not (args.spec_token_tree_depth is None and args.spec_token_tree_branching is None):
         assert args.spec_token_tree is None, "If using spec token tree depth+branching, cannot also use spec_token_tree"
+        if args.spec_token_tree_depth is None: args.spec_token_tree_depth = 1
+        if args.spec_token_tree_branching is None: args.spec_token_tree_branching = 1
         spec_token_tree = []
         depth, branching = args.spec_token_tree_depth, args.spec_token_tree_branching
         for d in range(1, depth + 1):
