@@ -924,8 +924,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
         "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
     ),
-    "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("royokong/e5-v"),
-    "TransformersMultiModalForSequenceClassification": _HfExamplesInfo("royokong/e5-v"),
+    "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(
+        "google/gemma-3-4b-it"
+    ),
 }
 
 _EXAMPLE_MODELS = {
