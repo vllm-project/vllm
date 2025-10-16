@@ -4,7 +4,7 @@ vLLM provides first-class support for generative models, which covers most of LL
 
 In vLLM, generative models implement the[VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface.
 Based on the final hidden states of the input, these models output log probabilities of the tokens to generate,
-which are then passed through [Sampler][vllm.model_executor.layers.sampler.Sampler] to obtain the final text.
+which are then passed through [Sampler][vllm.v1.sample.sampler.Sampler] to obtain the final text.
 
 ## Configuration
 
@@ -19,7 +19,7 @@ Run a model in generation mode via the option `--runner generate`.
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration](../api/summary.md#configuration) for a list of options when initializing the model.
+See [configuration](../api/README.md#configuration) for a list of options when initializing the model.
 
 ### `LLM.generate`
 
@@ -98,15 +98,15 @@ and automatically applies the model's [chat template](https://huggingface.co/doc
     conversation = [
         {
             "role": "system",
-            "content": "You are a helpful assistant"
+            "content": "You are a helpful assistant",
         },
         {
             "role": "user",
-            "content": "Hello"
+            "content": "Hello",
         },
         {
             "role": "assistant",
-            "content": "Hello! How can I assist you today?"
+            "content": "Hello! How can I assist you today?",
         },
         {
             "role": "user",

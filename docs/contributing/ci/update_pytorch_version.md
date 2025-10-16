@@ -90,7 +90,7 @@ address the long build time at its source, the current workaround is to set `VLL
 to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
 when manually triggering a build on Buildkite. This branch accomplishes two things:
 
-1. Increase the timeout limit to 10 hours so that the build doesn't timeout.
+1. Increase the timeout limit to 10 hours so that the build doesn't time out.
 2. Allow the compiled artifacts to be written to the vLLM sccache S3 bucket
 to warm it up so that future builds are faster.
 

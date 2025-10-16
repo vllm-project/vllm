@@ -4,22 +4,22 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from functools import cached_property
-from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
-                    Union)
+from typing import Any
 
-import torch.nn as nn
 from typing_extensions import TypeVar
 
 import vllm.platforms
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.tasks import SupportedTask
-from vllm.utils import make_async
-from vllm.worker.worker_base import WorkerBase
+from vllm.utils.asyncio import make_async
+from vllm.v1.outputs import SamplerOutput
+from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -30,7 +30,7 @@ class ExecutorBase(ABC):
     """Base class for all executors.
 
     An executor is responsible for executing the model on one device,
-    or it can be a distributed executor 
+    or it can be a distributed executor
     that can execute the model on multiple devices.
     """
 
@@ -54,17 +54,20 @@ class ExecutorBase(ABC):
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
+        self.kv_output_aggregator: KVOutputAggregator | None = None
 
     @abstractmethod
     def _init_executor(self) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def collective_rpc(self,
-                       method: Union[str, Callable[..., _R]],
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> list[_R]:
         """
         Execute an RPC call on all workers.
 
@@ -82,14 +85,14 @@ class ExecutorBase(ABC):
 
         Returns:
             A list containing the results from each worker.
-        
+
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
         raise NotImplementedError
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
@@ -97,9 +100,10 @@ class ExecutorBase(ABC):
         ExecutorBase may require modification of the result, e.g. to ensure the
         selected cache sizes are compatible with all workers.
 
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        Returns a tuple `(num_gpu_blocks, num_cpu_blocks)`, where
+        `num_gpu_blocks` are blocks that are "active" on the device and can be
+        appended to.
+        `num_cpu_blocks` refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
         results = self.collective_rpc("determine_num_available_blocks")
@@ -108,33 +112,29 @@ class ExecutorBase(ABC):
         return a, b
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
-        """Initialize the KV cache by invoking the underlying worker.
-        """
+        """Initialize the KV cache by invoking the underlying worker."""
         # NOTE: This is logged in the executor because there can be >1 workers.
-        logger.info("# %s blocks: %d, # CPU blocks: %d",
-                    vllm.platforms.current_platform.device_name,
-                    num_gpu_blocks, num_cpu_blocks)
-        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
-                           self.model_config.max_model_len)
-        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
-                    self.model_config.max_model_len, max_concurrency)
+        logger.info(
+            "# %s blocks: %d, # CPU blocks: %d",
+            vllm.platforms.current_platform.device_name,
+            num_gpu_blocks,
+            num_cpu_blocks,
+        )
+        max_concurrency = (
+            num_gpu_blocks
+            * self.cache_config.block_size
+            / self.model_config.max_model_len
+        )
+        logger.info(
+            "Maximum concurrency for %s tokens per request: %.2fx",
+            self.model_config.max_model_len,
+            max_concurrency,
+        )
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        self.collective_rpc("initialize_cache",
-                            args=(num_gpu_blocks, num_cpu_blocks))
-
-    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function directly on the model inside each worker,
-        returning the result for each of them.
-        """
-
-        def rpc_func(worker: WorkerBase) -> _R:
-            return func(worker.get_model())
-
-        return self.collective_rpc(rpc_func)
+        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
 
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -143,9 +143,9 @@ class ExecutorBase(ABC):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(execute_model_req, ))
+    ) -> list[SamplerOutput]:
+        output = self.collective_rpc("execute_model", args=(execute_model_req,))
+        assert output[0] is not None
         return output[0]
 
     def stop_remote_worker_execution_loop(self) -> None:
@@ -154,21 +154,25 @@ class ExecutorBase(ABC):
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return all(self.collective_rpc("add_lora", args=(lora_request, )))
+        return all(self.collective_rpc("add_lora", args=(lora_request,)))
 
     def remove_lora(self, lora_id: int) -> bool:
         assert lora_id > 0, "lora_id must be greater than 0."
-        return all(self.collective_rpc("remove_lora", args=(lora_id, )))
+        return all(self.collective_rpc("remove_lora", args=(lora_id,)))
 
     def pin_lora(self, lora_id: int) -> bool:
         assert lora_id > 0, "lora_id must be greater than 0."
-        return all(self.collective_rpc("pin_lora", args=(lora_id, )))
+        return all(self.collective_rpc("pin_lora", args=(lora_id,)))
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         sets = self.collective_rpc("list_loras")
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
+
+    def reset_mm_cache(self) -> None:
+        """Reset the multi-modal cache in each worker."""
+        self.collective_rpc("reset_mm_cache")
 
     def start_profile(self) -> None:
         self.collective_rpc("start_profile")
@@ -185,25 +189,29 @@ class ExecutorBase(ABC):
         time_after_sleep = time.perf_counter()
         self.sleeping_tags = {"weights", "kv_cache"}
         self.is_sleeping = True
-        logger.info("It took %.6f seconds to fall asleep.",
-                    time_after_sleep - time_before_sleep)
+        logger.info(
+            "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
+        )
 
-    def wake_up(self, tags: Optional[list[str]] = None):
+    def wake_up(self, tags: list[str] | None = None):
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
         if tags:
             for tag in tags:
                 if tag not in self.sleeping_tags:
-                    logger.warning("Tag %s is not in sleeping tags %s", tag,
-                                   self.sleeping_tags)
+                    logger.warning(
+                        "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
+                    )
                     return
         time_before_wakeup = time.perf_counter()
         self.collective_rpc("wake_up", kwargs=dict(tags=tags))
         time_after_wakeup = time.perf_counter()
-        logger.info("It took %.6f seconds to wake up tags %s.",
-                    time_after_wakeup - time_before_wakeup,
-                    tags if tags is not None else self.sleeping_tags)
+        logger.info(
+            "It took %.6f seconds to wake up tags %s.",
+            time_after_wakeup - time_before_wakeup,
+            tags if tags is not None else self.sleeping_tags,
+        )
         if tags:
             for tag in tags:
                 self.sleeping_tags.remove(tag)
@@ -215,13 +223,13 @@ class ExecutorBase(ABC):
     def save_sharded_state(
         self,
         path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
+        pattern: str | None = None,
+        max_size: int | None = None,
     ) -> None:
-        self.collective_rpc("save_sharded_state",
-                            kwargs=dict(path=path,
-                                        pattern=pattern,
-                                        max_size=max_size))
+        self.collective_rpc(
+            "save_sharded_state",
+            kwargs=dict(path=path, pattern=pattern, max_size=max_size),
+        )
 
     @abstractmethod
     def check_health(self) -> None:
@@ -231,14 +239,11 @@ class ExecutorBase(ABC):
 
     def shutdown(self) -> None:
         """Shutdown the executor."""
-        return
-
-    def __del__(self):
-        self.shutdown()
+        self.collective_rpc("shutdown")
 
     async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> list[SamplerOutput]:
         """Executes one model step on the given sequences."""
         output = await make_async(self.execute_model)(execute_model_req)
         return output
@@ -252,6 +257,12 @@ class ExecutorBase(ABC):
         exception."""
         self.check_health()
 
+    def init_kv_output_aggregator(self, finished_count: int | None) -> None:
+        """Init KVOutputAggregator"""
+        self.kv_output_aggregator = KVOutputAggregator(
+            finished_count or self.parallel_config.world_size
+        )
+
 
 class DistributedExecutorBase(ExecutorBase):
     """Abstract superclass of distributed executor implementations."""
@@ -259,19 +270,20 @@ class DistributedExecutorBase(ExecutorBase):
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
         # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
-        self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
+        self.parallel_worker_tasks: Any | Awaitable[Any] | None = None
 
         super().__init__(*args, **kwargs)
 
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         # TODO: unify into collective_rpc
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
-                async_run_tensor_parallel_workers_only=True)
+                async_run_tensor_parallel_workers_only=True,
+            )
 
         # Only the driver worker returns the sampling results.
         driver_outputs = self._driver_execute_model(execute_model_req)
@@ -291,8 +303,8 @@ class DistributedExecutorBase(ExecutorBase):
 
     @abstractmethod
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
+        self, execute_model_req: ExecuteModelRequest | None
+    ) -> list[SamplerOutput] | None:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution loop
@@ -301,20 +313,22 @@ class DistributedExecutorBase(ExecutorBase):
         """
         raise NotImplementedError
 
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+    def collective_rpc(
+        self,
+        method: str | Callable,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> list[Any]:
         return self._run_workers(method, *args, **(kwargs or {}))
 
     @abstractmethod
     def _run_workers(
         self,
-        method: Union[str, Callable],
+        method: str | Callable,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        max_concurrent_workers: Optional[int] = None,
+        max_concurrent_workers: int | None = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
@@ -324,7 +338,7 @@ class DistributedExecutorBase(ExecutorBase):
                 run only in the remote TP workers, not the driver worker.
                 It will also be run asynchronously and return a list of futures
                 rather than blocking on the results.
-        
+
         # TODO: simplify and merge with collective_rpc
         """
         raise NotImplementedError
@@ -336,12 +350,13 @@ class DistributedExecutorBase(ExecutorBase):
         raise NotImplementedError
 
     async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> list[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(
-                self._start_worker_execution_loop())
+                self._start_worker_execution_loop()
+            )
 
         # Only the driver worker returns the sampling results.
         return await self._driver_execute_model_async(execute_model_req)
@@ -360,8 +375,8 @@ class DistributedExecutorBase(ExecutorBase):
     @abstractmethod
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> List[SamplerOutput]:
+        execute_model_req: ExecuteModelRequest | None = None,
+    ) -> list[SamplerOutput]:
         """Execute the model asynchronously in the driver worker.
 
         Passing None will cause the driver to stop the model execution

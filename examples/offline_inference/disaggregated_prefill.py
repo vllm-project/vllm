@@ -30,12 +30,12 @@ def run_prefill(prefill_done):
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
-    # Using PyNcclConnector to transmit KV caches between vLLM instances.
+    # Using P2pNcclConnector to transmit KV caches between vLLM instances.
     # This instance is the prefill node (kv_producer, rank 0).
     # The number of parallel instances for KV cache transfer is set to 2,
-    # as required for PyNcclConnector.
+    # as required for P2pNcclConnector.
     ktc = KVTransferConfig(
-        kv_connector="PyNcclConnector",
+        kv_connector="P2pNcclConnector",
         kv_role="kv_producer",
         kv_rank=0,
         kv_parallel_size=2,
@@ -74,12 +74,12 @@ def run_decode(prefill_done):
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
-    # Using PyNcclConnector to transmit KV caches between vLLM instances.
+    # Using P2pNcclConnector to transmit KV caches between vLLM instances.
     # This instance is the decode node (kv_consumer, rank 1).
     # The number of parallel instances for KV cache transfer is set to 2,
-    # as required for PyNcclConnector.
+    # as required for P2pNcclConnector.
     ktc = KVTransferConfig(
-        kv_connector="PyNcclConnector",
+        kv_connector="P2pNcclConnector",
         kv_role="kv_consumer",
         kv_rank=1,
         kv_parallel_size=2,

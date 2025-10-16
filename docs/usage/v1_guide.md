@@ -83,16 +83,10 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | Model Type                  | Status                                                                             |
 |-----------------------------|------------------------------------------------------------------------------------|
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
-| **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
+| **Encoder-Decoder Models**  | <nobr>🟢 Whisper only</nobr>                                                       |
 | **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
 | **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟢 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
-
-vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
-
-!!! tip
-
-    This corresponds to the V1 column in our [list of supported models](../models/supported_models.md).
 
 See below for the status of models that are not yet supported or have more features planned in V1.
 
@@ -107,20 +101,20 @@ to enable simultaneous generation and embedding using the same engine instance i
 #### Mamba Models
 
 Models using selective state-space mechanisms instead of standard transformer attention are supported.
-Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`) are supported. Please note that these models currently require disabling prefix caching in V1. Additionally, Mamba-1 models require `enforce_eager=True`.
+Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`,`FalconMambaForCausalLM`) are supported.
 
-Models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
-`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`). Please note that
-these models currently require disabling prefix caching and using the FlashInfer attention backend in V1.
+Hybrid models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
+`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`, `Plamo2ForCausalLM`).
 
-Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`).
-Please note that these models currently require disabling prefix caching, enforcing eager mode, and using the FlashInfer
-attention backend in V1.
+Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`, `Lfm2ForCausalLM`).
+
+Please note that prefix caching is not yet supported for any of the above models.
 
 #### Encoder-Decoder Models
 
-Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
-are not yet supported.
+Whisper is supported. Other models requiring cross-attention between separate
+encoder and decoder (e.g., `BartForConditionalGeneration`,
+`MllamaForConditionalGeneration`) are not supported.
 
 ### Features
 
@@ -154,16 +148,19 @@ differences compared to V0:
 
 ##### Logprobs Calculation
 
-Logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
+By default, logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
 before applying any logits post-processing such as temperature scaling or penalty
 adjustments). As a result, the returned logprobs do not reflect the final adjusted
 probabilities used during sampling.
 
-Support for logprobs with post-sampling adjustments is in progress and will be added in future updates.
+You can adjust this behavior by setting the `--logprobs-mode` flag.
+Four modes are supported: `raw_logprobs` (default), `processed_logprobs`, `raw_logits`, `processed_logits`.
+Raw means the values before applying any logit processors, like bad words.
+Processed means the values after applying all processors, including temperature and top_k/top_p.
 
 ##### Prompt Logprobs with Prefix Caching
 
-Currently prompt logprobs are only supported when prefix caching is turned off via `--no-enable-prefix-caching`. In a future release, prompt logprobs will be compatible with prefix caching, but a recomputation will be triggered to recover the full prompt logprobs even upon a prefix cache hit. See details in [RFC #13414](gh-issue:13414).
+Logprobs are not cached. For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
 
 #### Deprecated Features
 

@@ -99,11 +99,11 @@ http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201
 
 ### Multi-process Mode
 
-In v0, metrics are collected in the engine core process and we use multi-process mode to make them available in the API server process. See <gh-pr:7279>.
+In v0, metrics are collected in the engine core process and we use multiprocess mode to make them available in the API server process. See <gh-pr:7279>.
 
 ### Built in Python/Process Metrics
 
-The following metrics are supported by default by `prometheus_client`, but they are not exposed when multi-process mode is used:
+The following metrics are supported by default by `prometheus_client`, but they are not exposed when multiprocess mode is used:
 
 - `python_gc_objects_collected_total`
 - `python_gc_objects_uncollectable_total`
@@ -478,15 +478,17 @@ us with:
 
 ```python
 if seq_group.is_finished():
-    if (seq_group.metrics.first_scheduled_time is not None and
-            seq_group.metrics.first_token_time is not None):
+    if (
+        seq_group.metrics.first_scheduled_time is not None
+        and seq_group.metrics.first_token_time is not None
+    ):
         time_queue_requests.append(
             seq_group.metrics.first_scheduled_time -
-            seq_group.metrics.arrival_time)
+            seq_group.metrics.arrival_time
+        )
     ...
     if seq_group.metrics.time_in_queue is not None:
-        time_in_queue_requests.append(
-            seq_group.metrics.time_in_queue)
+        time_in_queue_requests.append(seq_group.metrics.time_in_queue)
 ```
 
 This seems duplicative, and one of them should be removed. The latter
@@ -565,7 +567,7 @@ model and then validate those tokens with the larger model.
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
 There is a PR under review (<gh-pr:12193>) to add "prompt lookup (ngram)"
-seculative decoding to v1. Other techniques will follow. We should
+speculative decoding to v1. Other techniques will follow. We should
 revisit the v0 metrics in this context.
 
 !!! note

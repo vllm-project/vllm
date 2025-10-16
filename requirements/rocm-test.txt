@@ -1,5 +1,6 @@
 # Common dependencies
 -r common.txt
+tblib==3.1.0
 
 # entrypoints test
 # librosa==0.10.2.post1 # required by audio tests in entrypoints/openai
@@ -28,4 +29,6 @@ matplotlib==3.10.3
 # Multi-Modal Models Test (Extended) 3
 blobfile==3.0.0
 
+schemathesis==3.39.15 # Required for openai schema test.
 
+mteb[bm25s]>=1.38.11, <2 # required for mteb test

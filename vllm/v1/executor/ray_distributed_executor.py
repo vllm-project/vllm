@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from concurrent.futures import Future
-from typing import Optional, Union
 
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.ray_distributed_executor import (  # noqa
-    RayDistributedExecutor as RayDistributedExecutorV0)
+    RayDistributedExecutor as RayDistributedExecutorV0,
+)
 from vllm.logger import init_logger
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
@@ -17,14 +18,14 @@ logger = init_logger(__name__)
 
 class FutureWrapper(Future):
     """A wrapper around Ray output reference to meet the interface
-    of .execute_model(): The top level (core busy loop) expects .result() api 
+    of .execute_model(): The top level (core busy loop) expects .result() api
     to block and return a single output.
-    
-    If aggregator is provided, the outputs from all workers are aggregated upon 
+
+    If aggregator is provided, the outputs from all workers are aggregated upon
     the result() call. If not only the first worker's output is returned.
     """
 
-    def __init__(self, refs, aggregator: Optional[KVOutputAggregator] = None):
+    def __init__(self, refs, aggregator: KVOutputAggregator | None = None):
         super().__init__()
         self.refs = refs
         self.aggregator = aggregator
@@ -50,8 +51,6 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
 
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-        self.kv_output_aggregator = KVOutputAggregator(
-            self.parallel_config.world_size)
 
     @property
     def max_concurrent_batches(self) -> int:
@@ -64,12 +63,14 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
 
     def execute_model(
         self,
-        scheduler_output,
-    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         """Execute the model on the Ray workers.
 
         Args:
             scheduler_output: The scheduler output to execute.
+            non_block: If True, the method will return a Future.
 
         Returns:
             The model runner output.
@@ -83,7 +84,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
-            if self.max_concurrent_batches == 1:
+            if not non_block:
                 return refs[0].get()
 
             # When PP is used, we return a FutureWrapper immediately so that
@@ -91,7 +92,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
             return FutureWrapper(refs)
 
         # Get output from all workers when connector is present
-        if self.max_concurrent_batches == 1:
+        if not non_block:
             # Block and get results from all workers
             outputs = [ref.get() for ref in refs]
             return self.kv_output_aggregator.aggregate(outputs)
@@ -100,9 +101,11 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         return FutureWrapper(refs, self.kv_output_aggregator)
 
     def reinitialize_distributed(
-            self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        self, reconfig_request: ReconfigureDistributedRequest
+    ) -> None:
         self._run_workers("reinitialize_distributed", reconfig_request)
-        if reconfig_request.new_data_parallel_rank == \
-        ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
+        if (
+            reconfig_request.new_data_parallel_rank
+            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        ):
             self.shutdown()
-        return

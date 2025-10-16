@@ -1,0 +1,764 @@
+kind: PersesDashboard
+metadata:
+  name: performance-statistics
+  createdAt: 0001-01-01T00:00:00Z
+  updatedAt: 0001-01-01T00:00:00Z
+  version: 0
+  project: ""
+spec:
+  display:
+    name: Performance Statistics
+
+  variables:
+    - kind: ListVariable
+      spec:
+        display:
+          name: Deployment_ID
+          hidden: false
+        name: Deployment_id
+        allowAllValue: true
+        allowMultiple: true
+        defaultValue:
+          - $__all
+        sort: alphabetical-asc
+        plugin:
+          kind: PrometheusLabelValuesVariable
+          spec:
+            datasource:
+              kind: PrometheusDatasource
+              name: accelerators-thanos-querier-datasource
+            labelName: model_name
+            matchers:
+              # Any one vllm metric that always carries model_name
+              - vllm:generation_tokens_total{}
+
+  panels:
+    "1":
+      kind: Panel
+      spec:
+        display:
+          name: E2E Latency over Time
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend:
+              mode: table
+              position: bottom
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  # avg latency by model = sum(rate(sum)) / sum(rate(count))
+                  query: >
+                    sum by (model_name) (rate(vllm:e2e_request_latency_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
+                    /
+                    sum by (model_name) (rate(vllm:e2e_request_latency_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
+                  seriesNameFormat: '{{model_name}}'
+
+    "2":
+      kind: Panel
+      spec:
+        display:
+          name: E2E Latency (Avg)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    (sum by (model_name) (increase(vllm:e2e_request_latency_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
+                    /
+                    (sum by (model_name) (increase(vllm:e2e_request_latency_seconds_count{model_name=~"$Deployment_id"}[$__range])))
+
+    "3":
+      kind: Panel
+      spec:
+        display:
+          name: E2E Latency (P50)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.50,
+                      sum by (le, model_name) (
+                        rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "4":
+      kind: Panel
+      spec:
+        display:
+          name: E2E Latency (P90)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.90,
+                      sum by (le, model_name) (
+                        rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "5":
+      kind: Panel
+      spec:
+        display:
+          name: E2E Latency (P99)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.99,
+                      sum by (le, model_name) (
+                        rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "6":
+      kind: Panel
+      spec:
+        display:
+          name: TTFT over Time
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend:
+              mode: table
+              position: bottom
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    sum by (model_name) (rate(vllm:time_to_first_token_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
+                    /
+                    sum by (model_name) (rate(vllm:time_to_first_token_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
+                  seriesNameFormat: '{{model_name}}'
+
+    "7":
+      kind: Panel
+      spec:
+        display:
+          name: TTFT (Avg)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    (sum by (model_name) (increase(vllm:time_to_first_token_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
+                    /
+                    (sum by (model_name) (increase(vllm:time_to_first_token_seconds_count{model_name=~"$Deployment_id"}[$__range])))
+
+    "8":
+      kind: Panel
+      spec:
+        display:
+          name: TTFT (P50)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.50,
+                      sum by (le, model_name) (
+                        rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "9":
+      kind: Panel
+      spec:
+        display:
+          name: TTFT (P90)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.90,
+                      sum by (le, model_name) (
+                        rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "10":
+      kind: Panel
+      spec:
+        display:
+          name: TTFT (P99)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.99,
+                      sum by (le, model_name) (
+                        rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "11":
+      kind: Panel
+      spec:
+        display:
+          name: ITL (Time per Output Token) over Time
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend:
+              mode: table
+              position: bottom
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    sum by (model_name) (rate(vllm:time_per_output_token_seconds_sum{model_name=~"$Deployment_id"}[$__interval]))
+                    /
+                    sum by (model_name) (rate(vllm:time_per_output_token_seconds_count{model_name=~"$Deployment_id"}[$__interval]))
+                  seriesNameFormat: '{{model_name}}'
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.50,
+                      sum by (le, model_name) (
+                        rate(vllm:time_per_output_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+                  seriesNameFormat: '{{model_name}} p50'
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.90,
+                      sum by (le, model_name) (
+                        rate(vllm:time_per_output_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+                  seriesNameFormat: '{{model_name}} p90'
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.99,
+                      sum by (le, model_name) (
+                        rate(vllm:time_per_output_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+                  seriesNameFormat: '{{model_name}} p99'
+
+    "12":
+      kind: Panel
+      spec:
+        display:
+          name: ITL (Avg)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    (sum by (model_name) (increase(vllm:time_per_output_token_seconds_sum{model_name=~"$Deployment_id"}[$__range])))
+                    /
+                    (sum by (model_name) (increase(vllm:time_per_output_token_seconds_count{model_name=~"$Deployment_id"}[$__range])))
+
+    "13":
+      kind: Panel
+      spec:
+        display:
+          name: ITL (P50)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.50,
+                      sum by (le, model_name) (
+                        rate(vllm:time_per_output_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "14":
+      kind: Panel
+      spec:
+        display:
+          name: ITL (P90)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.90,
+                      sum by (le, model_name) (
+                        rate(vllm:time_per_output_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "15":
+      kind: Panel
+      spec:
+        display:
+          name: ITL (P99)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    histogram_quantile(
+                      0.99,
+                      sum by (le, model_name) (
+                        rate(vllm:time_per_output_token_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])
+                      )
+                    )
+
+    "16":
+      kind: Panel
+      spec:
+        display:
+          name: TPS (Tokens/sec) over Time
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend:
+              mode: table
+              position: bottom
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~"$Deployment_id"}[$__interval]))
+                  seriesNameFormat: '{{model_name}} generation'
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~"$Deployment_id"}[$__interval]))
+                  seriesNameFormat: '{{model_name}} prompt'
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  # overall iteration tokens/sec if exposed
+                  query: >
+                    rate(vllm:iteration_tokens_total_count[$__interval])
+                  seriesNameFormat: 'iteration overall'
+
+    "17":
+      kind: Panel
+      spec:
+        display:
+          name: KV Cache Usage (avg %)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  # Multiply by 100 so we can read it as a percentage without setting a unit (avoids CUE unit conflicts)
+                  query: >
+                    100 * avg(vllm:gpu_cache_usage_perc)
+
+    "18":
+      kind: Panel
+      spec:
+        display:
+          name: Running Requests by Pod
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend:
+              mode: table
+              position: bottom
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    sum by (pod) (vllm:num_requests_running)
+                  seriesNameFormat: '{{pod}}'
+
+    "19":
+      kind: Panel
+      spec:
+        display:
+          name: Waiting Requests by Pod
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend:
+              mode: table
+              position: bottom
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: >
+                    sum by (pod) (vllm:num_requests_waiting)
+                  seriesNameFormat: '{{pod}}'
+
+    "20":
+      kind: Panel
+      spec:
+        display:
+          name: Running Requests (sum)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: sum(vllm:num_requests_running)
+
+    "21":
+      kind: Panel
+      spec:
+        display:
+          name: Waiting Requests (sum)
+        plugin:
+          kind: StatChart
+          spec:
+            calculation: last-number
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource:
+                    kind: PrometheusDatasource
+                    name: accelerators-thanos-querier-datasource
+                  query: sum(vllm:num_requests_waiting)
+
+  layouts:
+    - kind: Grid
+      spec:
+        display:
+          title: Overview
+        items:
+          - x: 0
+            y: 0
+            width: 6
+            height: 3
+            content: { $ref: '#/spec/panels/17' }   # KV cache %
+          - x: 6
+            y: 0
+            width: 6
+            height: 3
+            content: { $ref: '#/spec/panels/20' }   # running sum
+          - x: 12
+            y: 0
+            width: 6
+            height: 3
+            content: { $ref: '#/spec/panels/21' }   # waiting sum
+
+    - kind: Grid
+      spec:
+        display:
+          title: E2E Latency
+        items:
+          - x: 0
+            y: 1
+            width: 10
+            height: 6
+            content: { $ref: '#/spec/panels/1' }
+          - x: 10
+            y: 1
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/2' }
+          - x: 17
+            y: 1
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/3' }
+          - x: 10
+            y: 4
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/4' }
+          - x: 17
+            y: 4
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/5' }
+
+    - kind: Grid
+      spec:
+        display:
+          title: TTFT
+        items:
+          - x: 0
+            y: 8
+            width: 10
+            height: 6
+            content: { $ref: '#/spec/panels/6' }
+          - x: 10
+            y: 8
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/7' }
+          - x: 17
+            y: 8
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/8' }
+          - x: 10
+            y: 11
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/9' }
+          - x: 17
+            y: 11
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/10' }
+
+    - kind: Grid
+      spec:
+        display:
+          title: ITL (Time per Output Token)
+        items:
+          - x: 0
+            y: 15
+            width: 10
+            height: 6
+            content: { $ref: '#/spec/panels/11' }
+          - x: 10
+            y: 15
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/12' }
+          - x: 17
+            y: 15
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/13' }
+          - x: 10
+            y: 18
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/14' }
+          - x: 17
+            y: 18
+            width: 7
+            height: 3
+            content: { $ref: '#/spec/panels/15' }
+
+    - kind: Grid
+      spec:
+        display:
+          title: TPS (Prompt / Generation / Iteration)
+        items:
+          - x: 0
+            y: 22
+            width: 14
+            height: 6
+            content: { $ref: '#/spec/panels/16' }
+
+    - kind: Grid
+      spec:
+        display:
+          title: Per-Pod Request State
+        items:
+          - x: 0
+            y: 28
+            width: 12
+            height: 6
+            content: { $ref: '#/spec/panels/18' }
+          - x: 12
+            y: 28
+            width: 12
+            height: 6
+            content: { $ref: '#/spec/panels/19' }
+
