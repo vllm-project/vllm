@@ -364,6 +364,11 @@ class GPUModelRunner(
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
+                    use_aux_hidden_state_from_config = \
+                        self.drafter._get_eagle3_use_aux_hidden_state_from_config()
+                    # Override from config if exists
+                    if use_aux_hidden_state_from_config is not None:
+                        self.use_aux_hidden_state_outputs = use_aux_hidden_state_from_config
             elif self.speculative_config.method == "medusa":
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
