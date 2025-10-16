@@ -341,10 +341,10 @@ class Qwen3MoeAttention(nn.Module):
 
 class Qwen3MoeDecoderLayer(nn.Module):
     def __init__(
-            self,
-            vllm_config: VllmConfig,
-            prefix: str = "",
-            alt_stream: device_module.Stream | None = None,
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        alt_stream: device_module.Stream | None = None,
     ) -> None:
         super().__init__()
 

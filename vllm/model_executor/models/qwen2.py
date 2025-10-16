@@ -27,7 +27,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
