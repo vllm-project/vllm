@@ -48,7 +48,7 @@ def is_rocm_aiter_moe_enabled() -> bool:
 
 
 @cache
-def use_fp4_aiter_moe() -> bool:
+def use_mxfp4_aiter_moe() -> bool:
     return current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
 
 

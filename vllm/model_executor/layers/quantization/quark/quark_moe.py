@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled,
-    use_fp4_aiter_moe,
+    use_mxfp4_aiter_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
@@ -472,11 +472,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             )
 
         self.emulate = not current_platform.supports_mx() or not (
-            use_fp4_aiter_moe() and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+            use_mxfp4_aiter_moe() and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
         )
         if self.emulate:
             logger.warning_once(
-                "The current mode does not support native MXFP4/MXFP6 "
+                f"The current mode (supports_mx={current_platform.supports_mx()}, "
+                f"use_mxfp4_aiter_moe={use_mxfp4_aiter_moe()}, "
+                f"ocp_mx_scheme={self.ocp_mx_scheme}) "
+                "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision."
