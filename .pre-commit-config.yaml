@@ -48,7 +48,7 @@ repos:
     entry: python tools/generate_nightly_torch_test.py
     files: ^requirements/test\.(in|txt)$
   - id: mypy-local
-    name: Run mypy for local Python installation
+    name: Run mypy for locally for lowest supported Python version
     entry: python tools/pre_commit/mypy.py 0 "3.10"
     stages: [pre-commit] # Don't run in CI
     <<: &mypy_common
