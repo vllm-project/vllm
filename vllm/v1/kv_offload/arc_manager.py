@@ -32,7 +32,11 @@ class ARCOffloadingManager(OffloadingManager):
 
     def _update_cache_capacity(self):
         if self.cache_capacity == 0:
-            self.cache_capacity = 10000  # arbitrary large value for initialization
+            if hasattr(self.backend, "num_blocks"):
+                self.cache_capacity = self.backend.num_blocks
+            else:
+                # fallback: use current free blocks as a proxy
+                self.cache_capacity = self.backend.get_num_free_blocks()
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         hit_count = 0
