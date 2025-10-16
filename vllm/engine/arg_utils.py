@@ -85,6 +85,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.vllm.config.optimization import OptimizationLevel
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -552,6 +553,7 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    optimzation_levels: OptimizationLevel = OptimizationLevel.O2s
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1093,6 +1095,10 @@ class EngineArgs:
         )
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
+        )
+
+        vllm_group.add_argument(
+            "--optimization-level", **vllm_kwargs["optimization_level"]
         )
 
         # Other arguments
