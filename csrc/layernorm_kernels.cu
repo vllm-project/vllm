@@ -426,7 +426,7 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                           wt_ptr % req_alignment_bytes == 0;
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
-  bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
       !batch_invariant_launch) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
@@ -474,7 +474,7 @@ void poly_norm(torch::Tensor& out,     // [..., hidden_size]
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
   auto out_ptr = reinterpret_cast<std::uintptr_t>(out.data_ptr());
   bool ptrs_are_aligned = inp_ptr % 16 == 0 && out_ptr % 16 == 0;
-  bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && hidden_size % 8 == 0 && !batch_invariant_launch) {
     LAUNCH_FUSED_POLY_NORM(8);
   } else {

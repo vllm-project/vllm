@@ -39,7 +39,7 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-        # m.setenv("VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT", "1")
+        # m.setenv("VLLM_BATCH_INVARIANT", "1")
 
         outputs: list[tuple[str, list]] = []
         for test_preemption in [False, True]:
