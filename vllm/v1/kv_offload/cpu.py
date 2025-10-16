@@ -8,9 +8,9 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
+from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
-from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager 
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
@@ -44,14 +44,17 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
             backend = CPUBackend(
-                block_size=self.offloaded_block_size,
-                num_blocks=self.num_cpu_blocks
+                block_size=self.offloaded_block_size, num_blocks=self.num_cpu_blocks
             )
 
             if self.eviction_policy == "arc":
-                self._manager = ARCOffloadingManager(backend, enable_events=enable_events)
+                self._manager = ARCOffloadingManager(
+                    backend, enable_events=enable_events
+                )
             elif self.eviction_policy == "lru":
-                self._manager = LRUOffloadingManager(backend, enable_events=enable_events)
+                self._manager = LRUOffloadingManager(
+                    backend, enable_events=enable_events
+                )
             else:
                 raise ValueError(
                     f"Unknown eviction policy: {self.eviction_policy}. "
