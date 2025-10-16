@@ -15,7 +15,7 @@ from vllm.attention.ops.flashmla import (
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -234,7 +234,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         tile_scheduler_metadata = attn_metadata.decode.tile_scheduler_metadata
         num_splits = attn_metadata.decode.num_splits
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             device = q.device
             dtype = torch.int32
 
