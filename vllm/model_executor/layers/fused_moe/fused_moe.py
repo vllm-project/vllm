@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
@@ -1129,7 +1130,7 @@ def fused_topk_bias(
 @torch.compile(
     dynamic=True,
     backend=current_platform.simple_compile_backend,
-    options={"graph_partition": False},
+    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
 )
 def grouped_topk(
     hidden_states: torch.Tensor,
