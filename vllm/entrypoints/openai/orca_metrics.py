@@ -6,7 +6,6 @@ Utility functions that create ORCA endpoint load report response headers.
 
 import json
 from collections.abc import Mapping
-from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.v1.metrics.reader import Gauge, get_metrics_snapshot
@@ -16,7 +15,7 @@ logger = init_logger(__name__)
 
 def create_orca_header(
     metrics_format: str, named_metrics: list[tuple[str, float]]
-) -> Optional[Mapping[str, str]]:
+) -> Mapping[str, str] | None:
     """
     Creates ORCA headers named 'endpoint-load-metrics' in the specified format
     and adds custom metrics to named_metrics.
@@ -98,7 +97,7 @@ def get_named_metrics_from_prometheus() -> list[tuple[str, float]]:
     return named_metrics
 
 
-def metrics_header(metrics_format: str) -> Optional[Mapping[str, str]]:
+def metrics_header(metrics_format: str) -> Mapping[str, str] | None:
     """
     Creates ORCA headers named 'endpoint-load-metrics' in the specified format.
     Metrics are collected from Prometheus using `get_named_metrics_from_prometheus()`.
