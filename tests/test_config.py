@@ -9,6 +9,7 @@ import pytest
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    CompilationConfig,
     ModelConfig,
     PoolerConfig,
     VllmConfig,
@@ -16,6 +17,7 @@ from vllm.config import (
 )
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
+from vllm.config.vllm import OptimizationLevel
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -582,19 +584,72 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
     assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
 
 
-# todo fix.
-# def test_vllm_config_defaults_are_none():
-#     """Verify that all fields that are set by default based on optimizaiton
-#     level are set to None if user does not set them explicitly."""
-#     # Construct VllmConfig without __post_init__.
-#     config = object.__new__(VllmConfig)
-#     # Construct CompilationConfig with __post_init__.
-#     config.compilation_config = CompilationConfig()
-#     for element in compilation_config_default_fields:
-#         assert getattr(config.compilation_config, element) is None
+def test_vllm_config_defaults_are_none():
+    """Verify that all fields that are set by default based on optimizaiton
+    level are set to None if user does not set them explicitly."""
+    # Construct VllmConfig without __post_init__.
+    config = object.__new__(VllmConfig)
+    # Construct CompilationConfig with __post_init__.
+    config.compilation_config = CompilationConfig()
+    default_config = config._build_defaults()
+    # Apply optimization level default if not set by user.
+    for k, v in default_config["general"].items():
+        if k == "pass_config":
+            for pass_k, pass_v in default_config["general"]["pass_config"].items():
+                assert getattr(config.compilation_config.pass_config, pass_k) is None
+        else:
+            assert getattr(config.compilation_config, k) is None
 
-#     for element in pass_config_enable_fields:
-#         assert getattr(config.compilation_config.pass_config, element) is None
+    for k, v in default_config["is_quantized"]["pass_config"].items():
+        assert getattr(config.compilation_config.pass_config, k) is None
 
-#     for element in vllm_config_default_fields:
-#         assert getattr(config, element) is None
+    for k, v in default_config["is_sequential"]["pass_config"].items():
+        assert getattr(config.compilation_config.pass_config, k) is None
+
+
+@pytest.mark.parametrize(
+    ("model_id", "optimization_level"),
+    [
+        (None, OptimizationLevel.O0),
+        (None, OptimizationLevel.O1),
+        (None, OptimizationLevel.O2),
+        (None, OptimizationLevel.O3),
+        ("Qwen/Qwen1.5-7B", OptimizationLevel.O0),
+        ("Qwen/Qwen1.5-7B", OptimizationLevel.O1),
+        ("Qwen/Qwen1.5-7B", OptimizationLevel.O2),
+        ("Qwen/Qwen1.5-7B", OptimizationLevel.O3),
+        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O0),
+        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O1),
+        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O2),
+        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O3),
+        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O0),
+        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O1),
+        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O2),
+        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O3),
+    ],
+)
+def test_vllm_conifg_defaults(model_id, optimization_level):
+    if model_id is not None:
+        model_config = ModelConfig(model_id)
+        vllm_config = VllmConfig(
+            model_config=model_config, optimization_level=optimization_level
+        )
+    else:
+        vllm_config = VllmConfig(optimization_level=optimization_level)
+
+    default_config = vllm_config._build_defaults()
+    for k, v in default_config["general"].items():
+        if k == "pass_config":
+            for pass_k, pass_v in default_config["general"]["pass_config"].items():
+                assert (
+                    getattr(vllm_config.compilation_config.pass_config, pass_k)
+                    == pass_v
+                )
+        else:
+            assert getattr(vllm_config.compilation_config, k) == v
+
+    for k, v in default_config["is_quantized"]["pass_config"].items():
+        assert getattr(vllm_config.compilation_config.pass_config, k) == v
+
+    for k, v in default_config["is_sequential"]["pass_config"].items():
+        assert getattr(vllm_config.compilation_config.pass_config, k) == v
