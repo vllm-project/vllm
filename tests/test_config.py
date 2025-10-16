@@ -16,6 +16,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.load import LoadConfig
+from vllm.config.optimization import build_defaults
 from vllm.config.utils import get_field, resolve_config_value
 from vllm.config.vllm import OptimizationLevel
 from vllm.model_executor.layers.pooler import PoolingType
@@ -588,7 +589,13 @@ def test_vllm_config_defaults_are_none():
     """Verify that optimization-level defaults are None when not set by user."""
     config = object.__new__(VllmConfig)
     config.compilation_config = CompilationConfig()
-    default_config = config._build_defaults()
+    config.optimization_level = OptimizationLevel.O0
+    config.model_config = None
+    default_config = build_defaults(
+        optimization_level=config.optimization_level,
+        compilation_config=config.compilation_config,
+        model_config=config.model_config,
+    )
 
     for k in default_config["general"]:
         if k == "pass_config":
@@ -627,6 +634,7 @@ def test_vllm_config_defaults_are_none():
 )
 def test_vllm_config_defaults(model_id, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
+    model_config = None
     if model_id is not None:
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
@@ -635,7 +643,11 @@ def test_vllm_config_defaults(model_id, optimization_level):
     else:
         vllm_config = VllmConfig(optimization_level=optimization_level)
 
-    default_config = vllm_config._build_defaults()
+    default_config = build_defaults(
+        optimization_level=optimization_level,
+        compilation_config=vllm_config.compilation_config,
+        model_config=model_config,
+    )
 
     # Verify general defaults
     for k, v in default_config["general"].items():

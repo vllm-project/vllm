@@ -35,7 +35,7 @@ from .load import LoadConfig
 from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
-from .optimization import OptimizationLevel
+from .optimization import OptimizationLevel, build_defaults
 from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
@@ -296,102 +296,6 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
-    def _build_defaults(self):
-        """Build optimization level-specific default configurations.
-
-        Returns configuration dict for the current optimization level (O0-O3).
-        Supports static values or callables for conditional defaults:
-            e.g., lambda cfg: cfg.model_config.is_quantized()
-        """
-        is_quantized = False
-        is_sequential = False
-        if self.model_config is not None:
-            is_quantized = self.model_config.is_quantized()
-            is_sequential = not self.model_config.is_model_moe()
-        optimization_level_00 = {
-            "general": {
-                "pass_config": {
-                    "enable_noop": False,
-                    "enable_fusion": False,
-                    "enable_fi_allreduce_fusion": False,
-                },
-                "mode": CompilationMode.NONE,
-                "cudagraph_mode": CUDAGraphMode.NONE,
-                "use_inductor_graph_partition": False,
-            },
-            "is_quantized": {"pass_config": {"enable_attn_fusion": False}},
-            "is_sequential": {
-                "pass_config": {
-                    "enable_sequence_parallelism": False,
-                    "enable_async_tp": False,
-                }
-            },
-        }
-        optimization_level_01 = {
-            "general": {
-                "pass_config": {
-                    "enable_noop": True,
-                    "enable_fusion": True,
-                    "enable_fi_allreduce_fusion": False,
-                },
-                "mode": CompilationMode.VLLM_COMPILE,
-                "cudagraph_mode": CUDAGraphMode.PIECEWISE,
-                "use_inductor_graph_partition": False,
-            },
-            "is_quantized": {"pass_config": {"enable_attn_fusion": False}},
-            "is_sequential": {
-                "pass_config": {
-                    "enable_sequence_parallelism": False,
-                    "enable_async_tp": False,
-                }
-            },
-        }
-        optimization_level_02 = {
-            "general": {
-                "pass_config": {
-                    "enable_noop": True,
-                    "enable_fusion": True,
-                    "enable_fi_allreduce_fusion": True,
-                },
-                "mode": CompilationMode.VLLM_COMPILE,
-                "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-                "use_inductor_graph_partition": True,
-            },
-            "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
-            "is_sequential": {
-                "pass_config": {
-                    "enable_sequence_parallelism": is_sequential,
-                    "enable_async_tp": is_sequential,
-                }
-            },
-        }
-        optimization_level_03 = {
-            "general": {
-                "pass_config": {
-                    "enable_noop": True,
-                    "enable_fusion": True,
-                    "enable_fi_allreduce_fusion": True,
-                },
-                "mode": CompilationMode.VLLM_COMPILE,
-                "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-                "use_inductor_graph_partition": True,
-            },
-            "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
-            "is_sequential": {
-                "pass_config": {
-                    "enable_sequence_parallelism": is_sequential,
-                    "enable_async_tp": is_sequential,
-                }
-            },
-        }
-        optimization_level_to_config = {
-            OptimizationLevel.O0: optimization_level_00,
-            OptimizationLevel.O1: optimization_level_01,
-            OptimizationLevel.O2: optimization_level_02,
-            OptimizationLevel.O3: optimization_level_03,
-        }
-        return optimization_level_to_config[self.optimization_level]
-
     def _set_config_default(self, config_obj: Any, key: str, value: Any) -> None:
         """Set config attribute to default if not already set by user.
 
@@ -484,7 +388,11 @@ class VllmConfig:
             self.optimization_level = OptimizationLevel.O0
 
         # Apply optimization level-specific defaults
-        default_config = self._build_defaults()
+        default_config = build_defaults(
+            optimization_level=self.optimization_level,
+            compilation_config=self.compilation_config,
+            model_config=self.model_config,
+        )
         self._apply_optimization_level_defaults(default_config)
         assert self.compilation_config.mode >= CompilationMode.NONE
         assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
