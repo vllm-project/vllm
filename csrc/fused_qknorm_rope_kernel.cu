@@ -75,8 +75,9 @@ inline __device__ __host__ T divUp(T m, T n) {
 }  // namespace tensorrt_llm::common
 
 namespace tensorrt_llm::kernels {
-// NOTE(zhuhaoran): This kernel based on https://github.com/NVIDIA/TensorRT-LLM/blob/main/cpp/tensorrt_llm/kernels/fusedQKNormRopeKernel.cu
-// and add support for pass cos_sin_cache.
+// NOTE(zhuhaoran): This kernel is adapted from TensorRT-LLM implementation,
+// with added support for passing the cos_sin_cache as an input.
+// https://github.com/NVIDIA/TensorRT-LLM/blob/main/cpp/tensorrt_llm/kernels/fusedQKNormRopeKernel.cu
 
 // Perform per-head QK Norm and RoPE in a single kernel.
 // head_dim: the dimension of each head
