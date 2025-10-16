@@ -844,10 +844,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 max_w13_scales, requires_grad=False
             )
 
-        self.rocm_aiter_use_asm = (
-            self.rocm_aiter_moe_enabled and envs.VLLM_ROCM_USE_AITER_ASMMOE
-        )
-
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
@@ -1108,7 +1104,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
-                use_asm=self.rocm_aiter_use_asm,
             )
 
         elif self.fused_experts is not None:

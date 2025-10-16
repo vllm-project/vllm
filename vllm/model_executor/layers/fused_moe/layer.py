@@ -325,9 +325,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-        self.rocm_aiter_use_asm = (
-            self.rocm_aiter_moe_enabled and envs.VLLM_ROCM_USE_AITER_ASMMOE
-        )
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
 
@@ -655,7 +652,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                use_asm=self.rocm_aiter_use_asm,
             )
         elif self.flashinfer_cutlass_moe_enabled:
             return self.flashinfer_cutlass_moe(

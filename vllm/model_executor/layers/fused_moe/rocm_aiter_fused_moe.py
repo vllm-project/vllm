@@ -100,7 +100,7 @@ class ActivationMethod(IntEnum):
 def is_rocm_aiter_moe_enabled() -> bool:
     return (
         current_platform.is_rocm()
-        and (envs.VLLM_ROCM_USE_AITER_MOE or envs.VLLM_ROCM_USE_AITER_ASMMOE)
+        and envs.VLLM_ROCM_USE_AITER_MOE
         and envs.VLLM_ROCM_USE_AITER
     )
 
@@ -314,63 +314,6 @@ def rocm_aiter_fused_moe_fake(
     return torch.empty_like(hidden_states)
 
 
-def rocm_aiter_asm_moe_impl(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
-    a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-    expert_mask: Optional[torch.Tensor] = None,
-    activation_method: int = ActivationMethod.SILU.value,
-) -> torch.Tensor:
-    from aiter import ActivationType
-    from aiter.fused_moe_bf16_asm import asm_moe
-
-    activation = ActivationType(activation_method)
-    return asm_moe(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        fc1_scale=fc1_scale,
-        fc2_scale=fc2_scale,
-        fc1_smooth_scale=fc1_smooth_scale,
-        fc2_smooth_scale=fc2_smooth_scale,
-        a16=a16,
-        per_tensor_quant_scale=per_tensor_quant_scale,
-        block_shape=None if block_shape is None else tuple(block_shape),
-        activation=activation,
-        expert_mask=expert_mask,
-    )
-
-
-def rocm_aiter_asm_moe_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weight: torch.Tensor,
-    topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
-    a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-    expert_mask: Optional[torch.Tensor] = None,
-    activation_method: int = ActivationMethod.SILU.value,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
 if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_asm_moe_tkw1",
@@ -382,14 +325,6 @@ if current_platform.is_rocm():
         op_name="rocm_aiter_fused_moe",
         op_func=rocm_aiter_fused_moe_impl,
         fake_impl=rocm_aiter_fused_moe_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_asm_moe",
-        op_func=rocm_aiter_asm_moe_impl,
-        mutates_args=[],
-        fake_impl=rocm_aiter_asm_moe_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
@@ -491,7 +426,6 @@ def rocm_aiter_fused_experts(
     apply_router_weight_on_input: bool = False,
     expert_map: Optional[torch.Tensor] = None,
     quant_config: Optional[FusedMoEQuantConfig] = None,
-    use_asm: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -535,23 +469,6 @@ def rocm_aiter_fused_experts(
             per_tensor_quant_scale=None,
             expert_mask=expert_mask,
             activation_method=activation_method,
-        )
-
-    elif use_asm:
-        return torch.ops.vllm.rocm_aiter_asm_moe(
-            hidden_states,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            fc1_scale=quant_config.w1_scale,
-            fc2_scale=quant_config.w2_scale,
-            fc1_smooth_scale=quant_config.a1_scale,
-            fc2_smooth_scale=quant_config.a2_scale,
-            a16=False,
-            block_shape=quant_config.block_shape,
-            activation_method=activation_method,
-            expert_mask=expert_mask,
         )
     else:
         quant_method = QuantMethod.NO.value

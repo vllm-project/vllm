@@ -855,9 +855,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-        self.rocm_aiter_use_asm = (
-            self.rocm_aiter_moe_enabled and envs.VLLM_ROCM_USE_AITER_ASMMOE
-        )
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
@@ -1311,7 +1308,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
-                use_asm=self.rocm_aiter_use_asm,
             )
         elif self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."

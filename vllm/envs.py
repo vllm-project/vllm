@@ -103,7 +103,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_USE_AITER_ASMMOE: bool = False
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
@@ -862,11 +861,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
-    # Whether to use aiter asm moe ops.
-    # By default is enabled.
-    "VLLM_ROCM_USE_AITER_ASMMOE": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_ASMMOE", "False").lower() in ("true", "1")
-    ),
     # Whether to use aiter mla ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
@@ -1468,7 +1462,6 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_PAGED_ATTN",
         "VLLM_ROCM_USE_AITER_LINEAR",
         "VLLM_ROCM_USE_AITER_MOE",
-        "VLLM_ROCM_USE_AITER_ASMMOE",
         "VLLM_ROCM_USE_AITER_RMSNORM",
         "VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE",
         "VLLM_ROCM_USE_AITER_MLA",
