@@ -431,7 +431,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
-    def is_applicable(self, shape: int | None) -> bool:
+    def is_applicable_for_range(self, compile_range: tuple[int, int] | None) -> bool:
         # This pass is applied on top of the sequence parallelism pass.
         # It inherits the same applicability condition as `SequenceParallelismPass`.
         # See `SequenceParallelismPass.is_applicable` for more details.
@@ -441,7 +441,9 @@ class AsyncTPPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return shape is not None and shape % tp_size == 0
+        return compile_range is not None and (
+            compile_range[0] == compile_range[1] and compile_range[1] % tp_size == 0
+        )
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
@@ -1100,18 +1102,18 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
         element_size = 4 if use_fp32_lamport else 2
-        max_token_num = max_size // (self.hidden_dim * element_size)
+        self.max_token_num = max_size // (self.hidden_dim * element_size)
         # take the min to save workspace size and we'll never use more
         # than max_num_batched_tokens anyways
-        max_token_num = min(
-            max_token_num, config.scheduler_config.max_num_batched_tokens
+        self.max_token_num = min(
+            self.max_token_num, config.scheduler_config.max_num_batched_tokens
         )
 
         self.ipc_handles, workspace_tensor = (
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=max_token_num,
+                max_token_num=self.max_token_num,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -1124,7 +1126,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=max_token_num,
+            max_token_num=self.max_token_num,
         )
 
         self.register_patterns()
@@ -1177,12 +1179,12 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
         self.disabled = False
 
-    @VllmInductorPass.time_and_log
     def is_applicable_for_range(self, compile_range: tuple[int, int] | None) -> bool:
         if compile_range is None:
             return False
         return compile_range[1] - 1 <= self.max_token_num
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
         if self.disabled:
             logger.debug("AllReduceFusionPass disabled")
