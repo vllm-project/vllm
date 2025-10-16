@@ -414,6 +414,18 @@ class Pooler(nn.Module, ABC):
         raise NotImplementedError
 
 
+class DummyPooler(Pooler):
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        raise {"plugin", "score"}
+
+    def forward(
+        self,
+        hidden_states: list[torch.Tensor] | torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        return hidden_states
+
+
 class PoolerHead(nn.Module):
     def __init__(self, activation: PoolerActivation) -> None:
         super().__init__()

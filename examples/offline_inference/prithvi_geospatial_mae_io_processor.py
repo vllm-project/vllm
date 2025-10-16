@@ -40,10 +40,9 @@ def main():
         model_impl="terratorch",
     )
 
-    pooling_params = PoolingParams(task="token_classify", activation=False)
     pooler_output = llm.encode(
         img_prompt,
-        pooling_params=pooling_params,
+        pooling_task="plugin"
     )
     output = pooler_output[0].outputs
 

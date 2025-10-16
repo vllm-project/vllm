@@ -63,7 +63,7 @@ class PrithviMAE:
         }
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
-        outputs = self.model.encode(prompt, use_tqdm=False)
+        outputs = self.model.encode(prompt, pooling_task="plugin", use_tqdm=False)
 
         return outputs[0].outputs.data
 
