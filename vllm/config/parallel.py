@@ -32,6 +32,14 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+All2allBackendType = Literal[
+    "naive",
+    "pplx",
+    "deepep_high_throughput",
+    "deepep_low_latency",
+    "allgather_reducescatter",
+    "flashinfer_all2allv",
+]
 
 
 @config
@@ -113,17 +121,7 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: (
-        Literal[
-            "naive",
-            "pplx",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "allgather_reducescatter",
-            "flashinfer_all2allv",
-        ]
-        | None
-    ) = None
+    all2all_backend: All2allBackendType | None = None
     """All2All backend for MoE expert parallel communication. If not set, uses
     the value from VLLM_ALL2ALL_BACKEND environment variable. Available options:
     - "naive": Naive all2all implementation using broadcasts

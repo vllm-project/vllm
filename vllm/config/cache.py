@@ -30,7 +30,7 @@ PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: BlockSize = Field(default=None)
+    block_size: BlockSize | None = Field(default=None)
     """Size of a contiguous cache block in number of tokens. On CUDA devices,
     only block sizes up to 32 are supported.
 

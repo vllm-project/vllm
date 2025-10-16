@@ -55,6 +55,7 @@ from vllm.config import (
 )
 from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
 from vllm.config.device import Device
+from vllm.config.lora import LoRAExtraVocabSize, MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -67,11 +68,13 @@ from vllm.config.model import (
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
+    All2allBackendType,
     DataParallelBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -375,7 +378,7 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    all2all_backend: str | None = ParallelConfig.all2all_backend
+    all2all_backend: All2allBackendType | None = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
@@ -449,12 +452,12 @@ class EngineArgs:
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
-    max_lora_rank: int = LoRAConfig.max_lora_rank
+    max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    lora_extra_vocab_size: LoRAExtraVocabSize = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -474,7 +477,7 @@ class EngineArgs:
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     # Deprecated guided decoding fields
-    guided_decoding_backend: str | None = None
+    guided_decoding_backend: StructuredOutputsBackend | None = None
     guided_decoding_disable_fallback: bool | None = None
     guided_decoding_disable_any_whitespace: bool | None = None
     guided_decoding_disable_additional_properties: bool | None = None
