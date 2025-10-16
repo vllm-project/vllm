@@ -17,6 +17,7 @@ from vllm.attention.backends.abstract import (
     is_quantized_kv_cache,
 )
 from vllm.attention.layer import Attention
+from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (
     flash_attn_supports_fp8,
@@ -32,6 +33,7 @@ if is_flash_attn_varlen_func_available():
     )
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
@@ -47,7 +49,6 @@ logger = init_logger(__name__)
 
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supports_quant_query_input: bool = True
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -147,6 +148,10 @@ class FlashAttentionMetadata:
     prefix_kv_lens: torch.Tensor | None
     suffix_kv_lens: torch.Tensor | None
 
+    # For GQA DCP
+    max_dcp_context_kv_len: int | None = None
+    dcp_context_kv_lens: torch.Tensor | None = None
+
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
@@ -215,6 +220,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
+
+        try:
+            from vllm.distributed.parallel_state import get_dcp_group
+
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -306,7 +321,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q,
+                    num_heads_q=self.num_heads_q * self.dcp_world_size,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
                     cache_seqlens=seqlens,
@@ -320,8 +335,35 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             return None
 
         use_cascade = common_prefix_len > 0
+        max_dcp_context_kv_len = 0
+        dcp_context_kv_lens = None
 
-        if use_cascade:
+        cu_prefix_query_lens = None
+        prefix_kv_lens = None
+        suffix_kv_lens = None
+        prefix_scheduler_metadata = None
+
+        if self.dcp_world_size > 1:
+            query_kv_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:]
+                - common_attn_metadata.query_start_loc_cpu[:-1]
+            )
+            dcp_context_kv_lens_cpu = seq_lens_cpu - query_kv_lens_cpu
+            dcp_context_kv_lens_cpu = dcp_context_kv_lens_cpu // self.dcp_world_size + (
+                self.dcp_rank <= (dcp_context_kv_lens_cpu - 1) % self.dcp_world_size
+            )
+            dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
+            max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
+
+            scheduler_metadata = schedule(
+                batch_size=num_reqs,
+                cu_query_lens=query_start_loc,
+                max_query_len=max_query_len,
+                seqlens=dcp_context_kv_lens,
+                max_seq_len=max_dcp_context_kv_len,
+                causal=False,
+            )
+        elif use_cascade:
             cu_prefix_query_lens = torch.tensor(
                 [0, num_actual_tokens], dtype=torch.int32, device=self.device
             )
@@ -348,10 +390,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 causal=True,
             )
         else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-            prefix_scheduler_metadata = None
             scheduler_metadata = schedule(
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
@@ -379,6 +417,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
+            max_dcp_context_kv_len=max_dcp_context_kv_len,
+            dcp_context_kv_lens=dcp_context_kv_lens,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             scheduler_metadata=scheduler_metadata,
@@ -396,6 +436,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
 
 class FlashAttentionImpl(AttentionImpl):
+    can_return_lse_for_decode: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -451,6 +493,9 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+    def supports_quant_query_input(self) -> bool:
+        return True
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -487,7 +532,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         attn_type = self.attn_type
 
@@ -562,30 +607,45 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
-            flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=scheduler_metadata,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-                num_splits=attn_metadata.max_num_splits,
-                s_aux=self.sinks,
-            )
-            return output
+            if self.dcp_world_size > 1:
+                self._forward_with_dcp(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
+                return output
+            else:
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                    s_aux=self.sinks,
+                )
+                return output
 
         # Cascade attention (rare case).
         cascade_attention(
@@ -614,6 +674,86 @@ class FlashAttentionImpl(AttentionImpl):
             s_aux=self.sinks,
         )
         return output
+
+    def _forward_with_dcp(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        cu_seqlens_q = attn_metadata.query_start_loc
+        max_seqlen_q = attn_metadata.max_query_len
+        block_table = attn_metadata.block_table
+
+        query = query.contiguous()
+        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        context_attn_out, context_lse = flash_attn_varlen_func(
+            q=query_across_dcp,
+            k=key_cache,
+            v=value_cache,
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=attn_metadata.dcp_context_kv_lens,
+            max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
+            softmax_scale=self.scale,
+            causal=False,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=block_table,
+            softcap=self.logits_soft_cap,
+            return_softmax_lse=True,
+            scheduler_metadata=attn_metadata.scheduler_metadata,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
+        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
+        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+            context_attn_out,
+            context_lse.transpose(0, 1),
+            get_dcp_group(),
+            return_lse=True,
+        )
+        context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
+
+        query_attn_out, query_lse = flash_attn_varlen_func(
+            q=query,
+            k=key,
+            v=value,
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_k=cu_seqlens_q,
+            max_seqlen_k=max_seqlen_q,
+            softmax_scale=self.scale,
+            causal=attn_metadata.causal,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            softcap=self.logits_soft_cap,
+            return_softmax_lse=True,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
+        assert context_attn_out_cor.shape == query_attn_out.shape
+        assert context_lse_cor.shape == query_lse.shape
+        merge_attn_states(
+            output,
+            context_attn_out_cor,
+            context_lse_cor,
+            query_attn_out,
+            query_lse,
+        )
 
     def _forward_encoder_attention(
         self,
@@ -684,6 +824,7 @@ def use_cascade_attention(
     use_sliding_window: bool,
     use_local_attention: bool,
     num_sms: int,
+    dcp_world_size: int,
 ) -> bool:
     """Decide whether to use cascade attention.
 
@@ -704,6 +845,9 @@ def use_cascade_attention(
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
     num_reqs = len(query_lens)
     if num_reqs < 8:
+        return False
+    # disable cascade attention for DCP
+    if dcp_world_size > 1:
         return False
 
     # Heuristics to decide whether using cascade attention is beneficial.

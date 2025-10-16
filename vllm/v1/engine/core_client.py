@@ -27,9 +27,9 @@ from vllm.utils import (
     close_sockets,
     get_open_port,
     get_open_zmq_inproc_path,
-    in_loop,
     make_zmq_socket,
 )
+from vllm.utils.async_utils import in_loop
 from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
