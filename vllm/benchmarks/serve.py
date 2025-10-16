@@ -186,6 +186,9 @@ async def get_request(
             total_requests,
             request_rate,
         )
+        assert current_request_rate > 0.0, (
+            f"Obtained non-positive request rate {current_request_rate}."
+        )
         request_rates.append(current_request_rate)
         if current_request_rate == float("inf"):
             delay_ts.append(0)
