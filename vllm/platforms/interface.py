@@ -6,37 +6,31 @@ import os
 import platform
 import random
 import sys
-from datetime import timedelta
-from platform import uname
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
 
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.attention.backends.registry import _Backend
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from datetime import timedelta
+
+    from torch.distributed import PrefixStore, ProcessGroup
+
+    from vllm.config import VllmConfig
+    from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
-else:
-    _Backend = object
-    ModelConfig = object
-    VllmConfig = object
-    PoolingParams = object
-    SamplingParams = object
-    FlexibleArgumentParser = object
 
 logger = init_logger(__name__)
 
 
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
+    return "microsoft" in " ".join(platform.uname()).lower()
 
 
 class PlatformEnum(enum.Enum):
@@ -179,8 +173,6 @@ class Platform:
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
-        from vllm.attention.backends.registry import _Backend
-
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -302,7 +294,7 @@ class Platform:
 
     @classmethod
     def pre_register_and_update(
-        cls, parser: FlexibleArgumentParser | None = None
+        cls, parser: "FlexibleArgumentParser" | None = None
     ) -> None:
         """
         Do some pre-registration or update action for the current platform.
@@ -317,7 +309,7 @@ class Platform:
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
 
@@ -498,9 +490,9 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: PromptType,
-        params: SamplingParams | PoolingParams,
-        processed_inputs: ProcessorInputs,
+        prompt: "PromptType",
+        params: "SamplingParams" | "PoolingParams",
+        processed_inputs: "ProcessorInputs",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
@@ -543,24 +535,15 @@ class Platform:
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,
-        prefix_store: PrefixStore,
+        prefix_store: "PrefixStore",
         group_rank: int,
         group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
+        timeout: "timedelta",
+    ) -> "ProcessGroup":
         """
         Init platform-specific torch distributed process group.
         """
         raise NotImplementedError
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: ModelConfig
-    ) -> bool:
-        """
-        Returns if the kv_cache_dtype is supported by the current platform.
-        """
-        return False
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

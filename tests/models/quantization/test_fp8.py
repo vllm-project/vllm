@@ -69,9 +69,6 @@ def test_models(
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
         pytest.skip(f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
 
-    if not current_platform.is_kv_cache_dtype_supported(kv_cache_dtype, None):
-        pytest.skip(f"{kv_cache_dtype} is not supported on this platform.")
-
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
         m.setenv(STR_BACKEND_ENV_VAR, backend)
