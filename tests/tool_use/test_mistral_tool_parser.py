@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Generator
-from typing import Optional, Union
 
 import partial_json_parser
 import pytest
@@ -45,7 +44,7 @@ def mistral_tool_parser(mistral_tokenizer):
 
 
 def assert_tool_calls(
-    actual_tool_calls: Union[list[ToolCall], list[DeltaToolCall]],
+    actual_tool_calls: list[ToolCall] | list[DeltaToolCall],
     expected_tool_calls: list[ToolCall],
 ):
     assert len(actual_tool_calls) == len(expected_tool_calls)
@@ -112,8 +111,8 @@ def fix_tool_call_tokenization(
 def stream_delta_message_generator(
     mistral_tool_parser: MistralToolParser,
     mistral_tokenizer: AnyTokenizer,
-    model_output: Optional[str],
-    tools: Optional[list[tuple[str, str]]],
+    model_output: str | None,
+    tools: list[tuple[str, str]] | None,
 ) -> Generator[DeltaMessage, None, None]:
     if isinstance(mistral_tokenizer, MistralTokenizer):
         assert tools is not None
@@ -344,7 +343,7 @@ def _test_extract_tool_calls_streaming(
     function_names: list[str] = []
     function_args_strs: list[str] = []
     tool_call_idx: int = -1
-    tool_call_ids: list[Optional[str]] = []
+    tool_call_ids: list[str | None] = []
 
     for delta_message in stream_delta_message_generator(
         tool_parser, tokenizer, model_output, tools
