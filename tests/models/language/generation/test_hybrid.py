@@ -27,6 +27,8 @@ SSM_MODELS = [
     # "yujiepan/mamba2-codestral-v0.1-tiny-random",
 ]
 
+GDN_MODELS = ["tiny-random/qwen3-next-moe"]
+
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
@@ -35,8 +37,7 @@ HYBRID_MODELS = [
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
-    "tiny-random/qwen3-next-moe",
-]
+] + GDN_MODELS
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
@@ -53,8 +54,7 @@ FP32_STATE_MODELS = [
 MAX_NUM_SEQS = 4
 
 
-# @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
-@pytest.mark.parametrize("model", ["tiny-random/qwen3-next-moe"])
+@pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -383,7 +383,7 @@ def _get_vLLM_output(
     return outs, vllm_model
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[3]] + GDN_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -449,7 +449,7 @@ def test_apc_single_prompt(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[3]] + GDN_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -531,8 +531,7 @@ def test_apc_single_prompt_block_align_alignment(
             )
 
 
-# @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
-@pytest.mark.parametrize("model", ["tiny-random/qwen3-next-moe"])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[3]] + GDN_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -599,7 +598,7 @@ def test_apc_multiple_prompts_all_cached_outputs(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[3]] + GDN_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -683,7 +682,7 @@ def test_apc_multiple_prompts_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[3]] + GDN_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
