@@ -19,7 +19,7 @@ from vllm.attention.utils.fa_utils import (
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -110,7 +110,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # pre-allocated during capture.
             self.max_num_splits = envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
 
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             self.max_num_splits = 1
 
     def _schedule_decode(
@@ -181,7 +181,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
                 # we only set num_splits when using cuda graphs.
                 max_num_splits = self.max_num_splits
 
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             max_num_splits = 1
 
         metadata = FlashAttnMLADecodeMetadata(
