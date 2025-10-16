@@ -23,7 +23,6 @@ logger = init_logger(__name__)
 class InductorCompilationConfig:
     splitting_ops: list[str] | None = None
     use_inductor_graph_partition: bool = False
-    compile_sizes: list[int | str] | None = None
 
 
 class VllmInductorPass(InductorPass):
@@ -39,9 +38,8 @@ class VllmInductorPass(InductorPass):
         # Get only the necessary CompilationConfig for the inductor pass, since
         # full `CompilationConfig` contains pointer to model which is unsafe.
         self.compilation_config = InductorCompilationConfig(
-            splitting_ops=config.splitting_ops,
-            use_inductor_graph_partition=config.use_inductor_graph_partition,
-            compile_sizes=config.compile_sizes,
+            splitting_ops=config.compilation_config.splitting_ops,
+            use_inductor_graph_partition=config.compilation_config.use_inductor_graph_partition,
         )
         self.pass_config = config.compilation_config.pass_config
         self.model_dtype = config.model_config.dtype if config.model_config else None
