@@ -24,12 +24,11 @@
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
 from transformers import Qwen3Config
-from vllm.platforms import current_platform
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -42,6 +41,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
@@ -70,7 +70,7 @@ class Qwen3Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
-        alt_stream: Optional[torch.cuda.Stream] = None,
+        alt_stream: device_module.Stream | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -151,19 +151,27 @@ class Qwen3Attention(nn.Module):
         if self.alt_stream is not None:
             current_stream = device_module.current_stream()
             self.alt_stream.wait_stream(current_stream)
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+            )
             q_by_head = self.q_norm(q_by_head)
             q = q_by_head.view(q.shape)
             with device_module.stream(self.alt_stream):
-                k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+                k_by_head = k.view(
+                    *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+                )
                 k_by_head = self.k_norm(k_by_head)
                 k = k_by_head.view(k.shape)
             current_stream.wait_stream(self.alt_stream)
         else:
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+            )
             q_by_head = self.q_norm(q_by_head)
             q = q_by_head.view(q.shape)
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+            )
             k_by_head = self.k_norm(k_by_head)
             k = k_by_head.view(k.shape)
 
@@ -180,7 +188,7 @@ class Qwen3DecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        alt_stream: Optional[torch.cuda.Stream] = None,
+        alt_stream: device_module.Stream | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -273,7 +281,10 @@ class Qwen3Model(Qwen2Model):
         if current_platform.is_cuda() or current_platform.is_out_of_tree():
             alt_stream = device_module.Stream()
         super().__init__(
-            vllm_config=vllm_config, prefix=prefix, decoder_layer_type=Qwen3DecoderLayer, alt_stream=alt_stream,
+            vllm_config=vllm_config,
+            prefix=prefix,
+            decoder_layer_type=Qwen3DecoderLayer,
+            alt_stream=alt_stream,
         )
 
 

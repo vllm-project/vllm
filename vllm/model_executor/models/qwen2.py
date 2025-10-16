@@ -32,7 +32,6 @@ from typing import Any, Optional
 import torch
 from torch import nn
 from transformers import Qwen2Config
-from vllm.platforms import current_platform
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
@@ -71,6 +70,7 @@ from .utils import (
     maybe_prefix,
 )
 
+device_module = torch.get_device_module()
 
 class Qwen2MLP(nn.Module):
     def __init__(
@@ -214,6 +214,7 @@ class Qwen2DecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        alt_stream: device_module.Stream | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -298,7 +299,7 @@ class Qwen2Model(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         decoder_layer_type: type[nn.Module] = Qwen2DecoderLayer,
-        alt_stream: Optional[torch.cuda.Stream] = None,
+        alt_stream: device_module.Stream | None = None,
     ):
         super().__init__()
 
