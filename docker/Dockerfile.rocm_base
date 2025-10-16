@@ -7,8 +7,7 @@ ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="2ab9f4cd"
-ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG AITER_WHL_URL="https://mkmartifactory.amd.com/artifactory/api/pypi/hw-orc3pypi-prod-local/simple"
 
 FROM ${BASE_IMAGE} AS base
 
@@ -41,7 +40,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11>=3.0.1' Cython pandas psutil
 
 FROM base AS build_triton
 ARG TRITON_BRANCH
@@ -90,19 +89,6 @@ RUN cd flash-attention \
     && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
-FROM base AS build_aiter
-ARG AITER_BRANCH
-ARG AITER_REPO
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN git clone --recursive ${AITER_REPO}
-RUN cd aiter \
-    && git checkout ${AITER_BRANCH} \
-    && git submodule update --init --recursive \
-    && pip install -r requirements.txt
-RUN pip install pyyaml && cd aiter && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist && ls /app/aiter/dist/*.whl
-RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
-
 FROM base AS debs
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
@@ -113,12 +99,13 @@ RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 
 FROM base AS final
+ARG AITER_WHL_URL
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl
+# Install aiter
+RUN pip install aiter --index-url ${AITER_WHL_URL}
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
