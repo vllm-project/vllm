@@ -64,9 +64,6 @@ import torch.types
 import yaml
 import zmq
 import zmq.asyncio
-from packaging import version
-from packaging.version import Version
-from torch.library import Library
 from typing_extensions import Never
 
 import vllm.envs as envs
@@ -1145,27 +1142,6 @@ class FlexibleArgumentParser(ArgumentParser):
         return processed_args
 
 
-# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
-# In particular, the FakeScalarType is not supported for earlier versions of
-# PyTorch which breaks dynamo for any ops registered using ScalarType.
-def supports_dynamo() -> bool:
-    base_torch_version = Version(Version(torch.__version__).base_version)
-    return base_torch_version >= Version("2.4.0")
-
-
-# Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
-def supports_xccl() -> bool:
-    return (
-        is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
-    )
-
-
-# Some backends use pytorch version < 2.4.0 which doesn't
-# support `torch.library.custom_op`.
-def supports_custom_op() -> bool:
-    return hasattr(torch.library, "custom_op")
-
-
 class AtomicCounter:
     """An atomic, thread-safe counter"""
 
@@ -1436,70 +1412,6 @@ class _PlaceholderModuleAttr(_PlaceholderBase):
             "PlaceholderModule should not be used "
             "when the original module can be imported"
         )
-
-
-# create a library to hold the custom op
-vllm_lib = Library("vllm", "FRAGMENT")  # noqa
-
-
-def direct_register_custom_op(
-    op_name: str,
-    op_func: Callable,
-    mutates_args: list[str] | None = None,
-    fake_impl: Callable | None = None,
-    target_lib: Library | None = None,
-    dispatch_key: str | None = None,
-    tags: tuple[torch.Tag, ...] = (),
-):
-    """
-    `torch.library.custom_op` can have significant overhead because it
-    needs to consider complicated dispatching logic. This function
-    directly registers a custom op and dispatches it to the CUDA backend.
-    See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
-    for more details.
-
-    By default, the custom op is registered to the vLLM library. If you
-    want to register it to a different library, you can pass the library
-    object to the `target_lib` argument.
-
-    IMPORTANT: the lifetime of the operator is tied to the lifetime of the
-    library object. If you want to bind the operator to a different library,
-    make sure the library object is alive when the operator is used.
-    """
-    if not supports_custom_op():
-        from vllm.platforms import current_platform
-
-        assert not current_platform.is_cuda_alike(), (
-            "cuda platform needs torch>=2.4 to support custom op, "
-            "chances are you are using an old version of pytorch "
-            "or a custom build of pytorch. It is recommended to "
-            "use vLLM in a fresh new environment and let it install "
-            "the required dependencies."
-        )
-        return
-
-    if mutates_args is None:
-        mutates_args = []
-
-    if dispatch_key is None:
-        from vllm.platforms import current_platform
-
-        dispatch_key = current_platform.dispatch_key
-
-    import torch.library
-
-    if hasattr(torch.library, "infer_schema"):
-        schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    else:
-        # for pytorch 2.4
-        import torch._custom_op.impl
-
-        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
-    my_lib = target_lib or vllm_lib
-    my_lib.define(op_name + schema_str, tags=tags)
-    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
-    if fake_impl is not None:
-        my_lib._register_fake(op_name, fake_impl)
 
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
@@ -2231,55 +2143,6 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
         return sha256_cbor
 
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
-
-
-def is_torch_equal_or_newer(target: str) -> bool:
-    """Check if the installed torch version is >= the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-    """
-    try:
-        return _is_torch_equal_or_newer(str(torch.__version__), target)
-    except Exception:
-        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
-        return Version(importlib.metadata.version("torch")) >= Version(target)
-
-
-# Helper function used in testing.
-def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    torch_version = version.parse(torch_version)
-    return torch_version >= version.parse(target)
-
-
-def _is_torch_equal(target: str) -> bool:
-    assert target.count(".") == 2
-    torch_version = str(torch.__version__)
-    torch_version = version.parse(torch_version)
-    # torch version is like "2.6.0.dev20240101" or "2.6.0.dev20240101+cpu"
-    # or "2.6.0+cu128" but never "2.6.0.1"
-    return (
-        torch_version >= version.parse(target)
-        and version.parse(target + ".1") > torch_version
-    )
-
-
-def is_torch_equal(target: str) -> bool:
-    """Check if the installed torch version is == the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-    """
-    try:
-        return _is_torch_equal(target)
-    except Exception:
-        return Version(importlib.metadata.version("torch")) == Version(target)
 
 
 @cache

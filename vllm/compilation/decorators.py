@@ -21,7 +21,8 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.utils import resolve_obj_by_qualname, supports_dynamo
+from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import supports_dynamo
 
 from .monitor import start_monitoring_torch_compile
 

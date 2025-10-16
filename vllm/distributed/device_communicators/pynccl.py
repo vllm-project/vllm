@@ -30,7 +30,7 @@ def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
         nccl_symm_mem_context,
     )
-    from vllm.utils import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     global _NCCL_SYMM_OPS_REGISTERED
     if _NCCL_SYMM_OPS_REGISTERED:

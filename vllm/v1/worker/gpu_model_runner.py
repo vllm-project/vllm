@@ -80,12 +80,12 @@ from vllm.utils import (
     is_pin_memory_available,
     length_from_prompt_token_ids_or_embeds,
     round_up,
-    supports_dynamo,
 )
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_dtype_size,
+    supports_dynamo,
 )
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder

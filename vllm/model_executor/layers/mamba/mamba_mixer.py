@@ -37,7 +37,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
 
