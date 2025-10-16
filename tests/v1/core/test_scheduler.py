@@ -30,7 +30,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler
 
@@ -335,10 +334,10 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [],
             requests[1].request_id: [10],
         },
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -383,10 +382,10 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [10, 42],
             requests[1].request_id: [13],
         },
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -429,10 +428,10 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [10, 11],
             requests[1].request_id: [],
         },
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -470,10 +469,10 @@ def test_stop_via_update_from_output():
         total_num_scheduled_tokens=3,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={requests[0].request_id: [EOS_TOKEN_ID, 10]},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -1941,7 +1940,6 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
         sampling_params=sampling_params,
         pooling_params=None,
         eos_token_id=EOS_TOKEN_ID,
-        structured_output_request=StructuredOutputRequest(sampling_params),
     )
     scheduler.add_request(request)
     output = scheduler.schedule()
