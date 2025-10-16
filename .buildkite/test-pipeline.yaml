@@ -1068,6 +1068,15 @@ steps:
   - tests/weight_loading
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
+  
+- label: NixlConnector P/D accuracy tests (Distributed) # TODO min
+  timeout_in_minutes: 30
+  num_gpus: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
 
 
 ##### multi gpus test #####
