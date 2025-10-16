@@ -1,32 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeVar
+from typing import TypeVar
 
 import torch
 import torch.nn as nn
 from transformers import (
     BatchFeature,
-    Mistral3Config,
     PixtralVisionConfig,
 )
-from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.model_executor.models.interfaces import (
-    MultiModalEmbeddings,
-    SupportsLoRA,
-    SupportsMultiModal,
-    SupportsPP,
-)
 from vllm.model_executor.models.mistral3 import (
-    BaseLlavaProcessingInfo,
     Mistral3DummyInputsBuilder,
+    Mistral3ForConditionalGeneration,
+    Mistral3ImagePixelInputs,
     Mistral3MultiModalProjector,
+    Mistral3ProcessingInfo,
+    _build_mistral3_info,
     init_vision_tower_for_llava,
 )
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -34,57 +27,25 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.model_executor.models.vision import get_vision_encoder_info
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+
+LightOnOCRImagePixelInputs = Mistral3ImagePixelInputs
 
 
-class LightOnOCRImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
-    """
-
-    type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
-
-    # Note that `height` or `width` may be different per batch and image,
-    # in which case the data is passed as a list instead of a batched tensor.
-    pixel_values: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"}),
-    ]
+_I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
 
-_I = TypeVar("_I", bound="LightOnOCRProcessingInfo")
-
-
-class LightOnOCRProcessingInfo(BaseLlavaProcessingInfo):
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(Mistral3Config)
-
-    def get_vision_encoder_info(self):
-        return get_vision_encoder_info(self.get_hf_config())
-
-    def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
-
-
-class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessingInfo]):
+class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -171,64 +132,22 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
         ]
 
 
-def _build_LightOnOCR_info(ctx: InputProcessingContext) -> LightOnOCRProcessingInfo:
-    hf_config = ctx.get_hf_config(Mistral3Config)
-    assert isinstance(hf_config.vision_config, PixtralVisionConfig)
-    return LightOnOCRProcessingInfo(ctx)
-
-
 def _build_LightOnOCR_processor(
     info: _I,
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
     cache: BaseMultiModalProcessorCache | None = None,
 ):
-    assert isinstance(info, LightOnOCRProcessingInfo)
+    assert isinstance(info, Mistral3ProcessingInfo)
     return LightOnOCRMultiModalProcessor(info, dummy_inputs, cache=cache)
-
-
-class LightOnOCRDummyInputsBuilder(Mistral3DummyInputsBuilder):
-    def get_dummy_text(self, mm_counts):
-        n = mm_counts.get("image", 0)
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
-        return image_token * n
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ):
-        n = mm_counts.get("image", 0)
-        w, h = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image") if mm_options else None
-        return {
-            "image": self._get_dummy_images(
-                width=w, height=h, num_images=n, overrides=image_overrides
-            )
-        }
-
-
-class LightOnOCRMultiModalProjector(Mistral3MultiModalProjector):
-    pass
 
 
 @MULTIMODAL_REGISTRY.register_processor(
     _build_LightOnOCR_processor,
-    info=_build_LightOnOCR_info,
-    dummy_inputs=LightOnOCRDummyInputsBuilder,
+    info=_build_mistral3_info,
+    dummy_inputs=Mistral3DummyInputsBuilder,
 )
-class LightOnOCRForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
-):
-    merge_by_field_config = True
-
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
+class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "vision_encoder.": "vision_tower.",
@@ -236,14 +155,8 @@ class LightOnOCRForConditionalGeneration(
         }
     )
 
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality.startswith("image"):
-            return None
-        raise ValueError("Only image modality is supported")
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -258,7 +171,7 @@ class LightOnOCRForConditionalGeneration(
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
 
-        self.multi_modal_projector = LightOnOCRMultiModalProjector(
+        self.multi_modal_projector = Mistral3MultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
@@ -279,69 +192,6 @@ class LightOnOCRForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def _parse_and_validate_image_input(
-        self, **kwargs: object
-    ) -> LightOnOCRImagePixelInputs | None:
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-
-        if pixel_values is None and image_embeds is None:
-            return None
-
-        return LightOnOCRImagePixelInputs(
-            type="pixel_values_pixtral", pixel_values=pixel_values
-        )
-
-    def _process_image_input(self, image_input: LightOnOCRImagePixelInputs):
-        image_sizes = [(t.shape[-2], t.shape[-1]) for t in image_input["pixel_values"]]
-        feats = self.vision_tower(image_input["pixel_values"])
-        if isinstance(feats, torch.Tensor):
-            return self.multi_modal_projector(feats, image_sizes)
-        feature_sizes = [f.shape[0] // self.config.spatial_merge_size**2 for f in feats]
-        embeds = self.multi_modal_projector(torch.cat(feats), image_sizes)
-        return (
-            tuple(torch.split(embeds, feature_sizes))
-            if len(feature_sizes) > 1
-            else (embeds,)
-        )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        if image_input is None:
-            return []
-
-        vision_embeddings = self._process_image_input(image_input)
-
-        return vision_embeddings
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
-        if intermediate_tensors is not None:
-            inputs_embeds = None
-        hidden_states = self.language_model.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
-        )
-        return hidden_states
-
-    def compute_logits(self, hidden_states: torch.Tensor):
-        return self.language_model.compute_logits(hidden_states)
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-    def get_mm_mapping(self) -> MultiModelKeys:
-        return MultiModelKeys.from_string_field(
-            language_model="language_model",
-            connector="multi_modal_projector",
-            tower_model="vision_tower",
-        )
