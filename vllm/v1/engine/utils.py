@@ -365,7 +365,7 @@ class CoreEngineActorManager:
         max_device_per_node = max(n_node_devices)
 
         pack_strategy = envs.VLLM_RAY_DP_PACK_STRATEGY
-        _supported_pack_strategies = ("strict", "fill", "spread")
+        _supported_pack_strategies = ("strict", "fill", "span")
         if pack_strategy not in _supported_pack_strategies:
             raise ValueError(
                 f"{envs.VLLM_RAY_DP_PACK_STRATEGY} is not supported. "
@@ -391,7 +391,7 @@ class CoreEngineActorManager:
                 f"World size {world_size} is larger than the maximum "
                 "number of devices per node. "
                 f"{max_device_per_node}. Make sure to set "
-                "`VLLM_RAY_DP_PACK_STRATEGY` to `spread`"
+                "`VLLM_RAY_DP_PACK_STRATEGY` to `span`"
             )
         else:
             placement_strategy = "PACK"
@@ -411,15 +411,16 @@ class CoreEngineActorManager:
                 f"For multi-node data parallel groups, world_size ({world_size}) must "
                 f"be a multiple of number of devices per node ({max_device_per_node})."
             )
-            assert len(nodes) * max_device_per_node >= world_size * dp_size, (
-                f"Not enough total available nodes ({len(nodes)}) and devices per node"
-                f" ({max_device_per_node}) "
+            assert len(n_node_devices) * max_device_per_node >= world_size * dp_size, (
+                f"Not enough total available nodes ({len(n_node_devices)}) "
+                f"and devices per node ({max_device_per_node}) "
                 f"to satisfy required world size {world_size} and data parallel size "
                 f"{dp_size}"
             )
             assert dp_size_local == 1, (
-                f"data-parallel-size-local {dp_size_local} must be 1 if we "
-                "need multiple nodes per dp group"
+                f"data-parallel-size-local {dp_size_local} should be set as the "
+                "default (1) for VLLM_RAY_DP_PACK_STRATEGY=span. "
+                "The actual data-parallel-size-local will be auto determined."
             )
 
         # we might have to fill pg bundle over multiple nodes
@@ -467,16 +468,17 @@ class CoreEngineActorManager:
                     continue
                 dp_size_to_allocate = dp_size_local
             else:
-                # for "pack_strategy" in "fill" and "spread"
+                # for "pack_strategy" in "fill" and "span"
                 # we always take everything that's available
                 dp_size_to_allocate = dp_size_available
 
             for i in range(dp_size_to_allocate):
                 device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
-                if pack_strategy == "spread":
+                if pack_strategy == "span":
                     pg_bundles += device_bundle * n_device_on_node
                     assert len(pg_bundles) <= world_size, (
-                        f"pg_bundles should be <= world_size, but got {pg_bundles}"
+                        "pg_bundles should be <= world_size, "
+                        f"but got {len(pg_bundles)=} and {world_size=}"
                     )
 
                     # we only create a placement group if we have enough devices
