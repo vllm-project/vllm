@@ -20,7 +20,6 @@ license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -31,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.10,<3.14"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -79,12 +78,12 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
+    # zip without `strict=`
+    "B905",
     # Loop control variable not used within loop body
     "B007",
     # f-string format
     "UP032",
-    # Can remove once 3.10+ is the minimum Python version
-    "UP007",
 ]
 
 [tool.ruff.format]
@@ -184,6 +183,7 @@ ba = "ba"
 
 [tool.typos.type.py.extend-words]
 ba = "ba"
+nd = "nd"
 
 [tool.typos.type.cpp]
 extend-glob = ["*.cu"]

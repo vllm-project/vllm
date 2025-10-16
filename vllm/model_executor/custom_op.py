@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch.nn as nn
 
@@ -114,9 +113,9 @@ class CustomOp(nn.Module):
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
-                "Custom op %s was not registered, which means it won't appear\
-                 in the op registry. It will be enabled/disabled based on the\
-                 global settings.",  # noqa: E501
+                "Custom op %s was not registered, which means it won't appear "
+                "in the op registry. It will be enabled/disabled based on the "
+                "global settings.",
                 cls.__name__,
             )
             return CustomOp.default_on()
@@ -171,7 +170,7 @@ class CustomOp(nn.Module):
     # or
     # - @CustomOP.register_oot(name="UnquantizedFusedMoEMethod")
     @classmethod
-    def register_oot(cls, _decorated_op_cls=None, name: Optional[str] = None):
+    def register_oot(cls, _decorated_op_cls=None, name: str | None = None):
         def decorator(op_cls):
             reg_name = name if name is not None else cls.__name__
             assert reg_name not in cls.op_registry_oot, f"Duplicate op name: {reg_name}"
