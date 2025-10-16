@@ -77,13 +77,11 @@ if TYPE_CHECKING:
     from argparse import Namespace
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.sequence import IntermediateTensors
 else:
     Namespace = object
 
     ModelConfig = object
     VllmConfig = object
-    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
@@ -1191,54 +1189,6 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
-
-
-def weak_ref_tensor(tensor: Any) -> Any:
-    """
-    Create a weak reference to a tensor.
-    The new tensor will share the same data as the original tensor,
-    but will not keep the original tensor alive.
-    """
-    if isinstance(tensor, torch.Tensor):
-        return torch.ops._C.weak_ref_tensor(tensor)
-    else:
-        return tensor
-
-
-def weak_ref_tensors(
-    tensors: torch.Tensor
-    | list[torch.Tensor]
-    | tuple[torch.Tensor]
-    | IntermediateTensors,
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
-    """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
-    """
-    if isinstance(tensors, torch.Tensor):
-        return weak_ref_tensor(tensors)
-    if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
-    if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-
-    # For IntermediateTensors used in pipeline parallelism
-    from vllm.sequence import IntermediateTensors
-
-    if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors(
-            {key: weak_ref_tensor(val) for key, val in tensors.tensors.items()}
-        )
-        return ret
-    raise ValueError("Invalid type for tensors")
-
-
-def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
-    """
-    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
-    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
 def import_from_path(module_name: str, file_path: str | os.PathLike):

@@ -4,10 +4,17 @@ import contextlib
 import threading
 from collections.abc import Collection
 from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 import vllm.envs as envs
+
+if TYPE_CHECKING:
+    from vllm.sequence import IntermediateTensors
+else:
+    IntermediateTensors = object
+
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
@@ -336,3 +343,51 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+def weak_ref_tensor(tensor: Any) -> Any:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C.weak_ref_tensor(tensor)
+    else:
+        return tensor
+
+
+def weak_ref_tensors(
+    tensors: torch.Tensor
+    | list[torch.Tensor]
+    | tuple[torch.Tensor]
+    | IntermediateTensors,
+) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+
+    # For IntermediateTensors used in pipeline parallelism
+    from vllm.sequence import IntermediateTensors
+
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors(
+            {key: weak_ref_tensor(val) for key, val in tensors.tensors.items()}
+        )
+        return ret
+    raise ValueError("Invalid type for tensors")
+
+
+def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    """
+    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
