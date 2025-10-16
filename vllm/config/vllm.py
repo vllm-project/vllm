@@ -740,10 +740,13 @@ class VllmConfig:
                     "Overriding `load_format` to 'runai_streamer'"
                 )
                 self.load_config.load_format = "runai_streamer"
-            elif self.load_config.load_format != "runai_streamer":
+            elif self.load_config.load_format not in (
+                "runai_streamer",
+                "runai_streamer_sharded",
+            ):
                 raise ValueError(
                     f"To load a model from S3, 'load_format' "
-                    f"must be 'runai_streamer', "
+                    f"must be 'runai_streamer' or 'runai_streamer_sharded', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
                 )
