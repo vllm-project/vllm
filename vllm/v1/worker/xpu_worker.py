@@ -151,7 +151,15 @@ class XPUWorker(Worker):
         if self.device_config.device.type == "xpu" and current_platform.is_xpu():
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
-            current_platform.check_if_supports_dtype(self.model_config.dtype)
+            if self.model_config.dtype == torch.bfloat16:  # noqa: SIM102
+                device_name = current_platform.get_device_name().lower()
+                # client gpu a770
+                if device_name.count("a770") > 0:
+                    raise ValueError(
+                        "Intel Arc A770 have bfloat16 accuracy known issue. "
+                        "You can use float16 instead by explicitly setting the "
+                        "`dtype` flag in CLI, for example: --dtype=half."
+                    )
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank
