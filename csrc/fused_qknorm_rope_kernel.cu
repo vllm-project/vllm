@@ -352,8 +352,8 @@ void fused_qk_norm_rope(
       static_cast<int>(num_tokens), static_cast<int>(num_heads_q),
       static_cast<int>(num_heads_k), static_cast<int>(num_heads_v),
       static_cast<int>(head_dim), static_cast<float>(eps),
-      reinterpret_cast<__nv_bfloat16*>(q_weight.data_ptr()),
-      reinterpret_cast<__nv_bfloat16*>(k_weight.data_ptr()),
+      reinterpret_cast<__nv_bfloat16 const*>(q_weight.data_ptr()),
+      reinterpret_cast<__nv_bfloat16 const*>(k_weight.data_ptr()),
       reinterpret_cast<__nv_bfloat16 const*>(cos_sin_cache.data_ptr()),
       !is_neox,  // interleave
       reinterpret_cast<int64_t const*>(position_ids.data_ptr()), stream);
