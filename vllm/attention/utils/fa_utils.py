@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -24,7 +23,7 @@ elif current_platform.is_xpu():
     get_scheduler_metadata = ipex_ops.get_scheduler_metadata
 
 
-def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
+def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
     if current_platform.is_xpu():
         return 2
     try:

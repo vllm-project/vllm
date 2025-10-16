@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from tpu_info import device
@@ -54,10 +54,10 @@ class TpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: Optional["_Backend"],
+        selected_backend: "_Backend | None",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -114,7 +114,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.config import CompilationLevel, CUDAGraphMode
+        from vllm.config import CompilationMode, CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
@@ -122,12 +122,13 @@ class TpuPlatform(Platform):
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
-        # TPU only supports DYNAMO_ONCE compilation level
-        if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
+        # TPU only supports DYNAMO_TRACE_ONCE compilation mode
+        if compilation_config.mode != CompilationMode.DYNAMO_TRACE_ONCE:
             logger.info(
-                "[TPU] Forcing DYNAMO_ONCE compilation level, and disabling cudagraph."
+                "[TPU] Forcing DYNAMO_TRACE_ONCE compilation mode, and\
+                disabling cudagraph."
             )
-            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
         if (
             compilation_config.cudagraph_mode is None
@@ -211,7 +212,7 @@ class TpuPlatform(Platform):
     def validate_request(
         cls,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""

@@ -5,8 +5,6 @@
 Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 
-from __future__ import annotations
-
 import importlib.metadata
 import sys
 

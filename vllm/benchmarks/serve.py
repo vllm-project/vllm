@@ -31,7 +31,7 @@ from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import aiohttp
 import numpy as np
@@ -58,7 +58,7 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 
 class TaskType(Enum):
     GENERATION = "generation"
-    EMBEDDING = "embedding"
+    POOLING = "pooling"
 
 
 @dataclass
@@ -107,9 +107,9 @@ class EmbedBenchmarkMetrics:
 
 
 def _get_current_request_rate(
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
-    ramp_up_start_rps: Optional[int],
-    ramp_up_end_rps: Optional[int],
+    ramp_up_strategy: Literal["linear", "exponential"] | None,
+    ramp_up_start_rps: int | None,
+    ramp_up_end_rps: int | None,
     request_index: int,
     total_requests: int,
     request_rate: float,
@@ -135,9 +135,9 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -474,22 +474,23 @@ async def benchmark(
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: list[SampleRequest],
-    logprobs: Optional[int],
+    logprobs: int | None,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
+    num_warmups: int,
     profile: bool,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
-    max_concurrency: Optional[int],
-    lora_modules: Optional[Iterable[str]],
-    extra_headers: Optional[dict],
-    extra_body: Optional[dict],
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    max_concurrency: int | None,
+    lora_modules: Iterable[str] | None,
+    extra_headers: dict | None,
+    extra_body: dict | None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
 ):
     try:
@@ -559,9 +560,36 @@ async def benchmark(
                 f"Error: {test_output.error}"
             )
         else:
-            print("Initial test run completed. Starting main benchmark run...")
+            print("Initial test run completed.")
     else:
         print("Skipping endpoint ready check.")
+
+    if num_warmups > 0:
+        print(f"Warming up with {num_warmups} requests...")
+        warmup_pbar = None if disable_tqdm else tqdm(total=num_warmups)
+        warmup_semaphore = (
+            asyncio.Semaphore(max_concurrency)
+            if max_concurrency
+            else contextlib.nullcontext()
+        )
+        warmup_tasks = []
+
+        async def warmup_limited_request_func():
+            async with warmup_semaphore:
+                return await request_func(
+                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                )
+
+        for _ in range(num_warmups):
+            request_task = asyncio.create_task(warmup_limited_request_func())
+            warmup_tasks.append(request_task)
+        _ = await asyncio.gather(*warmup_tasks)
+
+        if warmup_pbar is not None:
+            warmup_pbar.close()
+        print("Warmup run completed.")
+
+    print("Starting main benchmark run...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -1030,6 +1058,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Specify to disable tqdm progress bar.",
     )
     parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=0,
+        help="Number of warmup requests.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Use Torch Profiler. The endpoint must be launched with "
@@ -1084,10 +1118,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--percentile-metrics",
         type=str,
-        default="ttft,tpot,itl",
+        default=None,
         help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". ',
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
+        'If not specified, defaults to "ttft,tpot,itl" for generative models '
+        'and "e2el" for pooling models.',
     )
     parser.add_argument(
         "--metric-percentiles",
@@ -1230,6 +1266,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "the ready check will be skipped.",
     )
 
+    parser.add_argument(
+        "--extra-body",
+        help="A JSON string representing extra body parameters to include "
+        "in each request."
+        'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
+        type=json.loads,
+        default=None,
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1301,7 +1346,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
-    task_type = TaskType.EMBEDDING if "embeddings" in backend else TaskType.GENERATION
+    task_type = (
+        TaskType.POOLING
+        if "embeddings" in backend or "rerank" in backend
+        else TaskType.GENERATION
+    )
 
     # Collect the sampling parameters.
     if task_type == TaskType.GENERATION:
@@ -1327,8 +1376,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
         if "temperature" not in sampling_params:
             sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+
+        default_percentile_metrics = "ttft,tpot,itl"
     else:
         sampling_params = {}
+        default_percentile_metrics = "e2el"
+
+    extra_body = args.extra_body or {}
+    extra_body = {**sampling_params, **extra_body}
+
+    percentile_metrics: str = args.percentile_metrics or default_percentile_metrics
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
@@ -1347,15 +1404,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         request_rate=args.request_rate,
         burstiness=args.burstiness,
         disable_tqdm=args.disable_tqdm,
+        num_warmups=args.num_warmups,
         profile=args.profile,
-        selected_percentile_metrics=args.percentile_metrics.split(","),
+        selected_percentile_metrics=percentile_metrics.split(","),
         selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
         ignore_eos=args.ignore_eos,
         goodput_config_dict=goodput_config_dict,
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
         extra_headers=headers,
-        extra_body=sampling_params,
+        extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,

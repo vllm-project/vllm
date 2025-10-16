@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from typing import ClassVar, Optional
+from collections.abc import Hashable
+from typing import ClassVar, cast
 
 import torch
 
@@ -60,11 +61,11 @@ class ChunkedLocalAttention(Attention):
         head_size: int,
         scale: float,
         attention_chunk_size: int,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[list[float]] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        kv_sharing_target_layer_name: str | None = None,
         prefix: str = "",
     ):
         dtype = torch.get_default_dtype()
@@ -81,7 +82,9 @@ class ChunkedLocalAttention(Attention):
             )
 
             attn_backend = create_chunked_local_attention_backend(
-                underlying_attn_backend, attention_chunk_size, block_size
+                cast(Hashable, underlying_attn_backend),
+                attention_chunk_size,
+                block_size,
             )
         else:
             # in v0 the local attention is handled inside the backends

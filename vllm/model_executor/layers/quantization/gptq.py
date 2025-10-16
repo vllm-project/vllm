@@ -4,7 +4,7 @@
 import enum
 from enum import Enum
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -28,7 +28,7 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils import is_list_of
+from vllm.utils.collections import is_list_of
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -48,9 +48,9 @@ class GPTQConfig(QuantizationConfig):
         group_size: int,
         desc_act: bool,
         lm_head_quantized: bool,
-        dynamic: dict[str, dict[str, Union[int, bool]]],
+        dynamic: dict[str, dict[str, int | bool]],
         autoround_version: str = "",
-        modules_in_block_to_quantize: Optional[list[str]] = None,
+        modules_in_block_to_quantize: list[str] | None = None,
     ) -> None:
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -148,7 +148,7 @@ class GPTQConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["GPTQLinearMethod", "QuantizeMethodBase"]]:
+    ) -> Union["GPTQLinearMethod", "QuantizeMethodBase"] | None:
         if isinstance(layer, FusedMoE):
             # GPTQ MoE support: fall back to MoeWNA16 for broad compatibility
             from .moe_wna16 import MoeWNA16Config
@@ -170,7 +170,7 @@ class GPTQConfig(QuantizationConfig):
                 self.modules_in_block_to_quantize
             )
 
-    def maybe_update_config(self, model_name: str, revision: Optional[str] = None):
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
         if self.modules_in_block_to_quantize:
             if is_list_of(self.modules_in_block_to_quantize, list):
                 # original modules_in_block_to_quantize: list[list[str]]
@@ -345,7 +345,7 @@ class GPTQLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out_shape = x.shape[:-1] + (layer.qweight.shape[-1],)
         reshaped_x = x.reshape(-1, x.shape[-1])

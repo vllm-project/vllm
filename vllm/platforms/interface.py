@@ -8,7 +8,7 @@ import random
 import sys
 from datetime import timedelta
 from platform import uname
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -20,18 +20,16 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.lora.request import LoRARequest
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
-    _Backend = None
-    ModelConfig = None
-    VllmConfig = None
-    LoRARequest = None
-    PoolingParams = None
-    SamplingParams = None
-    FlexibleArgumentParser = None
+    _Backend = object
+    ModelConfig = object
+    VllmConfig = object
+    PoolingParams = object
+    SamplingParams = object
+    FlexibleArgumentParser = object
 
 logger = init_logger(__name__)
 
@@ -113,7 +111,7 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
-    _global_graph_pool: Optional[Any] = None
+    _global_graph_pool: Any | None = None
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -180,7 +178,7 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
         from vllm.attention.backends.registry import _Backend
 
         return _Backend.TORCH_SDPA
@@ -188,10 +186,10 @@ class Platform:
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: Optional["_Backend"],
+        selected_backend: _Backend,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -205,14 +203,14 @@ class Platform:
     def get_device_capability(
         cls,
         device_id: int = 0,
-    ) -> Optional[DeviceCapability]:
+    ) -> DeviceCapability | None:
         """Stateless version of [torch.cuda.get_device_capability][]."""
         return None
 
     @classmethod
     def has_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         """
@@ -236,7 +234,7 @@ class Platform:
     @classmethod
     def is_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         """
@@ -283,7 +281,7 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def seed_everything(cls, seed: Optional[int] = None) -> None:
+    def seed_everything(cls, seed: int | None = None) -> None:
         """
         Set the seed of each random module.
         `torch.manual_seed` will set seed on all devices.
@@ -304,7 +302,7 @@ class Platform:
 
     @classmethod
     def pre_register_and_update(
-        cls, parser: Optional[FlexibleArgumentParser] = None
+        cls, parser: FlexibleArgumentParser | None = None
     ) -> None:
         """
         Do some pre-registration or update action for the current platform.
@@ -389,7 +387,7 @@ class Platform:
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         """
         Return the memory usage in bytes.
@@ -501,7 +499,7 @@ class Platform:
     def validate_request(
         cls,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
@@ -553,11 +551,11 @@ class Platform:
         """
         Init platform-specific torch distributed process group.
         """
-        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+        raise NotImplementedError
 
     @classmethod
     def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+        cls, kv_cache_dtype: str, model_config: ModelConfig
     ) -> bool:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
@@ -565,7 +563,7 @@ class Platform:
         return False
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
         """
         Check if the dtype is supported by the current platform.
         """
@@ -617,7 +615,7 @@ class Platform:
         return {}
 
     @classmethod
-    def get_nixl_memory_type(cls) -> Optional[str]:
+    def get_nixl_memory_type(cls) -> str | None:
         """
         Returns the nixl memory type for the current platform.
         """

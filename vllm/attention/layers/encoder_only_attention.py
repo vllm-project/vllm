@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from collections.abc import Hashable
 from copy import copy
-from typing import Optional
+from typing import cast
 
 import torch
 
@@ -60,8 +61,8 @@ class EncoderOnlyAttention(Attention):
         num_heads: int,
         head_size: int,
         scale: float,
-        cache_config: Optional[CacheConfig] = None,
-        attn_type: Optional[str] = None,
+        cache_config: CacheConfig | None = None,
+        attn_type: str | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
@@ -79,7 +80,7 @@ class EncoderOnlyAttention(Attention):
             )
 
             attn_backend = create_encoder_only_attention_backend(
-                underlying_attn_backend
+                cast(Hashable, underlying_attn_backend)
             )
         else:
             # in v0 encoder only attention is handled inside the backends

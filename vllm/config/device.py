@@ -3,10 +3,10 @@
 
 import hashlib
 from dataclasses import field
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict, field_validator
+from pydantic import ConfigDict, SkipValidation, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -19,7 +19,7 @@ Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: Union[str, Device] = "auto"
+    device: SkipValidation[Device | torch.device | None] = "auto"
     """Device type for vLLM execution.
     This parameter is deprecated and will be
     removed in a future release.

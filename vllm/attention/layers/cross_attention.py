@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from collections.abc import Hashable
 from copy import copy
-from typing import Optional
+from typing import cast
 
 import numpy as np
 import torch
@@ -138,8 +139,8 @@ class CrossAttention(Attention):
         num_heads: int,
         head_size: int,
         scale: float,
-        cache_config: Optional[CacheConfig] = None,
-        attn_type: Optional[str] = None,
+        cache_config: CacheConfig | None = None,
+        attn_type: str | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
@@ -156,7 +157,9 @@ class CrossAttention(Attention):
                 head_size, dtype, kv_cache_dtype, block_size
             )
 
-            attn_backend = create_cross_attention_backend(underlying_attn_backend)
+            attn_backend = create_cross_attention_backend(
+                cast(Hashable, underlying_attn_backend)
+            )
         else:
             # in v0 cross attention is handled inside the backends
             attn_backend = None
