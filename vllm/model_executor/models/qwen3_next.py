@@ -550,7 +550,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 slot_in_copy = slot_in_safe.clamp(min=0).to(
                     device=conv_state.device, dtype=torch.long
                 )
-                breakpoint()
                 if slot_out_copy.numel() > 0:
                     conv_state.index_copy_(
                         0,
@@ -567,7 +566,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     slot_out,
                     base_decode_slots,
                 )
-                breakpoint()
                 non_spec_state_indices_runtime[decode_slice] = updated_decode_slots
                 state_indices_decode = updated_decode_slots
 
@@ -619,7 +617,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 slot_in_copy = slot_in_safe.clamp(min=0).to(
                     device=conv_state.device, dtype=torch.long
                 )
-                breakpoint()
                 if slot_out_copy.numel() > 0:
                     conv_state.index_copy_(
                         0,
@@ -637,11 +634,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     slot_out,
                     base_prefill_slots,
                 )
-                breakpoint()
                 non_spec_state_indices_runtime[start:end] = updated_prefill_slots
                 state_indices_prefill = updated_prefill_slots
 
-        breakpoint()
         if state_indices_decode is None and non_spec_state_indices_tensor is not None:
             state_indices_decode = non_spec_state_indices_tensor[
                 : attn_metadata.num_decodes

@@ -49,6 +49,7 @@ def chunk_gated_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
+    return_intermediate_states: bool = False,
 ):
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
@@ -82,9 +83,16 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    # TODO: perhaps bypass this if return_intermediate_states, if so always return h
     if SUPPRESS_LEVEL < 3:
-        return g, o, A, final_state, None, None, None
+        return (
+            g,
+            o,
+            A,
+            final_state,
+            None,
+            h if return_intermediate_states else None,
+            None,
+        )
     elif SUPPRESS_LEVEL >= 3:
         return g, o, A, final_state, w, h, v_new
 
@@ -121,14 +129,14 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            return_intermediate_states=return_intermediate_states,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        intermediate_states = (
-            _reshape_intermediate_states(h, cu_seqlens)
-            if return_intermediate_states
-            else None
-        )
+        intermediate_states = None
+        if return_intermediate_states:
+            assert h is not None
+            intermediate_states = _reshape_intermediate_states(h, cu_seqlens)
         return o.to(q.dtype), final_state, intermediate_states
 
 
