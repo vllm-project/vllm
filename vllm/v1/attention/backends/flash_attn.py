@@ -49,7 +49,6 @@ logger = init_logger(__name__)
 
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supports_quant_query_input: bool = True
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -494,6 +493,9 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+    def supports_quant_query_input(self) -> bool:
+        return True
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -530,7 +532,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         attn_type = self.attn_type
 

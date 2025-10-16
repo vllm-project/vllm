@@ -16,7 +16,6 @@ from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
 
-from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -828,6 +827,12 @@ class FlashInferImpl(AttentionImpl):
             and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
         )
 
+    def supports_quant_query_input(self) -> bool:
+        if flashinfer_disable_q_quantization():
+            return False
+
+        return self.support_trtllm_attn
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -857,7 +862,13 @@ class FlashInferImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
+
+        # Ensure query dtype matches the expected dtype from attention metadata
+        assert attn_metadata.q_data_type == query.dtype, (
+            f"Query dtype mismatch: expected {attn_metadata.q_data_type}, "
+            f"got {query.dtype}"
+        )
 
         if self.bmm1_scale is None:
             self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
@@ -898,15 +909,6 @@ class FlashInferImpl(AttentionImpl):
                     self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
-
-        # Insert FP8 quant for query
-        if attn_metadata.q_data_type == FP8_DTYPE:
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape((num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale,
-            )
-            query = query.reshape((num_tokens, num_heads, head_size))
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
