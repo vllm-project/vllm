@@ -833,6 +833,11 @@ class FlashInferImpl(AttentionImpl):
 
         return self.support_trtllm_attn
 
+    # FlashInfer requires attention sinks to be float32
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if self.sinks is not None and self.sinks.dtype != torch.float32:
+            self.sinks = self.sinks.to(torch.float32)
+
     def forward(
         self,
         layer: torch.nn.Module,
