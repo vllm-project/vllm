@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
 
-from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from vllm.config.model import ModelConfig
 
 
@@ -24,13 +24,31 @@ class OptimizationLevel(Enum):
 
 def build_defaults(
     optimization_level: OptimizationLevel,
+    compilation_config: CompilationConfig,
     model_config: ModelConfig | None = None,
 ):
+    is_rms_norm_enabled = False
+    if "all" in compilation_config.custom_ops:
+        if "-rms_norm" not in compilation_config.custom_ops:
+            is_rms_norm_enabled = True
+    else:
+        if "+rms_norm" in compilation_config.custom_ops:
+            is_rms_norm_enabled = True
+
+    is_quant_fp8_enabled = False
+    if "all" in compilation_config.custom_ops:
+        if "-quant_fp8" not in compilation_config.custom_ops:
+            is_quant_fp8_enabled = True
+    else:
+        if "+quant_fp8" in compilation_config.custom_ops:
+            is_quant_fp8_enabled = True
+
     is_quantized = False
     is_sequential = False
-    if model_config is not None:
-        is_quantized = model_config.is_quantized()
-        is_sequential = not model_config.is_model_moe()
+    # @todo Uncomment as experimentation occurs.
+    # if model_config is not None:
+    #     is_quantized = model_config.is_quantized()
+    #     is_sequential = not model_config.is_model_moe()
     optimization_level_00 = {
         "general": {
             "pass_config": {
@@ -54,7 +72,7 @@ def build_defaults(
         "general": {
             "pass_config": {
                 "enable_noop": True,
-                "enable_fusion": True,
+                "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
                 "enable_fi_allreduce_fusion": False,
             },
             "mode": CompilationMode.VLLM_COMPILE,
@@ -73,12 +91,12 @@ def build_defaults(
         "general": {
             "pass_config": {
                 "enable_noop": True,
-                "enable_fusion": True,
-                "enable_fi_allreduce_fusion": True,
+                "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
+                "enable_fi_allreduce_fusion": False,
             },
             "mode": CompilationMode.VLLM_COMPILE,
             "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-            "use_inductor_graph_partition": True,
+            "use_inductor_graph_partition": False,
         },
         "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
         "is_sequential": {
@@ -92,12 +110,12 @@ def build_defaults(
         "general": {
             "pass_config": {
                 "enable_noop": True,
-                "enable_fusion": True,
-                "enable_fi_allreduce_fusion": True,
+                "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
+                "enable_fi_allreduce_fusion": False,
             },
             "mode": CompilationMode.VLLM_COMPILE,
             "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-            "use_inductor_graph_partition": True,
+            "use_inductor_graph_partition": False,
         },
         "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
         "is_sequential": {
