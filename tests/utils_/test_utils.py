@@ -35,7 +35,6 @@ from vllm.utils import (
     sha256,
     split_host_port,
     split_zmq_path,
-    swap_dict_values,
     unique_filepath,
 )
 from vllm.utils.torch_utils import (
@@ -516,30 +515,6 @@ def test_placeholder_module_error_handling():
     with build_ctx():
         # Test conflict with internal __module attribute
         _ = placeholder_attr.module
-
-
-@pytest.mark.parametrize(
-    "obj,key1,key2",
-    [
-        # Tests for both keys exist
-        ({1: "a", 2: "b"}, 1, 2),
-        # Tests for one key does not exist
-        ({1: "a", 2: "b"}, 1, 3),
-        # Tests for both keys do not exist
-        ({1: "a", 2: "b"}, 3, 4),
-    ],
-)
-def test_swap_dict_values(obj, key1, key2):
-    original_obj = obj.copy()
-    swap_dict_values(obj, key1, key2)
-    if key1 in original_obj:
-        assert obj[key2] == original_obj[key1]
-    else:
-        assert key2 not in obj
-    if key2 in original_obj:
-        assert obj[key1] == original_obj[key2]
-    else:
-        assert key1 not in obj
 
 
 def test_model_specification(
