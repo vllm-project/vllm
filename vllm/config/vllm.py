@@ -412,10 +412,10 @@ class VllmConfig:
         appropriate value.
 
         Optimization Levels:
-            - O0 (None): No optimization, fast startup, eager execution
-            - O1 (STOCK_TORCH_COMPILE): Fast compilation
-            - O2 (DYNAMO_TRACE_ONCE): Full optimization
-            - O3 (VLLM_COMPILE): Maximum optimization with autotuning
+            - (None): No optimization, fast startup, eager execution
+            - (STOCK_TORCH_COMPILE): Fast compilation
+            - (DYNAMO_TRACE_ONCE): Full optimization
+            - (VLLM_COMPILE): Maximum optimization with autotuning
         """
         for k, v in default_config["general"].items():
             if k == "pass_config":
