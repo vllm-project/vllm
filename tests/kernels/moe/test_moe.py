@@ -1128,7 +1128,7 @@ def test_batched_fused_marlin_moe(
         "topk_ids": topk_ids,
         "topk_weights": topk_weights,
     }
-    ref_marlin_output = torch.ops.vllm.fused_marlin_moe(**fused_marlin_moe_kwargs)
+    ref_marlin_output = fused_marlin_moe(**fused_marlin_moe_kwargs)
 
     # Batched
     br = BatchedRun(max_tokens_per_batch, e, topk_ids, topk_weights)
