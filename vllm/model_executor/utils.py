@@ -7,8 +7,6 @@ from typing import Any
 
 import torch
 
-from vllm.utils import is_torch_equal_or_newer
-
 
 def set_random_seed(seed: int) -> None:
     from vllm.platforms import current_platform
@@ -85,38 +83,3 @@ def get_moe_expert_mapping(
             if child_map is not None:
                 return child_map()
         return []
-
-
-def disable_inductor_graph_partition(func):
-    """Decorator to disable inductor graph partition.
-    This is used to avoid nested cudagraph capture.
-
-    Example:
-    1. We apply torch.compile directly on some ops (e.g., grouped_topk) wrapped
-    in custom ops. Inductor graph partition applies cudagraph within the custom op.
-    2. At the same time, we compile the model which uses these custom ops. Inductor
-    graph partition also wraps each graph partition with CUDAGraph. Some partitions
-    may include custom ops, which has already been applied cudagraph. This leads to
-    nested cudagraph which is not supported.
-
-    This context manager should be wrapped around torch.compile calls within custom ops
-    to avoid the nested cudagraph capture.
-
-    Expected Usage:
-    @disable_inductor_graph_partition
-    @torch.compile()
-    def op_eager_code(...):
-        ...
-
-    Note that `@disable_inductor_graph_partition` should be applied on top of
-    `torch.compile()`
-    """
-
-    def wrapper(*args, **kwargs):
-        old_val = torch._inductor.config.graph_partition
-        torch._inductor.config.graph_partition = False
-        out = func(*args, **kwargs)
-        torch._inductor.config.graph_partition = old_val
-        return out
-
-    return wrapper if is_torch_equal_or_newer("2.9.0.dev") else func
