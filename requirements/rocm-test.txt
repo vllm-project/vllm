@@ -29,4 +29,4 @@ matplotlib==3.10.3
 # Multi-Modal Models Test (Extended) 3
 blobfile==3.0.0
 
-
+schemathesis>=3.39.15 # Required for openai schema test.
