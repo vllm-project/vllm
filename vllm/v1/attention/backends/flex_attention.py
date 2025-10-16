@@ -381,9 +381,7 @@ class FlexAttentionMetadata:
     sliding_window: int | None = None
     block_mask_capacity: BlockMask | None = None
     dummy_block_mask: BlockMask | None = None
-    cached_block_masks: dict[tuple[int, int], BlockMask] = field(
-        default_factory=dict
-    )
+    cached_block_masks: dict[tuple[int, int], BlockMask] = field(default_factory=dict)
 
     def _convert_physical_to_logical(
         self,
@@ -632,9 +630,11 @@ class FlexAttentionMetadata:
         if cached is not None:
             return cached
 
-        if (self.block_mask_capacity is not None
-                and self.block_mask_capacity.seq_lengths[0] >= aligned_q_len
-                and self.block_mask_capacity.seq_lengths[1] >= aligned_kv_len):
+        if (
+            self.block_mask_capacity is not None
+            and self.block_mask_capacity.seq_lengths[0] >= aligned_q_len
+            and self.block_mask_capacity.seq_lengths[1] >= aligned_kv_len
+        ):
             mask = _slice_block_mask_capacity(
                 self.block_mask_capacity, aligned_q_len, aligned_kv_len
             )
@@ -676,18 +676,22 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         mask_mod = self._get_effective_mask_mod()
-        kv_len = (self.total_cache_tokens
-                  if self.causal else self.num_actual_tokens)
+        kv_len = self.total_cache_tokens if self.causal else self.num_actual_tokens
 
-        if (self.num_reqs == 0 or self.num_actual_tokens == 0 or kv_len == 0
-                or self.doc_ids is None or self.doc_ids.numel() == 0):
+        if (
+            self.num_reqs == 0
+            or self.num_actual_tokens == 0
+            or kv_len == 0
+            or self.doc_ids is None
+            or self.doc_ids.numel() == 0
+        ):
             # Build a dense fallback block mask. The actual sequence lengths
             # will be adjusted later when we have real tokens available
             # (e.g. during CUDA graph capture we rebuild the mask with the
             # padded dimensions).
-            return self._build_dense_block_mask(max(self.q_block_size, 1),
-                                                max(self.kv_block_size, 1),
-                                                mask_mod)
+            return self._build_dense_block_mask(
+                max(self.q_block_size, 1), max(self.kv_block_size, 1), mask_mod
+            )
 
         # NOTE: torch.compile(create_block_mask, ...) intermittently hits
         # illegal memory access on large multi-GPU captures; stick to eager.
@@ -724,16 +728,13 @@ class FlexAttentionMetadata:
         num_q_blocks = max(1, cdiv(q_len, self.q_block_size))
         num_kv_blocks = max(1, cdiv(kv_len, self.kv_block_size))
 
-        kv_indices = torch.arange(num_kv_blocks,
-                                  device=device,
-                                  dtype=torch.int32)
+        kv_indices = torch.arange(num_kv_blocks, device=device, dtype=torch.int32)
         kv_indices = kv_indices.repeat(num_q_blocks, 1)
         kv_indices = kv_indices.unsqueeze(0).unsqueeze(0)
 
-        kv_num_blocks = torch.full((1, 1, num_q_blocks),
-                                   num_kv_blocks,
-                                   dtype=torch.int32,
-                                   device=device)
+        kv_num_blocks = torch.full(
+            (1, 1, num_q_blocks), num_kv_blocks, dtype=torch.int32, device=device
+        )
 
         block_mask = BlockMask.from_kv_blocks(
             seq_lengths=(q_len, kv_len),
@@ -779,31 +780,7 @@ class FlexAttentionMetadata:
             self.cached_block_masks[cache_key] = current
             return current
 
-        rebuilt: BlockMask | None = None
-        if (
-            self.doc_ids is not None
-            and self.doc_ids.numel() > 0
-            and self.num_actual_tokens > 0
-            and self.total_cache_tokens > 0
-        ):
-            try:
-                if self.direct_build and self.causal:
-                    rebuilt = self._build_block_mask_direct()
-                else:
-                    rebuilt = self.build_block_mask()
-            except Exception as e:
-                logger.warning(
-                    "Failed to build block mask due to: %s. "
-                    "Falling back to a dense block mask. "
-                    "This may impact performance.",
-                    e,
-                )
-                rebuilt = None
-
-        if rebuilt is None:
-            rebuilt = self._get_or_build_block_mask(
-                aligned_q_len, aligned_kv_len
-            )
+        rebuilt = self._get_or_build_block_mask(aligned_q_len, aligned_kv_len)
 
         if rebuilt.seq_lengths != cache_key:
             rebuilt = rebuilt._adjust(aligned_q_len, aligned_kv_len)
@@ -832,12 +809,13 @@ class FlexAttentionMetadata:
             self.block_mask = self.build_block_mask()
 
 
-class FlexAttentionMetadataBuilder(
-        AttentionMetadataBuilder[FlexAttentionMetadata]):
+class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
     # CUDA graphs are supported when we can stay on the direct mask build path.
     cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.ALWAYS
-        if is_torch_equal_or_newer("2.9.0.dev0") else AttentionCGSupport.NEVER)
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else AttentionCGSupport.NEVER
+    )
 
     def __init__(
         self,
@@ -860,7 +838,9 @@ class FlexAttentionMetadataBuilder(
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
+        # Disable sparse/direct mask construction to ensure CUDA graph safety.
+        # Dense masks are used during graph capture for stability.
+        self.direct_build: bool = False
 
         self.q_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
         self.kv_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
@@ -970,9 +950,7 @@ class FlexAttentionMetadataBuilder(
             out.cached_block_masks[out.block_mask.seq_lengths] = out.block_mask
 
         # Seed cache with a mask matching the full KV cache capacity.
-        if (
-            out.block_mask_capacity.seq_lengths[1] >= total_cache_tokens
-        ):
+        if out.block_mask_capacity.seq_lengths[1] >= total_cache_tokens:
             full_capacity_mask = _slice_block_mask_capacity(
                 out.block_mask_capacity, q_block, total_cache_tokens
             )
@@ -1091,8 +1069,12 @@ class FlexAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         doc_ids = attn_metadata.doc_ids
-        is_dummy_run = (attn_metadata.num_reqs == 0 or num_actual_tokens == 0
-                        or doc_ids is None or doc_ids.numel() == 0)
+        is_dummy_run = (
+            attn_metadata.num_reqs == 0
+            or num_actual_tokens == 0
+            or doc_ids is None
+            or doc_ids.numel() == 0
+        )
 
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
@@ -1175,7 +1157,8 @@ class FlexAttentionImpl(AttentionImpl):
         actual_kv_len = key_tensor.size(-2)
 
         block_mask = attn_metadata.ensure_block_mask_capacity(
-            actual_q_len, actual_kv_len)
+            actual_q_len, actual_kv_len
+        )
 
         target_q_len, target_kv_len = block_mask.seq_lengths
         original_num_actual_tokens = num_actual_tokens
