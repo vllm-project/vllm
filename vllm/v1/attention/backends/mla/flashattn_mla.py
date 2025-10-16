@@ -61,8 +61,10 @@ class FlashAttnMLABackend(MLACommonBackend):
         return ["auto"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[BlockSize]:
-        return []
+    def supports_block_size(cls, block_size: BlockSize | None) -> bool:
+        if block_size is None:
+            return True
+        return block_size % 16 == 0
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:

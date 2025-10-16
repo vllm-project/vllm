@@ -134,7 +134,7 @@ class AttentionBackend(ABC):
         return []
 
     @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
+    def supports_block_size(cls, block_size: BlockSize | None) -> bool:
         if block_size is None:
             return True
         try:

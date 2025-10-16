@@ -33,7 +33,7 @@ if is_flash_attn_varlen_func_available():
     )
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.cache import CacheDType
+from vllm.config.cache import BlockSize, CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
@@ -122,7 +122,7 @@ class FlashAttentionBackend(AttentionBackend):
         return kv_cache_dtype in ["auto"]
 
     @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
+    def supports_block_size(cls, block_size: BlockSize | None) -> bool:
         if block_size is None:
             return True
         return block_size % 16 == 0
