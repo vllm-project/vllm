@@ -534,6 +534,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 else:
                     layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
+                if getattr(layer, "is_weights_interleaved", False):
+                    from vllm.model_executor.layers.fused_moe.utils import (
+                        reorder_gate_up_to_halves,
+                    )
+
+                    layer.w13_weight.copy_(
+                        reorder_gate_up_to_halves(layer.w13_weight, axis=1)
+                    )
+                    if hasattr(layer, "w13_bias"):
+                        layer.w13_bias.copy_(
+                            reorder_gate_up_to_halves(layer.w13_bias, axis=-1)
+                        )
+                    layer.is_weights_interleaved = False
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
 
     def apply(
@@ -1090,6 +1103,7 @@ class FusedMoE(CustomOp):
         zero_expert_type: str | None = None,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
+        is_weights_interleaved: bool = False,
     ):
         super().__init__()
 
@@ -1124,6 +1138,8 @@ class FusedMoE(CustomOp):
             tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
         )
         dp_size_ = dp_size if dp_size is not None else get_dp_group().world_size
+
+        self.is_weights_interleaved = is_weights_interleaved
 
         self.is_sequence_parallel = is_sequence_parallel
         self.sp_size = tp_size_ if is_sequence_parallel else 1
