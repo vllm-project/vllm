@@ -19,7 +19,8 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless, update_environment_variables
+from vllm.utils import update_environment_variables
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
