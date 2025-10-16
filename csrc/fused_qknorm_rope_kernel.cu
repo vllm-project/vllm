@@ -300,7 +300,6 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
 }
 }  // namespace tensorrt_llm::kernels
 
-
 void fused_qk_norm_rope(
     torch::Tensor& qkv,       // Combined QKV tensor [num_tokens,
                               // (num_heads_q+num_heads_k+num_heads_v)*head_dim]
