@@ -65,7 +65,6 @@ class PoolingParams(
     def valid_parameters(self):
         return {
             "embed": ["dimensions", "normalize"],
-            "embed-sparse": ["dimensions", "normalize"],
             "classify": ["activation"],
             "score": ["activation"],
             "token_embed": ["dimensions", "normalize"],
@@ -139,7 +138,7 @@ class PoolingParams(
                     setattr(self, k, getattr(pooler_config, k))
 
     def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
-        if self.task in ["embed", "embed-sparse", "token_embed"]:
+        if self.task in ["embed", "token_embed"]:
             if self.normalize is None:
                 self.normalize = True
 

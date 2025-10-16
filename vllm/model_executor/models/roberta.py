@@ -10,6 +10,7 @@ from transformers import RobertaConfig
 
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import (
+    BOSEOSFilter,
     ClassifierPooler,
     CLSPool,
     DispatchPooler,
@@ -170,18 +171,9 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 class M3SparsePooler(Pooler):
     """A pooler that implements M3 sparse pooling
 
-    This layer does the following:
-    1. By default returns dense embeddings.
-    2. If the pooling params "additional_data" contain
-       "sparse_embeddings", return sparse embeddings
-
     Attributes:
-        dense_pooler: The default pooler.
         sparse_linear: the linear module applied to the
           logits to obtain the token weights
-        bos_token_id and eos_token_id: The special tokens
-          inserted by the tokenizer. These are removed for
-          sparse embeddings
     """
 
     def __init__(
@@ -267,11 +259,17 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         return DispatchPooler(
             {
                 "embed": Pooler.for_embed(pooler_config),
-                "embed-sparse": M3SparsePooler(
-                    self.sparse_linear, self.bos_token_id, self.eos_token_id
+                "token_embed": BOSEOSFilter(
+                    Pooler.for_token_embed(pooler_config),
+                    self.bos_token_id,
+                    self.eos_token_id,
                 ),
-                "token_embed": M3SparsePooler(
-                    self.sparse_linear, self.bos_token_id, self.eos_token_id
+                "token_classify": BOSEOSFilter(
+                    Pooler.for_token_classify(
+                        pooler_config, classifier=self.classifier, act_fn=torch.relu
+                    ),
+                    self.bos_token_id,
+                    self.eos_token_id,
                 ),
             }
         )

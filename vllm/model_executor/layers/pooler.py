@@ -803,3 +803,48 @@ class DispatchPooler(Pooler):
     def extra_repr(self) -> str:
         s = f"supported_task={self.get_supported_tasks()}"
         return s
+
+
+class BOSEOSFilter(Pooler):
+    """Filters the BOS and EOS token results from outputs."""
+
+    def __init__(
+        self,
+        pooler: Pooler,
+        bos_token_id: int,
+        eos_token_id: int,
+    ) -> None:
+        super().__init__()
+
+        self.pooler = pooler
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return self.pooler.get_supported_tasks()
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return self.pooler.get_pooling_updates(task)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        pooled_outputs = self.pooler(hidden_states, pooling_metadata)
+        assert isinstance(pooled_outputs, list)
+
+        for i, prompt_len in enumerate(pooling_metadata.prompt_lens):
+            pooled_data = pooled_outputs[i]
+            assert (
+                isinstance(pooled_data, torch.Tensor)
+                and pooled_data.shape[0] == prompt_len
+            )
+            token_ids = pooling_metadata.prompt_token_ids[i]
+            if token_ids[0] == self.bos_token_id:
+                pooled_data = pooled_data[1:]
+            if token_ids[-1] == self.eos_token_id:
+                pooled_data = pooled_data[:-1]
+            pooled_outputs[i] = pooled_data.squeeze()
+
+        return pooled_outputs
