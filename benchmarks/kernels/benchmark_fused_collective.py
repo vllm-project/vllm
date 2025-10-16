@@ -17,7 +17,6 @@ import argparse
 import itertools
 import os
 import time
-from typing import Optional
 
 import torch  # type: ignore
 import torch.distributed as dist  # type: ignore
@@ -156,12 +155,12 @@ class FlashInferFusedAllReduceParams:
 
 def flashinfer_fused_allreduce_rmsnorm(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rms_gamma: torch.Tensor,
     rms_eps: float,
     allreduce_params: "FlashInferFusedAllReduceParams",
     use_oneshot: bool,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """FlashInfer fused allreduce + rmsnorm operation."""
     if flashinfer_comm is None or _FI_WORKSPACE_TENSOR is None:
@@ -196,14 +195,14 @@ def flashinfer_fused_allreduce_rmsnorm(
 
 def flashinfer_fused_allreduce_rmsnorm_fp8_quant(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rms_gamma: torch.Tensor,
     rms_eps: float,
     scale_factor: torch.Tensor,
     allreduce_params: FlashInferFusedAllReduceParams,
     use_oneshot: bool = True,
-    norm_out: Optional[torch.Tensor] = None,
-    quant_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
+    quant_out: torch.Tensor | None = None,
 ):
     """FlashInfer fused allreduce + rmsnorm + FP8 quantization."""
     if flashinfer_comm is None or _FI_WORKSPACE_TENSOR is None:
@@ -238,7 +237,7 @@ def flashinfer_fused_allreduce_rmsnorm_fp8_quant(
 
 def flashinfer_fused_allreduce_rmsnorm_fp4_quant(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rms_gamma: torch.Tensor,
     rms_eps: float,
     input_global_scale: torch.Tensor,
@@ -246,7 +245,7 @@ def flashinfer_fused_allreduce_rmsnorm_fp4_quant(
     quant_out: torch.Tensor,
     use_oneshot: bool,
     output_scale: torch.Tensor,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """FlashInfer fused allreduce + rmsnorm + FP4 quantization."""
     if flashinfer_comm is None or _FI_WORKSPACE_TENSOR is None:
@@ -281,10 +280,10 @@ def flashinfer_fused_allreduce_rmsnorm_fp4_quant(
 
 def standard_allreduce_rmsnorm(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rms_gamma: torch.Tensor,
     rms_eps: float,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """Standard allreduce + rmsnorm operations."""
     # All-reduce first
@@ -302,12 +301,12 @@ def standard_allreduce_rmsnorm(
 
 def standard_allreduce_rmsnorm_fp8_quant(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rms_gamma: torch.Tensor,
     rms_eps: float,
     scale_factor: torch.Tensor,
-    norm_out: Optional[torch.Tensor] = None,
-    quant_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
+    quant_out: torch.Tensor | None = None,
 ):
     """Standard allreduce + rmsnorm + FP8 quantization."""
     if quant_out is None:
@@ -331,13 +330,13 @@ def standard_allreduce_rmsnorm_fp8_quant(
 
 def standard_allreduce_rmsnorm_fp4_quant(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rms_gamma: torch.Tensor,
     rms_eps: float,
     input_global_scale: torch.Tensor,
     quant_out: torch.Tensor,
     output_scale: torch.Tensor,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """Standard allreduce + rmsnorm + FP4 quantization."""
 
@@ -366,9 +365,9 @@ def standard_allreduce_rmsnorm_fp4_quant(
 
 def standard_allreduce_rmsnorm_native(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rmsnorm_layer: RMSNorm,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """Standard allreduce + rmsnorm operations using native RMSNorm forward."""
     # All-reduce first
@@ -384,12 +383,12 @@ def standard_allreduce_rmsnorm_native(
 
 def standard_allreduce_rmsnorm_fp8_quant_native(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rmsnorm_layer: RMSNorm,
     quant_fp8_layer: QuantFP8,
     scale_factor: torch.Tensor,
-    norm_out: Optional[torch.Tensor] = None,
-    quant_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
+    quant_out: torch.Tensor | None = None,
 ):
     """Standard allreduce + rmsnorm + FP8 quantization using native implementations."""
     # All-reduce first
@@ -413,12 +412,12 @@ def standard_allreduce_rmsnorm_fp8_quant_native(
 
 def standard_allreduce_rmsnorm_fp4_quant_native(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rmsnorm_layer: RMSNorm,
     input_global_scale: torch.Tensor,
     quant_out: torch.Tensor,
     output_scale: torch.Tensor,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """Standard allreduce + rmsnorm + FP4 quantization using native RMSNorm."""
     # All-reduce first
@@ -446,9 +445,9 @@ def standard_allreduce_rmsnorm_fp4_quant_native(
 @torch.compile
 def standard_allreduce_rmsnorm_native_compiled(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rmsnorm_layer: RMSNorm,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """Compiled version of standard allreduce + rmsnorm."""
     return standard_allreduce_rmsnorm_native(
@@ -459,12 +458,12 @@ def standard_allreduce_rmsnorm_native_compiled(
 @torch.compile
 def standard_allreduce_rmsnorm_fp8_quant_native_compiled(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rmsnorm_layer: RMSNorm,
     quant_fp8_layer: QuantFP8,
     scale_factor: torch.Tensor,
-    norm_out: Optional[torch.Tensor] = None,
-    quant_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
+    quant_out: torch.Tensor | None = None,
 ):
     """Compiled version of standard allreduce + rmsnorm + FP8 quantization."""
     return standard_allreduce_rmsnorm_fp8_quant_native(
@@ -481,12 +480,12 @@ def standard_allreduce_rmsnorm_fp8_quant_native_compiled(
 @torch.compile
 def standard_allreduce_rmsnorm_fp4_quant_native_compiled(
     input_tensor: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     rmsnorm_layer: RMSNorm,
     input_global_scale: torch.Tensor,
     quant_out: torch.Tensor,
     output_scale: torch.Tensor,
-    norm_out: Optional[torch.Tensor] = None,
+    norm_out: torch.Tensor | None = None,
 ):
     """Compiled version of standard allreduce + rmsnorm + FP4 quantization."""
     return standard_allreduce_rmsnorm_fp4_quant_native(
@@ -578,7 +577,7 @@ def run_benchmarks(
     hidden_dim: int,
     dtype: torch.dtype,
     use_residual: bool,
-    allreduce_params: Optional[FlashInferFusedAllReduceParams],
+    allreduce_params: FlashInferFusedAllReduceParams | None,
     quant_mode: str = "all",
     disable_oneshot: bool = False,
 ):

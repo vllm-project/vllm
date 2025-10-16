@@ -117,14 +117,14 @@ class PassConfig:
     Unspecified world sizes will fallback to
         _FI_ALLREDUCE_MAX_INPUT_SIZES = {
             "9.0": {
-                2: 64 * MiB,  # 64MB
-                4: 2 * MiB,  # 2MB
-                8: 1 * MiB,  # 1MB
+                2: 64,  # 64MB
+                4: 2,  # 2MB
+                8: 1,  # 1MB
             },
             "10.0": {
-                2: 64 * MiB,  # 64MB
-                4: 32 * MiB,  # 32MB
-                8: 1 * MiB,  # 1MB
+                2: 64,  # 64MB
+                4: 32,  # 32MB
+                8: 1,  # 1MB
             },
         }, where key is the device capability"""
 
@@ -137,18 +137,11 @@ class PassConfig:
         is not supported by configs as it's not supported by flashinfer.
         """
 
-        # import here to avoid circular dependencies
-        from vllm.platforms import current_platform
-
         MiB = 1024 * 1024
-
-        device_capability = current_platform.get_device_capability().as_version_str()
-        fi_allreduce_fusion_max_size_mb = self.fi_allreduce_fusion_max_size_mb.get(
-            device_capability, {}
-        )
         max_sizes = {
-            k: int(v * MiB) for k, v in fi_allreduce_fusion_max_size_mb.items()
+            k: int(v * MiB) for k, v in self.fi_allreduce_fusion_max_size_mb.items()
         }
+
         # return None if world size is not supported by flashinfer
         return max_sizes.get(world_size)
 
@@ -200,7 +193,7 @@ class PassConfig:
 
         max_sizes = fi_allreduce_fusion_max_size_mb.get(device_capability, {})
         max_sizes.update(self.fi_allreduce_fusion_max_size_mb)
-        self.fi_allreduce_fusion_max_size_mb[device_capability] = max_sizes
+        self.fi_allreduce_fusion_max_size_mb = max_sizes
 
 
 @config
