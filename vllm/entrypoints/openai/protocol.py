@@ -1667,18 +1667,18 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
     task: str | None = None
 
     def to_pooling_params(self):
-        return PoolingParams(
-            dimensions=self.dimensions, normalize=self.normalize, task=self.task
-        )
+        params = super().to_pooling_params()
+        params.task = self.task
+        return params
 
 
 class PoolingChatRequest(EmbeddingChatRequest):
     task: str | None = None
 
     def to_pooling_params(self):
-        return PoolingParams(
-            dimensions=self.dimensions, normalize=self.normalize, task=self.task
-        )
+        params = super().to_pooling_params()
+        params.task = self.task
+        return params
 
 
 T = TypeVar("T")
