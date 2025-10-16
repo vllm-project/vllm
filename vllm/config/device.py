@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict, SkipValidation, field_validator
+from pydantic import ConfigDict, SkipValidation
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -47,13 +47,6 @@ class DeviceConfig:
         factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
-
-    @field_validator("device", mode="before")
-    @classmethod
-    def validate_device(cls, v: Any) -> str:
-        if isinstance(v, torch.device):
-            return v.type
-        return v
 
     def __post_init__(self):
         if self.device == "auto":
