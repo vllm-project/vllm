@@ -844,11 +844,13 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
+        self.device_id = None
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
             for cache in cache_list:
                 base_addr = cache.data_ptr()
+                self.device_id = cache.device.index
                 if base_addr in seen_base_addresses:
                     continue
 
@@ -876,7 +878,7 @@ class NixlConnectorWorker:
                         "All kv cache tensors must have the same size"
                     )
                 caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, self.tp_rank, "")
+                    (base_addr, curr_tensor_size_bytes, self.device_id, "")
                 )
 
         logger.debug(
@@ -923,7 +925,8 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len_per_layer[i]
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, self.tp_rank))
+                assert self.device_id is not None
+                blocks_data.append((addr, kv_block_len, self.device_id))
 
             if self._use_flashinfer:
                 # Separate and interleave K/V regions to maintain the same
@@ -934,12 +937,14 @@ class NixlConnectorWorker:
                     addr = base_addr + block_offset
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
-                    blocks_data.append((v_addr, kv_block_len, self.tp_rank))
+                    assert self.device_id is not None
+                    blocks_data.append((v_addr, kv_block_len, self.device_id))
         logger.debug(
-            "Created %s blocks for src engine %s and rank %s",
+            "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
             self.engine_id,
             self.tp_rank,
+            self.device_id,
         )
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
