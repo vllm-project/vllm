@@ -32,7 +32,7 @@ from vllm.utils import (
     get_tcp_uri,
     kill_process_tree,
 )
-from vllm.utils.lite_profiler.lite_profiler import LiteScope
+from vllm.utils.lite_profiler.lite_profiler import LiteProfilerScope
 
 if TYPE_CHECKING:
     import numpy as np
@@ -382,7 +382,7 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
 
     func = contextlib.nullcontext
     if envs.VLLM_LITE_PROFILER_LOG_PATH:
-        func = LiteScope
+        func = LiteProfilerScope
     elif envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
         func = record_function
     elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:

@@ -8,6 +8,7 @@ import atexit
 import multiprocessing
 import os
 import time
+from functools import cache
 from types import TracebackType
 from typing import TextIO
 
@@ -17,6 +18,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+@cache
 def _should_log_results() -> bool:
     """Check if the current process should log results.
     Only the data-parallel rank 0 engine core and worker 0 should emit logs in
@@ -42,8 +44,9 @@ def _write_log_entry(name: str, elapsed_ns: int) -> None:
     The cached file handle is automatically closed on program exit via atexit.
     """
     global _log_file
-    _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
-    assert _LOG_PATH is not None
+
+    log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
+    assert log_path is not None
 
     if not _should_log_results():
         return
@@ -60,23 +63,22 @@ def _write_log_entry(name: str, elapsed_ns: int) -> None:
             _log_file = None
 
     # Write the log entry
-    log_line = f"{name}|{elapsed_ns}\n"
     if _log_file is None:
-        directory = os.path.dirname(_LOG_PATH)
+        directory = os.path.dirname(log_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
         # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
         # Currently, we are flushing the file handle after every write. This
-        # is done to ensure safety so that there is no data leakage.
+        # is done to ensure safety so that there is no data loss.
         # TODO: We can optimise this further, to ensure performance overhead
         # can be reduced in future.
-        _log_file = open(_LOG_PATH, "a", buffering=1)
+        _log_file = open(log_path, "a", buffering=1)
         atexit.register(_log_file.close)
 
-    _log_file.write(log_line)
+    _log_file.write(f"{name}|{elapsed_ns}\n")
 
 
-class LiteScope:
+class LiteProfilerScope:
     """Lightweight context manager for timing code blocks with minimal overhead.
 
     This class provides a simple way to measure and log the execution time of
@@ -86,10 +88,10 @@ class LiteScope:
 
     def __init__(self, name: str) -> None:
         self._name = name
-        self._start_time: int | None = None
+        self._start_time_ns: int | None = None
 
     def __enter__(self) -> None:
-        self._start_time = time.perf_counter_ns()
+        self._start_time_ns = time.perf_counter_ns()
 
     def __exit__(
         self,
@@ -97,8 +99,8 @@ class LiteScope:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._start_time is not None and exc_type is None:
-            elapsed_ns = time.perf_counter_ns() - self._start_time
+        if self._start_time_ns is not None:
+            elapsed_ns = time.perf_counter_ns() - self._start_time_ns
             _write_log_entry(self._name, elapsed_ns)
 
 
@@ -112,7 +114,7 @@ def maybe_emit_lite_profiler_report() -> None:
     """
 
     log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
-    if log_path is None:
+    if log_path is None or not os.path.exists(log_path):
         return
 
     # Ensure the log file is flushed and closed before generating report
@@ -120,13 +122,6 @@ def maybe_emit_lite_profiler_report() -> None:
     if _log_file is not None:
         _log_file.close()
         _log_file = None
-
-    if not os.path.exists(log_path):
-        logger.warning(
-            "Lite profiler log not found. Ensure the profiled process sets "
-            "the expected path."
-        )
-        return
 
     from vllm.utils.lite_profiler import lite_profiler_report
 
