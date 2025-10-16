@@ -1169,6 +1169,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=global_num_experts,
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         #
