@@ -100,6 +100,8 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        pinned_prefix_cap_ratio: float = 0.2,
+        enable_pinned_prefix: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -142,6 +144,8 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
+        self.pinned_prefix_cap_ratio = pinned_prefix_cap_ratio
+        self.enable_pinned_prefix = enable_pinned_prefix
 
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
@@ -333,7 +337,19 @@ class KVCacheManager:
         num_tokens_to_cache = min(
             num_computed_tokens + num_new_tokens, request.num_tokens
         )
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        # Cache and pin (prompt-only) early to protect blocks before execution.
+        pin_info = self.cache_blocks(request, num_tokens_to_cache)
+        # Optionally log pin details when stats logging is enabled.
+        if self.log_stats and isinstance(pin_info, dict):
+            status = pin_info.get("status", "disabled")
+            if status != "disabled":
+                logger.info(
+                    "Prefix pin: status=%s pinned=%s requested=%s cap=%s",
+                    status,
+                    pin_info.get("pinned_count"),
+                    pin_info.get("requested_count"),
+                    pin_info.get("cap_limit"),
+                )
 
         return self.create_kv_cache_blocks(new_blocks)
 
@@ -413,10 +429,95 @@ class KVCacheManager:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
-        """Cache the blocks for the request, if enabled."""
+    def cache_blocks(self, request: Request, num_computed_tokens: int):
+        """Cache the blocks for the request, and handle prefix pinning.
+
+        Returns a dict describing pinning results for observability:
+        - pinned: bool, whether any blocks were pinned by this call
+        - pinned_count: int, number of blocks pinned by this call (single group)
+        - requested_count: int, number of blocks requested to pin
+        - cap_limit: int, maximum allowed pinned blocks under current cap
+        - status: str, one of {"disabled", "ok", "partial", "capped"}
+        """
+        # Always perform caching if enabled.
         if self.enable_caching:
             self.coordinator.cache_blocks(request, num_computed_tokens)
+
+        # Default result when pinning is disabled globally or per-request.
+        result = {
+            "pinned": False,
+            "pinned_count": 0,
+            "requested_count": 0,
+            "cap_limit": int(
+                self.block_pool.num_gpu_blocks * self.pinned_prefix_cap_ratio
+            )
+            if self.block_size is not None
+            else 0,
+            "status": "disabled",
+        }
+
+        # Check pinning gates.
+        if not (self.enable_caching and self.enable_pinned_prefix):
+            return result
+        if request.sampling_params is None or not getattr(
+            request.sampling_params, "pin_prefix", False
+        ):
+            return result
+        if self.block_size is None:
+            return result
+
+        # Consider prompt tokens only: prefix caching excludes last-token logits.
+        prompt_tokens = max(request.num_prompt_tokens - 1, 0)
+        effective_tokens = min(max(num_computed_tokens, 0), prompt_tokens)
+
+        # Determine how many full blocks to pin from the computed prompt prefix.
+        requested_blocks = effective_tokens // self.block_size
+        result["requested_count"] = requested_blocks
+
+        if requested_blocks == 0:
+            result["status"] = "ok"
+            return result
+
+        # Enforce global cap on total pinned blocks across the pool.
+        cap_limit = int(self.block_pool.num_gpu_blocks * self.pinned_prefix_cap_ratio)
+        pinned_current = self.block_pool.num_pinned_blocks
+        budget = max(cap_limit - pinned_current, 0)
+        to_pin = min(requested_blocks, budget)
+        result["cap_limit"] = cap_limit
+
+        pinned_now = 0
+        if to_pin > 0:
+            # Pin prefix blocks for each group up to to_pin, skipping already pinned.
+            blocks = self.coordinator.get_blocks(request.request_id)
+            for group_blocks in blocks:
+                if not group_blocks:
+                    continue
+                candidates = [b for b in group_blocks[:to_pin] if not b.is_pinned]
+                if candidates:
+                    self.block_pool.pin_blocks(candidates)
+                    pinned_now += len(candidates)
+
+        # Count how many of the requested prefix blocks are pinned after this call
+        # (including those already pinned prior to this call).
+        pinned_effective = 0
+        blocks = self.coordinator.get_blocks(request.request_id)
+        for group_blocks in blocks:
+            if not group_blocks:
+                continue
+            pinned_effective = max(
+                pinned_effective,
+                sum(1 for b in group_blocks[:requested_blocks] if b.is_pinned),
+            )
+
+        result["pinned"] = pinned_effective > 0
+        result["pinned_count"] = pinned_effective
+        if pinned_effective == requested_blocks:
+            result["status"] = "ok"
+        elif pinned_effective == 0:
+            result["status"] = "capped"
+        else:
+            result["status"] = "partial"
+        return result
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]

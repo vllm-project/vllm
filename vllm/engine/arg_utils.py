@@ -528,6 +528,8 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    pinned_prefix_cap_ratio: float = CacheConfig.pinned_prefix_cap_ratio
+    enable_pinned_prefix: bool = CacheConfig.enable_pinned_prefix
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -868,6 +870,12 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
+        )
+        cache_group.add_argument(
+            "--pinned-prefix-cap-ratio", **cache_kwargs["pinned_prefix_cap_ratio"]
+        )
+        cache_group.add_argument(
+            "--enable-pinned-prefix", **cache_kwargs["enable_pinned_prefix"]
         )
 
         # Multimodal related configs
@@ -1329,6 +1337,8 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            pinned_prefix_cap_ratio=self.pinned_prefix_cap_ratio,
+            enable_pinned_prefix=self.enable_pinned_prefix,
         )
 
         ray_runtime_env = None

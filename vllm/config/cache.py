@@ -125,6 +125,18 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    pinned_prefix_cap_ratio: float = 0.2
+    """Maximum fraction of total GPU blocks that may be pinned for prefix
+    caching per engine instance. Must be within [0.0, 1.0]. Defaults to
+    0.2 (20%). This cap prevents the prefix cache from occupying all
+    blocks, helping stability under load.
+    """
+
+    enable_pinned_prefix: bool = False
+    """Global gate for pinned-prefix behavior. If False, requests with
+    pin_prefix=True will not pin any blocks. Default is disabled to allow
+    conservative rollouts."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -161,6 +173,15 @@ class CacheConfig:
                 "scaling factor."
             )
         return cache_dtype
+
+    @field_validator("pinned_prefix_cap_ratio", mode="after")
+    @classmethod
+    def _validate_pinned_prefix_cap_ratio(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError(
+                f"pinned_prefix_cap_ratio must be within [0.0, 1.0], got {value}."
+            )
+        return value
 
     def verify_with_parallel_config(
         self,
