@@ -100,12 +100,34 @@ def default_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
+def use_aiter_triton_gemm(m, k):
+    if envs.VLLM_ROCM_USE_AITER == 0 or envs.VLLM_ROCM_USE_AITER_TRITON_GEMM == 0:
+        return False
+
+    return (
+        (m == 5120 and k == 2880)
+        or (m == 2880 and k == 4096)
+        or (m == 128 and k == 2880)
+        or (m == 640 and k == 2880)
+        or (m == 2880 and k == 512)
+    )
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
     from vllm.platforms.rocm import on_gfx9
 
+    x_view = x.view(-1, x.size(-1))
+    n = x_view.shape[0]
+    m = weight.shape[0]
     k = weight.shape[1]
+
+    if use_aiter_triton_gemm(m, k):
+        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+        return gemm_a16w16(x, weight, bias)
+
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx9()
@@ -116,9 +138,6 @@ def rocm_unquantized_gemm_impl(
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
 
-    x_view = x.view(-1, x.size(-1))
-    n = x_view.shape[0]
-    m = weight.shape[0]
     cu_count = current_platform.get_cu_count()
 
     if m > 8 and 0 < n <= 4:
