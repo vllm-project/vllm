@@ -55,8 +55,10 @@ template <typename T>
 __device__ __forceinline__ float toFloat(T value) {
     if constexpr (std::is_same_v<T, float>) {
         return value;
-    } else {
+    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         return __bfloat162float(value);
+    } else if constexpr (std::is_same_v<T, __half>) {
+        return __half2float(value);
     }
 }
 
@@ -228,8 +230,9 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     void topkGatingSoftmax(const InputType* input, const bool* finished, float* output, const int num_rows, IndType* indices,
         int* source_rows, const int k, const int start_expert, const int end_expert, const bool renormalize)
 {
-    static_assert(std::is_same_v<InputType, float> || std::is_same_v<InputType, __nv_bfloat16>, 
-                "InputType must be either float or __nv_bfloat16");
+    static_assert(std::is_same_v<InputType, float> || std::is_same_v<InputType, __nv_bfloat16> ||
+                      std::is_same_v<InputType, __half>,
+                  "InputType must be float, __nv_bfloat16, or __half");
 
     // We begin by enforcing compile time assertions and setting up compile time constants.
     static_assert(BYTES_PER_LDG == (BYTES_PER_LDG & -BYTES_PER_LDG), "BYTES_PER_LDG must be power of 2");
@@ -241,9 +244,9 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     static constexpr int THREADS_PER_ROW = ELTS_PER_ROW / VPT;
     static constexpr int LDG_PER_THREAD = VPT / ELTS_PER_LDG;
 
-    if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
+    if constexpr (std::is_same_v<InputType, __nv_bfloat16> || std::is_same_v<InputType, __half>) {
         static_assert(ELTS_PER_LDG == 1 || ELTS_PER_LDG % 2 == 0,
-            "ELTS_PER_LDG must be 1 or even for bfloat162 conversion");
+            "ELTS_PER_LDG must be 1 or even for 16-bit conversion");
     }
 
     // Restrictions based on previous section.
@@ -293,7 +296,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     // Finally, we pull in the data from global mem
     float row_chunk[VPT];
 
-    // NOTE(zhuhaoran): dispatch different input types loading, BF16 will be converted to float
+    // NOTE(zhuhaoran): dispatch different input types loading, BF16/FP16 convert to float
     if constexpr (std::is_same_v<InputType, float>) {
         using VecType = AlignedArray<float, ELTS_PER_LDG>;
         VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(&row_chunk);
@@ -323,6 +326,29 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
             for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
                 const __nv_bfloat16* scalar_ptr = thread_read_ptr + ii * THREADS_PER_ROW;
                 row_chunk[ii] = __bfloat162float(*scalar_ptr);
+            }
+        }
+    } else if constexpr (std::is_same_v<InputType, __half>) {
+        if constexpr (ELTS_PER_LDG >= 2) {
+            using VecType = AlignedArray<__half, ELTS_PER_LDG>;
+            float2* row_chunk_f2 = reinterpret_cast<float2*>(row_chunk);
+            const VecType* vec_thread_read_ptr = reinterpret_cast<const VecType*>(thread_read_ptr);
+#pragma unroll
+            for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+                VecType vec = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+                int base_idx_f2 = ii * ELTS_PER_LDG / 2;
+#pragma unroll
+                for (int jj = 0; jj < ELTS_PER_LDG / 2; ++jj) {
+                    row_chunk_f2[base_idx_f2 + jj] = __half22float2(
+                        *reinterpret_cast<const __half2*>(vec.data + jj * 2)
+                    );
+                }
+            }
+        } else { // ELTS_PER_LDG == 1
+#pragma unroll
+            for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+                const __half* scalar_ptr = thread_read_ptr + ii * THREADS_PER_ROW;
+                row_chunk[ii] = __half2float(*scalar_ptr);
             }
         }
     }
@@ -539,7 +565,7 @@ void topkGatingSoftmaxKernelLauncher(
     // for bfloat16 dtype, we need 4 bytes loading to make sure num_experts
     // elements can be loaded by a warp
     static constexpr int BYTES_PER_LDG_MULTIPLE_64 =
-        std::is_same_v<InputType, __nv_bfloat16> ? 4 : 8;
+    (std::is_same_v<InputType, __nv_bfloat16> || std::is_same_v<InputType, __half>) ? 4 : 8;
 #endif
     switch (num_experts) {
         case 1:
@@ -651,6 +677,36 @@ void topk_softmax(
             TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
             vllm::moe::topkGatingSoftmaxKernelLauncher<int64_t, float>(
                 gating_output.data_ptr<float>(),
+                topk_weights.data_ptr<float>(),
+                topk_indices.data_ptr<int64_t>(),
+                token_expert_indices.data_ptr<int>(),
+                softmax_workspace.data_ptr<float>(),
+                num_tokens, num_experts, topk, renormalize, stream);
+        }
+    }
+    else if (gating_output.scalar_type() == at::ScalarType::Half) {
+        if(topk_indices.scalar_type() == at::ScalarType::Int) {
+            vllm::moe::topkGatingSoftmaxKernelLauncher<int, __half>(
+                reinterpret_cast<const __half*>(gating_output.data_ptr()),
+                topk_weights.data_ptr<float>(),
+                topk_indices.data_ptr<int>(),
+                token_expert_indices.data_ptr<int>(),
+                softmax_workspace.data_ptr<float>(),
+                num_tokens, num_experts, topk, renormalize, stream);
+        }
+        else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
+            vllm::moe::topkGatingSoftmaxKernelLauncher<uint32_t, __half>(
+                reinterpret_cast<const __half*>(gating_output.data_ptr()),
+                topk_weights.data_ptr<float>(),
+                topk_indices.data_ptr<uint32_t>(),
+                token_expert_indices.data_ptr<int>(),
+                softmax_workspace.data_ptr<float>(),
+                num_tokens, num_experts, topk, renormalize, stream);
+        }
+        else {
+            TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
+            vllm::moe::topkGatingSoftmaxKernelLauncher<int64_t, __half>(
+                reinterpret_cast<const __half*>(gating_output.data_ptr()),
                 topk_weights.data_ptr<float>(),
                 topk_indices.data_ptr<int64_t>(),
                 token_expert_indices.data_ptr<int>(),
