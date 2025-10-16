@@ -37,7 +37,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "JinaVLForRanking",
     "InternVLChatModel",
     "InternLM2ForRewardModel",
-    "TransformersForMultimodalLM",
+    "TransformersMultiModalForCausalLM",
     "PrithviGeoSpatialMAE",
     "UltravoxModel",
     "DeepSeekMTPModel",
