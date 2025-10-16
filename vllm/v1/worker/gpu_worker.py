@@ -28,7 +28,12 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
+from vllm.utils import (
+    GiB_bytes,
+    MemorySnapshot,
+    memory_profiling,
+    set_process_title_and_log_prefix,
+)
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -184,6 +189,10 @@ class Worker(WorkerBase):
                 self.local_rank,
                 current_platform.dist_backend,
             )
+
+            # Set process title and logging prefix immediately after
+            # distributed environment is initialized
+            set_process_title_and_log_prefix(self.parallel_config)
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
