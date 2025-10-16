@@ -19,6 +19,7 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
@@ -777,3 +778,4 @@ def init_worker_distributed_environment(
     )
 
     ensure_kv_transfer_initialized(vllm_config)
+    ensure_ec_transfer_initialized(vllm_config)

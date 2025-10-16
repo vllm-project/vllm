@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 else:
+    ECConnectorMetadata = object
     KVConnectorMetadata = object
     LoRARequest = object
     MultiModalFeatureSpec = object
@@ -172,3 +174,6 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
+
+    # EC Cache Connector metadata
+    ec_connector_metadata: ECConnectorMetadata | None = None

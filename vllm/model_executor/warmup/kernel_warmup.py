@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
@@ -25,6 +26,10 @@ logger = init_logger(__name__)
 
 
 def kernel_warmup(worker: "Worker"):
+    # skip warmup for encoder
+    if has_ec_transfer() and get_ec_transfer().is_producer:
+        return
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
