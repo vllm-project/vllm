@@ -223,16 +223,19 @@ class MistralToolParser(ToolParser):
 
         # if the tool call token IS in the tokens generated so far, that
         # means we're parsing as tool calls now
-
-        if _is_pre_v11_tokeniser(self.model_tokenizer):
-            return self._extract_tool_calls_streaming_pre_v11_tokenizer(
-                delta_text=delta_text,
-                delta_token_ids=delta_token_ids,
-            )
-        else:
-            return self._extract_tool_calls_streaming(
-                delta_text=delta_text, delta_token_ids=delta_token_ids
-            )
+        try:
+            if _is_pre_v11_tokeniser(self.model_tokenizer):
+                return self._extract_tool_calls_streaming_pre_v11_tokenizer(
+                    delta_text=delta_text,
+                    delta_token_ids=delta_token_ids,
+                )
+            else:
+                return self._extract_tool_calls_streaming(
+                    delta_text=delta_text, delta_token_ids=delta_token_ids
+                )
+        except Exception:
+            logger.exception("Error trying to handle streaming tool call.")
+            return None
 
     def _extract_tool_calls_streaming(
         self,
