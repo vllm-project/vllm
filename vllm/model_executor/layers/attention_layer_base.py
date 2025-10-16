@@ -3,7 +3,7 @@
 """Base class for attention-like layers."""
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -27,7 +27,7 @@ class AttentionLayerBase(ABC):
         pass
 
     @abstractmethod
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> Optional[KVCacheSpec]:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         """
         Get the KV cache spec for this layer.
         May be None if the layer does not need KV cache.

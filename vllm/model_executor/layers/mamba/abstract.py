@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -47,7 +47,7 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> Optional[KVCacheSpec]:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         if (
             vllm_config.speculative_config is not None
             and vllm_config.model_config.hf_config.model_type not in ["qwen3_next"]
