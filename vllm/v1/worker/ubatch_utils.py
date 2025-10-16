@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import numpy as np
-from typing_extensions import TypeAlias
 
 from vllm.config import ParallelConfig
 
