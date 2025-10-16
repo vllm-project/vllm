@@ -764,6 +764,9 @@ def init_worker_distributed_environment(
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
+    from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+
+    init_batch_invariance()
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(
