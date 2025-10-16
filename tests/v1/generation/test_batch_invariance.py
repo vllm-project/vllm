@@ -516,8 +516,23 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
             dtype="bfloat16",
         )
 
-        # Use more realistic prompts for better token generation
-        prompts = [_random_prompt(10, 50) for i in range(32)]
+        # build ragged prompts to change shapes significantly across BS=1 vs BS=N
+        long_min = int(os.getenv("VLLM_MIN_PROMPT", "768"))
+        long_max = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
+        prompts: list[str] = []
+        for i in range(32):
+            if i % 4 == 0:
+                # very long
+                prompts.append(_random_prompt(max(long_min, 1536), max(long_max, 3072)))
+            elif i % 4 == 1:
+                # long
+                prompts.append(_random_prompt(max(1024, long_min), max(2048, long_max)))
+            elif i % 4 == 2:
+                # mid
+                prompts.append(_random_prompt(256, 512))
+            else:
+                # short
+                prompts.append(_random_prompt(10, 20))
 
         sp = SamplingParams(
             temperature=0.6,
