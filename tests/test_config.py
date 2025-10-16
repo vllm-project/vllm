@@ -16,8 +16,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.load import LoadConfig
-from vllm.config.optimization import build_defaults
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, resolve_config_value
 from vllm.config.vllm import OptimizationLevel
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
@@ -586,25 +585,22 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
 
 
 def test_vllm_config_defaults_are_none():
-    """Verify that all fields that are set by default based on optimizaiton
-    level are set to None if user does not set them explicitly."""
-    # Construct VllmConfig without __post_init__.
+    """Verify that optimization-level defaults are None when not set by user."""
     config = object.__new__(VllmConfig)
-    # Construct CompilationConfig with __post_init__.
     config.compilation_config = CompilationConfig()
-    default_config = build_defaults(optimization_level=config.optimization_level)
-    # Apply optimization level default if not set by user.
-    for k, v in default_config["general"].items():
+    default_config = config._build_defaults()
+
+    for k in default_config["general"]:
         if k == "pass_config":
-            for pass_k, pass_v in default_config["general"]["pass_config"].items():
+            for pass_k in default_config["general"]["pass_config"]:
                 assert getattr(config.compilation_config.pass_config, pass_k) is None
         else:
             assert getattr(config.compilation_config, k) is None
 
-    for k, v in default_config["is_quantized"]["pass_config"].items():
+    for k in default_config["is_quantized"]["pass_config"]:
         assert getattr(config.compilation_config.pass_config, k) is None
 
-    for k, v in default_config["is_sequential"]["pass_config"].items():
+    for k in default_config["is_sequential"]["pass_config"]:
         assert getattr(config.compilation_config.pass_config, k) is None
 
 
@@ -629,8 +625,8 @@ def test_vllm_config_defaults_are_none():
         ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O3),
     ],
 )
-def test_vllm_conifg_defaults(model_id, optimization_level):
-    model_config = None
+def test_vllm_config_defaults(model_id, optimization_level):
+    """Test that optimization-level defaults are correctly applied."""
     if model_id is not None:
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
@@ -639,21 +635,66 @@ def test_vllm_conifg_defaults(model_id, optimization_level):
     else:
         vllm_config = VllmConfig(optimization_level=optimization_level)
 
-    default_config = build_defaults(
-        optimization_level=vllm_config.optimization_level, model_config=model_config
-    )
+    default_config = vllm_config._build_defaults()
+
+    # Verify general defaults
     for k, v in default_config["general"].items():
         if k == "pass_config":
             for pass_k, pass_v in default_config["general"]["pass_config"].items():
-                assert (
-                    getattr(vllm_config.compilation_config.pass_config, pass_k)
-                    == pass_v
-                )
+                actual = getattr(vllm_config.compilation_config.pass_config, pass_k)
+                expected = resolve_config_value(pass_v, vllm_config)
+                assert actual == expected
         else:
-            assert getattr(vllm_config.compilation_config, k) == v
+            actual = getattr(vllm_config.compilation_config, k)
+            expected = resolve_config_value(v, vllm_config)
+            assert actual == expected
 
+    # Verify quantized-specific defaults
     for k, v in default_config["is_quantized"]["pass_config"].items():
-        assert getattr(vllm_config.compilation_config.pass_config, k) == v
+        actual = getattr(vllm_config.compilation_config.pass_config, k)
+        expected = resolve_config_value(v, vllm_config)
+        assert actual == expected
 
+    # Verify sequential-specific defaults
     for k, v in default_config["is_sequential"]["pass_config"].items():
-        assert getattr(vllm_config.compilation_config.pass_config, k) == v
+        actual = getattr(vllm_config.compilation_config.pass_config, k)
+        expected = resolve_config_value(v, vllm_config)
+        assert actual == expected
+
+
+def test_vllm_config_callable_defaults():
+    """Test that callable defaults work in the config system.
+
+    Verifies that lambdas in default configs can inspect VllmConfig properties
+    (e.g., is_quantized, is_model_moe) to conditionally set optimization flags.
+    """
+    # Test resolve_config_value with different callable scenarios
+    config_no_model = VllmConfig(optimization_level=OptimizationLevel.O2)
+
+    # Callable that checks if model exists
+    has_model = lambda cfg: cfg.model_config is not None
+    assert resolve_config_value(has_model, config_no_model) is False
+    assert resolve_config_value(True, config_no_model) is True
+    assert resolve_config_value(False, config_no_model) is False
+
+    # Test with quantized model
+    quantized_model = ModelConfig("jerryzh168/Qwen3-8B-INT4")
+    config_quantized = VllmConfig(
+        model_config=quantized_model, optimization_level=OptimizationLevel.O2
+    )
+    enable_if_quantized = lambda cfg: (
+        cfg.model_config is not None and cfg.model_config.is_quantized()
+    )
+    assert resolve_config_value(enable_if_quantized, config_quantized) is True
+    assert resolve_config_value(enable_if_quantized, config_no_model) is False
+
+    # Test with MoE model
+    moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
+    config_moe = VllmConfig(
+        model_config=moe_model, optimization_level=OptimizationLevel.O2
+    )
+    enable_if_sequential = lambda cfg: (
+        cfg.model_config is not None and not cfg.model_config.is_model_moe()
+    )
+    assert resolve_config_value(enable_if_sequential, config_moe) is False
+    assert resolve_config_value(enable_if_sequential, config_quantized) is True
