@@ -611,7 +611,9 @@ class NixlConnectorWorker:
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_side_handle: int = 0
-        # Map of engine_id -> nixl_prepped_dlist_handle (int)].
+        # Map of engine_id -> tp_rank (remote agent) -> nixl_prepped_dlist_handle (int)
+        # Depending on the TP ratio, one worker may need to fetch data from
+        # multiple agents.
         self.dst_xfer_side_handles: dict[EngineId, dict[int, int]] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
@@ -732,9 +734,9 @@ class NixlConnectorWorker:
             # any rank is fine. Using modulo to as simple way to distribute the load.
             tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
             if tp_ratio < 1:
-                # For remote TP > local TP, each ranks will need to do a handshake
-                # with all associated remote ranks so all remote ranks will be notified
-                # to release the resource.
+                # For remote TP > local TP, each rank will need to do additional
+                # handshake with ranks that will not be pulled from, so on reading
+                # block, those remote ranks will be notified to release the resource.
                 # i.e. if remote TP = 4, local TP = 2, local rank 0 will handshake with
                 # remote rank 0,2, pull data from 0 while only sending notification to 2;
                 # similarly, local rank 1 will handshake with remote rank 1,3, pull from 1
@@ -1526,12 +1528,15 @@ class NixlConnectorWorker:
 
         # Number of D TP workers that will read from dst P. Propagate tp_ratio
         # on notification so that dst worker can wait before freeing blocks.
-        if not self.use_mla:
-            tp_ratio = self._tp_size[self.engine_id] // self._tp_size[dst_engine_id]
+        tp_ratio = self._tp_size[self.engine_id] // self._tp_size[dst_engine_id]
+        if tp_ratio >= 1:
             remote_rank = self.tp_rank // tp_ratio
             notif_id = f"{request_id}:{tp_ratio}".encode()
-        else:
-            tp_ratio = min(self._tp_size[self.engine_id] // self._tp_size[dst_engine_id], 1)
+        elif self.use_mla:
+            # If tp_raio < 1 (prefill TP > decode TP), MLA handling is the following:
+            # decode TP pull from same rank of prefill TP, and make sure that
+            # the unread prefill TP will receive the notification to free the blocks.
+            tp_ratio = 1
             remote_rank = self.tp_rank % self._tp_size[dst_engine_id]
             notif_id = f"{request_id}:{tp_ratio}".encode()
             notifiy_rank = remote_rank + self._tp_size[self.engine_id]
@@ -1539,6 +1544,11 @@ class NixlConnectorWorker:
                 agent_name = self._remote_agents[dst_engine_id][remote_rank]
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
                 notifiy_rank += self._tp_size[self.engine_id]
+        else:
+            # Shouldn't reach here, this should have been caught on add_remote_agent
+            raise ValueError(
+                "Decode TP cannot be smaller than prefill TP when not using MLA"
+            )
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
