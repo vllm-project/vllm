@@ -202,6 +202,7 @@ class TestQuantModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("enable_fusion", [True, False])
+@pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_pass(
     test_model_cls: type[torch.nn.Module],
@@ -211,6 +212,7 @@ def test_sequence_parallelism_pass(
     hidden_size: int,
     dtype: torch.dtype,
     enable_fusion: bool,
+    dynamic: bool,
 ):
     num_processes = 2
 
@@ -228,6 +230,7 @@ def test_sequence_parallelism_pass(
                 hidden_size,
                 dtype,
                 enable_fusion,
+                dynamic,
             ),
             nprocs=nprocs,
         )
@@ -245,6 +248,7 @@ def sequence_parallelism_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     enable_fusion: bool,
+    dynamic: bool,
 ):
     current_platform.seed_everything(0)
 
@@ -323,6 +327,9 @@ def sequence_parallelism_pass_on_test_model(
 
         hidden_states = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
         residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
+        if dynamic:
+            torch._dynamo.mark_dynamic(hidden_states, 0)
+            torch._dynamo.mark_dynamic(residual, 0)
 
         compiled_model_no_func = torch.compile(model, backend=backend_no_func)
         compiled_model_no_func(hidden_states, residual)
