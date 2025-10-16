@@ -1222,11 +1222,11 @@ def get_kernel_options(
         kernel_options["BLOCK_N"] = block_n
         return kernel_options
     else:
-        kernel_options["BLOCK_M"] = 64
-        kernel_options["BLOCK_N"] = 64
+        kernel_options["BLOCK_M"] = block_m
+        kernel_options["BLOCK_N"] = block_n
         if query.dtype == torch.float32:
-            kernel_options["BLOCK_M"] = 32
-            kernel_options["BLOCK_N"] = 32
+            kernel_options["BLOCK_M"] = min(block_m, 32)
+            kernel_options["BLOCK_N"] = min(block_n, 32)
         # if current_platform.is_cuda():
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties()
