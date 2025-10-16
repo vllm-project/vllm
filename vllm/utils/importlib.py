@@ -277,13 +277,13 @@ class _PlaceholderModuleAttr(_PlaceholderBase):
 
 class LazyLoader(ModuleType):
     """
-    LazyLoader module borrowed from Tensorflow
-    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
+    `LazyLoader` module borrowed from [Tensorflow]
+    (https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py)
     with an addition of "module caching".
 
     Lazily import a module, mainly to avoid pulling in large dependencies.
     Modules such as `xgrammar` might do additional side effects, so we
-    only want to use this when it is needed, delaying all eager effects
+    only want to use this when it is needed, delaying all eager effects.
     """
 
     def __init__(
