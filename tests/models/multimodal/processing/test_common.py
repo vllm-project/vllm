@@ -393,6 +393,7 @@ def _test_processing_correctness_one(
         "omni-research/Tarsier-7b",
         "omni-research/Tarsier2-Recap-7b",
         "mistralai/Voxtral-Mini-3B-2507",
+        "Open-Bee/Bee-8B-RL",
     ],
 )
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
