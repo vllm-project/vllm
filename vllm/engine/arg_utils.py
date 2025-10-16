@@ -83,6 +83,7 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
 from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.vllm.config.optimization import OptimizationLevel
 
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
@@ -528,6 +529,7 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    optimzation_levels: OptimizationLevel = OptimizationLevel.O2s
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1039,6 +1041,10 @@ class EngineArgs:
         )
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
+        )
+
+        vllm_group.add_argument(
+            "--optimization-level", **vllm_kwargs["optimization_level"]
         )
 
         # Other arguments
