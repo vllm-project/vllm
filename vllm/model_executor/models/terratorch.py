@@ -18,8 +18,8 @@
 """Wrapper around `Terratorch` models"""
 
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -87,18 +87,16 @@ def _terratorch_field_factory(
             if input.type == InputTypeEnum.tensor:
                 fields[input_name] = "image"
 
-        mm_fields_config = {}
-        for field_name, field_modality in fields.items():
-            mm_fields_config[field_name] = MultiModalFieldConfig.shared(
-                batch_size=1, modality=field_modality
-            )
-        return mm_fields_config
+        return {
+            field_name: MultiModalFieldConfig.batched(modality=field_modality)
+            for field_name, field_modality in fields.items()
+        }
 
     return _terratorch_field_config
 
 
 class TerratorchProcessingInfo(BaseProcessingInfo):
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
 
@@ -116,7 +114,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         # Dummy data is generated based on the 'input' section
         # defined in the HF configuration file
@@ -138,8 +136,8 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
 
     def _parse_image_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             terratorch_fields = _terratorch_field_names(self._pretrained_cfg)
 
@@ -159,7 +157,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         info: TerratorchProcessingInfo,
         dummy_inputs: "BaseDummyInputsBuilder[TerratorchProcessingInfo]",
         *,
-        cache: Optional[MultiModalProcessorOnlyCache] = None,
+        cache: MultiModalProcessorOnlyCache | None = None,
     ) -> None:
         self.pretrained_cfg = info.get_hf_config().to_dict()["pretrained_cfg"]
         super().__init__(info=info, dummy_inputs=dummy_inputs, cache=cache)
@@ -184,17 +182,20 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
 
     def apply(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        tokenization_kwargs: Mapping[str, object] | None = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         if "image" in mm_data:
             image_data = mm_data["image"]
+            image_data = {k: v.unsqueeze(0) for k, v in image_data.items()}
         else:
             image_data = mm_data
-            mm_data = {"image": mm_data}
+            image_data = {k: v.unsqueeze(0) for k, v in image_data.items()}
+
+        mm_data = {"image": image_data}
 
         mm_items = self._to_mm_items(mm_data)
         tokenization_kwargs = tokenization_kwargs or {}
@@ -226,11 +227,12 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
     dummy_inputs=TerratorchInputBuilder,
 )
 class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
+    merge_by_field_config = True
     supports_multimodal_raw_input_only = True
     is_pooling_model = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
 
@@ -248,15 +250,15 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {"encode": Pooler.for_encode(pooler_config)},
+            {"token_classify": Pooler.for_token_classify(pooler_config)}
         )
 
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         # We do not really use any input tokens and therefore no embeddings
@@ -267,10 +269,10 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
         model_output = self.inference_runner.forward(**kwargs)

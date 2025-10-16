@@ -3,7 +3,7 @@
 
 import time
 from collections.abc import Mapping
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -21,6 +21,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
     validate_structured_output_request_lm_format_enforcer,
@@ -37,15 +38,14 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: AnyTokenizer | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-    ):
+    ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
-        self.tokenizer = tokenizer
 
         self.generation_config_fields = self.model_config.try_get_generation_config()
 
@@ -54,10 +54,18 @@ class Processor:
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
-            self.tokenizer,
+            tokenizer,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
+
+    @property
+    def tokenizer(self) -> AnyTokenizer | None:
+        return self.input_preprocessor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
+        self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(
         self,
@@ -144,7 +152,7 @@ class Processor:
 
     def _validate_params(
         self,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
     ):
         """
         Validate supported SamplingParam.
@@ -166,7 +174,7 @@ class Processor:
         auto-hashed downstream.
         """
 
-        def _validate_single_prompt(single_prompt: Union[dict, str]) -> None:
+        def _validate_single_prompt(single_prompt: dict | str) -> None:
             if not isinstance(single_prompt, dict):
                 return
             mm_data = single_prompt.get("multi_modal_data")
@@ -206,7 +214,7 @@ class Processor:
         else:
             _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
-    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+    def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
 
@@ -301,7 +309,7 @@ class Processor:
         self,
         request_id: str,
         prompt: PromptType,
-    ) -> Optional[MultiModalUUIDDict]:
+    ) -> MultiModalUUIDDict | None:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
         index rather than their content.
@@ -334,13 +342,13 @@ class Processor:
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
+        data_parallel_rank: int | None = None,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
@@ -437,7 +445,7 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        mm_features: Optional[list[MultiModalFeatureSpec]] = None
+        mm_features: list[MultiModalFeatureSpec] | None = None
 
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
@@ -477,7 +485,7 @@ class Processor:
         )
 
     def _validate_model_inputs(
-        self, encoder_inputs: Optional[SingletonInputs], decoder_inputs: SingletonInputs
+        self, encoder_inputs: SingletonInputs | None, decoder_inputs: SingletonInputs
     ):
         if encoder_inputs is not None:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
@@ -511,10 +519,8 @@ class Processor:
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = self.tokenizer
+        tokenizer = self.tokenizer
+        if tokenizer is not None:
             max_input_id = max(prompt_ids or [], default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
@@ -568,5 +574,8 @@ class Processor:
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
-    def clear_cache(self) -> None:
-        self.input_preprocessor.clear_cache()
+    def stat_mm_cache(self) -> MultiModalCacheStats | None:
+        return self.input_preprocessor.stat_mm_cache()
+
+    def clear_mm_cache(self) -> None:
+        self.input_preprocessor.clear_mm_cache()

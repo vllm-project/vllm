@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import random
-from typing import Any, Union
+from typing import Any
 
 import pytest
 import torch
@@ -34,7 +32,7 @@ def get_test_prompts(mm_enabled: bool):
     for kind in random_prompt_type_choices:
         word_choices = ["test", "temp", "hello", "where"]
         word = random.choice(word_choices)
-        prompt: Union[str, list[dict[str, Any]]] = ""
+        prompt: str | list[dict[str, Any]] = ""
         if kind == "repeat":
             prompt = f"""
             please repeat the word '{word}' 10 times.
@@ -301,7 +299,6 @@ def test_mtp_correctness(
     model_setup: (method, model_name, tp_size)
     """
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_MLA_DISABLE", "1")
 
         method, model_name, tp_size = model_setup

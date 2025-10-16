@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import subprocess
 import sys
-from typing import Union
 
 import vllm
 from vllm import LLM
@@ -15,10 +14,10 @@ MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 EXPECTED_LORA_OUTPUT = [
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
-    "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' ",  # noqa: E501
+    "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' ",
     "  SELECT one_mora FROM table_name_95 WHERE gloss = 'low tone mora with a gloss of /˩okiru/' [òkìɽɯ́] AND accented_mora = 'low tone mora with a gloss of /˩okiru/' [òkìɽɯ́] ",  # noqa: E501
     "  SELECT sex FROM people WHERE people_id IN (SELECT people_id FROM candidate GROUP BY sex ORDER BY COUNT(people_id) DESC LIMIT 1) ",  # noqa: E501
-    "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'Minnesota Lynx' ",  # noqa: E501
+    "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'Minnesota Lynx' ",
     "  SELECT womens_doubles FROM table_28138035_4 WHERE mens_singles = 'Werner Schlager' ",  # noqa: E501
 ]
 
@@ -27,7 +26,7 @@ def do_sample(
     llm: vllm.LLM,
     lora_path: str,
     lora_id: int,
-    tensorizer_config_dict: Union[dict, None] = None,
+    tensorizer_config_dict: dict | None = None,
 ) -> list[str]:
     prompts = [
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
@@ -73,9 +72,7 @@ def do_sample(
     return generated_texts
 
 
-def generate_and_test(
-    llm, sql_lora_files, tensorizer_config_dict: Union[dict, None] = None
-):
+def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: dict | None = None):
     print("lora adapter created")
     print("lora 1")
     assert (
@@ -116,7 +113,6 @@ def test_llama_lora(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test()
 def test_llama_lora_tp4(sql_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -130,7 +126,6 @@ def test_llama_lora_tp4(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test()
 def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -145,7 +140,6 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=2)
-@create_new_process_for_each_test()
 def test_tp2_serialize_and_deserialize_lora(
     tmp_path, sql_lora_files, sql_lora_huggingface_id
 ):

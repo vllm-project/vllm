@@ -20,7 +20,6 @@ license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -31,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.10,<3.14"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -56,52 +55,6 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
-# TEMPORARY! These ignores will be fixed forward
-## Line length violations
-"csrc/cutlass_extensions/vllm_cutlass_library_extension.py" = ["E501"]
-"tests/compile/piecewise/test_simple.py" = ["E501"]
-"tests/compile/piecewise/test_toy_llama.py" = ["E501", "B023"]
-"tests/entrypoints/conftest.py" = ["E501"]
-"tests/entrypoints/openai/test_audio.py" = ["E501"]
-"tests/entrypoints/openai/test_chat.py" = ["E501"]
-"tests/entrypoints/openai/test_chat_template.py" = ["E501"]
-"tests/entrypoints/openai/test_chat_with_tool_reasoning.py" = ["E501"]
-"tests/entrypoints/openai/test_completion_with_function_calling.py" = ["E501"]
-"tests/entrypoints/openai/test_video.py" = ["E501"]
-"tests/entrypoints/openai/test_vision.py" = ["E501"]
-"tests/entrypoints/test_chat_utils.py" = ["E501"]
-"tests/kernels/moe/modular_kernel_tools/common.py" = ["E501"]
-"tests/models/language/generation/test_gemma.py" = ["E501"]
-"tests/models/language/generation/test_mistral.py" = ["E501"]
-"tests/models/multimodal/generation/test_ultravox.py" = ["E501"]
-"tests/models/multimodal/generation/test_voxtral.py" = ["E501"]
-"tests/models/multimodal/generation/vlm_utils/custom_inputs.py" = ["E501"]
-"tests/tool_use/test_tool_choice_required.py" = ["E501"]
-"tests/v1/attention/utils.py" = ["E501"]
-"tests/v1/entrypoints/openai/responses/test_image.py" = ["E501"]
-"tests/v1/kv_connector/nixl_integration/test_accuracy.py" = ["E501"]
-"tests/v1/kv_connector/unit/test_offloading_connector.py" = ["E501"]
-"tests/v1/logits_processors/test_custom_offline.py" = ["E501"]
-"vllm/attention/ops/pallas_kv_cache_update.py" = ["E501"]
-"vllm/compilation/collective_fusion.py" = ["E501"]
-"vllm/compilation/wrapper.py" = ["E501"]
-"vllm/config/vllm.py" = ["E501"]
-"vllm/distributed/device_communicators/all2all.py" = ["E501"]
-"vllm/entrypoints/openai/protocol.py" = ["E501"]
-"vllm/lora/layers/vocal_parallel_embedding.py" = ["E501"]
-"vllm/model_executor/model_loader/bitsandbytes_loader.py" = ["E501"]
-"vllm/model_executor/models/bailing_moe.py" = ["E501"]
-"vllm/model_executor/models/hyperclovax_vision.py" = ["E501"]
-"vllm/model_executor/models/llama4_eagle.py" = ["E501"]
-"vllm/model_executor/models/longcat_flash_mtp.py" = ["E501"]
-"vllm/model_executor/models/phi4mm.py" = ["E501"]
-"vllm/model_executor/models/qwen3_next.py" = ["E501"]
-"vllm/model_executor/layers/quantization/ptpc_fp8.py" = ["E501"]
-"vllm/v1/attention/backends/mla/common.py" = ["E501"]
-"vllm/v1/engine/utils.py" = ["E501"]
-"vllm/v1/utils.py" = ["E501"]
-"vllm/v1/worker/gpu_model_runner.py" = ["E501"]
-# End of temporary ignores
 
 [tool.ruff.lint]
 select = [
@@ -125,12 +78,12 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
+    # zip without `strict=`
+    "B905",
     # Loop control variable not used within loop body
     "B007",
     # f-string format
     "UP032",
-    # Can remove once 3.10+ is the minimum Python version
-    "UP007",
 ]
 
 [tool.ruff.format]
@@ -230,6 +183,7 @@ ba = "ba"
 
 [tool.typos.type.py.extend-words]
 ba = "ba"
+nd = "nd"
 
 [tool.typos.type.cpp]
 extend-glob = ["*.cu"]

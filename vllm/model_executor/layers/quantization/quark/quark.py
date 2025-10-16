@@ -23,8 +23,8 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkMoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import (
+    QuarkOCP_MX,
     QuarkScheme,
-    QuarkW4A4MXFP4,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
 )
@@ -43,8 +43,8 @@ class QuarkConfig(QuantizationConfig):
     def __init__(
         self,
         quant_config: dict[str, Any],
-        kv_cache_group: Optional[list[str]] = None,
-        kv_cache_config: Optional[dict[str, Any]] = None,
+        kv_cache_group: list[str] | None = None,
+        kv_cache_config: dict[str, Any] | None = None,
         pack_method: str = "reorder",
     ):
         super().__init__()
@@ -178,8 +178,8 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_fp8_w8a8(
         self,
-        weight_quant: Optional[dict[str, Any]],
-        input_quant: Optional[dict[str, Any]],
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
@@ -209,8 +209,8 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_static_tensor_w8a8(
         self,
-        weight_quant: Optional[dict[str, Any]],
-        input_quant: Optional[dict[str, Any]],
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
@@ -235,22 +235,17 @@ class QuarkConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
-    def _is_mx_fp4(
+    def _is_ocp_mx(
         self,
-        weight_quant: Optional[dict[str, Any]],
-        input_quant: Optional[dict[str, Any]],
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
             logger.debug(
-                "Quark model is not in MX-FP4 format: "
+                "Quark model is not in OCP MX format: "
                 "weight_quant or input_quant not set"
             )
-            return False
-
-        # Input and weight dtype needs to be fp4.
-        if weight_quant.get("dtype") != "fp4" or input_quant.get("dtype") != "fp4":
-            logger.debug("Quark model is not in MX-FP4 format: dtype not fp4")
             return False
 
         # Input and weight qscheme needs to be per group.
@@ -258,17 +253,12 @@ class QuarkConfig(QuantizationConfig):
             weight_quant.get("qscheme") != "per_group"
             or input_quant.get("qscheme") != "per_group"
         ):
-            logger.debug("Quark model is not in MX-FP4 format: not per_group")
+            logger.debug("Quark model is not in OCP MX format: not per_group")
             return False
 
         # Input and weight group size needs to be 32.
         if weight_quant.get("group_size") != 32 or input_quant.get("group_size") != 32:
-            logger.debug("Quark model is not in MX-FP4 format: not group_size=32")
-            return False
-
-        # Activations need to use dynamic quantization.
-        if input_quant.get("is_dynamic") is False:
-            logger.debug("Quark model is not in MX-FP4 format: not activation dynamic")
+            logger.debug("Quark model is not in OCP MX format: not group_size=32")
             return False
 
         # Activations and weight scales need to be in e8m0 format.
@@ -276,7 +266,19 @@ class QuarkConfig(QuantizationConfig):
             weight_quant.get("scale_format") != "e8m0"
             or input_quant.get("scale_format") != "e8m0"
         ):
-            logger.debug("Quark model is not in MX-FP4 format: not scale_format e8m0")
+            logger.debug("Quark model is not in OCP MX format: not scale_format e8m0")
+            return False
+
+        # Input and weight dtypes need to be any of fp4,
+        # fp6_e3m2 or fp6_e3m2, possibly mixed.
+        if weight_quant.get("dtype") not in {
+            "fp4",
+            "fp6_e3m2",
+            "fp6_e2m3",
+        } or input_quant.get("dtype") not in {"fp4", "fp6_e3m2", "fp6_e2m3"}:
+            logger.debug(
+                "Quark model is not in OCP MX format: dtype not fp4, fp6_e3m2, fp6_e2m3"
+            )
             return False
 
         return True
@@ -348,8 +350,8 @@ class QuarkConfig(QuantizationConfig):
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
             )
-        elif self._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFP4(weight_config, input_config)
+        elif self._is_ocp_mx(weight_config, input_config):
+            return QuarkOCP_MX(weight_config, input_config)
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -368,7 +370,7 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def get_cache_scale(self, name: str) -> Optional[str]:
+    def get_cache_scale(self, name: str) -> str | None:
         """
         Check whether the param name matches the format for k/v cache scales
         in quark. If this is the case, return its equivalent param name
@@ -427,7 +429,7 @@ class QuarkLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ):
         """
         Use the output of create_weights and the CompressedTensorsScheme
@@ -452,7 +454,7 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
     @staticmethod
-    def validate_kv_cache_config(kv_cache_config: Optional[dict[str, Any]]):
+    def validate_kv_cache_config(kv_cache_config: dict[str, Any] | None):
         """
         Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM

@@ -6,12 +6,8 @@ import json
 import pytest
 import pytest_asyncio
 from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.messages import (
-    AudioChunk,
-    RawAudio,
-    TextChunk,
-    UserMessage,
-)
+from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 
@@ -101,16 +97,11 @@ async def test_online_serving(client, audio_assets: AudioTestAssets):
         return audio_dict
 
     audio_chunks = [asset_to_chunk(asset) for asset in audio_assets]
+    text = f"What's happening in these {len(audio_assets)} audio clips?"
     messages = [
         {
             "role": "user",
-            "content": [
-                *audio_chunks,
-                {
-                    "type": "text",
-                    "text": f"What's happening in these {len(audio_assets)} audio clips?",
-                },
-            ],
+            "content": [*audio_chunks, {"type": "text", "text": text}],
         }
     ]
 

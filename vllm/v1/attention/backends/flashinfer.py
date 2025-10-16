@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import ClassVar, Union
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -18,14 +16,17 @@ from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
 
-from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    MultipleOf,
 )
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -37,7 +38,6 @@ from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_disable_q_quantization,
-    supports_trtllm_attention,
     use_trtllm_attention,
 )
 from vllm.v1.attention.backends.utils import (
@@ -52,6 +52,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -166,6 +167,13 @@ class FlashInferBackend(AttentionBackend):
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256]
 
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        # Note: Not sure for all platforms,
+        # but on Blackwell, only support a page size of
+        # 16, 32, 64
+        return [16, 32, 64]
+
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
         supported_head_sizes = cls.get_supported_head_sizes()
@@ -183,15 +191,15 @@ class FlashInferBackend(AttentionBackend):
         return "FLASHINFER"
 
     @staticmethod
-    def get_impl_cls() -> type[FlashInferImpl]:
+    def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> type[FlashInferMetadata]:
+    def get_metadata_cls() -> type["FlashInferMetadata"]:
         return FlashInferMetadata
 
     @staticmethod
-    def get_builder_cls() -> type[FlashInferMetadataBuilder]:
+    def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
         return FlashInferMetadataBuilder
 
     @staticmethod
@@ -283,12 +291,27 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
+        if vllm_kernel_override_batch_invariant():
+            self.decode_fixed_split_size = 2048
+            self.prefill_fixed_split_size = 4096
+            self.disable_split_kv = True
+        else:
+            self.decode_fixed_split_size = -1
+            self.prefill_fixed_split_size = -1
+            self.disable_split_kv = False
+
         self.compilation_config = vllm_config.compilation_config
         max_num_pages_per_req = cdiv(
             self.model_config.max_model_len, self.kv_cache_spec.block_size
         )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        speculative_config = vllm_config.speculative_config
+        num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
         self.enable_cuda_graph = (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
@@ -299,7 +322,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
             self._decode_cudagraph_max_bs = min(
-                max_num_reqs, self.compilation_config.max_capture_size
+                (1 + num_spec_tokens) * max_num_reqs,
+                self.compilation_config.max_capture_size,
             )
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
@@ -323,15 +347,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION is set to 1. Otherwise, try to
         # use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
-        if supports_trtllm_attention() and not flashinfer_disable_q_quantization():
+        can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+        if can_use_trtllm and not flashinfer_disable_q_quantization():
             self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
 
-        supports_spec_as_decode = can_use_trtllm_attention(
-            self.num_qo_heads, self.num_kv_heads
-        )
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -344,7 +366,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and not supports_trtllm_attention():
+        if self.has_sinks and not can_use_trtllm:
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -381,8 +403,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
+            buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE
+            if vllm_kernel_override_batch_invariant():
+                buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=self.device
+                buffer_size, dtype=torch.uint8, device=self.device
             )
         return self._workspace_buffer
 
@@ -548,16 +573,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
-            raise NotImplementedError(
-                "FlashInfer backend currently does not support attention "
-                "sinks, please use trtllm on blackwell or flash attention on "
-                "earlier GPUs."
+
+        if not (prefill_use_trtllm and decode_use_trtllm):
+            if self.has_sinks:
+                raise NotImplementedError(
+                    "FlashInfer backend currently does not support attention "
+                    "sinks, please use trtllm on blackwell or flash attention "
+                    "on earlier GPUs."
+                )
+
+            if not self.global_hyperparameters.has_same_window_lefts:
+                raise ValueError(
+                    "Window left is not the same for all layers. "
+                    "One potential fix is to set disable_sliding_window=True"
+                )
+
+            assert self.global_hyperparameters.has_same_all_params, (
+                "FlashInfer backend currently only supports models in which "
+                "all layers share the same values for the following "
+                "hyperparameters: `window_left`, `logits_soft_cap`, "
+                "`sm_scale`."
             )
 
-        # If TRTLLM attention is not used, the q quantization is not supported.
-        # Fall back to use model dtype.
-        if not (prefill_use_trtllm and decode_use_trtllm):
+            # The q quantization is not supported for non-trtllm attention,
+            # fall back to model dtype.
             self.q_data_type = self.model_config.dtype
 
         attn_metadata = FlashInferMetadata(
@@ -602,8 +641,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         else:
             # Regular attention (common case).
-            # Decodes are at the front and prefills are at the back,
-            # according to reorder_batch()
+            # Decodes are at the front and prefills are at the back.
             num_prefills = attn_metadata.num_prefills
             num_decodes = attn_metadata.num_decodes
             if num_prefills > 0:
@@ -646,6 +684,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
+                        fixed_split_size=self.prefill_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
                     )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
@@ -661,7 +701,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 use_cudagraph = (
                     self.enable_cuda_graph
                     and pure_decode
-                    and num_decodes <= self._decode_cudagraph_max_bs
+                    and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
                 if use_cudagraph:
                     num_input_tokens = self.vllm_config.pad_for_cudagraph(
@@ -707,6 +747,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
+                        fixed_split_size=self.decode_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
                     )
         return attn_metadata
 
@@ -773,9 +815,7 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
-        self.support_trtllm_attn = (
-            supports_trtllm_attention() and num_heads % num_kv_heads == 0
-        )
+        self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
@@ -786,6 +826,12 @@ class FlashInferImpl(AttentionImpl):
             and self.kv_cache_dtype.startswith("fp8")
             and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
         )
+
+    def supports_quant_query_input(self) -> bool:
+        if flashinfer_disable_q_quantization():
+            return False
+
+        return self.support_trtllm_attn
 
     def forward(
         self,
@@ -816,7 +862,13 @@ class FlashInferImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
+
+        # Ensure query dtype matches the expected dtype from attention metadata
+        assert attn_metadata.q_data_type == query.dtype, (
+            f"Query dtype mismatch: expected {attn_metadata.q_data_type}, "
+            f"got {query.dtype}"
+        )
 
         if self.bmm1_scale is None:
             self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
@@ -857,15 +909,6 @@ class FlashInferImpl(AttentionImpl):
                     self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
-
-        # Insert FP8 quant for query
-        if attn_metadata.q_data_type == FP8_DTYPE:
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape((num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale,
-            )
-            query = query.reshape((num_tokens, num_heads, head_size))
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -925,8 +968,7 @@ class FlashInferImpl(AttentionImpl):
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
         # Regular attention (common case).
-        # Decodes are at the front and prefills are at the back,
-        # according to reorder_batch()
+        # Decodes are at the front and prefills are at the back.
         if num_prefill_tokens > 0:
             prefill_wrapper = attn_metadata.prefill_wrapper
             prefill_query = query[num_decode_tokens:]
@@ -1094,13 +1136,15 @@ def fast_plan_decode(
     pos_encoding_mode: str = "NONE",
     window_left: int = -1,
     logits_soft_cap: float | None = None,
-    q_data_type: Union[str, torch.dtype] | None = "float16",
-    kv_data_type: Union[str, torch.dtype] | None = None,
-    data_type: Union[str, torch.dtype] | None = None,
+    q_data_type: str | torch.dtype | None = "float16",
+    kv_data_type: str | torch.dtype | None = None,
+    data_type: str | torch.dtype | None = None,
     sm_scale: float | None = None,
     rope_scale: float | None = None,
     rope_theta: float | None = None,
     non_blocking: bool = True,
+    fixed_split_size: int = -1,
+    disable_split_kv: bool = False,
 ) -> None:
     """
     A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
@@ -1137,6 +1181,10 @@ def fast_plan_decode(
             rope_scale,
             rope_theta,
             non_blocking,
+            None,  # block_tables
+            None,  # seq_lens
+            fixed_split_size,
+            disable_split_kv,
         )
         self.vllm_first_call = False
         return
@@ -1184,7 +1232,7 @@ def fast_plan_decode(
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
     try:
-        # Make sure we pass exactly 15 arguments for tensor core version
+        # Make sure we pass exactly 18 arguments for tensor core version
         self._plan_info = self._cached_module.plan(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -1201,6 +1249,9 @@ def fast_plan_decode(
             head_dim,
             head_dim,
             False,  # causal
+            window_left,
+            fixed_split_size,
+            disable_split_kv,
         )
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e

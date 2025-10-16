@@ -32,7 +32,6 @@ import uuid
 import warnings
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Optional
 
 import datasets
 import numpy as np
@@ -316,7 +315,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
-    goodput_config_dict: Optional[dict[str, float]] = None,
+    goodput_config_dict: dict[str, float] | None = None,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -436,9 +435,9 @@ async def benchmark(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[str],
     ignore_eos: bool,
-    max_concurrency: Optional[int],
+    max_concurrency: int | None,
     structured_output_ratio: float,
-    goodput_config_dict: Optional[dict[str, float]] = None,
+    goodput_config_dict: dict[str, float] | None = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -909,13 +908,13 @@ def create_argument_parser():
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--tokenizer-mode",
         type=str,
         default="auto",
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--num-prompts",

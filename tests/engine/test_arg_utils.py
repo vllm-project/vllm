@@ -5,7 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import pytest
 
@@ -115,9 +115,9 @@ class NestedConfig:
 class DummyConfig:
     regular_bool: bool = True
     """Regular bool with default True"""
-    optional_bool: Optional[bool] = None
+    optional_bool: bool | None = None
     """Optional bool with default None"""
-    optional_literal: Optional[Literal["x", "y"]] = None
+    optional_literal: Literal["x", "y"] | None = None
     """Optional literal with default None"""
     tuple_n: tuple[int, ...] = field(default_factory=lambda: (1, 2, 3))
     """Tuple with variable length"""
@@ -127,7 +127,7 @@ class DummyConfig:
     """List with variable length"""
     list_literal: list[Literal[1, 2]] = field(default_factory=list)
     """List with literal choices"""
-    list_union: list[Union[str, type[object]]] = field(default_factory=list)
+    list_union: list[str | type[object]] = field(default_factory=list)
     """List with union type"""
     literal_literal: Literal[Literal[1], Literal[2]] = 1
     """Literal of literals with default 1"""
@@ -152,11 +152,11 @@ def test_is_not_builtin(type_hint, expected):
     ("type_hint", "expected"),
     [
         (Annotated[int, "annotation"], {int}),
-        (Optional[int], {int, type(None)}),
-        (Annotated[Optional[int], "annotation"], {int, type(None)}),
-        (Optional[Annotated[int, "annotation"]], {int, type(None)}),
+        (int | None, {int, type(None)}),
+        (Annotated[int | None, "annotation"], {int, type(None)}),
+        (Annotated[int, "annotation"] | None, {int, type(None)}),
     ],
-    ids=["Annotated", "Optional", "Annotated_Optional", "Optional_Annotated"],
+    ids=["Annotated", "or_None", "Annotated_or_None", "or_None_Annotated"],
 )
 def test_get_type_hints(type_hint, expected):
     assert get_type_hints(type_hint) == expected
@@ -226,30 +226,30 @@ def test_compilation_config():
 
     # set to O3
     args = parser.parse_args(["-O0"])
-    assert args.compilation_config.level == 0
+    assert args.compilation_config.mode == 0
 
     # set to O 3 (space)
     args = parser.parse_args(["-O", "1"])
-    assert args.compilation_config.level == 1
+    assert args.compilation_config.mode == 1
 
     # set to O 3 (equals)
     args = parser.parse_args(["-O=2"])
-    assert args.compilation_config.level == 2
+    assert args.compilation_config.mode == 2
 
-    # set to O.level 3
-    args = parser.parse_args(["-O.level", "3"])
-    assert args.compilation_config.level == 3
+    # set to O.mode 3
+    args = parser.parse_args(["-O.mode", "3"])
+    assert args.compilation_config.mode == 3
 
     # set to string form of a dict
     args = parser.parse_args(
         [
             "-O",
-            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
             '"use_inductor": false}',
         ]
     )
     assert (
-        args.compilation_config.level == 3
+        args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and not args.compilation_config.use_inductor
     )
@@ -258,12 +258,12 @@ def test_compilation_config():
     args = parser.parse_args(
         [
             "--compilation-config="
-            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
             '"use_inductor": true}',
         ]
     )
     assert (
-        args.compilation_config.level == 3
+        args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and args.compilation_config.use_inductor
     )

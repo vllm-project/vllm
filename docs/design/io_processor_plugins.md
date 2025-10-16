@@ -9,8 +9,8 @@ When performing an inference with IO Processor plugins, the prompt type is defin
 IO Processor plugins implement the `IOProcessor` interface (<gh-file:vllm/plugins/io_processors/interface.py>):
 
 ```python
-IOProcessorInput = TypeVar('IOProcessorInput')
-IOProcessorOutput = TypeVar('IOProcessorOutput')
+IOProcessorInput = TypeVar("IOProcessorInput")
+IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
@@ -21,30 +21,32 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def pre_process(
         self,
         prompt: IOProcessorInput,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
-    ) -> Union[PromptType, Sequence[PromptType]]:
+    ) -> PromptType | Sequence[PromptType]:
         raise NotImplementedError
 
     async def pre_process_async(
         self,
         prompt: IOProcessorInput,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
-    ) -> Union[PromptType, Sequence[PromptType]]:
+    ) -> PromptType | Sequence[PromptType]:
         return self.pre_process(prompt, request_id, **kwargs)
 
     @abstractmethod
-    def post_process(self,
-                     model_output: Sequence[PoolingRequestOutput],
-                     request_id: Optional[str] = None,
-                     **kwargs) -> IOProcessorOutput:
+    def post_process(
+        self,
+        model_output: Sequence[PoolingRequestOutput],
+        request_id: str | None = None,
+        **kwargs,
+    ) -> IOProcessorOutput:
         raise NotImplementedError
 
     async def post_process_async(
         self,
         model_output: AsyncGenerator[tuple[int, PoolingRequestOutput]],
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
         collected_output = [item async for i, item in model_output]
@@ -56,7 +58,8 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
     @abstractmethod
     def output_to_response(
-            self, plugin_output: IOProcessorOutput) -> IOProcessorResponse:
+        self, plugin_output: IOProcessorOutput
+    ) -> IOProcessorResponse:
         raise NotImplementedError
 ```
 

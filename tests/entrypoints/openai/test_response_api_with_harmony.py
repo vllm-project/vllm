@@ -8,29 +8,41 @@ import pytest
 import pytest_asyncio
 import requests
 from openai import BadRequestError, NotFoundError, OpenAI
+from openai_harmony import (
+    Message,
+)
 
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
+GET_WEATHER_SCHEMA = {
+    "type": "function",
+    "name": "get_weather",
+    "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "latitude": {"type": "number"},
+            "longitude": {"type": "number"},
+        },
+        "required": ["latitude", "longitude"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
-@pytest.fixture(scope="module")
-def server(monkeypatch_module: pytest.MonkeyPatch):
+def server():
     args = ["--enforce-eager", "--tool-server", "demo"]
+    env_dict = dict(
+        VLLM_ENABLE_RESPONSES_API_STORE="1",
+        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+    )
 
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-            yield remote_server
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
@@ -311,12 +323,60 @@ async def test_streaming_types(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_with_streaming_types(client: OpenAI, model_name: str):
+    # this links the "done" type with the "start" type
+    # so every "done" type should have a corresponding "start" type
+    # and every open block should be closed by the end of the stream
+    pairs_of_event_types = {
+        "response.completed": "response.created",
+        "response.output_item.done": "response.output_item.added",
+        "response.output_text.done": "response.output_text.delta",
+        "response.reasoning_text.done": "response.reasoning_text.delta",
+        "response.reasoning_part.done": "response.reasoning_part.added",
+        "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
+    }
+
+    tools = [GET_WEATHER_SCHEMA]
+    input_list = [
+        {
+            "role": "user",
+            "content": "What's the weather like in Paris today?",
+        }
+    ]
+    stream_response = await client.responses.create(
+        model=model_name,
+        input=input_list,
+        tools=tools,
+        stream=True,
+    )
+
+    stack_of_event_types = []
+    async for event in stream_response:
+        if event.type == "response.created":
+            stack_of_event_types.append(event.type)
+        elif event.type == "response.completed":
+            assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+            stack_of_event_types.pop()
+        if event.type.endswith("added"):
+            stack_of_event_types.append(event.type)
+        elif event.type.endswith("delta"):
+            if stack_of_event_types[-1] == event.type:
+                continue
+            stack_of_event_types.append(event.type)
+        elif event.type.endswith("done"):
+            assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+            stack_of_event_types.pop()
+    assert len(stack_of_event_types) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("background", [True, False])
 async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
-        # "What is 13 * 24? Use python to calculate the result.",
+        "What is 13 * 24? Use python to calculate the result.",
         # "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
@@ -329,15 +389,11 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 # {
                 #     "type": "web_search_preview"
                 # },
-                # {
-                #     "type": "code_interpreter",
-                #     "container": {
-                #         "type": "auto"
-                #     }
-                # },
+                {"type": "code_interpreter", "container": {"type": "auto"}},
             ],
             stream=True,
             background=background,
+            extra_body={"enable_response_messages": True},
         )
 
         current_item_id = ""
@@ -346,6 +402,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
         events = []
         current_event_mode = None
         resp_id = None
+        checked_response_completed = False
         async for event in response:
             if event.type == "response.created":
                 resp_id = event.response.id
@@ -358,6 +415,16 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             ]:
                 assert "input_messages" in event.response.model_extra
                 assert "output_messages" in event.response.model_extra
+                if event.type == "response.completed":
+                    # make sure the serialization of content works
+                    for msg in event.response.model_extra["output_messages"]:
+                        # make sure we can convert the messages back into harmony
+                        Message.from_dict(msg)
+
+                    for msg in event.response.model_extra["input_messages"]:
+                        # make sure we can convert the messages back into harmony
+                        Message.from_dict(msg)
+                    checked_response_completed = True
 
             if current_event_mode != event.type:
                 current_event_mode = event.type
@@ -402,6 +469,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
         assert len(events) > 0
         response_completed_event = events[-1]
         assert len(response_completed_event.response.output) > 0
+        assert checked_response_completed
 
         if background:
             starting_after = 5
@@ -412,6 +480,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 async for event in stream:
                     counter += 1
                     assert event == events[counter]
+            assert counter == len(events) - 1
 
 
 @pytest.mark.asyncio
@@ -429,7 +498,6 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -443,10 +511,16 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
             "and you must print to see the output."
         ),
         tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
+        temperature=0.0,  # More deterministic output in response
     )
     assert response is not None
     assert response.status == "completed"
     assert response.usage.output_tokens_details.tool_output_tokens > 0
+    for item in response.output:
+        if item.type == "message":
+            output_string = item.content[0].text
+            print("output_string: ", output_string, flush=True)
+            assert "5846" in output_string
 
 
 def get_weather(latitude, longitude):
@@ -473,23 +547,7 @@ def call_function(name, args):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling(client: OpenAI, model_name: str):
-    tools = [
-        {
-            "type": "function",
-            "name": "get_weather",
-            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "latitude": {"type": "number"},
-                    "longitude": {"type": "number"},
-                },
-                "required": ["latitude", "longitude"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        }
-    ]
+    tools = [GET_WEATHER_SCHEMA]
 
     response = await client.responses.create(
         model=model_name,
@@ -555,21 +613,7 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
             },
             "strict": True,
         },
-        {
-            "type": "function",
-            "name": "get_weather",
-            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "latitude": {"type": "number"},
-                    "longitude": {"type": "number"},
-                },
-                "required": ["latitude", "longitude"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
+        GET_WEATHER_SCHEMA,
     ]
 
     response = await client.responses.create(
@@ -633,23 +677,7 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling_required(client: OpenAI, model_name: str):
-    tools = [
-        {
-            "type": "function",
-            "name": "get_weather",
-            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "latitude": {"type": "number"},
-                    "longitude": {"type": "number"},
-                },
-                "required": ["latitude", "longitude"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        }
-    ]
+    tools = [GET_WEATHER_SCHEMA]
 
     with pytest.raises(BadRequestError):
         await client.responses.create(
@@ -679,23 +707,7 @@ async def test_system_message_with_tools(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling_full_history(client: OpenAI, model_name: str):
-    tools = [
-        {
-            "type": "function",
-            "name": "get_weather",
-            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "latitude": {"type": "number"},
-                    "longitude": {"type": "number"},
-                },
-                "required": ["latitude", "longitude"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        }
-    ]
+    tools = [GET_WEATHER_SCHEMA]
 
     input_messages = [
         {"role": "user", "content": "What's the weather like in Paris today?"}
@@ -733,6 +745,74 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_with_stream(client: OpenAI, model_name: str):
+    tools = [GET_WEATHER_SCHEMA]
+    input_list = [
+        {
+            "role": "user",
+            "content": "What's the weather like in Paris today?",
+        }
+    ]
+    stream_response = await client.responses.create(
+        model=model_name,
+        input=input_list,
+        tools=tools,
+        stream=True,
+    )
+    assert stream_response is not None
+    final_tool_calls = {}
+    final_tool_calls_named = {}
+    async for event in stream_response:
+        if event.type == "response.output_item.added":
+            if event.item.type != "function_call":
+                continue
+            final_tool_calls[event.output_index] = event.item
+            final_tool_calls_named[event.item.name] = event.item
+        elif event.type == "response.function_call_arguments.delta":
+            index = event.output_index
+            tool_call = final_tool_calls[index]
+            if tool_call:
+                tool_call.arguments += event.delta
+                final_tool_calls_named[tool_call.name] = tool_call
+        elif event.type == "response.function_call_arguments.done":
+            assert event.arguments == final_tool_calls_named[event.name].arguments
+    for tool_call in final_tool_calls.values():
+        if (
+            tool_call
+            and tool_call.type == "function_call"
+            and tool_call.name == "get_weather"
+        ):
+            args = json.loads(tool_call.arguments)
+            result = call_function(tool_call.name, args)
+            input_list += [tool_call]
+            break
+    assert result is not None
+    response = await client.responses.create(
+        model=model_name,
+        input=input_list
+        + [
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(result),
+            }
+        ],
+        tools=tools,
+        stream=True,
+    )
+    assert response is not None
+    async for event in response:
+        # check that no function call events in the stream
+        assert event.type != "response.function_call_arguments.delta"
+        assert event.type != "response.function_call_arguments.done"
+        # check that the response contains output text
+        if event.type == "response.completed":
+            assert len(event.response.output) > 0
+            assert event.response.output_text is not None
 
 
 @pytest.mark.asyncio

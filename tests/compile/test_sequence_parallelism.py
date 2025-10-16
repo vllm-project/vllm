@@ -186,7 +186,7 @@ class TestQuantModel(torch.nn.Module):
         ):
             # If fusion happens, the fused op is the one
             # we check for (de)functionalization
-            return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]  # noqa: E501
+            return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         else:
             # If no fusion, the original ops are checked
             return [
@@ -278,7 +278,7 @@ def sequence_parallelism_pass_on_test_model(
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
-    model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
+    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
     vllm_config.model_config = ModelConfig(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
@@ -322,7 +322,7 @@ def sequence_parallelism_pass_on_test_model(
     # check if the functionalization pass is applied
     for op in model.ops_in_model():
         find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
-        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None  # noqa: E501
+        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
 
     # make sure the ops were all de-functionalized
     found = dict()

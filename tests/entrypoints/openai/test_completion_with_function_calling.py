@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
-from typing import Union
 
 import openai  # use the official client for correctness check
 import pytest
@@ -25,12 +24,14 @@ tools = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to find the weather for, e.g. 'Vienna'",
+                        "description": "The city to find the weather for, e.g. "
+                        "'Vienna'",
                         "default": "Vienna",
                     },
                     "country": {
                         "type": "string",
-                        "description": "The country that the city is in, e.g. 'Austria'",
+                        "description": "The country that the city is in, e.g. "
+                        "'Austria'",
                     },
                     "unit": {
                         "type": "string",
@@ -85,12 +86,14 @@ tools = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to get the forecast for, e.g. 'Vienna'",
+                        "description": "The city to get the forecast for, e.g. "
+                        "'Vienna'",
                         "default": "Vienna",
                     },
                     "country": {
                         "type": "string",
-                        "description": "The country that the city is in, e.g. 'Austria'",
+                        "description": "The country that the city is in, e.g. "
+                        "'Austria'",
                     },
                     "days": {
                         "type": "integer",
@@ -162,7 +165,7 @@ async def test_function_tool_use(
     client: openai.AsyncOpenAI,
     model_name: str,
     stream: bool,
-    tool_choice: Union[str, dict],
+    tool_choice: str | dict,
     enable_thinking: bool,
 ):
     if not stream:
@@ -244,10 +247,10 @@ async def test_tool_id_kimi_k2(
         )
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
-        assert (
-            chat_completion.choices[0].message.tool_calls[0].id
-            == "functions.get_current_weather:0"
-        )
+        assert chat_completion.choices[0].message.tool_calls[0].id in [
+            "functions.get_current_weather:0",
+            "functions.get_forecast:1",
+        ]
     else:
         # Streaming test
         output_stream = await k2_client.chat.completions.create(
@@ -263,7 +266,10 @@ async def test_tool_id_kimi_k2(
             if chunk.choices and chunk.choices[0].delta.tool_calls:
                 output.extend(chunk.choices[0].delta.tool_calls)
         for o in output:
-            assert o.id is None or o.id == "functions.get_current_weather:0"
+            assert o.id is None or o.id in [
+                "functions.get_current_weather:0",
+                "functions.get_forecast:1",
+            ]
 
 
 @pytest.mark.asyncio

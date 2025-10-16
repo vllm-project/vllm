@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import copy
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -50,8 +51,9 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
+        aggregate_engine_logging: bool = False,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        stat_loggers: list[StatLoggerFactory] | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
@@ -96,16 +98,14 @@ class LLMEngine:
         self.should_execute_dummy_batch = False
 
         if self.model_config.skip_tokenizer_init:
-            self.tokenizer = None
+            tokenizer = None
         else:
-            # Tokenizer (+ ensure liveness if running in another process).
-            self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config
-            )
+            tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(
-            vllm_config=vllm_config, tokenizer=self.tokenizer, mm_registry=mm_registry
+        self.processor = Processor(self.vllm_config, tokenizer)
+        self.io_processor = get_io_processor(
+            self.vllm_config,
+            self.model_config.io_processor_plugin,
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
@@ -127,12 +127,13 @@ class LLMEngine:
             log_stats=self.log_stats,
         )
 
-        self.logger_manager: Optional[StatLoggerManager] = None
+        self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
                 custom_stat_loggers=stat_loggers,
                 enable_default_loggers=log_stats,
+                aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
 
@@ -153,7 +154,7 @@ class LLMEngine:
         cls,
         vllm_config: VllmConfig,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        stat_loggers: list[StatLoggerFactory] | None = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
         return cls(
@@ -170,7 +171,7 @@ class LLMEngine:
         cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        stat_loggers: list[StatLoggerFactory] | None = None,
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
@@ -226,14 +227,14 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        prompt: Union[EngineCoreRequest, PromptType],
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt: EngineCoreRequest | PromptType,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        prompt_text: Optional[str] = None,
+        prompt_text: str | None = None,
     ) -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -284,7 +285,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> Union[list[RequestOutput], list[PoolingRequestOutput]]:
+    def step(self) -> list[RequestOutput] | list[PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -307,19 +308,15 @@ class LLMEngine:
         # 4) Record stats
         if self.logger_manager is not None:
             assert outputs.scheduler_stats is not None
+
             self.logger_manager.record(
                 scheduler_stats=outputs.scheduler_stats,
                 iteration_stats=iteration_stats,
+                mm_cache_stats=self.processor.stat_mm_cache(),
             )
             self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
-
-    def get_vllm_config(self):
-        return self.vllm_config
-
-    def get_model_config(self):
-        return self.model_config
 
     def start_profile(self):
         self.engine_core.profile(True)
@@ -328,16 +325,16 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.processor.clear_cache()
+        self.processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self, device: Optional[Device] = None):
+    def reset_prefix_cache(self, device: Device | None = None):
         self.engine_core.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
-    def wake_up(self, tags: Optional[list[str]] = None):
+    def wake_up(self, tags: list[str] | None = None):
         self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
@@ -346,6 +343,14 @@ class LLMEngine:
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
+
+    @property
+    def tokenizer(self) -> AnyTokenizer | None:
+        return self.processor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
+        self.processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
@@ -387,10 +392,10 @@ class LLMEngine:
 
     def collective_rpc(
         self,
-        method: Union[str, Callable[[WorkerBase], _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
