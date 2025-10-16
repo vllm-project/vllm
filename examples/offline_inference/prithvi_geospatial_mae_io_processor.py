@@ -6,7 +6,6 @@ import os
 import torch
 
 from vllm import LLM
-from vllm.pooling_params import PoolingParams
 
 # This example shows how to perform an offline inference that generates
 # multimodal data. In this specific case this example will take a geotiff
@@ -40,10 +39,7 @@ def main():
         model_impl="terratorch",
     )
 
-    pooler_output = llm.encode(
-        img_prompt,
-        pooling_task="plugin"
-    )
+    pooler_output = llm.encode(img_prompt, pooling_task="plugin")
     output = pooler_output[0].outputs
 
     print(output)

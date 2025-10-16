@@ -9,7 +9,6 @@ from tests.utils import RemoteOpenAIServer
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.protocol import IOProcessorResponse
 from vllm.plugins.io_processors import get_io_processor
-from vllm.pooling_params import PoolingParams
 
 MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 
@@ -105,9 +104,7 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
         model_impl="terratorch",
         io_processor_plugin="prithvi_to_tiff",
     ) as llm_runner:
-        pooler_output = llm_runner.get_llm().encode(
-            img_prompt, pooling_task="plugin"
-        )
+        pooler_output = llm_runner.get_llm().encode(img_prompt, pooling_task="plugin")
     output = pooler_output[0].outputs
 
     # verify the output is formatted as expected for this plugin
