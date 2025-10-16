@@ -16,7 +16,7 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
@@ -71,7 +71,7 @@ def test_rms_norm_batch_invariant_vs_standard(
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
@@ -119,7 +119,7 @@ def test_rms_norm_3d_input(batch_size: int, seq_len: int, hidden_size: int):
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
@@ -185,7 +185,7 @@ def test_rms_norm_numerical_stability():
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
@@ -224,7 +224,7 @@ def test_rms_norm_formula():
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
@@ -268,7 +268,7 @@ def test_rms_norm_different_hidden_sizes(hidden_size: int):
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(

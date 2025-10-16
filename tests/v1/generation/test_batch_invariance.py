@@ -67,7 +67,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.timeout(1000)
@@ -215,7 +215,7 @@ def _extract_step_logprobs(request_output):
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
@@ -437,7 +437,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 def test_simple_generation():
@@ -486,7 +486,7 @@ def test_simple_generation():
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
@@ -708,7 +708,7 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
+    not current_platform.is_device_capability(90),
     reason="Batch invariance tests only supported on Hopper (SM90)",
 )
 @pytest.mark.skipif(
