@@ -503,7 +503,6 @@ class GraniteMoeHybridModel(nn.Module):
                 scale_name := self.quant_config.get_cache_scale(n)
             ):
                 # Loading kv cache quantization scales
-                param = params_dict[scale_name]
                 loaded_weight = p
                 loaded_weight = (
                     loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
