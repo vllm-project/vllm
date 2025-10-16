@@ -3468,7 +3468,7 @@ def generate_unique_numbers(n):
         numbers.append(unique_num)
     return numbers
 
-def generate_identitys(peer1, peer2, use, n):
+def generate_identity_group(peer1, peer2, use, n):
     """
         Generate n unique identities for ZMQ ROUTER nodes
 

@@ -29,7 +29,7 @@ from vllm.utils import (
     get_open_zmq_inproc_path,
     in_loop,
     make_zmq_socket,
-    generate_identitys,
+    generate_identity_group,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -607,8 +607,8 @@ class MPClient(EngineCoreClient):
             self.start_engine_core_monitor()
             self.engine_registry = {}
             engine_indexs = [i for i in range(dp_size)]
-            fault_report_identitys = generate_identitys(peer1="client", peer2="engine_core_guard",use='report',n=dp_size)
-            client_cmd_identitys = generate_identitys(peer1="client", peer2="engine_core_guard", use="cmd", n=dp_size)
+            fault_report_identitys = generate_identity_group(peer1="client", peer2="engine_core_guard",use='report',n=dp_size)
+            client_cmd_identitys = generate_identity_group(peer1="client", peer2="engine_core_guard", use="cmd", n=dp_size)
             fault_report_registry = dict(zip(engine_indexs, fault_report_identitys))
             client_cmd_registry = dict(zip(engine_indexs, client_cmd_identitys))
             self.engine_registry["fault_report_identitys"] = fault_report_registry
