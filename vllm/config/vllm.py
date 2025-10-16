@@ -472,7 +472,7 @@ class VllmConfig:
 
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning("Enforce eager set, overriding optimization level to -O0")
-            self.level = OptimizationLevel.O0
+            self.optimization_level = OptimizationLevel.O0
         if (
             self.compilation_config.mode is not None
             and self.compilation_config.mode < CompilationMode.VLLM_COMPILE
