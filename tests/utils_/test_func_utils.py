@@ -4,7 +4,7 @@
 
 import pytest
 
-from vllm.utils.func import deprecate_kwargs, supports_kw
+from vllm.utils.functools import deprecate_kwargs, supports_kw
 
 from ..utils import error_on_warning
 

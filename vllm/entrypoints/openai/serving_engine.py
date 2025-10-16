@@ -91,7 +91,7 @@ from vllm.tracing import (
 )
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import is_list_of, random_uuid
-from vllm.utils.async_utils import (
+from vllm.utils.asyncio import (
     AsyncMicrobatchTokenizer,
     collect_from_async_generator,
     make_async,
