@@ -1776,6 +1776,6 @@ class Qwen3VLForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="model.visual.merger",
-            tower_model="model.visual.",
+            connector="visual.merger",
+            tower_model="visual.",
         )

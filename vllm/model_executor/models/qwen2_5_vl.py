@@ -116,7 +116,7 @@ class Qwen2_5_VLImagePixelInputs(TensorSchema):
         - pixel_values shape: (num_patches, num_channels * patch_size *
           patch_size)
         - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
-          formatnum_channels * patch_size * patch_size
+          format.
     """
 
     type: Literal["pixel_values"]
