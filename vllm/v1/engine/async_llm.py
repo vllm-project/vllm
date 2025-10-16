@@ -29,8 +29,9 @@ from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, as_list, cancel_task_threadsafe, cdiv
-from vllm.utils.func import deprecate_kwargs
+from vllm.utils import Device, as_list, cdiv
+from vllm.utils.asyncio import cancel_task_threadsafe
+from vllm.utils.functools import deprecate_kwargs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError

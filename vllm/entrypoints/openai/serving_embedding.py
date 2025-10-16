@@ -40,6 +40,7 @@ from vllm.outputs import (
 )
 from vllm.pooling_params import PoolingParams
 from vllm.utils import chunk_list
+from vllm.utils.asyncio import merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -386,8 +387,6 @@ class EmbeddingMixin(OpenAIServing):
                     ctx, engine_prompt, pooling_params, trace_headers, i
                 )
                 generators.append(generator)
-
-            from vllm.utils import merge_async_iterators
 
             ctx.result_generator = merge_async_iterators(*generators)
 
