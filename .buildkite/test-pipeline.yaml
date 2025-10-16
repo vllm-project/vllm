@@ -1076,7 +1076,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
+    - bash tests/v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
 
 
 ##### multi gpus test #####
