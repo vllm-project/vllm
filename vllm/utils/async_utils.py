@@ -270,7 +270,7 @@ async def merge_async_iterators(
 
     loop = asyncio.get_running_loop()
 
-    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
+    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}  # type: ignore[var-annotated, arg-type]
     try:
         while awaits:
             done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
@@ -279,7 +279,7 @@ async def merge_async_iterators(
                 try:
                     item = await d
                     i, it = pair
-                    awaits[loop.create_task(anext(it))] = pair
+                    awaits[loop.create_task(anext(it))] = pair  # type: ignore[arg-type]
                     yield i, item
                 except StopAsyncIteration:
                     pass

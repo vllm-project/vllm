@@ -1137,7 +1137,7 @@ class EngineArgs:
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
-            max_model_len=self.max_model_len,
+            max_model_len=self.max_model_len,  # type: ignore[arg-type]
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,
@@ -1325,7 +1325,7 @@ class EngineArgs:
         )
 
         cache_config = CacheConfig(
-            block_size=self.block_size,
+            block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
@@ -1512,9 +1512,9 @@ class EngineArgs:
 
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
-            max_num_batched_tokens=self.max_num_batched_tokens,
-            max_num_seqs=self.max_num_seqs,
-            max_model_len=model_config.max_model_len,
+            max_num_batched_tokens=self.max_num_batched_tokens,  # type: ignore[arg-type]
+            max_num_seqs=self.max_num_seqs,  # type: ignore[arg-type]
+            max_model_len=model_config.max_model_len,  # type: ignore[arg-type]
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -1616,7 +1616,7 @@ class EngineArgs:
             return False
 
         # No Mamba or Encoder-Decoder so far.
-        if not model_config.is_v1_compatible:
+        if not getattr(model_config, "is_v1_compatible", True):
             _raise_or_fallback(
                 feature_name=str(model_config.architectures), recommend_to_remove=False
             )
