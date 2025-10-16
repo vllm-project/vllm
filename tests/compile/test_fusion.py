@@ -184,8 +184,6 @@ def test_fusion_rmsnorm_quant(
 
         if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
-        elif static:
-            ATOL, RTOL = (5e-3, 5e-3)
         else:
             ATOL, RTOL = (1e-2, 1e-2)
 
