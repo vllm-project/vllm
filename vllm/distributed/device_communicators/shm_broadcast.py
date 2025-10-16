@@ -519,6 +519,7 @@ class MessageQueue:
         def oob_callback(buf: PickleBuffer) -> bool:
             raw_buf = buf.raw()
             if len(raw_buf) < 1024 * 1024:
+                # In-line buffers smaller than 1MiB.
                 return True
             oob_buffers.append(raw_buf)
             nonlocal total_bytes
