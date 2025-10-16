@@ -35,7 +35,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -290,7 +289,6 @@ elif current_platform.is_rocm():
     # quant_fp4 only has the custom impl
     + list(flat_product(BACKENDS_FP4, MODELS_FP4, [""])),
 )
-@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
 )
@@ -305,7 +303,6 @@ def test_attention_quant_pattern(
     model_name: str,
     model_class: type[AttentionQuantPatternModel],
     backend: _Backend,
-    use_inductor_graph_partition: bool,
     dist_init,
 ):
     """Test AttentionStaticQuantPattern fusion pass"""
@@ -313,10 +310,6 @@ def test_attention_quant_pattern(
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
-
-    # TODO(boyuan/luka): test inductor graph partition on rocm
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("Inductor graph partition requires torch>=2.9")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
@@ -333,7 +326,6 @@ def test_attention_quant_pattern(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops_list,
-            use_inductor_graph_partition=use_inductor_graph_partition,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"),
     )
