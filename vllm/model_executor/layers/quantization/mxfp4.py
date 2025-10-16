@@ -48,11 +48,11 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import (
     has_triton_kernels,
-    is_torch_equal_or_newer,
     next_power_of_2,
     round_up,
 )
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 

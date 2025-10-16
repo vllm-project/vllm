@@ -24,11 +24,10 @@ from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (
     cdiv,
-    direct_register_custom_op,
     is_pin_memory_available,
     is_uva_available,
 )
-from vllm.utils.torch import get_cuda_view_from_cpu_tensor
+from vllm.utils.torch import direct_register_custom_op, get_cuda_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
