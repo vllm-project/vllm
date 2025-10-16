@@ -1505,7 +1505,12 @@ class ModelConfig:
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
-        return chunk_size or 64
+        if chunk_size is None and self.hf_text_config.model_type == "qwen3_next":
+            # Fallback for Qwen3-Next. 64 is a hardcoded value in the GDN kernel.
+            # https://github.com/fla-org/flash-linear-attention/blob/2e7336262c11f8bc6cd6a94b1eb5ee353ae8b4cd/fla/ops/common/chunk_delta_h.py#L439
+            return 64
+
+        return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
         """
