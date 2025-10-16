@@ -501,6 +501,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             and non_spec_state_indices_tensor is not None
             and non_spec_state_indices_tensor.numel() > 0
         ):
+            # Work on a copy so that updates to the runtime view don't leak back
+            # into the attention metadata shared across microbatches.
             non_spec_state_indices_runtime = non_spec_state_indices_tensor.clone()
 
             num_decodes = attn_metadata.num_decodes
@@ -551,6 +553,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     device=conv_state.device, dtype=torch.long
                 )
                 if slot_out_copy.numel() > 0:
+                    # Recycle the previously computed state into the newly
+                    # scheduled slot so we can skip recomputing the prefix.
                     conv_state.index_copy_(
                         0,
                         slot_out_copy,
@@ -618,6 +622,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     device=conv_state.device, dtype=torch.long
                 )
                 if slot_out_copy.numel() > 0:
+                    # Mirror the decode path: move cached prefix states into
+                    # the slots assigned to this prefill chunk.
                     conv_state.index_copy_(
                         0,
                         slot_out_copy,
@@ -797,6 +803,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             ).to(device=ssm_state.device, dtype=torch.long),
                         ),
                     )
+
                 if has_initial_state is not None:
                     chunk_has_initial_state = has_initial_state[:end_non_spec_prefill]
                     initial_state[~chunk_has_initial_state, ...] = 0
@@ -855,6 +862,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 chunk_offset = int(attn_metadata.num_decodes)
                 block_history_prefill = block_history[chunk_offset:]
                 if block_history_prefill.shape[0] > 0:
+                    # The block history contains recurrent states per chunk; we
+                    # replay it into the persistent cache blocks owned by each
+                    # sequence so future steps can hit the prefix cache.
                     chunk_size = attn_metadata.chunk_size
                     block_size = attn_metadata.block_size
                     chunk_stride = block_size // chunk_size
