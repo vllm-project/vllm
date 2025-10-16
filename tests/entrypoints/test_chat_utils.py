@@ -1847,10 +1847,21 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         tools=tools,
         model_config=model_config,
     )
+    with pytest.raises(
+        ValueError, match="Found unexpected chat template kwargs from request"
+    ):
+        # should raise error if `chat_template_kwargs` contains
+        # `chat_template` or `tokenize`
+        resolve_chat_template_kwargs(
+            tokenizer,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     resolved_chat_template_kwargs = resolve_chat_template_kwargs(
         tokenizer,
         chat_template=chat_template,
         chat_template_kwargs=chat_template_kwargs,
+        raise_on_unexpected=False,
     )
     assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
 

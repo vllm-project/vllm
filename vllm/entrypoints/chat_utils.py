@@ -1498,18 +1498,25 @@ def resolve_chat_template_kwargs(
     tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
     chat_template: str,
     chat_template_kwargs: dict[str, Any],
+    raise_on_unexpected: bool = True,
 ) -> dict[str, Any]:
+    # We exclude chat_template from kwargs here, because
+    # chat template has been already resolved at this stage
+    unexpected_vars = {"chat_template", "tokenize"}
+    if raise_on_unexpected and (
+        unexpected_in_kwargs := unexpected_vars & chat_template_kwargs.keys()
+    ):
+        raise ValueError(
+            "Found unexpected chat template kwargs from request: "
+            f"{unexpected_in_kwargs}"
+        )
+
     fn_kw = {
         k
         for k in chat_template_kwargs
         if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
     }
-
     template_vars = _cached_resolve_chat_template_kwargs(chat_template)
-
-    # We exclude chat_template from kwargs here, because
-    # chat template has been already resolved at this stage
-    unexpected_vars = {"chat_template", "tokenize"}
     accept_vars = (fn_kw | template_vars) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
