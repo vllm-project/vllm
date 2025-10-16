@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+from vllm.utils import is_torch_equal_or_newer
+
 
 def set_random_seed(seed: int) -> None:
     from vllm.platforms import current_platform
@@ -117,4 +119,4 @@ def disable_inductor_graph_partition(func):
         torch._inductor.config.graph_partition = old_val
         return out
 
-    return wrapper
+    return wrapper if is_torch_equal_or_newer("2.9.0.dev") else func
