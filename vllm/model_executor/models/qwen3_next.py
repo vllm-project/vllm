@@ -858,8 +858,18 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 and attn_metadata.block_size is not None
             ):
                 block_history = block_state_history.to(ssm_state.dtype)
-                chunk_offset = int(attn_metadata.num_decodes)
-                block_history_prefill = block_history[chunk_offset:]
+                total_chunks = block_history.shape[0]
+                last_chunk_indices = attn_metadata.last_chunk_indices_p
+                prefill_chunk_count = (
+                    int(last_chunk_indices[-1].item()) + 1
+                    if last_chunk_indices is not None and last_chunk_indices.numel() > 0
+                    else 0
+                )
+                decode_chunk_count = max(total_chunks - prefill_chunk_count, 0)
+                # Prefill chunks trail the decode chunks; skip the actual number of
+                # decode chunk completions so partial decodes (no chunk output) do
+                # not offset the history.
+                block_history_prefill = block_history[decode_chunk_count:]
                 if block_history_prefill.shape[0] > 0:
                     # The block history contains recurrent states per chunk; we
                     # replay it into the persistent cache blocks owned by each
