@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # Utility to run integration tests sequentially with varying TP configurations.
-SCRIPT="tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh"
+SCRIPT="v1/kv_connector/nixl_integration/run_accuracy_test.sh"
 
 # Define test configurations
 configs=(
-  "PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2"
-  "PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
-  "GPU_MEMORY_UTILIZATION=0.6 MODEL_NAMES=deepseek-ai/DeepSeek-V2-Lite-Chat" # MLA case
-  "PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.6 MODEL_NAMES=deepseek-ai/DeepSeek-V2-Lite-Chat"
+  "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2"
+  "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
+  "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA case
+  "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
 )
 
 run_tests() {

@@ -15,6 +15,7 @@ RTOL = 0.03
 EXPECTED_VALUES = {
     "Qwen/Qwen3-0.6B": 0.41,
     "deepseek-ai/deepseek-vl2-small": 0.59,
+    "deepseek-ai/deepseek-vl2-tiny": 0.19,
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.65,
 }
 
