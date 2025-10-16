@@ -5,8 +5,10 @@ import importlib.metadata
 import threading
 from collections.abc import Callable, Collection
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
+import numpy as np
+import numpy.typing as npt
 import torch
 from packaging import version
 from packaging.version import Version
@@ -32,6 +34,18 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
 }
+
+TORCH_DTYPE_TO_NUMPY_DTYPE = {
+    torch.float16: np.float16,
+    torch.float32: np.float32,
+    torch.float64: np.float64,
+    torch.uint8: np.uint8,
+    torch.int32: np.int32,
+    torch.int64: np.int64,
+}
+
+
+T = TypeVar("T")
 
 
 @contextlib.contextmanager
@@ -250,6 +264,56 @@ def async_tensor_h2d(
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=target_device, non_blocking=True)
+
+
+def make_ndarray_with_pad(
+    x: list[list[T]],
+    pad: T,
+    dtype: npt.DTypeLike,
+    *,
+    max_len: int | None = None,
+) -> npt.NDArray:
+    """
+    Make a padded array from 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    if max_len is None:
+        # Unlike for most functions, map is faster than a genexpr over `len`
+        max_len = max(map(len, x), default=0)
+
+    padded_x = np.full((len(x), max_len), pad, dtype=dtype)
+    for ind, blocktb in enumerate(x):
+        assert len(blocktb) <= max_len
+        padded_x[ind, : len(blocktb)] = blocktb
+
+    return padded_x
+
+
+def make_tensor_with_pad(
+    x: list[list[T]],
+    pad: T,
+    dtype: torch.dtype,
+    *,
+    max_len: int | None = None,
+    device: str | torch.device | None = None,
+    pin_memory: bool = False,
+) -> torch.Tensor:
+    """
+    Make a padded tensor from 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
+    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
+
+    tensor = torch.from_numpy(padded_x).to(device)
+    if pin_memory:
+        tensor = tensor.pin_memory()
+
+    return tensor
 
 
 prev_set_stream = torch.cuda.set_stream

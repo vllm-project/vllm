@@ -54,8 +54,6 @@ from uuid import uuid4
 
 import cbor2
 import cloudpickle
-import numpy as np
-import numpy.typing as npt
 import psutil
 import regex as re
 import setproctitle
@@ -118,16 +116,6 @@ GiB_bytes = 1 << 30
 # ANSI color codes
 CYAN = "\033[1;36m"
 RESET = "\033[0;0m"
-
-
-TORCH_DTYPE_TO_NUMPY_DTYPE = {
-    torch.float16: np.float16,
-    torch.float32: np.float32,
-    torch.float64: np.float64,
-    torch.uint8: np.uint8,
-    torch.int32: np.int32,
-    torch.int64: np.int64,
-}
 
 
 T = TypeVar("T")
@@ -445,56 +433,6 @@ class DeviceMemoryProfiler:
 
         # Force garbage collection
         gc.collect()
-
-
-def make_ndarray_with_pad(
-    x: list[list[T]],
-    pad: T,
-    dtype: npt.DTypeLike,
-    *,
-    max_len: int | None = None,
-) -> npt.NDArray:
-    """
-    Make a padded array from 2D inputs.
-
-    The padding is applied to the end of each inner list until it reaches
-    `max_len`.
-    """
-    if max_len is None:
-        # Unlike for most functions, map is faster than a genexpr over `len`
-        max_len = max(map(len, x), default=0)
-
-    padded_x = np.full((len(x), max_len), pad, dtype=dtype)
-    for ind, blocktb in enumerate(x):
-        assert len(blocktb) <= max_len
-        padded_x[ind, : len(blocktb)] = blocktb
-
-    return padded_x
-
-
-def make_tensor_with_pad(
-    x: list[list[T]],
-    pad: T,
-    dtype: torch.dtype,
-    *,
-    max_len: int | None = None,
-    device: str | torch.device | None = None,
-    pin_memory: bool = False,
-) -> torch.Tensor:
-    """
-    Make a padded tensor from 2D inputs.
-
-    The padding is applied to the end of each inner list until it reaches
-    `max_len`.
-    """
-    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
-    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
-
-    tensor = torch.from_numpy(padded_x).to(device)
-    if pin_memory:
-        tensor = tensor.pin_memory()
-
-    return tensor
 
 
 # TODO: This function can be removed if transformer_modules classes are
