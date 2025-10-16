@@ -15,8 +15,10 @@ from typing import Literal, NamedTuple
 
 import pytest
 
+from vllm.config.compilation import CompilationMode
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
+from vllm.utils import is_torch_equal_or_newer
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -158,6 +160,7 @@ def _compare_sp(
     runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available: int,
+    use_inductor_graph_partition: bool,
     *,
     method: Literal["generate", "encode"],
     is_multimodal: bool,
@@ -234,7 +237,7 @@ def _compare_sp(
         common_args.append("--skip-tokenizer-init")
 
     compilation_config = {
-        "level": 3,
+        "mode": CompilationMode.VLLM_COMPILE,
         "custom_ops": ["+rms_norm"],
         "compile_sizes": [4, 8],
         "pass_config": {
@@ -242,6 +245,7 @@ def _compare_sp(
             "enable_fusion": enable_fusion,
             "enable_noop": True,
         },
+        "use_inductor_graph_partition": use_inductor_graph_partition,
     }
 
     tp_sp_args = [
@@ -296,6 +300,7 @@ SP_TEST_MODELS = [
         if model_id in SP_TEST_MODELS
     ],
 )
+@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
 @create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
@@ -304,7 +309,11 @@ def test_tp_sp_generation(
     runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available,
+    use_inductor_graph_partition: bool,
 ):
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
     _compare_sp(
         model_id,
         parallel_setup,
@@ -312,6 +321,7 @@ def test_tp_sp_generation(
         runner,
         test_options,
         num_gpus_available,
+        use_inductor_graph_partition,
         method="generate",
         is_multimodal=False,
     )
