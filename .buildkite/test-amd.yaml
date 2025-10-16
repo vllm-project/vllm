@@ -619,7 +619,7 @@ steps:
 - label: LM Eval Small Models # 53min
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
+  agent_pool: mi325_2
   # grade: Blocking
   source_file_dependencies:
   - csrc/
