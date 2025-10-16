@@ -478,6 +478,7 @@ async def benchmark(
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
+    num_warmups: int,
     profile: bool,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
@@ -559,9 +560,36 @@ async def benchmark(
                 f"Error: {test_output.error}"
             )
         else:
-            print("Initial test run completed. Starting main benchmark run...")
+            print("Initial test run completed.")
     else:
         print("Skipping endpoint ready check.")
+
+    if num_warmups > 0:
+        print(f"Warming up with {num_warmups} requests...")
+        warmup_pbar = None if disable_tqdm else tqdm(total=num_warmups)
+        warmup_semaphore = (
+            asyncio.Semaphore(max_concurrency)
+            if max_concurrency
+            else contextlib.nullcontext()
+        )
+        warmup_tasks = []
+
+        async def warmup_limited_request_func():
+            async with warmup_semaphore:
+                return await request_func(
+                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                )
+
+        for _ in range(num_warmups):
+            request_task = asyncio.create_task(warmup_limited_request_func())
+            warmup_tasks.append(request_task)
+        _ = await asyncio.gather(*warmup_tasks)
+
+        if warmup_pbar is not None:
+            warmup_pbar.close()
+        print("Warmup run completed.")
+
+    print("Starting main benchmark run...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -1030,6 +1058,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Specify to disable tqdm progress bar.",
     )
     parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=0,
+        help="Number of warmup requests.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Use Torch Profiler. The endpoint must be launched with "
@@ -1370,6 +1404,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         request_rate=args.request_rate,
         burstiness=args.burstiness,
         disable_tqdm=args.disable_tqdm,
+        num_warmups=args.num_warmups,
         profile=args.profile,
         selected_percentile_metrics=percentile_metrics.split(","),
         selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
