@@ -236,8 +236,8 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             device_name = cls.get_device_name().lower()
             # client gpu a770
             if device_name.count("a770") > 0:
