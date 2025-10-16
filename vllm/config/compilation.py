@@ -333,7 +333,7 @@ class CompilationConfig:
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
-    compile_ranges_split_points: Optional[list[int]] = None
+    compile_ranges_split_points: list[int] | None = None
     """Split points that represent compile ranges for inductor.
     The compile ranges are 
     [1, split_points[0]), 
@@ -935,7 +935,8 @@ class CompilationConfig:
         max_split_point = max(compile_ranges_split_points)
         compile_sizes = set(self.compile_sizes)
         split_points = sorted(
-            compile_sizes.union(set(self.compile_ranges_split_points)))
+            compile_sizes.union(set(self.compile_ranges_split_points))
+        )
         # filter out split points that are greater
         # than max_num_batched_tokens + 1
         split_points = [x for x in split_points if x <= max_split_point]
@@ -946,6 +947,7 @@ class CompilationConfig:
                 compile_ranges.append((split_points[i - 1], s))
             if s in compile_sizes and s != 1:
                 compile_ranges.append((s, s))
-        assert compile_ranges[-1][1] == max_split_point, \
+        assert compile_ranges[-1][1] == max_split_point, (
             "Last compile range end should be max_split_point"
+        )
         return sorted(compile_ranges)

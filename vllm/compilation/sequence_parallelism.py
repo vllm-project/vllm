@@ -502,9 +502,11 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return compile_range is not None and (
-            compile_range[0]
-            == compile_range[1]) and (compile_range[1] % tp_size == 0)
+        return (
+            compile_range is not None
+            and (compile_range[0] == compile_range[1])
+            and (compile_range[1] % tp_size == 0)
+        )
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):

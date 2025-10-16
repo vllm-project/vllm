@@ -63,14 +63,14 @@ class CompilerInterface:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int | None] = None,
+        compile_range: tuple[int, int] | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         """
         Compile the graph with the given example inputs and compiler config,
         with a range. If the `compile_range` is None, it means
         the `example_inputs` have a dynamic shape. Otherwise, the
-        `compile_range` specifies the range of the inputs, 
+        `compile_range` specifies the range of the inputs,
         it could be concrete size, e.g. (4, 4).
         Right now we only support one variable range of shapes for all inputs,
          which is the batchsize (number of tokens) during inference.
@@ -99,7 +99,7 @@ class CompilerInterface:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: tuple[int, int | None] = None,
+        compile_range: tuple[int, int] | None = None,
     ) -> Callable:
         """
         Load the compiled function from the handle.
@@ -193,7 +193,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int | None] = None,
+        compile_range: tuple[int, int] | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         compilation_counter.num_inductor_compiles += 1
@@ -234,7 +234,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: tuple[int, int | None] = None,
+        compile_range: tuple[int, int] | None = None,
     ) -> Callable:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
@@ -298,7 +298,7 @@ class InductorAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int | None] = None,
+        compile_range: tuple[int, int] | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         compilation_counter.num_inductor_compiles += 1
@@ -497,7 +497,7 @@ class InductorAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: tuple[int, int | None] = None,
+        compile_range: tuple[int, int] | None = None,
     ) -> Callable:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
@@ -615,7 +615,7 @@ class EagerAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int | None] = None,
+        compile_range: tuple[int, int] | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         compilation_counter.num_eager_compiles += 1

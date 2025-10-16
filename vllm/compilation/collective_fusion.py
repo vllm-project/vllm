@@ -505,12 +505,12 @@ if flashinfer_comm is not None:
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
         max_tensor_size = max_token_num * hidden_size * element_size
-        assert current_tensor_size <= max_tensor_size, \
-            f"Current tensor size {current_tensor_size} is larger than " \
-            f"max token num {max_token_num} * hidden size {hidden_size} * " \
+        assert current_tensor_size <= max_tensor_size, (
+            f"Current tensor size {current_tensor_size} is larger than "
+            f"max token num {max_token_num} * hidden size {hidden_size} * "
             f"element size {element_size}"
-        device_capability = current_platform.get_device_capability(
-        ).as_version_str()
+        )
+        device_capability = current_platform.get_device_capability().as_version_str()
         # Get one shot input size limit for the current world size
         # for the current device capability
         max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB. \
@@ -520,9 +520,9 @@ if flashinfer_comm is not None:
         use_oneshot = max_one_shot_size is None or \
             current_tensor_size <= max_one_shot_size * MiB
 
-        assert (
-            _FI_WORKSPACE_TENSOR
-            is not None), "Flashinfer must be enabled when using flashinfer"
+        assert _FI_WORKSPACE_TENSOR is not None, (
+            "Flashinfer must be enabled when using flashinfer"
+        )
         if norm_out is None:
             norm_out = allreduce_in
             residual_out = residual
@@ -1178,8 +1178,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         self.disabled = False
 
     @VllmInductorPass.time_and_log
-    def is_applicable_for_range(
-            self, compile_range: tuple[int, int] | None) -> bool:
+    def is_applicable_for_range(self, compile_range: tuple[int, int] | None) -> bool:
         if compile_range is None:
             return False
         return compile_range[1] - 1 <= self.max_token_num

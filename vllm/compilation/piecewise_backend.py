@@ -30,7 +30,6 @@ class PiecewiseBackend:
         piecewise_compile_index: int,
         total_piecewise_compiles: int,
         sym_shape_indices: list[int],
-        compiled_graph_for_general_shape: Callable,
         vllm_backend: VllmBackend,
     ):
         """
@@ -58,8 +57,11 @@ class PiecewiseBackend:
         log_string = f"PiecewiseBackend: compile_ranges: {self.compile_ranges}"
         logger.debug_once(log_string)
 
-        self.is_in_range = lambda x, range: range[0] <= x < range[1] if range[
-            0] < range[1] else x == range[0]
+        self.is_in_range = (
+            lambda x, range: range[0] <= x < range[1]
+            if range[0] < range[1]
+            else x == range[0]
+        )
 
         self.first_run_finished = False
 
@@ -73,22 +75,22 @@ class PiecewiseBackend:
 
         # to_be_compiled_ranges tracks the remaining ranges to compile,
         # and updates during the compilation process, so we need to copy it
-        self.to_be_compiled_ranges: set[tuple[int,
-                                              int]] = set(self.compile_ranges)
+        self.to_be_compiled_ranges: set[tuple[int, int]] = set(self.compile_ranges)
 
         # We only keep compilation management inside this class directly.
         for range in self.compile_ranges:
-            self.range_entries[range] = RangeEntry(compile_range=range, )
+            self.range_entries[range] = RangeEntry(
+                compile_range=range,
+            )
 
     def check_for_ending_compilation(self):
-        if (self.is_last_graph and not self.to_be_compiled_ranges):
+        if self.is_last_graph and not self.to_be_compiled_ranges:
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
-    def _maybe_compile_for_range_entry(self, range_entry: RangeEntry,
-                                       args) -> Any:
+    def _maybe_compile_for_range_entry(self, range_entry: RangeEntry, args) -> Any:
         if not range_entry.compiled:
             range_entry.compiled = True
             self.to_be_compiled_ranges.remove(range_entry.compile_range)
@@ -101,7 +103,8 @@ class PiecewiseBackend:
                 self.compilation_config,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
-                compile_range=range_entry.compile_range)
+                compile_range=range_entry.compile_range,
+            )
 
             # finished compilations for all required shapes
             self.check_for_ending_compilation()
@@ -123,9 +126,10 @@ class PiecewiseBackend:
                 range_entry = self.range_entries[range]
                 range_found = True
                 break
-        assert range_found, \
-        f"Shape out of considered range: {runtime_shape} " \
-        "[1, max_num_batched_tokens]"
+        assert range_found, (
+            f"Shape out of considered range: {runtime_shape} "
+            "[1, max_num_batched_tokens]"
+        )
 
         self._maybe_compile_for_range_entry(range_entry, args)
 
