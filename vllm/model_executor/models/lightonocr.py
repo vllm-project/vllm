@@ -14,7 +14,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
     Mistral3ForConditionalGeneration,
-    Mistral3ImagePixelInputs,
     Mistral3MultiModalProjector,
     Mistral3ProcessingInfo,
     _build_mistral3_info,
@@ -38,9 +37,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-
-LightOnOCRImagePixelInputs = Mistral3ImagePixelInputs
-
 
 _I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
