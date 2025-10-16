@@ -527,6 +527,9 @@ async def async_request_openai_embeddings(
         if request_func_input.model_name
         else request_func_input.model,
         "input": request_func_input.prompt,
+        # Many embedding models have short context length,
+        # this is to avoid dropping some of the requests.
+        "truncate_prompt_tokens": -1,
     }
     _update_payload_common(payload, request_func_input)
 
@@ -564,6 +567,9 @@ async def async_request_vllm_rerank(
         else request_func_input.model,
         "query": request_func_input.prompt[0],
         "documents": request_func_input.prompt[1:],
+        # Many reranker models have short context length,
+        # this is to avoid dropping some of the requests.
+        "truncate_prompt_tokens": -1,
     }
 
     headers = {
@@ -599,6 +605,9 @@ async def async_request_openai_embeddings_chat(
         "messages": [
             {"role": "user", "content": content},
         ],
+        # Many embedding models have short context length,
+        # this is to avoid dropping some of the requests.
+        "truncate_prompt_tokens": -1,
     }
     _update_payload_common(payload, request_func_input)
 
@@ -633,13 +642,6 @@ def _preprocess_clip(request_func_input: RequestFuncInput):
     if request_func_input.multi_modal_content:
         # Image input
         request_func_input.prompt = ""
-
-    # max_model_len=77 is too short for most datasets,
-    # so by default we truncate the prompt to max_model_len
-    if request_func_input.extra_body is None:
-        request_func_input.extra_body = {}
-    if "truncate_prompt_tokens" not in request_func_input.extra_body:
-        request_func_input.extra_body["truncate_prompt_tokens"] = -1
 
 
 def _preprocess_vlm2vec(request_func_input: RequestFuncInput):
