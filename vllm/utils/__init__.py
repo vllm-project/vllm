@@ -972,7 +972,6 @@ def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     # c1cd946818442aca8c7f812b16d187ce1586c3bc/
     # torch/cuda/__init__.py#L831C1-L831C17
     import torch.cuda
-    import torch.version
 
     from vllm.platforms import current_platform
 
