@@ -66,15 +66,15 @@ th:not(:first-child) {
 | [CP][chunked-prefill]                                     | [❌](gh-issue:2729) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ | ✅        |
 | [APC](automatic_prefix_caching.md)                        | [❌](gh-issue:3687) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ | ✅        |
 | [LoRA](lora.md)                                           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ | ✅        |
-| [SD](spec_decode.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | WIP        |
+| [SD](spec_decode.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | [❌](gh-issue:26963)       |
 | CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ❌ | ❌        |
 | [pooling](../models/pooling_models.md)                    | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr>       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     | ❌ | ✅        |
-| [mm](multimodal_inputs.md)                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | WIP       |
+| [mm](multimodal_inputs.md)                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | [❌](gh-issue:26965)       |
 | <abbr title="Logprobs">logP</abbr>                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
 | <abbr title="Prompt Logprobs">prmpt logP</abbr>           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
 | <abbr title="Async Output Processing">async output</abbr> | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ❌     | ❌ | ✅        |
 | multi-step                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](gh-issue:8477) | ✅     | ❌ | ✅        |
 | best-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
 | beam-search                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
-| [prompt-embeds](prompt_embeds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ?     | [❌](gh-issue:25097) | WIP       |
+| [prompt-embeds](prompt_embeds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ?     | [❌](gh-issue:25097) | ✅       |
