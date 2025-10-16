@@ -197,12 +197,21 @@ __device__ inline void mma_trans(
   } else {
     if constexpr (std::is_same<scalar_t, __nv_fp8_e4m3>::value) {
       float* c = reinterpret_cast<float*>(&frag_c);
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      asm volatile(
+          "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+          : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
+            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  #else
       asm volatile(
           "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
           "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
           : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
           : "r"(b[0]), "r"(b2[0]), "r"(b[1]), "r"(b2[1]), "r"(a[0]), "r"(a[1]),
             "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  #endif
     } else if constexpr (std::is_same<scalar_t, int8_t>::value) {
       int32_t* c = reinterpret_cast<int32_t*>(&frag_c);
       asm volatile(

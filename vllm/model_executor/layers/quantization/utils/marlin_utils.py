@@ -222,6 +222,11 @@ def get_marlin_input_dtype(prefix):
     elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "INT8":
         return torch.int8
     elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "FP8":
+        if not current_platform.is_device_capability(89) and \
+                not current_platform.is_device_capability(120):
+            raise ValueError(
+                "Marlin W4A8-FP8 only support SM89 or SM120 device "
+                "(It is slower than Marlin W4A16 on other devices).")
         return torch.float8_e4m3fn
     else:
         return

@@ -392,8 +392,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   TORCH_CHECK(major_capability * 10 + minor_capability >= 80,
               "marlin kernel only support Ampere or newer GPUs.");
   if (a_type == vllm::kFE4M3fn) {
-    TORCH_CHECK(major_capability * 10 + minor_capability >= 80,
-                "FP8 only support Ada Lovelace or newer GPUs.");
+    TORCH_CHECK(
+        major_capability * 10 + minor_capability == 89 ||
+            major_capability * 10 + minor_capability == 120,
+        "Marlin W4A8-FP8 only support SM89 or SM120 device (It is slower than "
+        "Marlin W4A16 on other devices).");
   }
 
   int max_par = 16;
