@@ -31,10 +31,12 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
-
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -49,7 +51,6 @@ logger = init_logger(__name__)
 
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supports_quant_query_input: bool = True
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -307,6 +308,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
 
+        if vllm_kernel_override_batch_invariant():
+            max_num_splits = 1
+
         def schedule(
             batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
         ):
@@ -479,6 +483,9 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version()
+        # Cache the batch invariant result for use in forward passes
+        self.batch_invariant_enabled = vllm_kernel_override_batch_invariant()
+
         if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device."
@@ -493,6 +500,9 @@ class FlashAttentionImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer"
             )
+
+    def supports_quant_query_input(self) -> bool:
+        return True
 
     def forward(
         self,
@@ -808,6 +818,7 @@ class FlashAttentionImpl(AttentionImpl):
             q_descale=layer._q_scale.expand(descale_shape),
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            num_splits=1 if self.batch_invariant_enabled else 0,
         )
 
         return output
@@ -952,6 +963,7 @@ def cascade_attention(
         # s_aux is incorporated into prefix_lse inside the GPU kernel,
         # enabling its effect during the final attention merge.
         s_aux=s_aux,
+        num_splits=1 if vllm_kernel_override_batch_invariant() else 0,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -976,6 +988,7 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
+        num_splits=1 if vllm_kernel_override_batch_invariant() else 0,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
