@@ -181,19 +181,20 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             pooling_params = request.to_pooling_params()
 
-            if "token_embed" in self.supported_tasks:
-                pooling_task = "token_embed"
-            elif "token_classify" in self.supported_tasks:
-                pooling_task = "token_classify"
-            else:
-                return self.create_error_response(
-                    f"pooling_task must be one of {self.supported_tasks}."
-                )
+            if pooling_params.task is None:
+                if "token_embed" in self.supported_tasks:
+                    pooling_task = "token_embed"
+                elif "token_classify" in self.supported_tasks:
+                    pooling_task = "token_classify"
+                else:
+                    return self.create_error_response(
+                        f"pooling_task must be one of {self.supported_tasks}."
+                    )
 
-            try:
                 pooling_params.verify(pooling_task, self.model_config)
-            except ValueError as e:
-                return self.create_error_response(str(e))
+            else:
+                if pooling_params.task not in self.supported_tasks:
+                    raise ValueError(f"Task {pooling_params.task} is not supported")
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"

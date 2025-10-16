@@ -824,7 +824,7 @@ class BOSEOSFilter(Pooler):
         return self.pooler.get_supported_tasks()
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooler.get_pooling_updates(task)
+        return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward(
         self,
