@@ -15,7 +15,6 @@ from vllm.model_executor.layers.pooler import (
     CLSPool,
     DispatchPooler,
     Pooler,
-    PoolingParamsUpdate,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -33,9 +32,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import PoolingTask
-from vllm.v1.outputs import PoolerOutput
-from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding
@@ -168,53 +164,6 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         return loader.load_weights(weights_list, mapper=mapper)
 
 
-class M3SparsePooler(Pooler):
-    """A pooler that implements M3 sparse pooling
-
-    Attributes:
-        sparse_linear: the linear module applied to the
-          logits to obtain the token weights
-    """
-
-    def __init__(
-        self, sparse_linear: nn.Module, bos_token_id: int, eos_token_id: int
-    ) -> None:
-        super().__init__()
-        self.sparse_linear = sparse_linear
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
-
-    def get_supported_tasks(self) -> set[PoolingTask]:
-        return {"token_embed", "embed-sparse"}
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return PoolingParamsUpdate(requires_token_ids=True)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: V1PoolingMetadata,
-    ) -> PoolerOutput:
-        token_results = torch.squeeze(
-            torch.relu(self.sparse_linear(hidden_states)), dim=0
-        )
-
-        pooled_outputs = []
-
-        start = 0
-        for i, prompt_len in enumerate(pooling_metadata.prompt_lens):
-            pooled_data = token_results[start : start + prompt_len]
-            token_ids = pooling_metadata.prompt_token_ids[i]
-            if token_ids[0] == self.bos_token_id:
-                pooled_data = pooled_data[1:]
-            if token_ids[-1] == self.eos_token_id:
-                pooled_data = pooled_data[:-1]
-            start += prompt_len
-            pooled_outputs.append(pooled_data.squeeze())
-
-        return pooled_outputs
-
-
 def filter_secondary_weights(
     all_weights: Iterable[tuple[str, torch.Tensor]],
     secondary_weights: list[str],
@@ -239,8 +188,10 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         self.hidden_size = vllm_config.model_config.hf_config.hidden_size
 
-        self.bos_token_id = vllm_config.model_config.hf_config.bos_token_id
-        self.eos_token_id = vllm_config.model_config.hf_config.eos_token_id
+        model_config = vllm_config.model_config
+        self.head_dtype = model_config.head_dtype
+        self.bos_token_id = model_config.hf_config.bos_token_id
+        self.eos_token_id = model_config.hf_config.eos_token_id
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.secondary_weight_prefix = "sparse_linear."
@@ -255,7 +206,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         ]
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
-        self.sparse_linear = nn.Linear(self.hidden_size, 1)
+        self.sparse_linear = nn.Linear(self.hidden_size, 1, dtype=self.head_dtype)
         return DispatchPooler(
             {
                 "embed": Pooler.for_embed(pooler_config),
@@ -266,7 +217,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
                 ),
                 "token_classify": BOSEOSFilter(
                     Pooler.for_token_classify(
-                        pooler_config, classifier=self.classifier, act_fn=torch.relu
+                        pooler_config, classifier=self.sparse_linear, act_fn=torch.relu
                     ),
                     self.bos_token_id,
                     self.eos_token_id,
