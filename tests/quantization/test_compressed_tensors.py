@@ -139,9 +139,6 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
     "model_path",
     [
         "neuralmagic/Llama-3.2-1B-quantized.w8a8",
-        # "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Asym",
-        # "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
-        # "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym",
     ],
 )
 @pytest.mark.parametrize("max_tokens", [8])
@@ -212,15 +209,10 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
     "model_args",
     [
         ("nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2", "tensor"),
-        # ("nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2-asym", "tensor"),
         (
             "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
             "channel",
         ),
-        # (
-        #     "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2-asym",
-        #     "channel",
-        # ),
     ],
 )
 @pytest.mark.parametrize(
@@ -276,38 +268,6 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
             True,
             False,
         ),
-        # (
-        #     "nm-testing/tinyllama-oneshot-w4a16-group128-v2",
-        #     "group",
-        #     128,
-        #     8,
-        #     True,
-        #     False,
-        # ),
-        # (
-        #     "nm-testing/tinyllama-oneshot-w8a16-per-channel",
-        #     "channel",
-        #     None,
-        #     4,
-        #     True,
-        #     False,
-        # ),
-        # (
-        #     "nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256",
-        #     "group",
-        #     128,
-        #     8,
-        #     False,
-        #     False,
-        # ),
-        # (
-        #     "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
-        #     "channel",
-        #     None,
-        #     8,
-        #     False,
-        #     False,
-        # ),
         (
             "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
             "group",
