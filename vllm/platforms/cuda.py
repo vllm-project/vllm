@@ -5,13 +5,11 @@ pynvml. However, it should not initialize cuda context.
 """
 
 import os
-from datetime import timedelta
+from collections.abc import Callable
 from functools import cache, wraps
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
@@ -85,7 +83,7 @@ class CudaPlatformBase(Platform):
         _ = torch.zeros(1, device=device)
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         raise NotImplementedError
 
     @classmethod
@@ -118,7 +116,15 @@ class CudaPlatformBase(Platform):
 
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
-        if model_config is not None and model_config.use_mla:
+        # Note: block_size is initialized in
+        # HybridAttentionMambaModelConfig.verify_and_update_config
+        # for models with both attention and mamba,
+        # and doesn't need to be reinitialized here
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and cache_config.block_size is not None
+        ):
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
             # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
@@ -151,18 +157,22 @@ class CudaPlatformBase(Platform):
             if (
                 use_flashmla
                 and is_flashmla_dense_supported()[0]
-                and cache_config.block_size != 64
+                and cache_config.block_size % 64 != 0
             ):
                 cache_config.block_size = 64
                 logger.info("Forcing kv cache block size to 64 for FlashMLA backend.")
 
-            if use_cutlass_mla and cache_config.block_size != 128:
+            if use_cutlass_mla and cache_config.block_size % 128 != 0:
                 cache_config.block_size = 128
                 logger.info(
                     "Forcing kv cache block size to 128 for CUTLASS_MLA backend."
                 )
 
-            if use_flashinfer_mla and cache_config.block_size not in [32, 64]:
+            if (
+                use_flashinfer_mla
+                and cache_config.block_size != 32
+                and cache_config.block_size % 64 != 0
+            ):
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashInferMLA backend."
@@ -179,7 +189,7 @@ class CudaPlatformBase(Platform):
 
         compilation_config = vllm_config.compilation_config
         if (
-            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            parallel_config.all2all_backend == "deepep_high_throughput"
             and parallel_config.data_parallel_size > 1
             and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
@@ -191,14 +201,14 @@ class CudaPlatformBase(Platform):
                 "kernels are optimized for prefill and are incompatible with "
                 "CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
-                "set VLLM_ALL2ALL_BACKEND to another option, such as "
+                "use --all2all-backend with another option, such as "
                 "deepep_low_latency, pplx, or allgather_reducescatter."
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
@@ -269,12 +279,12 @@ class CudaPlatformBase(Platform):
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None
                 and cls.is_device_capability(100)
-                and block_size == 128
+                and block_size % 128 == 0
             )
             use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
                 selected_backend is None
                 and cls.is_device_capability(100)
-                and block_size in [32, 64]
+                and (block_size == 32 or block_size % 64 == 0)
             )
             use_flashmla = selected_backend == _Backend.FLASHMLA or (
                 selected_backend is None and is_flashmla_dense_supported()[0]
@@ -298,7 +308,7 @@ class CudaPlatformBase(Platform):
                     "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
                 )
             if use_flashmla:
-                if block_size != 64:
+                if block_size % 64 != 0:
                     logger.warning(
                         "FlashMLA backend is not supported for block size %d"
                         " (currently only supports block size 64).",
@@ -443,37 +453,6 @@ class CudaPlatformBase(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
-    def stateless_init_device_torch_dist_pg(
-        cls,
-        backend: str,
-        prefix_store: PrefixStore,
-        group_rank: int,
-        group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
-        assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(
-            prefix_store, group_rank, group_size, backend_options
-        )
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-        pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
-
-    @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
 
@@ -521,8 +500,8 @@ class CudaPlatformBase(Platform):
         return supported
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()
                 gpu_name = cls.get_device_name()
@@ -582,7 +561,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @cache
     @with_nvml_context
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
@@ -595,7 +574,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def has_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         try:

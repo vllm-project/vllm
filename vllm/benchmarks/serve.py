@@ -18,6 +18,7 @@ On the client side, run:
 
 import argparse
 import asyncio
+import contextlib
 import gc
 import importlib.util
 import json
@@ -30,7 +31,7 @@ from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import aiohttp
 import numpy as np
@@ -57,7 +58,7 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 
 class TaskType(Enum):
     GENERATION = "generation"
-    EMBEDDING = "embedding"
+    POOLING = "pooling"
 
 
 @dataclass
@@ -106,9 +107,9 @@ class EmbedBenchmarkMetrics:
 
 
 def _get_current_request_rate(
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
-    ramp_up_start_rps: Optional[int],
-    ramp_up_end_rps: Optional[int],
+    ramp_up_strategy: Literal["linear", "exponential"] | None,
+    ramp_up_start_rps: int | None,
+    ramp_up_end_rps: int | None,
     request_index: int,
     total_requests: int,
     request_rate: float,
@@ -134,9 +135,9 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -473,7 +474,7 @@ async def benchmark(
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: list[SampleRequest],
-    logprobs: Optional[int],
+    logprobs: int | None,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
@@ -482,13 +483,13 @@ async def benchmark(
     selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
-    max_concurrency: Optional[int],
-    lora_modules: Optional[Iterable[str]],
-    extra_headers: Optional[dict],
-    extra_body: Optional[dict],
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    max_concurrency: int | None,
+    lora_modules: Iterable[str] | None,
+    extra_headers: dict | None,
+    extra_body: dict | None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
 ):
     try:
@@ -605,17 +606,13 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (
+        asyncio.Semaphore(max_concurrency)
+        if max_concurrency
+        else contextlib.nullcontext()
+    )
 
     async def limited_request_func(request_func_input, session, pbar):
-        if semaphore is None:
-            return await request_func(
-                request_func_input=request_func_input, session=session, pbar=pbar
-            )
         async with semaphore:
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
@@ -1087,10 +1084,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--percentile-metrics",
         type=str,
-        default="ttft,tpot,itl",
+        default=None,
         help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". ',
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
+        'If not specified, defaults to "ttft,tpot,itl" for generative models '
+        'and "e2el" for pooling models.',
     )
     parser.add_argument(
         "--metric-percentiles",
@@ -1233,6 +1232,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "the ready check will be skipped.",
     )
 
+    parser.add_argument(
+        "--extra-body",
+        help="A JSON string representing extra body parameters to include "
+        "in each request."
+        'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
+        type=json.loads,
+        default=None,
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1304,7 +1312,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
-    task_type = TaskType.EMBEDDING if "embeddings" in backend else TaskType.GENERATION
+    task_type = (
+        TaskType.POOLING
+        if "embeddings" in backend or "rerank" in backend
+        else TaskType.GENERATION
+    )
 
     # Collect the sampling parameters.
     if task_type == TaskType.GENERATION:
@@ -1330,8 +1342,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
         if "temperature" not in sampling_params:
             sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+
+        default_percentile_metrics = "ttft,tpot,itl"
     else:
         sampling_params = {}
+        default_percentile_metrics = "e2el"
+
+    extra_body = args.extra_body or {}
+    extra_body = {**sampling_params, **extra_body}
+
+    percentile_metrics: str = args.percentile_metrics or default_percentile_metrics
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
@@ -1351,14 +1371,14 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         burstiness=args.burstiness,
         disable_tqdm=args.disable_tqdm,
         profile=args.profile,
-        selected_percentile_metrics=args.percentile_metrics.split(","),
+        selected_percentile_metrics=percentile_metrics.split(","),
         selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
         ignore_eos=args.ignore_eos,
         goodput_config_dict=goodput_config_dict,
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
         extra_headers=headers,
-        extra_body=sampling_params,
+        extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,

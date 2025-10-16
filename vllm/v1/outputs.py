@@ -3,12 +3,14 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+else:
+    KVConnectorStats = object
 
 
 class LogprobsLists(NamedTuple):
@@ -64,7 +66,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = Union[torch.Tensor, list[torch.Tensor]]
+PoolerOutput = torch.Tensor | list[torch.Tensor]
 
 
 @dataclass
@@ -74,15 +76,15 @@ class SamplerOutput:
     # All requests are padded to max_num_generated_tokens.
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
-    logprobs_tensors: Optional[LogprobsTensors]
+    logprobs_tensors: LogprobsTensors | None
 
 
 @dataclass
 class KVConnectorOutput:
     # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
-    kv_connector_stats: Optional["KVConnectorStats"] = None
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
+    kv_connector_stats: KVConnectorStats | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them.
     invalid_block_ids: set[int] = field(default_factory=set)
@@ -114,21 +116,21 @@ class ModelRunnerOutput:
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
-    logprobs: Optional[LogprobsLists]
+    logprobs: LogprobsLists | None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None]
 
     # [num_reqs, hidden_size]
-    pooler_output: list[Optional[torch.Tensor]]
+    pooler_output: list[torch.Tensor | None]
 
-    kv_connector_output: Optional[KVConnectorOutput] = None
+    kv_connector_output: KVConnectorOutput | None = None
 
     # req_id -> num_nans_in_logits
-    num_nans_in_logits: Optional[dict[str, int]] = None
+    num_nans_in_logits: dict[str, int] | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

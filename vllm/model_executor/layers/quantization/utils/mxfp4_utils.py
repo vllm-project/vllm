@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -71,17 +72,17 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
 
 def _can_support_mxfp4(
     use_grouped_topk: bool = False,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    expert_map: Optional[torch.Tensor] = None,
-    custom_routing_function: Optional[Callable] = None,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    topk_group: int | None = None,
+    num_expert_group: int | None = None,
+    expert_map: torch.Tensor | None = None,
+    custom_routing_function: Callable | None = None,
+    e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     scoring_func: str = "softmax",
     activation: str = "swigluoai",
-    expert_load_view: Optional[torch.Tensor] = None,
-    logical_to_physical_map: Optional[torch.Tensor] = None,
-    logical_replica_count: Optional[torch.Tensor] = None,
+    expert_load_view: torch.Tensor | None = None,
+    logical_to_physical_map: torch.Tensor | None = None,
+    logical_replica_count: torch.Tensor | None = None,
 ):
     return not (
         use_grouped_topk

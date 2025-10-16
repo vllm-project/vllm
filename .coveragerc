@@ -1,5 +1,10 @@
 [run]
-source = vllm
+# Track the installed vllm package (this is what actually gets imported during tests)
+# Use wildcard pattern to match the installed location
+source =
+    vllm
+    */dist-packages/vllm
+    */site-packages/vllm
 omit =
     */tests/*
     */test_*
@@ -11,6 +16,16 @@ omit =
     */examples/*
     */benchmarks/*
     */docs/*
+
+[paths]
+# Map all possible vllm locations to a canonical "vllm" path
+# This ensures coverage.combine properly merges data from different test runs
+source =
+    vllm
+    /vllm-workspace/src/vllm
+    /vllm-workspace/vllm
+    */site-packages/vllm
+    */dist-packages/vllm
 
 [report]
 exclude_lines =

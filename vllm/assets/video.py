@@ -3,9 +3,8 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, ClassVar, Literal
 
-import cv2
 import numpy as np
 import numpy.typing as npt
 from huggingface_hub import hf_hub_download
@@ -43,6 +42,8 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -78,6 +79,8 @@ def video_to_pil_images_list(path: str, num_frames: int = -1) -> list[Image.Imag
 
 
 def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -137,7 +140,7 @@ class VideoAsset:
         ret = video_get_metadata(self.video_path, self.num_frames)
         return ret
 
-    def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:
+    def get_audio(self, sampling_rate: float | None = None) -> npt.NDArray:
         """
         Read audio data from the video asset, used in Qwen2.5-Omni examples.
 

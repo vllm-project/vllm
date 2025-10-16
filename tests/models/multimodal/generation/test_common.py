@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from vllm.platforms import current_platform
-from vllm.utils import identity
+from vllm.utils.functools import identity
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -707,8 +707,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
-        # FIXME: https://github.com/huggingface/transformers/issues/38358
-        marks=[pytest.mark.skip("Model initialization fails")],
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
@@ -749,6 +747,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.smolvlm_trunc_hf_output,
+        num_logprobs=10,
     ),
     "tarsier": VLMTestInfo(
         models=["omni-research/Tarsier-7b"],

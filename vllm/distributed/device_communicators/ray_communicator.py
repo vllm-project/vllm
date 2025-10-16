@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 import ray
 import torch
@@ -27,15 +27,15 @@ class RayPPCommunicator(Communicator):
     This class is not thread-safe.
     """
 
-    _comm: Optional[DeviceCommunicatorBase]
+    _comm: DeviceCommunicatorBase | None
 
     def __init__(
         self,
         world_size: int,
         comm_id: Any,
-        rank: Optional[int],
+        rank: int | None,
         actor_handles: list["ray.actor.ActorHandle"],
-        cuda_stream: Optional[torch.cuda.Stream],
+        cuda_stream: torch.cuda.Stream | None,
         use_communication_streams: bool = False,
     ):
         """
@@ -56,7 +56,7 @@ class RayPPCommunicator(Communicator):
                 This is not supported.
         """
         self._world_size = world_size
-        self._rank: Optional[int] = None
+        self._rank: int | None = None
         self._actor_handles = actor_handles
         if use_communication_streams:
             raise NotImplementedError("use_communication_streams is not supported")
@@ -143,7 +143,7 @@ class RayPPCommunicator(Communicator):
         else:
             raise ValueError(f"Actor {actor} not found in communicator group")
 
-    def get_self_rank(self) -> Optional[int]:
+    def get_self_rank(self) -> int | None:
         """
         Return this actor's rank.
         """
