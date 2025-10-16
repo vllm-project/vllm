@@ -59,8 +59,6 @@ __device__ __forceinline__ float toFloat(T value) {
         return __bfloat162float(value);
     } else if constexpr (std::is_same_v<T, __half>) {
         return __half2float(value);
-    } else {
-        static_assert(!sizeof(T), "Unsupported type in toFloat");
     }
 }
 
