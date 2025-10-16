@@ -297,6 +297,112 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     assert int(log_matches[1]) == matches.allreduce_fusion
 
 
+# TODO luka resolve
+CUSTOM_OPS_RMS_NORM = ["+rms_norm"]
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, matches, custom_ops",
+    # Toggle RMSNorm and QuantFP8 for FP8 models
+    list(
+        flat_product(
+            MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
+        )
+    )
+    # Toggle RMSNorm for FP4 models and unquant models
+    + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
+)
+@pytest.mark.parametrize("inductor_graph_partition", [True, False])
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="sequence parallel only tested on CUDA",
+)
+def test_tp2_attn_quant_async_tp(
+    model_name: str,
+    model_kwargs: dict,
+    backend: _Backend,
+    matches: Matches,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_mp_spawn,
+    monkeypatch,
+):
+    if backend == _Backend.FLASHINFER and (
+        not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
+    ):
+        pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: list[str] | None = None
+    else:
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    compilation_config = CompilationConfig(
+        # Testing properties
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        custom_ops=custom_ops_list,
+        splitting_ops=splitting_ops,
+        # Common
+        level=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(
+            enable_attn_fusion=True,
+            enable_noop=True,
+            enable_sequence_parallelism=True,
+            enable_async_tp=True,
+        ),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
+    )
+
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        run_model(
+            compilation_config, model_name, tensor_parallel_size=2, **model_kwargs
+        )
+    log_matches = re.findall(
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
+        log_holder.text,
+    )
+    assert len(log_matches) == 2, log_holder.text
+
+    assert int(log_matches[0]) == matches.attention_fusion
+    assert int(log_matches[1]) == matches.attention_fusion
+
+    log_matches = re.findall(
+        r"sequence_parallelism.py:\d+] Replaced (\d+) patterns",
+        log_holder.text,
+    )
+    assert len(log_matches) == 2, log_holder.text
+
+    assert int(log_matches[0]) == matches.sequence_parallel
+    assert int(log_matches[1]) == matches.sequence_parallel
+
+    log_matches = re.findall(
+        r"collective_fusion.py:\d+] Replaced (\d+) patterns",
+        log_holder.text,
+    )
+    assert len(log_matches) == 2, log_holder.text
+
+    assert int(log_matches[0]) == matches.async_tp
+    assert int(log_matches[1]) == matches.async_tp
+
+
 def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
     compilation_config = (
         compile_config
