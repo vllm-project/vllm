@@ -1748,16 +1748,19 @@ async def init_app_state(
         else None
     )
     state.openai_serving_pooling = (
-        OpenAIServingPooling(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
+        (
+            OpenAIServingPooling(
+                engine_client,
+                state.openai_serving_models,
+                supported_tasks=supported_tasks,
+                request_logger=request_logger,
+                chat_template=resolved_chat_template,
+                chat_template_content_format=args.chat_template_content_format,
+                trust_request_chat_template=args.trust_request_chat_template,
+                log_error_stack=args.log_error_stack,
+            )
         )
-        if "encode" in supported_tasks
+        if ("token_embed" in supported_tasks or "token_classify" in supported_tasks)
         else None
     )
     state.openai_serving_embedding = (
@@ -1808,6 +1811,7 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
         else None
@@ -1818,6 +1822,7 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
         else None
