@@ -66,6 +66,7 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
+from vllm.config.optimization import OptimizationLevel
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
@@ -83,7 +84,6 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
 from vllm.v1.sample.logits_processor import LogitsProcessor
-from vllm.vllm.config.optimization import OptimizationLevel
 
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
@@ -529,7 +529,7 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
-    optimzation_levels: OptimizationLevel = OptimizationLevel.O2s
+    optimzation_levels: OptimizationLevel = OptimizationLevel.O2
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
