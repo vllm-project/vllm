@@ -22,7 +22,6 @@ import contextlib
 import gc
 import importlib.util
 import json
-import math
 import os
 import random
 import shutil
@@ -1307,32 +1306,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
         )
-
-    if args.dataset_name in {"random", "random-mm", "random-rerank"}:
-        if hasattr(args, "random_output_len") and int(args.random_output_len) < 1:
-            raise ValueError("--random-output-len must be >= 1.")
-
-        # for text generation random datasets, ensure the minimum possible
-        # total input tokens (prefix + sampled) is at least 1.
-        if args.dataset_name != "random-rerank":
-            num_special = int(tokenizer.num_special_tokens_to_add())
-            # random_input_len might be missing for non-random datasets
-            if hasattr(args, "random_input_len"):
-                real_input_len = max(0, int(args.random_input_len) - num_special)
-                range_ratio = float(getattr(args, "random_range_ratio", 0.0))
-                min_sampled_input = math.floor(real_input_len * (1.0 - range_ratio))
-                prefix_len = int(getattr(args, "random_prefix_len", 0))
-                min_total_input = prefix_len + min_sampled_input
-                if min_total_input < 1:
-                    raise ValueError(
-                        "--random-input-len is too small: with tokenizer special "
-                        f"tokens {num_special} and --random-range-ratio {range_ratio}, "
-                        "the minimum possible total input tokens (prefix + sampled) is "
-                        f"{min_total_input}. Increase --random-input-len and/or "
-                        "--random-prefix-len, or decrease --random-range-ratio so that "
-                        "prefix_len + floor(max(0, random_input_len - num_special)) "
-                        "* (1 - range_ratio) >= 1."
-                    )
 
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
