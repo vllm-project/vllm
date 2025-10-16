@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from typing import Optional
 
 import msgspec
 
@@ -27,10 +26,10 @@ class LoRARequest(
     lora_name: str
     lora_int_id: int
     lora_path: str = ""
-    lora_local_path: Optional[str] = msgspec.field(default=None)
-    long_lora_max_len: Optional[int] = None
-    base_model_name: Optional[str] = msgspec.field(default=None)
-    tensorizer_config_dict: Optional[dict] = None
+    lora_local_path: str | None = msgspec.field(default=None)
+    long_lora_max_len: int | None = None
+    base_model_name: str | None = msgspec.field(default=None)
+    tensorizer_config_dict: dict | None = None
 
     def __post_init__(self):
         if self.lora_int_id < 1:

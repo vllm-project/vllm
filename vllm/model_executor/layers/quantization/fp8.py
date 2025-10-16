@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.nn import Module
@@ -13,6 +14,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEActivationFormat,
@@ -25,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -173,8 +178,8 @@ class Fp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
-        ignored_layers: Optional[list[str]] = None,
-        weight_block_size: Optional[list[int]] = None,
+        ignored_layers: list[str] | None = None,
+        weight_block_size: list[int] | None = None,
     ) -> None:
         super().__init__()
 
@@ -298,7 +303,7 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
-    def get_cache_scale(self, name: str) -> Optional[str]:
+    def get_cache_scale(self, name: str) -> str | None:
         """
         Check whether the param name matches the format for k/v cache scales
         in compressed-tensors. If this is the case, return its equivalent
@@ -350,6 +355,8 @@ class Fp8LinearMethod(LinearMethodBase):
         )
         # Disable marlin for rocm
         if current_platform.is_rocm():
+            self.use_marlin = False
+        if vllm_kernel_override_batch_invariant():
             self.use_marlin = False
 
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
@@ -530,8 +537,68 @@ class Fp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # If batch invariant mode is enabled, dequantize and use BF16 compute
+        if vllm_kernel_override_batch_invariant():
+            # Dequantize FP8 weights to BF16
+            weight_fp8 = layer.weight.to(torch.bfloat16)
+            weight_scale = layer.weight_scale.to(torch.bfloat16)
+
+            # Handle different quantization granularities
+            if self.block_quant:
+                # Block-wise quantization:
+                # - Weight is NOT transposed, shape is [N, K] (output_size, input_size)
+                # - Scale has shape [num_blocks_k, num_blocks_n] (TRANSPOSED!)
+                assert self.weight_block_size is not None
+                block_n, block_k = self.weight_block_size  # Note: order is [N, K]
+
+                N, K = weight_fp8.shape
+
+                # Scale is stored transposed: [num_blocks_k, num_blocks_n]
+                # We need to transpose it to [num_blocks_n, num_blocks_k] first
+                weight_scale = weight_scale.t()
+
+                # Expand scale to match weight dimensions
+                # scale_expanded should have shape [N, K]
+                scale_expanded = weight_scale.repeat_interleave(
+                    block_n, dim=0
+                ).repeat_interleave(block_k, dim=1)
+                # Trim to exact weight size (in case of padding)
+                scale_expanded = scale_expanded[:N, :K]
+                weight_bf16 = weight_fp8 * scale_expanded
+            else:
+                # Per-tensor quantization: weight IS transposed to [K, N]
+                # scale should be scalar or [1] or per-output-channel [N]
+                if weight_scale.numel() == 1:
+                    # Per-tensor: simple scalar multiplication
+                    weight_bf16 = weight_fp8 * weight_scale
+                else:
+                    # Multiple scales (fused modules like QKV)
+                    # Try to infer correct broadcasting
+                    # weight is [K, N], scale could be [num_logical_weights]
+                    # Need to figure out how to broadcast - for now just try
+                    # direct multiplication
+                    if (
+                        weight_scale.dim() == 1
+                        and weight_scale.shape[0] == weight_fp8.shape[0]
+                    ):
+                        # Per-row scaling
+                        weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
+                    else:
+                        # Fallback
+                        weight_bf16 = weight_fp8 * weight_scale
+
+            # For block quant, weight is [N, K], for per-tensor it's [K, N]
+            # F.linear expects weight to be [N, K], so:
+            if self.block_quant:
+                # Already in correct shape [N, K]
+                output = torch.nn.functional.linear(x, weight_bf16, bias)
+            else:
+                # Need to transpose back: [K, N] -> [N, K]
+                output = torch.nn.functional.linear(x, weight_bf16.t(), bias)
+            return output
+
         if self.use_marlin:
             return apply_fp8_marlin_linear(
                 input=x,
@@ -584,12 +651,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
 
-        self.fused_experts: Optional[mk.FusedMoEModularKernel] = None  # type: ignore
+        self.fused_experts: mk.FusedMoEModularKernel | None = None  # type: ignore
 
         self.fp8_backend = get_fp8_moe_backend(self.block_quant)
 
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
-        self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
+        self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
@@ -970,7 +1037,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w2_weight_scale_inv
                 )
 
-    def maybe_make_prepare_finalize(self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
             self.rocm_aiter_moe_enabled
             or self.use_marlin
@@ -1043,7 +1110,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         if self.use_marlin:
             return None
 
@@ -1069,21 +1136,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -1167,6 +1234,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=global_num_experts,
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         #
@@ -1195,7 +1263,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."
             assert self.fused_experts is None
-            result = torch.ops.vllm.fused_marlin_moe(
+            result = fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,

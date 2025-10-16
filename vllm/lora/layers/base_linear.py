@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 from transformers import PretrainedConfig
@@ -37,7 +36,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         self.lora_config = lora_config
         #
@@ -97,7 +96,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
+        embeddings_tensor: torch.Tensor | None,
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
@@ -119,9 +118,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
-    def apply(
-        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         # In transformers backend, x and output have extra batch dimension like
@@ -131,7 +128,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_linear(
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
             output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
         )
         if not current_platform.can_update_inplace():
@@ -160,7 +157,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             raise ValueError(f"Unsupported base layer: {self.base_layer}")
 
     @property
-    def bias(self) -> Optional[torch.Tensor]:
+    def bias(self) -> torch.Tensor | None:
         if hasattr(self.base_layer, "bias"):
             return self.base_layer.bias
         else:

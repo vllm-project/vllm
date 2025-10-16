@@ -9,7 +9,7 @@ import os
 import random
 import time
 import warnings
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 import uvloop
@@ -34,7 +34,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils import merge_async_iterators
+from vllm.utils.asyncio import merge_async_iterators
 
 
 def run_vllm(
@@ -43,7 +43,7 @@ def run_vllm(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
-) -> tuple[float, Optional[list[RequestOutput]]]:
+) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -56,7 +56,7 @@ def run_vllm(
         " prompt_len and expected_output_len for all requests."
     )
     # Add the requests to the engine.
-    prompts: list[Union[TextPrompt, TokensPrompt]] = []
+    prompts: list[TextPrompt | TokensPrompt] = []
     sampling_params: list[SamplingParams] = []
     for request in requests:
         prompt = (
@@ -79,7 +79,7 @@ def run_vllm(
                 detokenize=not disable_detokenize,
             )
         )
-    lora_requests: Optional[list[LoRARequest]] = None
+    lora_requests: list[LoRARequest] | None = None
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
 
@@ -197,9 +197,9 @@ async def run_vllm_async(
         )
 
         # Add the requests to the engine.
-        prompts: list[Union[TextPrompt, TokensPrompt]] = []
+        prompts: list[TextPrompt | TokensPrompt] = []
         sampling_params: list[SamplingParams] = []
-        lora_requests: list[Optional[LoRARequest]] = []
+        lora_requests: list[LoRARequest | None] = []
         for request in requests:
             prompt = (
                 TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"])
@@ -251,7 +251,7 @@ def run_hf(
     disable_detokenize: bool = False,
 ) -> float:
     llm = AutoModelForCausalLM.from_pretrained(
-        model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code
+        model, dtype=torch.float16, trust_remote_code=trust_remote_code
     )
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
@@ -696,7 +696,7 @@ def main(args: argparse.Namespace):
     )
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None for request in requests)
-    request_outputs: Optional[list[RequestOutput]] = None
+    request_outputs: list[RequestOutput] | None = None
     if args.backend == "vllm":
         if args.async_engine:
             elapsed_time = uvloop.run(
