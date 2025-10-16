@@ -867,3 +867,21 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def is_custom_op_enabled(self, op: str):
+        """
+        Determine if a custom op is enabled.
+
+        Args:
+            op: The name of the op.
+
+        Returns:
+            A flag indicating if the op is enabled.
+        """
+        if "all" in self.custom_ops:
+            if "-" + op not in self.custom_ops:
+                return True
+        else:
+            if "+" + op in self.custom_ops:
+                return True
+        return False

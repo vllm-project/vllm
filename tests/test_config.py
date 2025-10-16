@@ -16,9 +16,8 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.load import LoadConfig
-from vllm.config.optimization import build_defaults
 from vllm.config.utils import get_field, resolve_config_value
-from vllm.config.vllm import OptimizationLevel
+from vllm.config.vllm import OptimizationLevel, build_defaults
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -248,6 +247,8 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
     [
         ("Qwen/Qwen1.5-7B", False),
         ("deepseek-ai/DeepSeek-V2-Lite", True),
+        ("RedHatAI/Llama-3.2-1B-FP8", False),
+        ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", False),
     ],
 )
 def test_moe_model_detection(model_id, expected_is_moe_model):
@@ -259,8 +260,10 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
 @pytest.mark.parametrize(
     ("model_id", "quantized"),
     [
-        ("jerryzh168/Qwen3-8B-INT4", True),
+        ("RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4", True),
         ("deepseek-ai/DeepSeek-V2-Lite", False),
+        ("RedHatAI/Llama-3.2-1B-FP8", True),
+        ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", True),
     ],
 )
 def test_is_quantized(model_id, quantized):
@@ -585,6 +588,21 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
     assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
 
 
+@pytest.mark.parametrize(
+    ("backend", "custom_ops", "expected"),
+    [
+        ("eager", ["+fused_layernorm"], True),
+        ("eager", ["-fused_layernorm"], False),
+        ("inductor", ["+fused_layernorm"], True),
+        ("inductor", ["-fused_layernorm"], False),
+    ],
+)
+def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: bool):
+    """Test that is_custom_op_enabled works correctly."""
+    config = CompilationConfig(backend=backend, custom_ops=custom_ops)
+    assert config.is_custom_op_enabled("fused_layernorm") is expected
+
+
 def test_vllm_config_defaults_are_none():
     """Verify that optimization-level defaults are None when not set by user."""
     config = object.__new__(VllmConfig)
@@ -612,36 +630,48 @@ def test_vllm_config_defaults_are_none():
 
 
 @pytest.mark.parametrize(
-    ("model_id", "optimization_level"),
+    ("model_id", "compiliation_config", "optimization_level"),
     [
-        (None, OptimizationLevel.O0),
-        (None, OptimizationLevel.O1),
-        (None, OptimizationLevel.O2),
-        (None, OptimizationLevel.O3),
-        ("Qwen/Qwen1.5-7B", OptimizationLevel.O0),
-        ("Qwen/Qwen1.5-7B", OptimizationLevel.O1),
-        ("Qwen/Qwen1.5-7B", OptimizationLevel.O2),
-        ("Qwen/Qwen1.5-7B", OptimizationLevel.O3),
-        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O0),
-        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O1),
-        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O2),
-        ("deepseek-ai/DeepSeek-V2-Lite", OptimizationLevel.O3),
-        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O0),
-        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O1),
-        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O2),
-        ("jerryzh168/Qwen3-8B-INT4", OptimizationLevel.O3),
+        (
+            None,
+            CompilationConfig(backend="eager", custom_ops=["+fused_layernorm"]),
+            OptimizationLevel.O0,
+        ),
+        (None, CompilationConfig(), OptimizationLevel.O0),
+        (None, CompilationConfig(), OptimizationLevel.O1),
+        (None, CompilationConfig(), OptimizationLevel.O2),
+        (None, CompilationConfig(), OptimizationLevel.O3),
+        (
+            "Qwen/Qwen1.5-7B",
+            CompilationConfig(backend="inductor", custom_ops=["+fused_layernorm"]),
+            OptimizationLevel.O2,
+        ),
+        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O0),
+        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O1),
+        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O2),
+        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O3),
+        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O0),
+        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O1),
+        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O2),
+        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
-def test_vllm_config_defaults(model_id, optimization_level):
+def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
+
     model_config = None
     if model_id is not None:
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
-            model_config=model_config, optimization_level=optimization_level
+            model_config=model_config,
+            compilation_config=compiliation_config,
+            optimization_level=optimization_level,
         )
     else:
-        vllm_config = VllmConfig(optimization_level=optimization_level)
+        vllm_config = VllmConfig(
+            compilation_config=compiliation_config,
+            optimization_level=optimization_level,
+        )
 
     default_config = build_defaults(
         optimization_level=optimization_level,
