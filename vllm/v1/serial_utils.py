@@ -4,10 +4,10 @@
 import dataclasses
 import importlib
 import pickle
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from inspect import isclass
 from types import FunctionType
-from typing import Any, Callable, Optional, Union
+from typing import Any, TypeAlias
 
 import cloudpickle
 import msgspec
@@ -47,7 +47,7 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
     MultiModalBatchedField: "batched",
 }
 
-bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
+bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
 
 
 def _log_insecure_serialization_warning():
@@ -57,7 +57,7 @@ def _log_insecure_serialization_warning():
     )
 
 
-def _typestr(val: Any) -> Optional[tuple[str, str]]:
+def _typestr(val: Any) -> tuple[str, str] | None:
     if val is None:
         return None
     t = type(val)
@@ -111,14 +111,14 @@ class MsgpackEncoder:
     via dedicated messages. Note that this is a per-tensor limit.
     """
 
-    def __init__(self, size_threshold: Optional[int] = None):
+    def __init__(self, size_threshold: int | None = None):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
-        self.aux_buffers: Optional[list[bytestr]] = None
+        self.aux_buffers: list[bytestr] | None = None
         self.size_threshold = size_threshold
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
@@ -195,7 +195,7 @@ class MsgpackEncoder:
 
     def _encode_ndarray(
         self, obj: np.ndarray
-    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+    ) -> tuple[str, tuple[int, ...], int | memoryview]:
         assert self.aux_buffers is not None
         # If the array is non-contiguous, we need to copy it first
         arr_data = obj.data if obj.flags.c_contiguous else obj.tobytes()
@@ -215,7 +215,7 @@ class MsgpackEncoder:
 
     def _encode_tensor(
         self, obj: torch.Tensor
-    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+    ) -> tuple[str, tuple[int, ...], int | memoryview]:
         assert self.aux_buffers is not None
         # view the tensor as a contiguous 1D array of bytes
         arr = obj.flatten().contiguous().view(torch.uint8).numpy()
@@ -280,7 +280,7 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
     """
 
-    def __init__(self, t: Optional[Any] = None):
+    def __init__(self, t: Any | None = None):
         args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
@@ -289,7 +289,7 @@ class MsgpackDecoder:
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
-    def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
+    def decode(self, bufs: bytestr | Sequence[bytestr]) -> Any:
         if isinstance(bufs, bytestr):  # type: ignore
             return self.decoder.decode(bufs)
 

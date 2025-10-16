@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
 
-from typing import Optional
-
 import torch
 from typing_extensions import override
 
@@ -21,38 +19,37 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     maybe_warn_marlin_atomic_add,
 )
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils import direct_register_custom_op
 
 
 def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    bias1: Optional[torch.Tensor],
-    bias2: Optional[torch.Tensor],
+    bias1: torch.Tensor | None,
+    bias2: torch.Tensor | None,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    gating_output: Optional[torch.Tensor],
+    gating_output: torch.Tensor | None,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_type_id: int,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    activation: Optional[str] = "silu",
-    expert_map: Optional[torch.Tensor] = None,
-    global_scale1: Optional[torch.Tensor] = None,
-    global_scale2: Optional[torch.Tensor] = None,
-    g_idx1: Optional[torch.Tensor] = None,
-    g_idx2: Optional[torch.Tensor] = None,
-    sort_indices1: Optional[torch.Tensor] = None,
-    sort_indices2: Optional[torch.Tensor] = None,
-    w1_zeros: Optional[torch.Tensor] = None,
-    w2_zeros: Optional[torch.Tensor] = None,
-    workspace: Optional[torch.Tensor] = None,
-    intermediate_cache13: Optional[torch.Tensor] = None,
-    intermediate_cache2: Optional[torch.Tensor] = None,
+    activation: str | None = "silu",
+    expert_map: torch.Tensor | None = None,
+    global_scale1: torch.Tensor | None = None,
+    global_scale2: torch.Tensor | None = None,
+    g_idx1: torch.Tensor | None = None,
+    g_idx2: torch.Tensor | None = None,
+    sort_indices1: torch.Tensor | None = None,
+    sort_indices2: torch.Tensor | None = None,
+    w1_zeros: torch.Tensor | None = None,
+    w2_zeros: torch.Tensor | None = None,
+    workspace: torch.Tensor | None = None,
+    intermediate_cache13: torch.Tensor | None = None,
+    intermediate_cache2: torch.Tensor | None = None,
     is_k_full: bool = True,
-    output: Optional[torch.Tensor] = None,
+    output: torch.Tensor | None = None,
     inplace: bool = False,
 ) -> torch.Tensor:
     """
@@ -243,44 +240,6 @@ def fused_marlin_moe(
     return torch.sum(intermediate_cache3.view(-1, topk, K), dim=1, out=output)
 
 
-def fused_marlin_moe_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    gating_output: Optional[torch.Tensor],
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_type_id: int,
-    apply_router_weight_on_input: bool = False,
-    global_num_experts: int = -1,
-    global_scale1: Optional[torch.Tensor] = None,
-    global_scale2: Optional[torch.Tensor] = None,
-    expert_map: Optional[torch.Tensor] = None,
-    g_idx1: Optional[torch.Tensor] = None,
-    g_idx2: Optional[torch.Tensor] = None,
-    sort_indices1: Optional[torch.Tensor] = None,
-    sort_indices2: Optional[torch.Tensor] = None,
-    w1_zeros: Optional[torch.Tensor] = None,
-    w2_zeros: Optional[torch.Tensor] = None,
-    workspace: Optional[torch.Tensor] = None,
-    intermediate_cache13: Optional[torch.Tensor] = None,
-    intermediate_cache2: Optional[torch.Tensor] = None,
-    is_k_full: bool = True,
-    output: Optional[torch.Tensor] = None,
-    inplace: bool = False,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-direct_register_custom_op(
-    op_name="fused_marlin_moe",
-    op_func=fused_marlin_moe,
-    fake_impl=fused_marlin_moe_fake,
-)
-
-
 class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config: FusedMoEQuantConfig):
         # TODO (varun) : Enable activation quantization
@@ -341,7 +300,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Modular Kernel provisions output buffer from workspace1. However in
         # the fused_marlin_moe() function, the final torch.sum(), is defined
@@ -374,12 +333,12 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         assert self.w1_scale is not None

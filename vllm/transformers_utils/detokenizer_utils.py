@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 from .tokenizer import AnyTokenizer
 
 
-def _replace_none_with_empty(tokens: list[Optional[str]]):
+def _replace_none_with_empty(tokens: list[str | None]):
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
@@ -111,7 +110,7 @@ def convert_ids_list_to_tokens(
 def detokenize_incrementally(
     tokenizer: AnyTokenizer,
     all_input_ids: list[int],
-    prev_tokens: Optional[list[str]],
+    prev_tokens: list[str] | None,
     prefix_offset: int,
     read_offset: int,
     skip_special_tokens: bool = False,

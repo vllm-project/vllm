@@ -3,7 +3,7 @@
 
 import hashlib
 import os
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import Field, model_validator
@@ -75,7 +75,7 @@ class ParallelConfig:
     """Number of local data parallel groups."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    data_parallel_rank_local: Optional[int] = None
+    data_parallel_rank_local: int | None = None
     """Local rank of the data parallel group,
     set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
@@ -113,24 +113,43 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    num_redundant_experts: Optional[int] = None
+    all2all_backend: (
+        Literal[
+            "naive",
+            "pplx",
+            "deepep_high_throughput",
+            "deepep_low_latency",
+            "allgather_reducescatter",
+            "flashinfer_all2allv",
+        ]
+        | None
+    ) = None
+    """All2All backend for MoE expert parallel communication. If not set, uses
+    the value from VLLM_ALL2ALL_BACKEND environment variable. Available options:
+    - "naive": Naive all2all implementation using broadcasts
+    - "allgather_reducescatter": All2all based on allgather and reducescatter
+    - "pplx": Use pplx kernels
+    - "deepep_high_throughput": Use deepep high-throughput kernels
+    - "deepep_low_latency": Use deepep low-latency kernels
+    - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
+    num_redundant_experts: int | None = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
     Please use `eplb_config.num_redundant_experts` instead."""
-    eplb_window_size: Optional[int] = None
+    eplb_window_size: int | None = None
     """`eplb_window_size` is deprecated and has been replaced with
     `eplb_config.window_size`. This will be removed in v0.12.0.
     Please use `eplb_config.window_size` instead."""
-    eplb_step_interval: Optional[int] = None
+    eplb_step_interval: int | None = None
     """`eplb_step_interval` is deprecated and has been replaced with
     `eplb_config.step_interval`. This will be removed in v0.12.0.
     Please use `eplb_config.step_interval` instead."""
-    eplb_log_balancedness: Optional[bool] = None
+    eplb_log_balancedness: bool | None = None
     """`eplb_log_balancedness` is deprecated and has been replaced with
     `eplb_config.log_balancedness`. This will be removed in v0.12.0.
     Please use `eplb_config.log_balancedness` instead."""
 
-    max_parallel_loading_workers: Optional[int] = None
+    max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
     parallel and large models."""
@@ -159,15 +178,15 @@ class ParallelConfig:
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
-    ray_runtime_env: Optional[RuntimeEnv] = None
+    ray_runtime_env: RuntimeEnv | None = None
     """Ray runtime environment to pass to distributed workers."""
 
-    placement_group: Optional[PlacementGroup] = None
+    placement_group: PlacementGroup | None = None
     """ray distributed model workers placement group."""
 
-    distributed_executor_backend: Optional[
-        Union[str, DistributedExecutorBackend, type[ExecutorBase]]
-    ] = None
+    distributed_executor_backend: (
+        str | DistributedExecutorBackend | type[ExecutorBase] | None
+    ) = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
     of pipeline_parallel_size and tensor_parallel_size is less than
@@ -306,7 +325,7 @@ class ParallelConfig:
         )
 
         max_retries = 5
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for _ in range(max_retries):
             try:
                 # use gloo since the engine process might not have cuda device
@@ -315,7 +334,7 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend="gloo",
+                    backend=current_platform.dist_backend,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -341,7 +360,7 @@ class ParallelConfig:
     @property
     def use_sequence_parallel_moe(self) -> bool:
         return (
-            envs.VLLM_ALL2ALL_BACKEND
+            self.all2all_backend
             in (
                 "allgather_reducescatter",
                 "naive",
@@ -390,7 +409,7 @@ class ParallelConfig:
         factors.append(self.tensor_parallel_size)
         factors.append(self.enable_expert_parallel)
         factors.append(self.data_parallel_size)
-        factors.append(envs.VLLM_ALL2ALL_BACKEND)
+        factors.append(self.all2all_backend)
         factors.append(self.enable_eplb)
         if self.enable_eplb:
             factors.append(self.eplb_config.log_balancedness)
@@ -400,6 +419,16 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # Set all2all_backend from env var if not specified, with deprecation warning
+        if self.all2all_backend is None:
+            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if envs.is_set("VLLM_ALL2ALL_BACKEND"):
+                logger.warning_once(
+                    "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
+                    "will be removed in a future release. Please use the "
+                    "--all2all-backend command-line argument instead."
+                )
+
         # Forward deprecated fields to their new location
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts

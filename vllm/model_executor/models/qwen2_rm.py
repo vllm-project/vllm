@@ -8,7 +8,6 @@
 """Inference-only Qwen2-RM model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -83,9 +82,9 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -108,7 +107,7 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {"encode": Pooler.for_encode(pooler_config)},
+            {"token_classify": Pooler.for_token_classify(pooler_config)}
         )
 
 
@@ -121,4 +120,6 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler({"encode": Pooler.for_encode(pooler_config)})
+        self.pooler = DispatchPooler(
+            {"token_classify": Pooler.for_token_classify(pooler_config)}
+        )
