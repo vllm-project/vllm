@@ -22,23 +22,6 @@ from .utils import SUPPRESS_LEVEL, input_guard
 from .wy_fast import recompute_w_u_fwd
 
 
-def _reshape_intermediate_states(
-    states: torch.Tensor,
-    cu_seqlens: torch.LongTensor | None,
-) -> torch.Tensor:
-    """Return a chunk-major view of the kernel's intermediate states."""
-
-    if cu_seqlens is None:
-        # Equal-length batches keep their batch dimension; flatten it together
-        # with the chunk axis so callers receive a contiguous chunk stream.
-        return states.reshape(-1, *states.shape[-3:])
-
-    # Variable-length inputs collapse the batch dimension during preprocessing,
-    # so the kernel already emits a linearised chunk stream in ``states[:, i]``.
-    # Flattening mirrors the metadata builder's chunk enumeration order.
-    return states.reshape(-1, *states.shape[-3:])
-
-
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -136,7 +119,13 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         intermediate_states = None
         if return_intermediate_states:
             assert h is not None
-            intermediate_states = _reshape_intermediate_states(h, cu_seqlens)
+            # Convert intermediate states into "chunk-major" form
+            # Equal-length batches keep their batch dimension; flatten it together
+            # with the chunk axis so callers receive a contiguous chunk stream.
+            # Variable-length inputs collapse the batch dimension during preprocessing,
+            # so the kernel already emits a linearised chunk stream in ``states[:, i]``.
+            # Flattening mirrors the metadata builder's chunk enumeration order.
+            intermediate_states = h.reshape(-1, *h.shape[-3:])
         return o.to(q.dtype), final_state, intermediate_states
 
 
