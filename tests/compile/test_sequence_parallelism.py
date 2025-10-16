@@ -192,9 +192,12 @@ class TestQuantModel(torch.nn.Module):
 @pytest.mark.parametrize(
     "test_model_cls, custom_ops",
     [
-        (TestModel, ""),
-        (TestQuantModel, "+quant_fp8"),
-        (TestQuantModel, "-quant_fp8"),
+        (TestModel, "+rms_norm"),
+        (TestModel, "-rms_norm"),
+        (TestQuantModel, "+rms_norm,+quant_fp8"),
+        (TestQuantModel, "+rms_norm,-quant_fp8"),
+        (TestQuantModel, "-rms_norm,+quant_fp8"),
+        (TestQuantModel, "-rms_norm,-quant_fp8"),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
