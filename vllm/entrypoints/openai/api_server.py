@@ -980,6 +980,213 @@ if envs.VLLM_SERVER_DEV_MODE:
         }
         return JSONResponse(content=server_info)
 
+    @router.post("/spec_decode/collection/start")
+    async def start_spec_decode_collection(raw_request: Request):
+        """
+        Start collecting spec decode training data.
+
+        Query parameters:
+        - output_dir: Directory to save collected data
+          (default: /tmp/vllm_spec_decode_data)
+        - hidden_state_layers: Comma-separated list of layer
+          indices (default: all layers)
+        - samples_per_file: Maximum samples per file (default: 1000)
+        - max_buffer_size: Maximum buffer size before flushing (default: 100)
+        - collect_logits: Whether to collect logits (default: true)
+        - collect_hidden_states: Whether to collect hidden states (default: true)
+        """
+        try:
+            from vllm.spec_decode_data_collector import get_global_collector
+
+            collector = get_global_collector()
+
+            # Parse query parameters
+            output_dir = raw_request.query_params.get("output_dir")
+            hidden_state_layers_str = raw_request.query_params.get(
+                "hidden_state_layers",
+            )
+            samples_per_file = raw_request.query_params.get(
+                "samples_per_file",
+            )
+            max_buffer_size = raw_request.query_params.get(
+                "max_buffer_size",
+            )
+            collect_logits = (
+                raw_request.query_params.get("collect_logits", "true").lower() == "true"
+            )
+            collect_hidden_states = (
+                raw_request.query_params.get("collect_hidden_states", "true").lower()
+                == "true"
+            )
+
+            # Parse hidden state layers if provided
+            hidden_state_layers = []
+            if hidden_state_layers_str:
+                hidden_state_layers = [
+                    int(x.strip()) for x in hidden_state_layers_str.split(",")
+                ]
+
+            # Build kwargs for enable()
+            kwargs = {
+                "collect_logits": collect_logits,
+                "collect_hidden_states": collect_hidden_states,
+            }
+            if hidden_state_layers:
+                kwargs["hidden_state_layers"] = hidden_state_layers
+            if samples_per_file:
+                kwargs["samples_per_file"] = int(samples_per_file)
+            if max_buffer_size:
+                kwargs["max_buffer_size"] = int(max_buffer_size)
+
+            # For V1 engine with workers, we need to enable collection in the workers
+            # Use collective_rpc to call enable on all workers
+            try:
+                engine = engine_client(raw_request)
+                # Enable collection in all workers via RPC
+                enable_args = {
+                    "output_dir": output_dir or "/tmp/vllm_spec_decode_data",
+                    **kwargs,
+                }
+                # Serialize the enable arguments as JSON
+                import json
+
+                enable_args_json = json.dumps(enable_args)
+
+                # Call a method on all workers to enable collection
+                await engine.collective_rpc(
+                    method="_enable_spec_decode_collection",
+                    args=(enable_args_json,),
+                    timeout=30.0,
+                )
+                logger.info("Enabled spec decode collection in all workers")
+            except Exception as e:
+                logger.exception("Error enabling collection in workers: %s", e)
+                raise HTTPException(
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    detail=(f"Failed to enable collection in workers: {str(e)}"),
+                ) from e
+
+            # Also enable in API server process (though it won't collect data)
+            collector.enable(output_dir=output_dir, **kwargs)
+
+            return JSONResponse(
+                content={
+                    "status": "success",
+                    "message": "Spec decode data collection started",
+                    "config": collector.get_stats(),
+                }
+            )
+        except Exception as e:
+            logger.exception("Error starting spec decode collection: %s", e)
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                detail=f"Failed to start collection: {str(e)}",
+            ) from e
+
+    @router.post("/spec_decode/collection/stop")
+    async def stop_spec_decode_collection(raw_request: Request):
+        """Stop collecting spec decode training data."""
+        try:
+            # Disable collection in all workers via RPC
+            engine = engine_client(raw_request)
+            try:
+                await engine.collective_rpc(
+                    method="_disable_spec_decode_collection",
+                    timeout=30.0,
+                )
+                logger.info("Disabled spec decode collection in all workers")
+            except Exception as e:
+                logger.exception("Error disabling collection in workers: %s", e)
+                raise HTTPException(
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    detail=(f"Failed to disable collection in workers: {str(e)}"),
+                ) from e
+
+            # Also disable in API server process (for consistency)
+            from vllm.spec_decode_data_collector import get_global_collector
+
+            collector = get_global_collector()
+            stats = collector.get_stats()
+            collector.disable()
+
+            return JSONResponse(
+                content={
+                    "status": "success",
+                    "message": "Spec decode data collection stopped",
+                    "final_stats": stats,
+                }
+            )
+        except HTTPException:
+            # Re-raise HTTP exceptions as is
+            raise
+        except Exception as e:
+            logger.exception("Error stopping spec decode collection: %s", e)
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                detail=f"Failed to stop collection: {str(e)}",
+            ) from e
+
+    @router.get("/spec_decode/collection/status")
+    async def get_spec_decode_collection_status(raw_request: Request):
+        """Get the current status of spec decode data collection."""
+        try:
+            engine = engine_client(raw_request)
+
+            # Get stats from all workers via RPC
+            results = await engine.collective_rpc(
+                method="_get_spec_decode_collection_stats", timeout=10.0
+            )
+
+            if results is None or len(results) == 0:
+                return JSONResponse(
+                    content={
+                        "error": "No stats available from workers",
+                        "enabled": False,
+                    }
+                )
+
+            # Parse the JSON results from each worker
+            import json
+
+            worker_stats = []
+            for result in results:
+                if result:
+                    worker_stats.append(json.loads(result))
+
+            # Aggregate stats from all workers
+            # Since all workers collect the same data, we'll return stats from rank 0
+            # plus a summary showing all workers
+            rank_0_stats = next(
+                (s for s in worker_stats if s.get("worker_rank") == 0), None
+            )
+
+            if rank_0_stats is None:
+                # Fall back to first worker if rank 0 not found
+                rank_0_stats = worker_stats[0] if worker_stats else {}
+
+            # Create aggregated response
+            response = {
+                **rank_0_stats,
+                "num_workers": len(worker_stats),
+                "workers": [
+                    {
+                        "rank": s.get("worker_rank"),
+                        "samples": s.get("total_samples_collected", 0),
+                        "files": s.get("files_written", 0),
+                        "buffer_size": s.get("buffer_size", 0),
+                    }
+                    for s in worker_stats
+                ],
+            }
+
+            return JSONResponse(content=response)
+        except Exception as e:
+            logger.exception("Error getting spec decode collection status: %s", e)
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                detail=f"Failed to get status: {str(e)}",
+            ) from e
+
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """

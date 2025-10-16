@@ -2629,6 +2629,47 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_scheduled_tokens,
             )
 
+        # Collect spec decode training data if enabled
+        # Only collect during decode phase (when generating tokens)
+        with record_function_or_nullcontext("SpecDecodeCollection"):
+            try:
+                from vllm.spec_decode_data_collector import get_global_collector
+
+                collector = get_global_collector()
+                if collector.is_enabled():
+                    # Only collect data for requests that are in decode phase
+                    # (i.e., have generated at least one token)
+                    decode_req_ids = []
+                    decode_token_ids_list = []
+
+                    for req_id in self.input_batch.req_ids:
+                        req_state = self.requests[req_id]
+                        # Only collect if this request has generated tokens
+                        if len(req_state.output_token_ids) > 0:
+                            decode_req_ids.append(req_id)
+                            # Combine prompt tokens and generated tokens
+                            if req_state.prompt_token_ids is not None:
+                                full_tokens = (
+                                    req_state.prompt_token_ids
+                                    + req_state.output_token_ids
+                                )
+                            else:
+                                # If no prompt tokens (embeddings-only), just use output
+                                full_tokens = req_state.output_token_ids
+                            decode_token_ids_list.append(full_tokens)
+
+                    # Only call collect_step if there are decode requests
+                    if decode_req_ids:
+                        collector.collect_step(
+                            request_ids=decode_req_ids,
+                            token_ids_list=decode_token_ids_list,
+                            hidden_states=hidden_states,
+                            logits=logits,
+                            # layer_hidden_states will be populated from forward hooks
+                        )
+            except Exception as e:
+                logger.exception("Error in spec decode data collection: %s", e)
+
         if (
             self.speculative_config
             and not use_padded_batch_for_eagle

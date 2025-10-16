@@ -284,6 +284,107 @@ can occur due to following factors:
 
 For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../usage/faq.md).
 
+## Collecting Training Data for Draft Models
+
+!!! note
+    This feature is only available when running vLLM with the V1 engine (`VLLM_USE_V1=1`) in development mode (`VLLM_SERVER_DEV_MODE=1`).
+
+vLLM provides built-in infrastructure to collect training data for EAGLE-style speculative decoding draft models. This allows you to capture the model's hidden states and logits during inference, which can be used to train custom draft models tailored to your specific use case.
+
+### Enabling Data Collection
+
+Start the vLLM server with development mode enabled:
+
+```bash
+VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+    --tensor-parallel-size 2
+```
+
+Enable data collection via the HTTP endpoint:
+
+```bash
+curl -X POST "http://localhost:8000/spec_decode/collection/start?output_dir=./eagle_data&hidden_state_layers=0,8,16,23&collect_logits=true"
+```
+
+### Configuration Parameters
+
+- `output_dir`: Directory where collected data will be saved (default: `/tmp/vllm_spec_decode_data`)
+- `hidden_state_layers`: Comma-separated list of layer indices to collect hidden states from (empty = all layers)
+- `samples_per_file`: Maximum number of samples per file (default: 1000)
+- `max_buffer_size`: Buffer size before flushing to disk (default: 100)
+- `collect_logits`: Whether to collect output logits (default: true)
+- `collect_hidden_states`: Whether to collect hidden states (default: true)
+
+### Collected Data Format
+
+Data is saved in compressed NumPy `.npz` files with the following fields:
+
+- `request_ids`: List of request identifiers
+- `token_ids`: Input token sequences (padded)
+- `token_lens`: Actual length of each token sequence
+- `logits`: Output logits in float32 format `[num_samples, vocab_size]`
+- `hidden_states_layer_N`: Hidden states from layer N `[num_samples, hidden_size]`
+- `timestamps`: Collection timestamps
+- `num_tokens`: Token counts per sample
+
+In tensor parallel setups, each worker writes to separate files (e.g., `spec_decode_data_rank0_000000.npz`, `spec_decode_data_rank1_000000.npz`). Since all workers process the same requests, the data is identical across ranks—you only need to use data from one rank for training.
+
+### Monitoring Collection Status
+
+Check the collection status:
+
+```bash
+curl http://localhost:8000/spec_decode/collection/status
+```
+
+Example response:
+
+```json
+{
+    "enabled": true,
+    "total_samples_collected": 1000,
+    "files_written": 1,
+    "buffer_size": 0,
+    "output_dir": "./eagle_data",
+    "num_workers": 2,
+    "workers": [
+        {"rank": 0, "samples": 1000, "files": 1, "buffer_size": 0},
+        {"rank": 1, "samples": 1000, "files": 1, "buffer_size": 0}
+    ]
+}
+```
+
+### Stopping Collection
+
+Stop data collection and flush remaining buffers:
+
+```bash
+curl -X POST http://localhost:8000/spec_decode/collection/stop
+```
+
+### Using Collected Data
+
+Load and inspect the collected data:
+
+```python
+import numpy as np
+
+# Load data from rank 0 (data is identical across all ranks)
+data = np.load('./eagle_data/spec_decode_data_rank0_000000.npz')
+
+print(f"Number of samples: {len(data['request_ids'])}")
+print(f"Token IDs shape: {data['token_ids'].shape}")
+print(f"Logits shape: {data['logits'].shape}")
+print(f"Available layers: {data['layer_indices']}")
+
+# Access hidden states from a specific layer
+if 'hidden_states_layer_0' in data:
+    hidden_states = data['hidden_states_layer_0']
+    print(f"Layer 0 hidden states shape: {hidden_states.shape}")
+```
+
+The collected data can be used to train EAGLE-style draft models using frameworks like PyTorch. The hidden states provide context from intermediate layers, while the logits provide the target distribution for the draft model to learn.
+
 ## Resources for vLLM contributors
 
 - [A Hacker's Guide to Speculative Decoding in vLLM](https://www.youtube.com/watch?v=9wNAgpX6z_4)

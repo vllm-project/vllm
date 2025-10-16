@@ -750,6 +750,93 @@ class Worker(WorkerBase):
             tensorizer_config=tensorizer_config,
         )
 
+    def _enable_spec_decode_collection(self, enable_args_json: str) -> None:
+        """
+        Enable spec decode data collection in this worker.
+        Called via collective RPC from the API server.
+
+        Args:
+            enable_args_json: JSON-encoded arguments for enabling collection
+        """
+        import json
+
+        from vllm.spec_decode_data_collector import get_global_collector
+
+        try:
+            # Parse the JSON arguments
+            enable_args = json.loads(enable_args_json)
+
+            # Add worker rank to the config to avoid file collisions
+            # in multi-worker setups (e.g., tensor parallel)
+            enable_args["worker_rank"] = self.rank
+
+            # Get the global collector
+            collector = get_global_collector()
+
+            # Enable collection with the provided arguments
+            collector.enable(**enable_args)
+
+            logger.info(
+                "Enabled spec decode collection in worker %d with args: %s",
+                self.rank,
+                enable_args,
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to enable spec decode collection in worker %d: %s",
+                self.rank,
+                e,
+            )
+            raise
+
+    def _disable_spec_decode_collection(self) -> None:
+        """
+        Disable spec decode data collection in this worker.
+        Called via collective RPC from the API server.
+        """
+        from vllm.spec_decode_data_collector import get_global_collector
+
+        try:
+            collector = get_global_collector()
+            collector.disable()
+            logger.info(
+                "Disabled spec decode collection in worker %d",
+                self.rank,
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to disable spec decode collection in worker %d: %s",
+                self.rank,
+                e,
+            )
+            raise
+
+    def _get_spec_decode_collection_stats(self) -> str:
+        """
+        Get spec decode data collection stats from this worker.
+        Called via collective RPC from the API server.
+
+        Returns:
+            JSON-encoded stats dictionary
+        """
+        import json
+
+        from vllm.spec_decode_data_collector import get_global_collector
+
+        try:
+            collector = get_global_collector()
+            stats = collector.get_stats()
+            # Add worker rank to stats for identification
+            stats["worker_rank"] = self.rank
+            return json.dumps(stats)
+        except Exception as e:
+            logger.exception(
+                "Failed to get spec decode collection stats in worker %d: %s",
+                self.rank,
+                e,
+            )
+            raise
+
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
