@@ -553,7 +553,7 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
-    optimzation_levels: OptimizationLevel = OptimizationLevel.O2
+    optimization_level: OptimizationLevel = VllmConfig.optimization_level
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
