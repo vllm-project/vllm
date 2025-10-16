@@ -189,7 +189,7 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 pooling_task = pooling_params.task
 
-            if pooling_task in self.supported_tasks:
+            if pooling_task not in self.supported_tasks:
                 return self.create_error_response(
                     f"Task {pooling_task} is not supported, it"
                     f" must be one of {self.supported_tasks}."
