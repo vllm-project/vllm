@@ -416,7 +416,7 @@ class Pooler(nn.Module, ABC):
 
 class DummyPooler(Pooler):
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        raise {"plugin", "score"}
+        return {"plugin", "score"}
 
     def forward(
         self,
