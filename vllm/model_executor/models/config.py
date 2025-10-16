@@ -500,8 +500,10 @@ class Qwen2_5_VLMultiModalConfig(VerifyAndUpdateConfig):
         Update model config for Qwen2.5-VL to ensure correct behavior.
         """
         mm_config = vllm_config.model_config.multimodal_config
+        if mm_config is None:
+            return
         # Set default dynamic kwargs to avoid rebuilding mm_processor
-        if getattr(mm_config, "mm_processor_dynamic_kwargs", None) is None:
+        if mm_config.mm_processor_dynamic_kwargs is None:
             mm_config.mm_processor_dynamic_kwargs = ["fps"]
 
 
