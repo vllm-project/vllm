@@ -678,7 +678,7 @@ void topk_softmax(
                 num_tokens, num_experts, topk, renormalize, stream);
         }
         else {
-            assert(topk_indices.scalar_type() == at::ScalarType::Int64);
+            TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
             vllm::moe::topkGatingSoftmaxKernelLauncher<int64_t, __nv_bfloat16>(
                 reinterpret_cast<__nv_bfloat16*>(gating_output.data_ptr()),
                 topk_weights.data_ptr<float>(),
