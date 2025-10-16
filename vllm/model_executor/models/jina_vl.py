@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -98,21 +97,27 @@ class JinaVLForSequenceClassification(
         self.score = JinaVLScorer(vllm_config.model_config)
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
-                "classify": Pooler.for_classify(pooler_config, classifier=self.score),
-                "score": Pooler.for_classify(pooler_config, classifier=self.score),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.score
+                ),
+                "classify": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="classify"
+                ),
+                "score": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="score"
+                ),
             }
         )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|vision_start|><|image_pad|><|vision_end|>"
 
         raise ValueError("Only image modality is supported")
 
     @classmethod
-    def get_score_template(cls, query: str, document: str) -> Optional[str]:
+    def get_score_template(cls, query: str, document: str) -> str | None:
         return f"**Document**:\n{document}\n**Query**:\n{query}"
 
     @classmethod
@@ -124,8 +129,8 @@ class JinaVLForSequenceClassification(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         hidden_states = super().forward(

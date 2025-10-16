@@ -11,7 +11,6 @@ import importlib.metadata
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import Optional
 
 import huggingface_hub
 import lm_eval
@@ -156,8 +155,8 @@ class AccuracyTestConfig:
     def get_model_args(
         self,
         tp_size: int,
-        model_max_len: Optional[int] = None,
-        kwargs: Optional[dict] = None,
+        model_max_len: int | None = None,
+        kwargs: dict | None = None,
     ) -> dict:
         if kwargs is None:
             kwargs = {}

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import torch
 
@@ -14,6 +13,9 @@ from vllm.attention.backends.abstract import (
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import (
@@ -44,12 +46,12 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -138,11 +140,11 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
@@ -159,7 +161,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
-        num_kv_splits = 4  # TODO: heuristic
+
+        # For batch invariance, use only 1 split to ensure deterministic reduction
+        num_kv_splits = 1 if vllm_kernel_override_batch_invariant() else 4
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(

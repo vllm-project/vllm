@@ -25,9 +25,8 @@
 """Inference-only Qwen3-VL-MoE model compatible with HuggingFace weights."""
 
 import typing
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Callable, Optional, Union
 
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig
@@ -90,10 +89,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        deepstack_input_embeds: Optional[IntermediateTensors] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        deepstack_input_embeds: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds

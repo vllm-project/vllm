@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class LoadConfig:
     """Configuration for loading the model weights."""
 
-    load_format: Union[str, LoadFormats] = "auto"
+    load_format: str | LoadFormats = "auto"
     """The format of the model weights to load:\n
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.\n
@@ -48,7 +48,7 @@ class LoadConfig:
     - "mistral" will load weights from consolidated safetensors files used by
     Mistral models.
     - Other custom values can be supported via plugins."""
-    download_dir: Optional[str] = None
+    download_dir: str | None = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
     safetensors_load_strategy: str = "lazy"
@@ -64,23 +64,19 @@ class LoadConfig:
       was quantized using torchao and saved using safetensors.
       Needs torchao >= 0.14.0
     """
-    model_loader_extra_config: Union[dict, TensorizerConfig] = Field(
-        default_factory=dict
-    )
+    model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
-    device: Optional[str] = None
+    device: str | None = None
     """Device to which model weights will be loaded, default to
     device_config.device"""
-    ignore_patterns: Union[list[str], str] = Field(
-        default_factory=lambda: ["original/**/*"]
-    )
+    ignore_patterns: list[str] | str = Field(default_factory=lambda: ["original/**/*"])
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
-    pt_load_map_location: Union[str, dict[str, str]] = "cpu"
+    pt_load_map_location: str | dict[str, str] = "cpu"
     """
     pt_load_map_location: the map location for loading pytorch checkpoint, to
     support loading checkpoints can only be loaded on certain devices like
@@ -115,8 +111,8 @@ class LoadConfig:
 
     @field_validator("ignore_patterns", mode="after")
     def _validate_ignore_patterns(
-        cls, ignore_patterns: Union[list[str], str]
-    ) -> Union[list[str], str]:
+        cls, ignore_patterns: list[str] | str
+    ) -> list[str] | str:
         if ignore_patterns != ["original/**/*"] and len(ignore_patterns) > 0:
             logger.info(
                 "Ignoring the following patterns when downloading weights: %s",

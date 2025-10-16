@@ -3,7 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -55,10 +55,10 @@ def make_request(
     prompt_token_ids: list[int],
     block_size: int,
     hash_fn: Callable,
-    mm_positions: Optional[list[PlaceholderRange]] = None,
-    mm_hashes: Optional[list[str]] = None,
-    prompt_logprobs: Optional[int] = None,
-    cache_salt: Optional[str] = None,
+    mm_positions: list[PlaceholderRange] | None = None,
+    mm_hashes: list[str] | None = None,
+    prompt_logprobs: int | None = None,
+    cache_salt: str | None = None,
 ):
     mm_features = []
     if mm_positions is not None:

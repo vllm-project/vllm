@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
-from functools import cache
-from typing import Optional
+from functools import cache, lru_cache
 
 import torch
 
@@ -47,19 +46,82 @@ def is_rocm_aiter_moe_enabled() -> bool:
     )
 
 
+@cache
+def is_rocm_aiter_fusion_shared_expert_enabled() -> bool:
+    return (
+        envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS and is_rocm_aiter_moe_enabled()
+    )
+
+
+aiter_topK_meta_data = None
+
+
+@lru_cache(maxsize=1)
+def init_aiter_topK_meta_data(
+    n_routed_experts: int,
+    n_shared_experts: int,
+    top_k: int,
+    tp_rank: int,
+    tp_size: int,
+    shared_experts_score: float = 1.0,
+    max_num_tokens: int = 32768,
+    is_EP: bool = False,
+):
+    global aiter_topK_meta_data
+    fake_expertid = n_routed_experts + n_shared_experts
+
+    # all layers reuse same buffer
+    # This extra element when EP is enabled is used as a sentinel
+    # to mask out shared expert processing for tokens not owned by
+    # the current EP rank. This is necessary to avoid double-processing
+    # of shared experts.
+    total_topk_ids = torch.empty(
+        (max_num_tokens, top_k + n_shared_experts + is_EP),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    ns_topk_ids, s_topk_ids = total_topk_ids.split(
+        [top_k, n_shared_experts + is_EP], dim=1
+    )
+    shared_expert_ids = [n_routed_experts + i for i in range(n_shared_experts + is_EP)]
+    if is_EP:
+        s_topk_ids_list = [
+            [fake_expertid] * (n_shared_experts + is_EP)
+        ] * max_num_tokens
+        for i in range(tp_rank, max_num_tokens, tp_size):
+            s_topk_ids_list[i] = shared_expert_ids
+    else:
+        s_topk_ids_list = [
+            list(range(n_routed_experts, fake_expertid))
+        ] * max_num_tokens
+    s_topk_ids[:] = torch.tensor(s_topk_ids_list, dtype=torch.int32, device="cuda")
+
+    total_topk_weights = torch.empty(
+        (max_num_tokens, top_k + n_shared_experts + is_EP),
+        dtype=torch.float32,
+        device="cuda",
+    )
+    ns_topk_weights, s_topk_weights = total_topk_weights.split(
+        [top_k, n_shared_experts + is_EP], dim=1
+    )
+    s_topk_weights.fill_(shared_experts_score)
+    assert aiter_topK_meta_data is None, "AITER topK meta data is already initialized"
+    aiter_topK_meta_data = (total_topk_weights, total_topk_ids)
+
+
 def rocm_aiter_asm_moe_tkw1_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    fc1_scale: torch.Tensor | None = None,
+    fc2_scale: torch.Tensor | None = None,
+    fc1_smooth_scale: torch.Tensor | None = None,
+    fc2_smooth_scale: torch.Tensor | None = None,
     a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    expert_mask: Optional[torch.Tensor] = None,
+    per_tensor_quant_scale: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
 ) -> torch.Tensor:
     from aiter import ActivationType
@@ -90,13 +152,13 @@ def rocm_aiter_asm_moe_tkw1_fake(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    fc1_scale: torch.Tensor | None = None,
+    fc2_scale: torch.Tensor | None = None,
+    fc1_smooth_scale: torch.Tensor | None = None,
+    fc2_smooth_scale: torch.Tensor | None = None,
     a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    expert_mask: Optional[torch.Tensor] = None,
+    per_tensor_quant_scale: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
@@ -206,14 +268,14 @@ def rocm_aiter_fused_moe_impl(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    expert_mask: Optional[torch.Tensor] = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
     quant_method: int = QuantMethod.NO.value,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -244,14 +306,14 @@ def rocm_aiter_fused_moe_fake(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    expert_mask: Optional[torch.Tensor] = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = ActivationMethod.SILU.value,
     quant_method: int = QuantMethod.NO.value,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -300,12 +362,34 @@ def rocm_aiter_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
+    num_fused_shared_experts: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     token = hidden_states.shape[0]
     device = hidden_states.device
-    topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
-    topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
+    if is_rocm_aiter_fusion_shared_expert_enabled() and num_fused_shared_experts > 0:
+        assert aiter_topK_meta_data is not None, (
+            "AITER topK meta data is not initialized. "
+            "Please ensure that init_aiter_topK_meta_data "
+            "is called before this function."
+        )
+        total_topk_weights, total_topk_ids = aiter_topK_meta_data
+        assert total_topk_weights.shape[0] >= token, (
+            f"AITER topK meta data support {total_topk_weights.shape[0]} "
+            f"tokens which is determined by max_num_batched_tokens, "
+            f"but got {token} tokens now."
+        )
+        total_topk_weights = total_topk_weights[:token]
+        total_topk_ids = total_topk_ids[:token]
+        topk_weights, _ = total_topk_weights.split(
+            [topk, total_topk_weights.shape[1] - topk], dim=1
+        )
+        topk_ids, _ = total_topk_ids.split(
+            [topk, total_topk_ids.shape[1] - topk], dim=1
+        )
+    else:
+        topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+        topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
 
     if e_score_correction_bias is not None:
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
@@ -316,6 +400,7 @@ def rocm_aiter_grouped_topk(
             num_expert_group,
             topk_group,
             renormalize,
+            routed_scaling_factor=routed_scaling_factor,
         )
     else:
         assert scoring_func == "softmax" or scoring_func == "sigmoid"
@@ -327,10 +412,11 @@ def rocm_aiter_grouped_topk(
             topk_group,
             renormalize,
             scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
-    if routed_scaling_factor != 1.0:
-        topk_weights = topk_weights * routed_scaling_factor
+    if is_rocm_aiter_fusion_shared_expert_enabled() and num_fused_shared_experts > 0:
+        return total_topk_weights, total_topk_ids
     return topk_weights, topk_ids
 
 
@@ -342,8 +428,8 @@ def rocm_aiter_fused_experts(
     topk_ids: torch.Tensor,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
-    expert_map: Optional[torch.Tensor] = None,
-    quant_config: Optional[FusedMoEQuantConfig] = None,
+    expert_map: torch.Tensor | None = None,
+    quant_config: FusedMoEQuantConfig | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -355,7 +441,7 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
-    expert_mask = (expert_map > -1).to(torch.int32) if expert_map is not None else None
+    expert_mask = expert_map if expert_map is not None else None
 
     # w8a8 per-channel quantization
     if (
