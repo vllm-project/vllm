@@ -78,9 +78,7 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
-    with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, kv_cache_memory_bytes=1_000_000_000
-    ) as vllm_model:
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
