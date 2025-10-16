@@ -10,7 +10,7 @@ The image can be used to run OpenAI compatible server and is available on Docker
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+    --env "HF_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
@@ -22,7 +22,7 @@ This image can also be used with other container engines such as [Podman](https:
 ```bash
 podman run --device nvidia.com/gpu=all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
-  --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+  --env "HF_TOKEN=$HF_TOKEN" \
   -p 8000:8000 \
   --ipc=host \
   docker.io/vllm/vllm-openai:latest \
@@ -128,7 +128,7 @@ To run vLLM with the custom-built Docker image:
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
-    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
+    --env "HF_TOKEN=<secret>" \
     vllm/vllm-openai <args...>
 ```
 
