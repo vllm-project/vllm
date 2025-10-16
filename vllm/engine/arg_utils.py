@@ -339,7 +339,6 @@ class EngineArgs:
     task: TaskOption | None = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
-    enable_mm_embeds: bool = ModelConfig.enable_mm_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
@@ -426,6 +425,7 @@ class EngineArgs:
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
+    enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str, Any]] = get_field(
         MultiModalConfig, "media_io_kwargs"
@@ -604,9 +604,6 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-prompt-embeds", **model_kwargs["enable_prompt_embeds"]
-        )
-        model_group.add_argument(
-            "--enable-mm-embeds", **model_kwargs["enable_mm_embeds"]
         )
         model_group.add_argument(
             "--served-model-name", **model_kwargs["served_model_name"]
@@ -884,6 +881,9 @@ class EngineArgs:
             "--limit-mm-per-prompt", **multimodal_kwargs["limit_per_prompt"]
         )
         multimodal_group.add_argument(
+            "--enable-mm-embeds", **multimodal_kwargs["enable_mm_embeds"]
+        )
+        multimodal_group.add_argument(
             "--media-io-kwargs", **multimodal_kwargs["media_io_kwargs"]
         )
         multimodal_group.add_argument(
@@ -1140,9 +1140,9 @@ class EngineArgs:
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
-            enable_mm_embeds=self.enable_mm_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            enable_mm_embeds=self.enable_mm_embeds,
             interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
             skip_mm_profiling=self.skip_mm_profiling,

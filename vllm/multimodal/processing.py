@@ -1305,7 +1305,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
 
-        if not self.info.ctx.model_config.enable_mm_embeds:
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
             for modality, items in mm_items.items():
                 if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
                     raise ValueError(

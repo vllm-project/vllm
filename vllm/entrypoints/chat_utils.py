@@ -825,7 +825,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         image_embeds: str | dict[str, str] | None,
         uuid: str | None = None,
     ) -> None:
-        if not self.model_config.enable_mm_embeds:
+        mm_config = self.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
             raise ValueError(
                 "You must set `--enable-mm-embeds` to input `image_embeds`"
             )
@@ -909,7 +910,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         image_embeds: str | dict[str, str] | None,
         uuid: str | None = None,
     ) -> None:
-        if not self.model_config.enable_mm_embeds:
+        mm_config = self.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
             raise ValueError(
                 "You must set `--enable-mm-embeds` to input `image_embeds`"
             )
