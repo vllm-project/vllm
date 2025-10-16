@@ -387,12 +387,6 @@ class CoreEngineActorManager:
 
         if pack_strategy in ("strict", "fill"):
             placement_strategy = "STRICT_PACK"
-            assert world_size <= max_device_per_node, (
-                f"World size {world_size} is larger than the maximum "
-                "number of devices per node. "
-                f"{max_device_per_node}. Make sure to set "
-                "`VLLM_RAY_DP_PACK_STRATEGY` to `span`"
-            )
         else:
             placement_strategy = "PACK"
             assert world_size > max_device_per_node, (
@@ -423,9 +417,9 @@ class CoreEngineActorManager:
                 "The actual data-parallel-size-local will be auto determined."
             )
 
-        # we might have to fill pg bundle over multiple nodes
-        # with placement_strategy == "PACK"
-        pg_bundles = []
+        # bundles collected for a single DP rank from multiple nodes,
+        # for "span" pack strategy
+        collected_bundles = []
         for node_resources in nodes:
             node_ip_keys = [
                 key
@@ -440,12 +434,14 @@ class CoreEngineActorManager:
             node_ip = node_ip_key.split(":")[1]
 
             n_device_on_node = int(node_resources.get(device_str, 0))
-            if n_device_on_node == 0:
-                continue
+            if pack_strategy == "span" and n_device_on_node != 0:
+                # Strictly speaking,
+                # dp_size_available = n_device_on_node / world_size
+                # and is a fraction, but we use 1 for easier processing
+                dp_size_available = 1
+            else:
+                dp_size_available = n_device_on_node // world_size
 
-            # we always have at least 1 dp_size available
-            # even if world_size > n_device_on_node
-            dp_size_available = max(n_device_on_node // world_size, 1)
             if node_ip == dp_master_ip:
                 if dp_size_available < dp_size_local:
                     raise ValueError(
@@ -475,18 +471,18 @@ class CoreEngineActorManager:
             for i in range(dp_size_to_allocate):
                 device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
                 if pack_strategy == "span":
-                    pg_bundles += device_bundle * n_device_on_node
-                    assert len(pg_bundles) <= world_size, (
-                        "pg_bundles should be <= world_size, "
-                        f"but got {len(pg_bundles)=} and {world_size=}"
+                    collected_bundles += device_bundle * n_device_on_node
+                    assert len(collected_bundles) <= world_size, (
+                        "collected_bundles should be <= world_size, "
+                        f"but got {len(collected_bundles)=} and {world_size=}"
                     )
 
-                    # we only create a placement group if we have enough devices
-                    if len(pg_bundles) < world_size:
+                    # we only create a placement group if we collected enough devices
+                    if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = pg_bundles + [{"CPU": 1.0}]
-                    pg_bundles = []
+                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    collected_bundles = []
                 else:
                     bundles = device_bundle * world_size + [{"CPU": 1.0}]
 
