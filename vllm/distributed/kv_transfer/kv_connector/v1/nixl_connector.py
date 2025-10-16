@@ -844,13 +844,14 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
-        self.device_id = None
+        self.device_id = self.tp_rank
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                self.device_id = cache.device.index
+                if not self.use_host_buffer and current_platform.is_cuda_alike():
+                    self.device_id = cache.device.index
                 if base_addr in seen_base_addresses:
                     continue
 
@@ -925,7 +926,6 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len_per_layer[i]
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                assert self.device_id is not None
                 blocks_data.append((addr, kv_block_len, self.device_id))
 
             if self._use_flashinfer:
@@ -937,7 +937,6 @@ class NixlConnectorWorker:
                     addr = base_addr + block_offset
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
-                    assert self.device_id is not None
                     blocks_data.append((v_addr, kv_block_len, self.device_id))
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
