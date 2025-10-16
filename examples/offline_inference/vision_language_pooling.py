@@ -11,7 +11,7 @@ on HuggingFace model repository.
 from argparse import Namespace
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
+from typing import Literal, NamedTuple, TypeAlias, TypedDict, get_args
 
 from PIL.Image import Image
 
@@ -47,15 +47,39 @@ class TextImagesQuery(TypedDict):
 
 
 QueryModality = Literal["text", "image", "text+image", "text+images"]
-Query = Union[TextQuery, ImageQuery, TextImageQuery, TextImagesQuery]
+Query: TypeAlias = TextQuery | ImageQuery | TextImageQuery | TextImagesQuery
 
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    image: Optional[Image] = None
-    query: Optional[str] = None
-    documents: Optional[ScoreMultiModalParam] = None
+    prompt: str | None = None
+    image: Image | None = None
+    query: str | None = None
+    documents: ScoreMultiModalParam | None = None
+
+
+def run_clip(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""  # For image input, make sure that the prompt text is empty
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="openai/clip-vit-base-patch32",
+        runner="pooling",
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
 
 
 def run_e5_v(query: Query) -> ModelRequestData:
@@ -89,7 +113,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
 def _get_vlm2vec_prompt_image(query: Query, image_token: str):
     if query["modality"] == "text":
         text = query["text"]
-        prompt = f"Find me an everyday image that matches the given caption: {text}"  # noqa: E501
+        prompt = f"Find me an everyday image that matches the given caption: {text}"
         image = None
     elif query["modality"] == "image":
         prompt = f"{image_token} Find a day-to-day image that looks similar to the provided image."  # noqa: E501
@@ -146,7 +170,8 @@ def run_vlm2vec_qwen2vl(query: Query) -> ModelRequestData:
 
     processor = AutoProcessor.from_pretrained(
         model_id,
-        # `min_pixels` and `max_pixels` are deprecated
+        # `min_pixels` and `max_pixels` are deprecated for
+        # transformers `preprocessor_config.json`
         size={"shortest_edge": 3136, "longest_edge": 12845056},
     )
     processor.chat_template = load_chat_template(
@@ -172,8 +197,10 @@ def run_vlm2vec_qwen2vl(query: Query) -> ModelRequestData:
         model=merged_path,
         runner="pooling",
         max_model_len=4096,
-        trust_remote_code=True,
-        mm_processor_kwargs={"num_crops": 4},
+        mm_processor_kwargs={
+            "min_pixels": 3136,
+            "max_pixels": 12845056,
+        },
         limit_mm_per_prompt={"image": 1},
     )
 
@@ -254,7 +281,7 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
+def run_encode(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -284,7 +311,7 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         print("-" * 50)
 
 
-def run_score(model: str, modality: QueryModality, seed: Optional[int]):
+def run_score(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -299,6 +326,7 @@ def run_score(model: str, modality: QueryModality, seed: Optional[int]):
 
 
 model_example_map = {
+    "clip": run_clip,
     "e5_v": run_e5_v,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,

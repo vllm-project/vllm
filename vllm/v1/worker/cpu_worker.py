@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import platform
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 
@@ -13,25 +13,27 @@ from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.cpu import CpuPlatform, LogicalCPUInfo
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
-from vllm.v1.worker.gpu_worker import (Worker,
-                                       init_worker_distributed_environment)
+from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
 logger = init_logger(__name__)
 
 
 class CPUWorker(Worker):
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 local_rank: int,
-                 rank: int,
-                 distributed_init_method: str,
-                 is_driver_worker: bool = False):
-        super().__init__(vllm_config,
-                         local_rank,
-                         rank,
-                         distributed_init_method,
-                         is_driver_worker=is_driver_worker)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        is_driver_worker: bool = False,
+    ):
+        super().__init__(
+            vllm_config,
+            local_rank,
+            rank,
+            distributed_init_method,
+            is_driver_worker=is_driver_worker,
+        )
 
         self.parallel_config.disable_custom_all_reduce = True
 
@@ -43,11 +45,13 @@ class CPUWorker(Worker):
             if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
                 # For S390X/POWERPC SMT-8/4/2
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
-                    lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4])
+                    lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4]
+                )
             elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 # For x86 SMT-2, use 1 CPU per core
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
-                    lambda cpus: cpus[-1:])
+                    lambda cpus: cpus[-1:]
+                )
             else:
                 self.local_omp_cpuid = "all"
         else:
@@ -55,9 +59,9 @@ class CPUWorker(Worker):
             omp_cpuids = omp_cpuids.split("|")
             if local_dp_rank is not None:
                 world_size = self.parallel_config.world_size
-                omp_cpuids = omp_cpuids[local_dp_rank *
-                                        world_size:(local_dp_rank + 1) *
-                                        world_size]
+                omp_cpuids = omp_cpuids[
+                    local_dp_rank * world_size : (local_dp_rank + 1) * world_size
+                ]
             self.local_omp_cpuid = omp_cpuids[self.rank]
 
         if self.local_omp_cpuid != "all":
@@ -66,25 +70,28 @@ class CPUWorker(Worker):
                 logger.info(ret)
 
         # Note: unique identifier for creating allreduce shared memory
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
-            ":")[-1]
+        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.vllm_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank,
-                                            current_platform.dist_backend)
+        init_worker_distributed_environment(
+            self.vllm_config,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            current_platform.dist_backend,
+        )
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
         self.model_runner: CPUModelRunner = CPUModelRunner(
-            self.vllm_config, torch.device("cpu"))
+            self.vllm_config, torch.device("cpu")
+        )
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
@@ -98,31 +105,31 @@ class CPUWorker(Worker):
         self.model_runner.warming_up_model()
 
     def _get_autobind_cpu_ids(
-        self, cpu_selector: Callable[[list[LogicalCPUInfo]],
-                                     list[LogicalCPUInfo]]
+        self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
     ) -> str:
         """
-        Return CPU ids to bind based on NUMA nodes. 
-        Currently for rank N, only CPU ids on the N-th node in available NUMA 
+        Return CPU ids to bind based on NUMA nodes.
+        Currently for rank N, only CPU ids on the N-th node in available NUMA
         node list will be selected.
         Args:
-            cpu_selector: a callable object to select CPUs from a CPU list 
+            cpu_selector: a callable object to select CPUs from a CPU list
             of a physical core. The input is a LogicalCPUInfo list, sorted by
-            the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be 
+            the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
             returned.
         """
 
-        allowed_numa_nodes, logical_cpu_list = \
+        allowed_numa_nodes, logical_cpu_list = (
             CpuPlatform.get_allowed_cpu_core_node_list()
+        )
         assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
             f"No enough allowed NUMA nodes to bind threads of "
             f"{self.parallel_config.world_size} CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
-            "Please try to bind threads manually.")
+            "Please try to bind threads manually."
+        )
 
         # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]``
-        selected_numa_node = allowed_numa_nodes[
-            self.local_rank]  # type: ignore
+        selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
         logical_cpu_list = [
             x for x in logical_cpu_list if x.numa_node == selected_numa_node
         ]
@@ -142,15 +149,20 @@ class CPUWorker(Worker):
         # Reserve CPUs for other processes
         reserve_cpu_num = envs.VLLM_CPU_NUM_OF_RESERVED_CPU
         if reserve_cpu_num is None:
-            need_reserve = (self.parallel_config.world_size > 1 or
-                            self.parallel_config.data_parallel_size_local > 1)
+            need_reserve = (
+                self.parallel_config.world_size > 1
+                or self.parallel_config.data_parallel_size_local > 1
+            )
             reserve_cpu_num = 1 if need_reserve else 0
         assert len(logical_cpu_list) > reserve_cpu_num, (
             f"VLLM_CPU_NUM_OF_RESERVED_CPU ({reserve_cpu_num}) "
-            f"should less than {len(logical_cpu_list)}.")
+            f"should less than {len(logical_cpu_list)}."
+        )
         if reserve_cpu_num != 0:
             logical_cpu_list = logical_cpu_list[:-reserve_cpu_num]
 
-        logger.info("auto thread-binding list (id, physical core): %s",
-                    [(x.id, x.physical_core) for x in logical_cpu_list])
+        logger.info(
+            "auto thread-binding list (id, physical core): %s",
+            [(x.id, x.physical_core) for x in logical_cpu_list],
+        )
         return ",".join([str(x.id) for x in logical_cpu_list])

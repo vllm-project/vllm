@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -14,16 +13,17 @@ from .base_linear import BaseLinearLayerWithLoRA
 
 
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
-
     def __init__(self, base_layer: ReplicatedLinear) -> None:
-        super().__init__(base_layer, )
+        super().__init__(
+            base_layer,
+        )
         # To ensure interface compatibility, set to 1 always.
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -33,14 +33,12 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
             - output
             - bias
         """
-        bias = (self.base_layer.bias
-                if not self.base_layer.skip_bias_add else None)
+        bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 
         # Matrix multiply.
         output = self.apply(input_, bias)
 
-        output_bias = (self.base_layer.bias
-                       if self.base_layer.skip_bias_add else None)
+        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
 
         if not self.base_layer.return_bias:
             return output
@@ -55,6 +53,6 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is ReplicatedLinear

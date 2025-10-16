@@ -4,12 +4,12 @@
 
 Users of vLLM should always import **only** these wrappers.
 """
-from __future__ import annotations
 
 import functools
 import importlib
 import os
-from typing import Any, Callable, NoReturn, Optional
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 import torch
 
@@ -26,9 +26,9 @@ def is_deep_gemm_supported() -> bool:
     """
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
-        or current_platform.is_device_capability(100))
-    return (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
-            and not envs.VLLM_USE_FLASHINFER_MOE_FP8)
+        or current_platform.is_device_capability(100)
+    )
+    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
 @functools.cache
@@ -38,7 +38,8 @@ def is_deep_gemm_e8m0_used() -> bool:
     """
     if not is_deep_gemm_supported():
         logger.debug_once(
-            "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system.")
+            "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system."
+        )
         return False
 
     _lazy_init()
@@ -51,14 +52,8 @@ def is_deep_gemm_e8m0_used() -> bool:
         logger.info_once("DeepGEMM E8M0 disabled: FlashInfer MOE is enabled.")
         return False
 
-    if current_platform.is_device_capability(100) and \
-            envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.info_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
-        return True
-
-    if current_platform.is_device_capability(90) and \
-            envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
-        logger.info_once("DeepGEMM E8M0 enabled on Hopper GPU.")
+    if envs.VLLM_USE_DEEP_GEMM_E8M0:
+        logger.info_once("DeepGEMM E8M0 enabled on current platform.")
         return True
 
     logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
@@ -69,7 +64,8 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
     raise RuntimeError(
         "DeepGEMM backend is not available or outdated. Please install or "
-        "update the `deep_gemm` to a newer version to enable FP8 kernels.")
+        "update the `deep_gemm` to a newer version to enable FP8 kernels."
+    )
 
 
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
@@ -89,21 +85,25 @@ def _lazy_init() -> None:
     global _get_mn_major_tma_aligned_tensor_impl
 
     # fast path
-    if (_fp8_gemm_nt_impl is not None or _grouped_impl is not None
-            or _grouped_masked_impl is not None
-            or _fp8_mqa_logits_impl is not None
-            or _fp8_paged_mqa_logits_impl is not None
-            or _get_paged_mqa_logits_metadata_impl is not None):
+    if (
+        _fp8_gemm_nt_impl is not None
+        or _grouped_impl is not None
+        or _grouped_masked_impl is not None
+        or _fp8_mqa_logits_impl is not None
+        or _fp8_paged_mqa_logits_impl is not None
+        or _get_paged_mqa_logits_metadata_impl is not None
+    ):
         return
 
     if not has_deep_gemm():
         return
 
     # Set up deep_gemm cache path
-    DEEP_GEMM_JIT_CACHE_ENV_NAME = 'DG_JIT_CACHE_DIR'
+    DEEP_GEMM_JIT_CACHE_ENV_NAME = "DG_JIT_CACHE_DIR"
     if not os.environ.get(DEEP_GEMM_JIT_CACHE_ENV_NAME, None):
         os.environ[DEEP_GEMM_JIT_CACHE_ENV_NAME] = os.path.join(
-            envs.VLLM_CACHE_ROOT, "deep_gemm")
+            envs.VLLM_CACHE_ROOT, "deep_gemm"
+        )
 
     _dg = importlib.import_module("deep_gemm")
 
@@ -113,9 +113,11 @@ def _lazy_init() -> None:
     _fp8_mqa_logits_impl = getattr(_dg, "fp8_mqa_logits", None)
     _fp8_paged_mqa_logits_impl = getattr(_dg, "fp8_paged_mqa_logits", None)
     _get_paged_mqa_logits_metadata_impl = getattr(
-        _dg, "get_paged_mqa_logits_metadata", None)
+        _dg, "get_paged_mqa_logits_metadata", None
+    )
     _get_mn_major_tma_aligned_tensor_impl = getattr(
-        _dg, "get_mn_major_tma_aligned_tensor", None)
+        _dg, "get_mn_major_tma_aligned_tensor", None
+    )
 
 
 def get_num_sms() -> int:
@@ -148,9 +150,9 @@ def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
     _lazy_init()
     if _grouped_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_impl(*args,
-                         disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-                         **kwargs)
+    return _grouped_impl(
+        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
+    )
 
 
 def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
@@ -158,7 +160,8 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     if _grouped_masked_impl is None:
         return _missing(*args, **kwargs)
     return _grouped_masked_impl(
-        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs)
+        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
+    )
 
 
 def fp8_mqa_logits(
@@ -191,8 +194,9 @@ def fp8_mqa_logits(
     return _fp8_mqa_logits_impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
-def get_paged_mqa_logits_metadata(context_lens: torch.Tensor, block_size: int,
-                                  num_sms: int) -> torch.Tensor:
+def get_paged_mqa_logits_metadata(
+    context_lens: torch.Tensor, block_size: int, num_sms: int
+) -> torch.Tensor:
     """Build scheduling metadata for paged MQA logits.
 
     Args:
@@ -208,8 +212,7 @@ def get_paged_mqa_logits_metadata(context_lens: torch.Tensor, block_size: int,
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
-    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size,
-                                               num_sms)
+    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
 
 
 def fp8_paged_mqa_logits(
@@ -245,14 +248,16 @@ def fp8_paged_mqa_logits(
     _lazy_init()
     if _fp8_paged_mqa_logits_impl is None:
         return _missing()
-    return _fp8_paged_mqa_logits_impl(q_fp8,
-                                      kv_cache_fp8,
-                                      weights,
-                                      context_lens,
-                                      block_tables,
-                                      schedule_metadata,
-                                      max_model_len,
-                                      clean_logits=True)
+    return _fp8_paged_mqa_logits_impl(
+        q_fp8,
+        kv_cache_fp8,
+        weights,
+        context_lens,
+        block_tables,
+        schedule_metadata,
+        max_model_len,
+        clean_logits=True,
+    )
 
 
 def _ceil_to_ue8m0(x: torch.Tensor):
@@ -269,15 +274,14 @@ DEFAULT_BLOCK_SIZE = [128, 128]
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/dd6ed14acbc7445dcef224248a77ab4d22b5f240/deep_gemm/utils/math.py#L38
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def per_block_cast_to_fp8(
-        x: torch.Tensor,
-        block_size: list[int] = DEFAULT_BLOCK_SIZE,
-        use_ue8m0: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+    x: torch.Tensor, block_size: list[int] = DEFAULT_BLOCK_SIZE, use_ue8m0: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
     block_m, block_n = block_size
-    x_padded = torch.zeros((_align(m, block_m), _align(n, block_n)),
-                           dtype=x.dtype,
-                           device=x.device)
+    x_padded = torch.zeros(
+        (_align(m, block_m), _align(n, block_n)), dtype=x.dtype, device=x.device
+    )
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
@@ -285,7 +289,8 @@ def per_block_cast_to_fp8(
     sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
     x_scaled = (x_view * (1.0 / sf)).to(torch.float8_e4m3fn)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
-        x_view.size(0), x_view.size(2))
+        x_view.size(0), x_view.size(2)
+    )
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
@@ -305,13 +310,18 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
 
 
 def should_use_deepgemm_for_fp8_linear(
-        output_dtype: torch.dtype,
-        weight: torch.Tensor,
-        supports_deep_gemm: Optional[bool] = None):
+    output_dtype: torch.dtype,
+    weight: torch.Tensor,
+    supports_deep_gemm: bool | None = None,
+):
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
-    return (supports_deep_gemm and output_dtype == torch.bfloat16
-            and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
+    return (
+        supports_deep_gemm
+        and output_dtype == torch.bfloat16
+        and weight.shape[0] % 128 == 0
+        and weight.shape[1] % 128 == 0
+    )
 
 
 __all__ = [

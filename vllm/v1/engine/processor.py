@@ -3,7 +3,7 @@
 
 import time
 from collections.abc import Mapping
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -21,47 +21,51 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.structured_output.backend_guidance import (
-    validate_guidance_grammar)
+from vllm.v1.metrics.stats import MultiModalCacheStats
+from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
-    validate_structured_output_request_lm_format_enforcer)
+    validate_structured_output_request_lm_format_enforcer,
+)
 from vllm.v1.structured_output.backend_outlines import (
-    validate_structured_output_request_outlines)
-from vllm.v1.structured_output.backend_xgrammar import (
-    validate_xgrammar_grammar)
+    validate_structured_output_request_outlines,
+)
+from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
 logger = init_logger(__name__)
 
 
 class Processor:
-
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: AnyTokenizer | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-    ):
-
+    ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
-        self.tokenizer = tokenizer
 
-        self.generation_config_fields = (
-            self.model_config.try_get_generation_config())
+        self.generation_config_fields = self.model_config.try_get_generation_config()
 
         self.mm_registry = mm_registry
-        self.mm_processor_cache = processor_cache_from_config(
-            vllm_config, mm_registry)
+        self.mm_processor_cache = processor_cache_from_config(vllm_config, mm_registry)
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
-            self.tokenizer,
+            tokenizer,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
+
+    @property
+    def tokenizer(self) -> AnyTokenizer | None:
+        return self.input_preprocessor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
+        self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(
         self,
@@ -79,7 +83,8 @@ class Processor:
             if num_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}")
+                    f"which is greater than max allowed: {max_logprobs}"
+                )
 
         # Validate prompt logprobs.
         if params.prompt_logprobs:
@@ -89,7 +94,8 @@ class Processor:
             if num_prompt_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}")
+                    f"which is greater than max allowed: {max_logprobs}"
+                )
 
     def _validate_sampling_params(
         self,
@@ -108,8 +114,7 @@ class Processor:
             return
         vocab_size = len(self.tokenizer)
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
-            raise ValueError(
-                "allowed_token_ids contains out-of-vocab token id!")
+            raise ValueError("allowed_token_ids contains out-of-vocab token id!")
 
     def _validate_logit_bias(
         self,
@@ -129,7 +134,8 @@ class Processor:
         if invalid_token_ids:
             raise ValueError(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}")
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}"
+            )
 
     def _validate_supported_sampling_params(
         self,
@@ -140,12 +146,13 @@ class Processor:
             raise ValueError("vLLM V1 does not yet support best_of.")
         # Logits processors not supported.
         if params.logits_processors:
-            raise ValueError("vLLM V1 does not support per request "
-                             "user provided logits processors.")
+            raise ValueError(
+                "vLLM V1 does not support per request user provided logits processors."
+            )
 
     def _validate_params(
         self,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
     ):
         """
         Validate supported SamplingParam.
@@ -167,7 +174,7 @@ class Processor:
         auto-hashed downstream.
         """
 
-        def _validate_single_prompt(single_prompt: Union[dict, str]) -> None:
+        def _validate_single_prompt(single_prompt: dict | str) -> None:
             if not isinstance(single_prompt, dict):
                 return
             mm_data = single_prompt.get("multi_modal_data")
@@ -178,18 +185,23 @@ class Processor:
             for modality, items in mm_data.items():
                 if modality in mm_uuids:
                     data_len = len(items) if isinstance(items, list) else 1
-                    uuid_len = len(mm_uuids[modality]) if isinstance(
-                        mm_uuids[modality], list) else 1
+                    uuid_len = (
+                        len(mm_uuids[modality])
+                        if isinstance(mm_uuids[modality], list)
+                        else 1
+                    )
                     if uuid_len != data_len:
                         raise ValueError(
                             f"multi_modal_uuids for modality '{modality}' "
                             "must have same length as data: got "
                             f"{uuid_len} uuids vs "
-                            f"{data_len} items.")
+                            f"{data_len} items."
+                        )
                 else:
                     raise ValueError(
                         f"multi_modal_uuids for modality '{modality}' must "
-                        "be provided if multi_modal_data is provided.")
+                        "be provided if multi_modal_data is provided."
+                    )
 
         # Handle explicit encoder/decoder prompts or singleton prompt
         if isinstance(prompt, dict) and "encoder_prompt" in prompt:
@@ -202,14 +214,15 @@ class Processor:
         else:
             _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
-    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+    def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
 
         # LoRA request passed in while LoRA is not enabled
         if not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
+            raise ValueError(
+                f"Got lora_request {lora_request} but LoRA is not enabled!"
+            )
 
         if self.tokenizer is not None:
             logger.warning_once(
@@ -217,7 +230,8 @@ class Processor:
                 "tokenizers for different LoRAs. By default, vLLM uses base "
                 "model's tokenizer. If you are using a LoRA "
                 "with its own tokenizer, consider specifying `--tokenizer "
-                "[lora_path]` to use the LoRA tokenizer.")
+                "[lora_path]` to use the LoRA tokenizer."
+            )
 
     def _validate_structured_output(self, params: SamplingParams) -> None:
         if not params.structured_outputs or not self.structured_outputs_config:
@@ -235,20 +249,23 @@ class Processor:
             # to a specific backend based on `auto` behavior in a previous
             # request. We remember that it was set as a result of `auto`
             # using the `_backend_was_auto` field set in the params.
-            if (backend != _backend
-                    and not (backend == "auto"
-                             and params.structured_outputs._backend_was_auto)):
+            if backend != _backend and not (
+                backend == "auto" and params.structured_outputs._backend_was_auto
+            ):
                 raise ValueError(
                     "Request-level structured output backend selection is not "
                     f"supported. The request specified '{_backend}', but vLLM "
                     f"was initialised with '{backend}'. This error can be "
-                    "resolved by removing '_backend' from the request.")
+                    "resolved by removing '_backend' from the request."
+                )
         else:
             params.structured_outputs._backend = backend
 
         # Request content validation
-        if (isinstance(params.structured_outputs.choice, list)
-                and not params.structured_outputs.choice):
+        if (
+            isinstance(params.structured_outputs.choice, list)
+            and not params.structured_outputs.choice
+        ):
             # It is invalid for choice to be an empty list
             raise ValueError(
                 f"Choice '{params.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
@@ -292,7 +309,7 @@ class Processor:
         self,
         request_id: str,
         prompt: PromptType,
-    ) -> Optional[MultiModalUUIDDict]:
+    ) -> MultiModalUUIDDict | None:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
         index rather than their content.
@@ -318,31 +335,32 @@ class Processor:
         mm_uuids: MultiModalUUIDDict = {}
         for modality, data in mm_data.items():
             n = len(data) if isinstance(data, list) else 1
-            mm_uuids[modality] = [
-                f"{request_id}-{modality}-{i}" for i in range(n)
-            ]
+            mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
     def process_inputs(
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
+        data_parallel_rank: int | None = None,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
 
         data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
-        if data_parallel_rank is not None and not (0 <= data_parallel_rank <
-                                                   data_parallel_size):
-            raise ValueError(f"data_parallel_rank {data_parallel_rank} "
-                             f"is out of range [0, {data_parallel_size}).")
+        if data_parallel_rank is not None and not (
+            0 <= data_parallel_rank < data_parallel_size
+        ):
+            raise ValueError(
+                f"data_parallel_rank {data_parallel_rank} "
+                f"is out of range [0, {data_parallel_size})."
+            )
 
         if arrival_time is None:
             arrival_time = time.time()
@@ -355,9 +373,11 @@ class Processor:
         # reused across requests, therefore identifying multimodal data items
         # by their content is no longer necessary, and we create uuids with
         # request id-modality-index as multimodal hash overrides.
-        if (self.model_config.multimodal_config and
-                self.model_config.multimodal_config.mm_processor_cache_gb == 0
-                and not self.cache_config.enable_prefix_caching):
+        if (
+            self.model_config.multimodal_config
+            and self.model_config.multimodal_config.mm_processor_cache_gb == 0
+            and not self.cache_config.enable_prefix_caching
+        ):
             mm_uuids = self._maybe_build_mm_uuids(request_id, prompt)
         else:
             # Otherwise, use user-provided uuids as multimodal hash overrides
@@ -378,6 +398,7 @@ class Processor:
             mm_uuids=mm_uuids,
         )
         from vllm.platforms import current_platform
+
         current_platform.validate_request(
             prompt=prompt,
             params=params,
@@ -393,10 +414,16 @@ class Processor:
         # discriminated unions of TypedDicts, because of how it handles
         # inheritance of TypedDict. If we explicitly extract the items we want
         # we can avoid type errors from using `dict.get` later in the method.
-        prompt_token_ids = decoder_inputs[
-            "prompt_token_ids"] if decoder_inputs["type"] != "embeds" else None
-        prompt_embeds = decoder_inputs["prompt_embeds"] if decoder_inputs[
-            "type"] == "embeds" else None
+        prompt_token_ids = (
+            decoder_inputs["prompt_token_ids"]
+            if decoder_inputs["type"] != "embeds"
+            else None
+        )
+        prompt_embeds = (
+            decoder_inputs["prompt_embeds"]
+            if decoder_inputs["type"] == "embeds"
+            else None
+        )
 
         sampling_params = None
         pooling_params = None
@@ -406,18 +433,19 @@ class Processor:
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
                 seq_len = length_from_prompt_token_ids_or_embeds(
-                    prompt_token_ids, prompt_embeds)
-                sampling_params.max_tokens = \
-                    self.model_config.max_model_len - seq_len
+                    prompt_token_ids, prompt_embeds
+                )
+                sampling_params.max_tokens = self.model_config.max_model_len - seq_len
             sampling_params.update_from_generation_config(
-                self.generation_config_fields, eos_token_id)
+                self.generation_config_fields, eos_token_id
+            )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
         else:
             pooling_params = params.clone()
 
         # Multimodal related.
-        mm_features: Optional[list[MultiModalFeatureSpec]] = None
+        mm_features: list[MultiModalFeatureSpec] | None = None
 
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
@@ -436,7 +464,9 @@ class Processor:
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
                         identifier=decoder_mm_hashes[modality][idx],
-                        mm_position=decoder_mm_positions[modality][idx]))
+                        mm_position=decoder_mm_positions[modality][idx],
+                    )
+                )
 
         return EngineCoreRequest(
             request_id=request_id,
@@ -454,8 +484,9 @@ class Processor:
             trace_headers=trace_headers,
         )
 
-    def _validate_model_inputs(self, encoder_inputs: Optional[SingletonInputs],
-                               decoder_inputs: SingletonInputs):
+    def _validate_model_inputs(
+        self, encoder_inputs: SingletonInputs | None, decoder_inputs: SingletonInputs
+    ):
         if encoder_inputs is not None:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
 
@@ -469,12 +500,17 @@ class Processor:
     ):
         model_config = self.model_config
 
-        prompt_ids = None if prompt_inputs[
-            "type"] == "embeds" else prompt_inputs["prompt_token_ids"]
-        prompt_embeds = prompt_inputs["prompt_embeds"] if prompt_inputs[
-            "type"] == "embeds" else None
-        prompt_len = length_from_prompt_token_ids_or_embeds(
-            prompt_ids, prompt_embeds)
+        prompt_ids = (
+            None
+            if prompt_inputs["type"] == "embeds"
+            else prompt_inputs["prompt_token_ids"]
+        )
+        prompt_embeds = (
+            prompt_inputs["prompt_embeds"]
+            if prompt_inputs["type"] == "embeds"
+            else None
+        )
+        prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 pass  # Mllama may have empty encoder inputs for text-only data
@@ -483,10 +519,8 @@ class Processor:
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = self.tokenizer
+        tokenizer = self.tokenizer
+        if tokenizer is not None:
             max_input_id = max(prompt_ids or [], default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
@@ -499,10 +533,10 @@ class Processor:
 
             # Here we take the max of the two to determine if a token id is
             # truly out-of-vocabulary.
-            if max_input_id > max(tokenizer.max_token_id,
-                                  self.model_config.get_vocab_size() - 1):
-                raise ValueError(
-                    f"Token id {max_input_id} is out of vocabulary")
+            if max_input_id > max(
+                tokenizer.max_token_id, self.model_config.get_vocab_size() - 1
+            ):
+                raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if prompt_len > max_prompt_len:
@@ -522,20 +556,26 @@ class Processor:
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
-                    "of images, and possibly their aspect ratios as well.")
+                    "of images, and possibly their aspect ratios as well."
+                )
             else:
                 suggestion = (
                     "Make sure that `max_model_len` is no smaller than the "
-                    "number of text tokens.")
+                    "number of text tokens."
+                )
 
             raise ValueError(
                 f"The {prompt_type} prompt (length {prompt_len}) is "
                 f"longer than the maximum model length of {max_prompt_len}. "
-                f"{suggestion}")
+                f"{suggestion}"
+            )
 
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
-    def clear_cache(self) -> None:
-        self.input_preprocessor.clear_cache()
+    def stat_mm_cache(self) -> MultiModalCacheStats | None:
+        return self.input_preprocessor.stat_mm_cache()
+
+    def clear_mm_cache(self) -> None:
+        self.input_preprocessor.clear_mm_cache()

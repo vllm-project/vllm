@@ -9,7 +9,6 @@ _T = TypeVar("_T")
 
 
 class MediaIO(ABC, Generic[_T]):
-
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError

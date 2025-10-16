@@ -3,8 +3,7 @@
 
 import pytest
 
-from vllm.utils import (create_kv_caches_with_random,
-                        create_kv_caches_with_random_flash)
+from vllm.utils import create_kv_caches_with_random, create_kv_caches_with_random_flash
 
 
 @pytest.fixture()

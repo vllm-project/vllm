@@ -6,13 +6,12 @@ from pathlib import Path
 
 def pytest_addoption(parser):
     """Add custom command line options."""
-    parser.addoption("--config-list-file",
-                     default="configs/models-small.txt",
-                     help="File containing list of config files to test")
-    parser.addoption("--tp-size",
-                     default=1,
-                     type=int,
-                     help="Tensor parallel size")
+    parser.addoption(
+        "--config-list-file",
+        default="configs/models-small.txt",
+        help="File containing list of config files to test",
+    )
+    parser.addoption("--tp-size", default=1, type=int, help="Tensor parallel size")
 
 
 def pytest_generate_tests(metafunc):
@@ -55,12 +54,10 @@ def pytest_generate_tests(metafunc):
 
         # Generate test parameters
         if config_files:
-            metafunc.parametrize(["config_filename", "tp_size"],
-                                 [(config_file, int(tp_size))
-                                  for config_file in config_files],
-                                 ids=[
-                                     f"{config_file.stem}-tp{tp_size}"
-                                     for config_file in config_files
-                                 ])
+            metafunc.parametrize(
+                ["config_filename", "tp_size"],
+                [(config_file, int(tp_size)) for config_file in config_files],
+                ids=[f"{config_file.stem}-tp{tp_size}" for config_file in config_files],
+            )
         else:
             print("No config files found, test will be skipped")
