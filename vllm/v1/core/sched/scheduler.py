@@ -1283,11 +1283,19 @@ class Scheduler(SchedulerInterface):
         self,
         request_ids: str | Iterable[str],
         finished_status: RequestStatus,
+        free_immediately: bool = True,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
         disconnects.
+
+        Args:
+            request_ids: Request IDs to finish.
+            finished_status: The finished status to set.
+            free_immediately: If True, frees requests immediately. If False,
+                only marks them as finished and removes from queues without
+                freeing. Useful when outputs need to be created before freeing.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -1318,10 +1326,11 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
 
-        # Second pass: set status and free requests
+        # Second pass: set status and optionally free requests
         for request in valid_requests:
             request.status = finished_status
-            self._free_request(request)
+            if free_immediately:
+                self._free_request(request)
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
@@ -1654,30 +1663,13 @@ class Scheduler(SchedulerInterface):
             )
             all_affected_req_ids = async_affected_req_ids | sync_affected_req_ids
 
-            # mark requests as finished and remove from queues. importantly:
-            # don't free yet as outputs will be created in update_from_output
-            running_requests_to_remove = set()
-            waiting_requests_to_remove = []
-
-            for req_id in all_affected_req_ids:
-                request = self.requests.get(req_id)
-                if request is None or request.is_finished():
-                    continue
-
-                # track which queue the request was in BEFORE changing status
-                if request.status == RequestStatus.RUNNING:
-                    running_requests_to_remove.add(request)
-                else:
-                    waiting_requests_to_remove.append(request)
-
-                # mark finished
-                request.status = RequestStatus.FINISHED_ERROR
-
-            # remove
-            if running_requests_to_remove:
-                self.running = remove_all(self.running, running_requests_to_remove)
-            if waiting_requests_to_remove:
-                self.waiting.remove_requests(waiting_requests_to_remove)
+            # mark requests as finished and remove from queues without freeing
+            # we don't free yet as outputs will be created in update_from_output
+            self.finish_requests(
+                all_affected_req_ids,
+                RequestStatus.FINISHED_ERROR,
+                free_immediately=False,
+            )
 
             return all_affected_req_ids
         else:
