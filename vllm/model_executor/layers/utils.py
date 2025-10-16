@@ -10,6 +10,7 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -122,7 +123,7 @@ def rocm_unquantized_gemm_impl(
     x_view = x.view(-1, x.size(-1))
     n = x_view.shape[0]
     m = weight.shape[0]
-    cu_count = current_platform.get_cu_count()
+    cu_count = get_cu_count()
 
     if m > 8 and 0 < n <= 4:
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
