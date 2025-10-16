@@ -28,7 +28,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch import direct_register_custom_op
 
 logger = init_logger(__name__)
 

@@ -13,7 +13,7 @@ from vllm import LLM
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODELS = ["meta-llama/Llama-3.2-1B"]

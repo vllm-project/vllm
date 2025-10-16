@@ -82,7 +82,7 @@ from vllm.utils import (
     round_up,
 )
 from vllm.utils.jsontree import json_map_leaves
-from vllm.utils.torch_utils import (
+from vllm.utils.torch import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_dtype_size,
     supports_dynamo,

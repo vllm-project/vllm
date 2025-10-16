@@ -17,7 +17,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import set_graph_poo
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import weak_ref_tensors
+from vllm.utils.torch import weak_ref_tensors
 
 logger = init_logger(__name__)
 

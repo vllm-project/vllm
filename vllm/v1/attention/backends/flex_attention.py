@@ -29,7 +29,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_kernel_override_batch_invariant,
 )
 from vllm.utils import cdiv
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,

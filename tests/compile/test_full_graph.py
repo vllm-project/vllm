@@ -14,7 +14,7 @@ from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
 

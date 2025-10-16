@@ -45,7 +45,7 @@ try:
     from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
-    from vllm.utils.torch_utils import direct_register_custom_op
+    from vllm.utils.torch import direct_register_custom_op
 
     if is_rocm_aiter_fp4_asm_gemm_enabled():
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip

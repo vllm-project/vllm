@@ -26,7 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import 
     TensorMemoryPool,
 )
 from vllm.utils import get_ip
-from vllm.utils.torch_utils import current_stream
+from vllm.utils.torch import current_stream
 
 logger = logging.getLogger(__name__)
 

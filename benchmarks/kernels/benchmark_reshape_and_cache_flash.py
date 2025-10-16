@@ -13,7 +13,7 @@ from vllm.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import (
+from vllm.utils.torch import (
     STR_DTYPE_TO_TORCH_DTYPE,
     create_kv_caches_with_random_flash,
 )

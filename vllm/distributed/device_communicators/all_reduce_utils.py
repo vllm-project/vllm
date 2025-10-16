@@ -23,7 +23,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_kernel_override_batch_invariant,
 )
 from vllm.utils import update_environment_variables
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 

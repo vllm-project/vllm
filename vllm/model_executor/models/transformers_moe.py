@@ -28,7 +28,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch import direct_register_custom_op
 
 from .interfaces import MixtureOfExperts, SupportsMultiModal
 from .transformers import (

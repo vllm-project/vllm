@@ -14,7 +14,7 @@ from vllm.utils import (
     get_open_port,
     update_environment_variables,
 )
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch import cuda_device_count_stateless
 
 from ..utils import multi_gpu_test
 

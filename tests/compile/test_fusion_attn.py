@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch import is_torch_equal_or_newer
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()

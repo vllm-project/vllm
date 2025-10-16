@@ -15,7 +15,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch import cuda_device_count_stateless
 
 from .modular_kernel_tools.common import (
     Config,

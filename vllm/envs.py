@@ -246,7 +246,7 @@ def maybe_convert_bool(value: str | None) -> bool | None:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch import is_torch_equal_or_newer
 
     default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"

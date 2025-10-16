@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import flashinfer_fp4_quantize
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch import is_torch_equal_or_newer
 
 
 @triton.jit

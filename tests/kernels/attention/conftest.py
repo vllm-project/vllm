@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.utils.torch_utils import (
+from vllm.utils.torch import (
     create_kv_caches_with_random,
     create_kv_caches_with_random_flash,
 )

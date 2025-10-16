@@ -14,7 +14,7 @@ import torch
 from torch import fx
 from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch import is_torch_equal_or_newer
 
 if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass

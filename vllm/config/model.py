@@ -42,7 +42,7 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import LayerBlockType, LazyLoader
-from vllm.utils.torch_utils import common_broadcastable_dtype
+from vllm.utils.torch import common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig

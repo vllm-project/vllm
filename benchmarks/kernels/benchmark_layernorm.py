@@ -8,7 +8,7 @@ import torch
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch import STR_DTYPE_TO_TORCH_DTYPE
 
 
 @torch.inference_mode()

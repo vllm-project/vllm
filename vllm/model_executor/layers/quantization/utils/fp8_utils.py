@@ -34,7 +34,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch import direct_register_custom_op
 
 logger = init_logger(__name__)
 

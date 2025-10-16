@@ -22,7 +22,7 @@ import vllm.envs as envs
 from vllm.connections import global_http_connection
 from vllm.logger import init_logger
 from vllm.utils import cuda_get_device_properties
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch import cuda_device_count_stateless
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)

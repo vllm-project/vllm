@@ -21,7 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator,
 )
-from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.utils.torch import set_default_torch_dtype
 
 
 class GGUFModelLoader(BaseModelLoader):

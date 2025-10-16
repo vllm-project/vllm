@@ -9,7 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
