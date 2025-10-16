@@ -1544,12 +1544,13 @@ def apply_hf_chat_template(
             "does not define one."
         )
 
+    resolved_kwargs = resolve_chat_template_kwargs(
+        tokenizer=tokenizer,
+        chat_template=hf_chat_template,
+        chat_template_kwargs=kwargs,
+    )
+
     try:
-        resolved_kwargs = resolve_chat_template_kwargs(
-            tokenizer=tokenizer,
-            chat_template=hf_chat_template,
-            chat_template_kwargs=kwargs,
-        )
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
