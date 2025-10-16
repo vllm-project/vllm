@@ -9,7 +9,7 @@ import signal
 from vllm import envs
 from vllm.assets.base import get_cache_dir
 from vllm.logger import init_logger
-from vllm.utils import PlaceholderModule
+from vllm.utils.importlib import PlaceholderModule
 
 logger = init_logger(__name__)
 

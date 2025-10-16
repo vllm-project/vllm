@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 
 import numpy.typing as npt
 
-from vllm.utils import PlaceholderModule
+from vllm.utils.importlib import PlaceholderModule
 
 from .base import VLLM_S3_BUCKET_URL, get_vllm_public_assets
 

@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname, supports_xccl
+from vllm.utils import supports_xccl
+from vllm.utils.importlib import resolve_obj_by_qualname
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 

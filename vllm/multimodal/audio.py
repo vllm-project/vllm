@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 
-from vllm.utils import PlaceholderModule
+from vllm.utils.importlib import PlaceholderModule
 
 from .base import MediaIO
 

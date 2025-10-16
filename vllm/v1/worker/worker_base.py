@@ -15,11 +15,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils import (
     enable_trace_function_call_for_thread,
-    resolve_obj_by_qualname,
     run_method,
     update_environment_variables,
     warn_for_unimplemented_methods,
 )
+from vllm.utils.importlib import resolve_obj_by_qualname
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:

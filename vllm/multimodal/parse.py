@@ -19,8 +19,8 @@ import numpy as np
 import torch
 from typing_extensions import assert_never
 
-from vllm.utils import LazyLoader
 from vllm.utils.collections import is_list_of
+from vllm.utils.importlib import LazyLoader
 
 from .audio import AudioResampler
 from .inputs import (
