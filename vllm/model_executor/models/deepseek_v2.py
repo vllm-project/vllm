@@ -682,7 +682,6 @@ def sparse_attn_indexer(
 
         torch.ops._C.top_k_per_row_decode(
             logits,
-            batch_size,
             next_n,
             decode_metadata.seq_lens,
             topk_indices,
