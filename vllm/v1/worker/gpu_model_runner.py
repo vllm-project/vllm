@@ -3475,7 +3475,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not skip_eplb:
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
-        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        logit_indices_np = np.cumsum(num_scheduled_tokens, dtype=np.int64) - 1
+        if hidden_states.size(0) > 0 and logit_indices_np.size > 0:
+            max_index = logit_indices_np.max()
+            if max_index >= hidden_states.size(0):
+                logit_indices_np = np.remainder(
+                    logit_indices_np, hidden_states.size(0)
+                )
+        logit_indices = torch.as_tensor(
+            logit_indices_np,
+            device=hidden_states.device,
+            dtype=torch.long,
+        )
+        hidden_states = hidden_states.contiguous()
         return hidden_states, hidden_states[logit_indices]
 
     @torch.inference_mode()
