@@ -12,8 +12,8 @@ from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBaseType,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
-    KVConnectorHMAMixin,
     KVConnectorRole,
+    supports_hma,
 )
 from vllm.logger import init_logger
 
@@ -55,7 +55,7 @@ class KVConnectorFactory:
 
         # check if the connector supports HMA
         hma_enabled = not config.scheduler_config.disable_hybrid_kv_cache_manager
-        if not issubclass(connector_cls, KVConnectorHMAMixin) and hma_enabled:
+        if hma_enabled and not supports_hma(connector_cls):
             raise ValueError(
                 f"Connector {connector_cls.__name__} does not support HMA but "
                 f"HMA is enabled. Please set `--disable-hybrid-kv-cache-manager`."

@@ -99,7 +99,10 @@ class KVConnectorHMAMixin:
 
 
 def supports_hma(connector: Any) -> bool:
-    return isinstance(connector, KVConnectorHMAMixin)
+    if isinstance(connector, type):
+        return issubclass(connector, KVConnectorHMAMixin)
+    else:
+        return isinstance(connector, KVConnectorHMAMixin)
 
 
 class KVConnectorRole(enum.Enum):
