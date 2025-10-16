@@ -111,9 +111,10 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
             end_id = vocab.get(processor.image_end_token)
 
             # create mask to remove break/end tokens
-            keep_mask = torch.ones_like(input_ids, dtype=torch.bool)
-            keep_mask &= input_ids != break_id
-            keep_mask &= input_ids != end_id
+            keep_mask = ~torch.isin(
+                input_ids,
+                torch.tensor([break_id, end_id]),
+            )
 
             processed_outputs["input_ids"] = input_ids[keep_mask].unsqueeze(0)
             if "attention_mask" in processed_outputs:
