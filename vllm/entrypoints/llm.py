@@ -75,7 +75,8 @@ from vllm.transformers_utils.tokenizer import (
     get_cached_tokenizer,
 )
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device, as_iter, is_list_of
+from vllm.utils import Counter, Device
+from vllm.utils.collections import as_iter, is_list_of
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor

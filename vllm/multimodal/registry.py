@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, cached_tokenizer_from_config
-from vllm.utils import ClassRegistry
+from vllm.utils.collections import ClassRegistry
 
 from .cache import BaseMultiModalProcessorCache
 from .processing import (

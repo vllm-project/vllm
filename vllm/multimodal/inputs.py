@@ -22,7 +22,8 @@ from typing import (
 import numpy as np
 from typing_extensions import NotRequired, TypeVar, deprecated
 
-from vllm.utils import LazyLoader, full_groupby, is_list_of
+from vllm.utils import LazyLoader
+from vllm.utils.collections import full_groupby, is_list_of
 from vllm.utils.jsontree import json_map_leaves
 
 if TYPE_CHECKING:
