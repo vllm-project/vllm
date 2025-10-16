@@ -319,6 +319,7 @@ def fused_marlin_moe(
 
     return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
 
+
 def batched_fused_marlin_moe(
     hidden_states: torch.Tensor,
     expert_num_tokens: torch.Tensor,
@@ -475,6 +476,7 @@ def batched_fused_marlin_moe(
     output = output.view(B, BATCH_TOKENS_MAX, K)
 
     return output
+
 
 class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config: FusedMoEQuantConfig):
