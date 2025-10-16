@@ -414,7 +414,6 @@ class GraniteMoeHybridModel(nn.Module):
         ckpt_down_proj_name = "down_proj"
         ckpt_up_proj_name = "up_proj"
         num_experts = self.config.num_local_experts
-        num_redundant_experts = 0
 
         return [
             # (param_name, weight_name, expert_id, shard_id)
@@ -506,7 +505,6 @@ class GraniteMoeHybridModel(nn.Module):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 loaded_weight = p
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = (
                     loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
                 )
