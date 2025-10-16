@@ -162,8 +162,8 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
     return {"type": option_type, kwarg: sorted(options)}
 
 
-def sequence_to_kwargs(type_hints: set[TypeHint], seq_type: type) -> dict[str, Any]:
-    type_hint = get_type(type_hints, seq_type)
+def collection_to_kwargs(type_hints: set[TypeHint], type: TypeHint) -> dict[str, Any]:
+    type_hint = get_type(type_hints, type)
     types = get_args(type_hint)
     elem_type = types[0]
 
@@ -183,7 +183,7 @@ def sequence_to_kwargs(type_hints: set[TypeHint], seq_type: type) -> dict[str, A
 
     return {
         "type": elem_type,
-        "nargs": "+" if seq_type is not tuple or Ellipsis in types else len(types),
+        "nargs": "+" if type is not tuple or Ellipsis in types else len(types),
     }
 
 
@@ -276,11 +276,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, Literal):
             kwargs[name].update(literal_to_kwargs(type_hints))
         elif contains_type(type_hints, tuple):
-            kwargs[name].update(sequence_to_kwargs(type_hints, tuple))
+            kwargs[name].update(collection_to_kwargs(type_hints, tuple))
         elif contains_type(type_hints, list):
-            kwargs[name].update(sequence_to_kwargs(type_hints, list))
+            kwargs[name].update(collection_to_kwargs(type_hints, list))
         elif contains_type(type_hints, set):
-            kwargs[name].update(sequence_to_kwargs(type_hints, set))
+            kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
