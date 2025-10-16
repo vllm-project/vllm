@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utils for model executor."""
 
-import contextlib
 import copy
 from typing import Any
 
@@ -86,9 +85,8 @@ def get_moe_expert_mapping(
         return []
 
 
-@contextlib.contextmanager
-def disable_graph_partition():
-    """Context manager to disable inductor graph partition.
+def disable_inductor_graph_partition(func):
+    """Decorator to disable inductor graph partition.
     This is used to avoid nested cudagraph capture.
 
     Example:
@@ -100,10 +98,23 @@ def disable_graph_partition():
     nested cudagraph which is not supported.
 
     This context manager should be wrapped around torch.compile calls within custom ops
-    to avoid the nested cudagraph capture."""
-    old_val = torch._inductor.config.graph_partition
-    try:
+    to avoid the nested cudagraph capture.
+
+    Expected Usage:
+    @disable_inductor_graph_partition
+    @torch.compile()
+    def op_eager_code(...):
+        ...
+
+    Note that `@disable_inductor_graph_partition` should be applied before
+    `@torch.compile()`
+    """
+
+    def wrapper(*args, **kwargs):
+        old_val = torch._inductor.config.graph_partition
         torch._inductor.config.graph_partition = False
-        yield
-    finally:
+        out = func(*args, **kwargs)
         torch._inductor.config.graph_partition = old_val
+        return out
+
+    return wrapper
