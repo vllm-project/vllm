@@ -269,7 +269,7 @@ class MistralToolParser(ToolParser):
                 # return None when the tool is not likely to be finished
                 # This can occur when the name is being parsed for example
                 # and we wait for the name to be complete
-                # before sendingthe function name
+                # before sending the function name
                 return None
 
         delta = DeltaMessage()
@@ -279,7 +279,7 @@ class MistralToolParser(ToolParser):
             delta.tool_calls = delta_tool_calls
 
         # HACK: serving_chat.py inspects the internal state of tool parsers
-        # when determining it's final streaming delta, automatically
+        # when determining its final streaming delta, automatically
         # adding autocompleted JSON.
         # These two lines avoid that nonsense while ensuring finish_reason
         # is set to tool_calls when at least one tool is called.
@@ -392,7 +392,7 @@ class MistralToolParser(ToolParser):
         # Cut smartly the delta text to catch the ijson events
         # as ijson does not give us the index in the text at each event.
         # We need to cut so that we know
-        # where in the text the events are emited from.
+        # where in the text the events are emitted from.
         while len(delta_text) > 0:
             streaming_state_before_parse = self.streaming_state
 
