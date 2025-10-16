@@ -146,8 +146,10 @@ def _build_LightOnOCR_processor(
 class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "vision_encoder.": "vision_tower.",
-            "vision_projection.": "multi_modal_projector.",
+            "model.vision_encoder.": "vision_tower.",
+            "model.vision_projection.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
         }
     )
 
