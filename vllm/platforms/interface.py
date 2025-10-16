@@ -6,24 +6,25 @@ import os
 import platform
 import random
 import sys
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
 
-from vllm.attention.backends.registry import _Backend
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from datetime import timedelta
-
     from torch.distributed import PrefixStore, ProcessGroup
 
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import VllmConfig
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = object
 
 logger = init_logger(__name__)
 
@@ -172,13 +173,16 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        # Import _Backend here to avoid circular import.
+        from vllm.attention.backends.registry import _Backend
+
         return _Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: _Backend,
+        selected_backend: "_Backend",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
@@ -294,7 +298,7 @@ class Platform:
 
     @classmethod
     def pre_register_and_update(
-        cls, parser: Optional["FlexibleArgumentParser"] = None
+        cls, parser: FlexibleArgumentParser | None = None
     ) -> None:
         """
         Do some pre-registration or update action for the current platform.
@@ -491,7 +495,7 @@ class Platform:
     def validate_request(
         cls,
         prompt: "PromptType",
-        params: Union["SamplingParams", "PoolingParams"],
+        params: "SamplingParams | PoolingParams",
         processed_inputs: "ProcessorInputs",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
@@ -538,7 +542,7 @@ class Platform:
         prefix_store: "PrefixStore",
         group_rank: int,
         group_size: int,
-        timeout: "timedelta",
+        timeout: timedelta,
     ) -> "ProcessGroup":
         """
         Init platform-specific torch distributed process group.
