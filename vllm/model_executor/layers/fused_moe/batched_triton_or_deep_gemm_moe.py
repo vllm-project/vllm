@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
@@ -22,11 +23,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(quant_config)
 
-        self.batched_triton_experts = BatchedTritonExperts(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=num_dispatchers,
-            quant_config=self.quant_config,
-        )
+        # Store the original request for deep gemm
+        deep_gemm_requested = allow_deep_gemm
 
         self.allow_deep_gemm = (
             allow_deep_gemm
@@ -41,6 +39,28 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 quant_config=self.quant_config,
             )
             if self.allow_deep_gemm
+            else None
+        )
+
+        # If deep gemm was requested but is not available (either due to
+        # unsupported configuration or missing dependencies), check if
+        # we should allow fallback to batched triton kernel
+        if deep_gemm_requested and self.batched_deep_gemm_experts is None:
+            if not envs.VLLM_ALLOW_BATCHED_TRITON_FALLBACK:
+                raise RuntimeError(
+                    "DeepGemm was requested but is not available. "
+                    "The batched triton kernel fallback is disabled by default. "
+                    "Set VLLM_ALLOW_BATCHED_TRITON_FALLBACK=1 to enable the fallback "
+                    "for debugging purposes."
+                )
+
+        self.batched_triton_experts = (
+            BatchedTritonExperts(
+                max_num_tokens=max_num_tokens,
+                num_dispatchers=num_dispatchers,
+                quant_config=self.quant_config,
+            )
+            if self.batched_deep_gemm_experts is None
             else None
         )
 

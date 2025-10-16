@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "throughput"
+    VLLM_ALLOW_BATCHED_TRITON_FALLBACK: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1149,6 +1150,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # BF16 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))
+    ),
+    # If set to 1, allow fallback to batched triton kernel when deepgemm
+    # is unavailable. By default (0), the system will crash if deepgemm
+    # is expected but not available.
+    "VLLM_ALLOW_BATCHED_TRITON_FALLBACK": lambda: bool(
+        int(os.getenv("VLLM_ALLOW_BATCHED_TRITON_FALLBACK", "0"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
