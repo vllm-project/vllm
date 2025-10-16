@@ -26,7 +26,8 @@ ENV VLLM_TARGET_DEVICE="tpu"
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
-        -r requirements/tpu.txt
+        -r requirements/tpu.txt \
+    pip install torch_xla[tpu, pallas]==2.8.0
 
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e .
 
