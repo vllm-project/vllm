@@ -98,15 +98,15 @@ and automatically applies the model's [chat template](https://huggingface.co/doc
     conversation = [
         {
             "role": "system",
-            "content": "You are a helpful assistant"
+            "content": "You are a helpful assistant",
         },
         {
             "role": "user",
-            "content": "Hello"
+            "content": "Hello",
         },
         {
             "role": "assistant",
-            "content": "Hello! How can I assist you today?"
+            "content": "Hello! How can I assist you today?",
         },
         {
             "role": "user",
