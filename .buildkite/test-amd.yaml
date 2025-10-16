@@ -575,7 +575,7 @@ steps:
   - benchmarks/
   commands:
   - bash scripts/run-benchmarks.sh
-  
+
 - label: AMD LM Eval Large Models
   mirror_hardwares: [amdproduction]
   agent_pool: mi325_2
@@ -583,7 +583,7 @@ steps:
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-mi300 --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-mi300 --tp-size=8
 
 - label: Benchmarks CLI Test # 7min
   timeout_in_minutes: 20
