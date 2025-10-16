@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -41,7 +40,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
-        sharded_to_full_mapping: Optional[list[int]],
+        sharded_to_full_mapping: list[int] | None,
     ) -> None:
         super().__init__()
         self.base_layer = base_layer
@@ -88,7 +87,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
         if 32000 < self.base_layer.vocab_size > 257024:
@@ -142,8 +141,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        embeddings_tensor: torch.Tensor | None,
     ):
         self.reset_lora(index)
         self.lora_a_stacked[index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
@@ -163,8 +161,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self,
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
-        embedding_bias: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
+        embedding_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
         logits = lm_head.quant_method.apply(lm_head, hidden_states)
         if embedding_bias is not None:
@@ -228,7 +226,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             + lora_logits.shape[1],
         ] = lora_logits
 
-        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_logits(
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
             logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
         )
 
@@ -248,7 +246,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         # Special handling for the LogitsProcessor.
         return False

@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.ovis import OvisImagePatchInputs, VisualEmbedding
+from vllm.model_executor.models.ovis import VisualEmbedding
 from vllm.model_executor.models.siglip2navit import Siglip2NavitModel
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -37,6 +37,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 
@@ -58,36 +59,38 @@ IMAGE_PAD_TOKEN_ID_MAP = {
 }
 
 
-class OvisVideoPatchInputs(TypedDict):
+class Ovis2_5ImagePatchInputs(TensorSchema):
+    """
+    Dimensions:
+        - bnp: Batch size * number of images * number of patches
+        - patch_size: patch_size_x * patch_size_y * num_channels
+        - patch_indicators: Batch size * (number of patches + 1)
+        - bn: Batch size * number of images
+    """
+
+    type: Literal["image_patches"]
+    flat_data: Annotated[torch.Tensor, TensorShape("bnp", "patch_size")]
+    indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
+    patches_per_item: Annotated[list[int], TensorShape("bn")]
+    grids: Annotated[torch.Tensor, TensorShape("bn", 3)]
+    # This is used to restore the first two dimensions of `flat_data`.
+
+
+class Ovis2_5VideoPatchInputs(TensorSchema):
+    """
+    Dimensions:
+        - bnp: Batch size * number of videos * number of patches
+        - patch_size: patch_size_x * patch_size_y * num_channels
+        - patch_indicators: Batch size * (number of patches + 1)
+        - bn: Batch size * number of videos
+    """
+
     type: Literal["video_patches"]
-    flat_data: torch.Tensor
-    """
-    Shape:
-    `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
-    """
-
-    indicator_tokens: torch.Tensor
-    """
-    Shape:
-    `(batch_size * (num_patches + 1))`
-    """
-
-    patches_per_image: list[int]
-    """
-    List of number of total patches for each frame in the video.
-    This is used to restore the first two dimensions of `flat_data`.
-    """
-
-
-def _ovis2_5_field_config():
-    return dict(
-        pixel_values=MultiModalFieldConfig.batched("image"),
-        grids=MultiModalFieldConfig.batched("image"),
-        indicator_tokens=MultiModalFieldConfig.batched("image"),
-        video_pixel_values=MultiModalFieldConfig.batched("video"),
-        video_indicator_tokens=MultiModalFieldConfig.batched("video"),
-        video_grids=MultiModalFieldConfig.batched("video"),
-    )
+    flat_data: Annotated[torch.Tensor, TensorShape("bnp", "patch_size")]
+    indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
+    patches_per_item: Annotated[list[int], TensorShape("bn")]
+    grids: Annotated[torch.Tensor, TensorShape("bn", 3)]
+    # This is used to restore the first two dimensions of `flat_data`.
 
 
 class VisualTokenizer(torch.nn.Module):
@@ -99,7 +102,7 @@ class VisualTokenizer(torch.nn.Module):
         self,
         config: PretrainedConfig,
         visual_vocab_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -126,7 +129,7 @@ class VisualTokenizer(torch.nn.Module):
     def _init_backbone(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -202,7 +205,7 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self) -> BaseImageProcessor:
         return self.get_hf_processor().image_processor  # type: ignore
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": 1}
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -271,7 +274,7 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Optional[BaseImageProcessor],
+        image_processor: BaseImageProcessor | None,
     ) -> int:
         num_video_tokens = self.get_num_image_tokens(
             image_width=image_width, image_height=image_height, num_frames=num_frames
@@ -302,7 +305,7 @@ class Ovis2_5DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2_5ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -380,7 +383,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
                 self.visual_indicators_to_visual_tokens(indicator)
                 for indicator in visual_indicators
             ]
-            processed_outputs["video_indicator_tokens"] = indicator_tokens
+            processed_outputs["video_indicator_tokens"] = torch.tensor(indicator_tokens)
         if "images" in mm_data:
             visual_indicators = [
                 hf_processor.construct_visual_indicators((1, 1, 1), False)
@@ -391,7 +394,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
                 for indicator in visual_indicators
             ]
 
-            processed_outputs["indicator_tokens"] = indicator_tokens
+            processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
         return processed_outputs
 
     def _apply_hf_processor_tokens_only(
@@ -405,7 +408,14 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _ovis2_5_field_config()
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            grids=MultiModalFieldConfig.batched("image"),
+            indicator_tokens=MultiModalFieldConfig.batched("image"),
+            video_pixel_values=MultiModalFieldConfig.batched("video"),
+            video_indicator_tokens=MultiModalFieldConfig.batched("video"),
+            video_grids=MultiModalFieldConfig.batched("video"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -441,6 +451,8 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
 class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -470,7 +482,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[OvisImagePatchInputs]:
+    ) -> Ovis2_5ImagePatchInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         indicator_tokens = kwargs.pop("indicator_tokens", None)
         grids = kwargs.pop("grids", None)
@@ -489,22 +501,22 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                     f"Got type: {type(indicator_tokens)}"
                 )
 
-            return OvisImagePatchInputs(
+            return Ovis2_5ImagePatchInputs(
                 type="image_patches",
-                flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
-                patches_per_image=[
+                flat_data=flatten_bn(pixel_values, concat=True),
+                patches_per_item=[
                     x.shape[0] // (self.config.vit_config.hidden_stride**2)
-                    for x in flatten_bn(pixel_values)
+                    for x in pixel_values
                 ],
-                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens), concat=True),
-                grids=flatten_bn(flatten_bn(grids), concat=True),
+                indicator_tokens=flatten_bn(indicator_tokens, concat=True),
+                grids=flatten_bn(grids, concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[OvisImagePatchInputs]:
+    ) -> Ovis2_5VideoPatchInputs | None:
         pixel_values = kwargs.pop("video_pixel_values", None)
         indicator_tokens = kwargs.pop("video_indicator_tokens", None)
         grids = kwargs.pop("video_grids", None)
@@ -523,26 +535,26 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                     f"Got type: {type(indicator_tokens)}"
                 )
 
-            return OvisVideoPatchInputs(
+            return Ovis2_5VideoPatchInputs(
                 type="video_patches",
-                flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
-                patches_per_image=[
+                flat_data=flatten_bn(pixel_values, concat=True),
+                patches_per_item=[
                     x.shape[0] // (self.config.vit_config.hidden_stride**2)
-                    for x in flatten_bn(pixel_values)
+                    for x in pixel_values
                 ],
-                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens), concat=True),
-                grids=flatten_bn(flatten_bn(grids), concat=True),
+                indicator_tokens=flatten_bn(indicator_tokens, concat=True),
+                grids=flatten_bn(grids, concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(
-        self, image_input: Union[OvisImagePatchInputs, OvisVideoPatchInputs]
+    def _process_visual_input(
+        self, visual_input: Ovis2_5ImagePatchInputs | Ovis2_5VideoPatchInputs
     ) -> MultiModalEmbeddings:
-        image_patches_flat = image_input["flat_data"]
-        patches_per_image = image_input["patches_per_image"]
-        indicator_tokens = image_input["indicator_tokens"]
-        grid_thws = image_input["grids"]
+        image_patches_flat = visual_input["flat_data"]
+        patches_per_image = visual_input["patches_per_item"]
+        indicator_tokens = visual_input["indicator_tokens"]
+        grid_thws = visual_input["grids"]
 
         indicator_per_image = list(
             map(lambda x: 2 if x > 1 else x + 2, patches_per_image)
@@ -604,12 +616,12 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_visual_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_embeddings = self._process_image_input(video_input)
-                multimodal_embeddings += video_embeddings
+                video_embeddings = self._process_visual_input(video_input)
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
@@ -617,10 +629,10 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -637,7 +649,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.llm.compute_logits(hidden_states)
         return logits
 

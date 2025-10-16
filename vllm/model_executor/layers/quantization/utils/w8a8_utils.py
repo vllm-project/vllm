@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import torch
 from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
@@ -75,7 +75,7 @@ CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 
 def per_tensor_dequantize(
-    tensor: torch.Tensor, inv_scale: Union[float, torch.Tensor]
+    tensor: torch.Tensor, inv_scale: float | torch.Tensor
 ) -> torch.Tensor:
     fake_qweight = tensor.to(torch.float16)
     dq_weight = fake_qweight * inv_scale
@@ -399,7 +399,7 @@ class Fp8LinearOp:
         self,
         act_quant_static: bool,
         act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
-        pad_output: Optional[bool] = None,
+        pad_output: bool | None = None,
     ):
         if current_platform.is_rocm():
             self.preferred_backend = "rocm"
@@ -419,7 +419,7 @@ class Fp8LinearOp:
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
             pad_output = (
-                config.level < CompilationLevel.PIECEWISE
+                config.mode < CompilationMode.VLLM_COMPILE
                 and self.preferred_backend == "torch"
             )
 
@@ -437,10 +437,10 @@ class Fp8LinearOp:
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        out_dtype: Optional[torch.dtype] = None,
-        input_scale: Optional[torch.Tensor] = None,
-        input_scale_ub: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
+        out_dtype: torch.dtype | None = None,
+        input_scale: torch.Tensor | None = None,
+        input_scale_ub: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_scale computed from x.
@@ -486,8 +486,8 @@ class Fp8LinearOp:
 def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    input_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.

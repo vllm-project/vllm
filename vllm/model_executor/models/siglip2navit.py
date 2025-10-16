@@ -4,7 +4,6 @@
 within a vision language model."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from einops import rearrange, repeat
@@ -82,7 +81,7 @@ class Siglip2VisionEmbeddings(nn.Module):
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        grid_thws: Optional[torch.LongTensor] = None,
+        grid_thws: torch.LongTensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -206,7 +205,7 @@ class Siglip2Attention(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -275,8 +274,8 @@ class Siglip2Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Input shape: Batch x Time x Channel"""
 
         seq_length, embed_dim = hidden_states.shape
@@ -337,7 +336,7 @@ class Siglip2MLP(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -370,7 +369,7 @@ class Siglip2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -432,7 +431,7 @@ class Siglip2Encoder(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -592,7 +591,7 @@ class Siglip2Encoder(nn.Module):
             # for more information
             dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
         reverse_indices = torch.argsort(window_index)
 
@@ -616,7 +615,7 @@ class Siglip2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -655,7 +654,7 @@ class Siglip2NavitModel(torch.nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):

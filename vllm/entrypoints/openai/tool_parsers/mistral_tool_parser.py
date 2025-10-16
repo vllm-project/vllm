@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from enum import Enum, auto
 from random import choices
 from string import ascii_letters, digits
-from typing import Optional, Union
 
 import ijson
 import regex as re
@@ -91,8 +90,8 @@ class MistralToolParser(ToolParser):
         self.streaming_state: StreamingState = StreamingState.WAITING_FOR_TOOL_START
 
         # For streaming pre v11 tokenizer tool calls
-        self.current_tool_name: Optional[str] = None
-        self.current_tool_mistral_id: Optional[str] = None
+        self.current_tool_name: str | None = None
+        self.current_tool_mistral_id: str | None = None
         self.starting_new_tool = False
         if _is_pre_v11_tokeniser(self.model_tokenizer):
             self.parse_coro = ijson.parse_coro(
@@ -216,7 +215,7 @@ class MistralToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if self.bot_token_id not in current_token_ids:
             # if the tool call token is not in the tokens generated so far,
             # append output to contents since it's not a tool
@@ -239,7 +238,7 @@ class MistralToolParser(ToolParser):
         self,
         delta_text: str,
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extracts tool calls for Mistral models
         doing tool calls of the following format:
@@ -371,7 +370,7 @@ class MistralToolParser(ToolParser):
         self,
         delta_text: str,
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extracts tool calls for Mistral models
         doing tool calls of the following format:

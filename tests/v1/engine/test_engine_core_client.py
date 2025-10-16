@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Optional, Union
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -41,7 +41,7 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
 def make_request(
-    params: SamplingParams, prompt_tokens_ids: Optional[list[int]] = None
+    params: SamplingParams, prompt_tokens_ids: list[int] | None = None
 ) -> EngineCoreRequest:
     if not prompt_tokens_ids:
         prompt_tokens_ids = PROMPT_TOKENS
@@ -113,9 +113,7 @@ async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
 
 
 # Dummy utility function to monkey-patch into engine core.
-def echo(
-    self, msg: str, err_msg: Optional[str] = None, sleep: Optional[float] = None
-) -> str:
+def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None) -> str:
     print(f"echo util function called: {msg}, {err_msg}")
     if sleep is not None:
         time.sleep(sleep)
@@ -130,8 +128,6 @@ def test_engine_core_client(
     monkeypatch: pytest.MonkeyPatch, multiprocessing_mode: bool
 ):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo", echo, raising=False)
 
@@ -218,8 +214,6 @@ def test_engine_core_client(
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo", echo, raising=False)
 
@@ -321,7 +315,7 @@ def echo_dc(
     self,
     msg: str,
     return_list: bool = False,
-) -> Union[MyDataclass, list[MyDataclass]]:
+) -> MyDataclass | list[MyDataclass]:
     print(f"echo dc util function called: {msg}")
     val = None if msg is None else MyDataclass(msg)
     # Return dataclass to verify support for returning custom types
@@ -334,7 +328,7 @@ def echo_dc_dict(
     self,
     msg: str,
     return_dict: bool = False,
-) -> Union[MyDataclass, dict[str, MyDataclass]]:
+) -> MyDataclass | dict[str, MyDataclass]:
     print(f"echo dc dict util function called: {msg}")
     val = None if msg is None else MyDataclass(msg)
     # Return dict of dataclasses to verify support for returning dicts
@@ -373,8 +367,6 @@ async def test_engine_core_client_util_method_custom_return(
     monkeypatch: pytest.MonkeyPatch,
 ):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Must set insecure serialization to allow returning custom types.
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -422,8 +414,6 @@ async def test_engine_core_client_util_method_custom_dict_return(
     monkeypatch: pytest.MonkeyPatch,
 ):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Must set insecure serialization to allow returning custom types.
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -480,8 +470,6 @@ async def test_engine_core_client_util_method_nested_structures(
     monkeypatch: pytest.MonkeyPatch,
 ):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Must set insecure serialization to allow returning custom types.
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -592,76 +580,71 @@ async def test_engine_core_client_util_method_nested_structures(
     indirect=["publisher_config"],
 )
 def test_kv_cache_events(
-    monkeypatch: pytest.MonkeyPatch,
     multiprocessing_mode: bool,
     publisher_config,
 ):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        block_size = 16
-        num_blocks = 2
+    block_size = 16
+    num_blocks = 2
 
-        engine_args = EngineArgs(
-            model=MODEL_NAME,
-            enforce_eager=True,
-            enable_prefix_caching=True,
-            block_size=block_size,
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        block_size=block_size,
+    )
+    engine_args.kv_events_config = publisher_config
+
+    vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
+
+    executor_class = Executor.get_class(vllm_config)
+    with set_default_torch_num_threads(1):
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=multiprocessing_mode,
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
         )
-        engine_args.kv_events_config = publisher_config
+    endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
+    subscriber = MockSubscriber(
+        endpoint, topic=publisher_config.topic, decode_type=KVEventBatch
+    )
 
-        vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
+    try:
+        custom_tokens = list(range(num_blocks * block_size))
+        sampling_params = SamplingParams(max_tokens=1)
+        request = make_request(sampling_params, custom_tokens)
+        client.add_request(request)
 
-        executor_class = Executor.get_class(vllm_config)
-        with set_default_torch_num_threads(1):
-            client = EngineCoreClient.make_client(
-                multiprocess_mode=multiprocessing_mode,
-                asyncio_mode=False,
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=False,
-            )
-        endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
-        subscriber = MockSubscriber(
-            endpoint, topic=publisher_config.topic, decode_type=KVEventBatch
+        outputs: dict[str, list] = {request.request_id: []}
+        loop_until_done(client, outputs)
+
+        result = subscriber.receive_one(timeout=1000)
+        assert result is not None, "No message received"
+
+        seq, received = result
+
+        assert seq == 0, "Sequence number mismatch"
+        assert len(received.events) == 1, "We should have exactly one BlockStored event"
+        event = received.events[0]
+        assert isinstance(event, BlockStored), "We should have a BlockStored event"
+        assert len(event.block_hashes) == num_blocks, (
+            "We should have a BlockStored event with 2 block_hashes"
         )
-
-        try:
-            custom_tokens = list(range(num_blocks * block_size))
-            sampling_params = SamplingParams(max_tokens=1)
-            request = make_request(sampling_params, custom_tokens)
-            client.add_request(request)
-
-            outputs: dict[str, list] = {request.request_id: []}
-            loop_until_done(client, outputs)
-
-            result = subscriber.receive_one(timeout=1000)
-            assert result is not None, "No message received"
-
-            seq, received = result
-
-            assert seq == 0, "Sequence number mismatch"
-            assert len(received.events) == 1, (
-                "We should have exactly one BlockStored event"
-            )
-            event = received.events[0]
-            assert isinstance(event, BlockStored), "We should have a BlockStored event"
-            assert len(event.block_hashes) == num_blocks, (
-                "We should have a BlockStored event with 2 block_hashes"
-            )
-            assert event.block_size == block_size, (
-                "Block size should be the same as the block size"
-            )
-            assert event.parent_block_hash is None, "Parent block hash should be None"
-            assert event.lora_id is None, "Lora id should be None"
-            assert len(event.token_ids) == num_blocks * block_size, (
-                "Token ids should be the same as the custom tokens"
-            )
-            assert event.token_ids == custom_tokens, (
-                "Token ids should be the same as the custom tokens"
-            )
-        finally:
-            client.shutdown()
-            subscriber.close()
+        assert event.block_size == block_size, (
+            "Block size should be the same as the block size"
+        )
+        assert event.parent_block_hash is None, "Parent block hash should be None"
+        assert event.lora_id is None, "Lora id should be None"
+        assert len(event.token_ids) == num_blocks * block_size, (
+            "Token ids should be the same as the custom tokens"
+        )
+        assert event.token_ids == custom_tokens, (
+            "Token ids should be the same as the custom tokens"
+        )
+    finally:
+        client.shutdown()
+        subscriber.close()
 
 
 @pytest.mark.asyncio
@@ -672,101 +655,96 @@ def test_kv_cache_events(
 )
 @multi_gpu_test(num_gpus=4)
 async def test_kv_cache_events_dp(
-    monkeypatch: pytest.MonkeyPatch,
     multiprocessing_mode: bool,
     publisher_config,
 ):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        block_size = 16
-        num_blocks = 2
-        dp_size = 2
-        tp_size = 2
+    block_size = 16
+    num_blocks = 2
+    dp_size = 2
+    tp_size = 2
 
-        engine_args = EngineArgs(
-            model=MODEL_NAME,
-            enforce_eager=True,
-            enable_prefix_caching=True,
-            data_parallel_size=dp_size,
-            tensor_parallel_size=tp_size,
-            block_size=block_size,
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        block_size=block_size,
+    )
+    engine_args.kv_events_config = publisher_config
+
+    vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
+
+    executor_class = Executor.get_class(vllm_config)
+    with set_default_torch_num_threads(1):
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=multiprocessing_mode,
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
         )
-        engine_args.kv_events_config = publisher_config
+    await asyncio.sleep(1)
 
-        vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
+    # Build endpoints for all DP ranks
+    base_endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
+    endpoints = []
+    for i in range(dp_size):
+        offset_endpoint = ZmqEventPublisher.offset_endpoint_port(base_endpoint, i)
+        endpoints.append(offset_endpoint)
 
-        executor_class = Executor.get_class(vllm_config)
-        with set_default_torch_num_threads(1):
-            client = EngineCoreClient.make_client(
-                multiprocess_mode=multiprocessing_mode,
-                asyncio_mode=True,
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=False,
-            )
-        await asyncio.sleep(1)
+    subscriber = MockSubscriber(
+        endpoints, topic=publisher_config.topic, decode_type=KVEventBatch
+    )
 
-        # Build endpoints for all DP ranks
-        base_endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
-        endpoints = []
-        for i in range(dp_size):
-            offset_endpoint = ZmqEventPublisher.offset_endpoint_port(base_endpoint, i)
-            endpoints.append(offset_endpoint)
+    try:
+        custom_tokens = list(range(num_blocks * block_size))
+        sampling_params = SamplingParams(max_tokens=1)
+        all_request_ids = []
 
-        subscriber = MockSubscriber(
-            endpoints, topic=publisher_config.topic, decode_type=KVEventBatch
+        # Create and add 25 requests
+        # NOTE: attempts to force routing to both dp groups but can be flaky
+        for i in range(25):
+            await asyncio.sleep(0.01)
+            request = make_request(sampling_params, custom_tokens)
+            await client.add_request_async(request)
+            all_request_ids.append(request.request_id)
+
+        await asyncio.sleep(0.1)
+
+        # Initialize outputs dict for all requests
+        outputs: dict[str, list] = {req_id: [] for req_id in all_request_ids}
+
+        print("processing requests...")
+        await asyncio.wait_for(
+            loop_until_fully_done_async(client, outputs), timeout=20.0
         )
 
-        try:
-            custom_tokens = list(range(num_blocks * block_size))
-            sampling_params = SamplingParams(max_tokens=1)
-            all_request_ids = []
+        # Receive from subscriber until no more messages
+        print("collecting results...")
+        results = []
+        while True:
+            result = subscriber.receive_one(timeout=1)
+            print(result)
+            if result is None:
+                break
+            results.append(result)
 
-            # Create and add 25 requests
-            # NOTE: attempts to force routing to both dp groups but can be flaky
-            for i in range(25):
-                await asyncio.sleep(0.01)
-                request = make_request(sampling_params, custom_tokens)
-                await client.add_request_async(request)
-                all_request_ids.append(request.request_id)
+        # Collect all events and data_parallel_ranks from all results
+        all_dp_ranks = [received.data_parallel_rank for (_, received) in results]
+        unique_dps = set(all_dp_ranks)
+        assert len(unique_dps) == 2, (
+            f"Expected 2 unique data_parallel_ranks, got {len(unique_dps)}"
+        )
 
-            await asyncio.sleep(0.1)
-
-            # Initialize outputs dict for all requests
-            outputs: dict[str, list] = {req_id: [] for req_id in all_request_ids}
-
-            print("processing requests...")
-            await asyncio.wait_for(
-                loop_until_fully_done_async(client, outputs), timeout=20.0
-            )
-
-            # Receive from subscriber until no more messages
-            print("collecting results...")
-            results = []
-            while True:
-                result = subscriber.receive_one(timeout=1)
-                print(result)
-                if result is None:
-                    break
-                results.append(result)
-
-            # Collect all events and data_parallel_ranks from all results
-            all_dp_ranks = [received.data_parallel_rank for (_, received) in results]
-            unique_dps = set(all_dp_ranks)
-            assert len(unique_dps) == 2, (
-                f"Expected 2 unique data_parallel_ranks, got {len(unique_dps)}"
-            )
-
-        finally:
-            client.shutdown()
-            subscriber.close()
+    finally:
+        client.shutdown()
+        subscriber.close()
 
 
 @pytest.mark.timeout(20)
 def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, pytest.raises(Exception) as e_info:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Monkey-patch to extract core process pid while it's starting.
         core_proc_pid = [None]
         cepm_ctor = CoreEngineProcManager.__init__
@@ -841,7 +819,6 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
     mock_executor_class.side_effect = create_mock_executor
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv("CUDA_VISIBLE_DEVICES", "")  # No CUDA devices
 
         from vllm.v1.engine.utils import EngineZmqAddresses

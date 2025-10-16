@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -10,6 +9,9 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.platforms import current_platform
 
 try:
@@ -31,10 +33,10 @@ class SymmMemCommunicator:
     def __init__(
         self,
         group: ProcessGroup,
-        device: Union[int, str, torch.device],
+        device: int | str | torch.device,
         # add options for testing
-        force_multimem: Optional[bool] = None,
-        max_size_override: Optional[int] = None,
+        force_multimem: bool | None = None,
+        max_size_override: int | None = None,
     ):
         self.disabled = True
 
@@ -53,9 +55,14 @@ class SymmMemCommunicator:
         self.device = device
         self.group = group
         self.world_size = dist.get_world_size(self.group)
-        self.device_capability = (
-            current_platform.get_device_capability().as_version_str()
-        )
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            logger.warning(
+                "SymmMemCommunicator: device capability is unknown, "
+                "communicator is not available."
+            )
+            return
+        self.device_capability = capability.as_version_str()
         if self.device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
             logger.warning(
                 "SymmMemCommunicator: Device capability %s not supported, "
@@ -96,6 +103,8 @@ class SymmMemCommunicator:
             return
         self.force_multimem = force_multimem
         self.disabled = False
+        if vllm_kernel_override_batch_invariant():
+            self.disabled = True
 
     def should_use_symm_mem(self, inp: torch.Tensor):
         if self.disabled:
@@ -108,8 +117,8 @@ class SymmMemCommunicator:
         return inp_size < self.max_size
 
     def all_reduce(
-        self, inp: torch.Tensor, *, out: Optional[torch.Tensor] = None
-    ) -> Optional[torch.Tensor]:
+        self, inp: torch.Tensor, *, out: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
         if not self.should_use_symm_mem(inp):
             return None
         if out is None:

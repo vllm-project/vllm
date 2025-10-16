@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
-from typing import Optional, Union, cast
+from typing import cast
 
 import numpy as np
 from fastapi import Request
 from typing_extensions import override
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -37,7 +36,7 @@ class ClassificationMixin(OpenAIServing):
     async def _preprocess(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         """
         Process classification inputs: tokenize text, resolve adapters,
         and prepare model-specific inputs.
@@ -71,7 +70,7 @@ class ClassificationMixin(OpenAIServing):
     def _build_response(
         self,
         ctx: ServeContext,
-    ) -> Union[ClassificationResponse, ErrorResponse]:
+    ) -> ClassificationResponse | ErrorResponse:
         """
         Convert model outputs to a formatted classification response
         with probabilities and labels.
@@ -128,15 +127,13 @@ class ServingClassification(ClassificationMixin):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,
@@ -146,7 +143,7 @@ class ServingClassification(ClassificationMixin):
         self,
         request: ClassificationRequest,
         raw_request: Request,
-    ) -> Union[ClassificationResponse, ErrorResponse]:
+    ) -> ClassificationResponse | ErrorResponse:
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
 
@@ -163,7 +160,7 @@ class ServingClassification(ClassificationMixin):
     def _create_pooling_params(
         self,
         ctx: ClassificationServeContext,
-    ) -> Union[PoolingParams, ErrorResponse]:
+    ) -> PoolingParams | ErrorResponse:
         pooling_params = super()._create_pooling_params(ctx)
         if isinstance(pooling_params, ErrorResponse):
             return pooling_params
