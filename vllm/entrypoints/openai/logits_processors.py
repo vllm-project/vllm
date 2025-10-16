@@ -3,7 +3,6 @@
 
 from collections.abc import Iterable
 from functools import lru_cache, partial
-from typing import Optional, Union
 
 import torch
 
@@ -16,15 +15,14 @@ class AllowedTokenIdsLogitsProcessor:
     specific set of token ids."""
 
     def __init__(self, allowed_ids: Iterable[int]):
-        self.allowed_ids: Optional[list[int]] = list(allowed_ids)
-        self.mask: Optional[torch.Tensor] = None
+        self.allowed_ids: list[int] | None = list(allowed_ids)
+        self.mask: torch.Tensor | None = None
 
-    def __call__(self, token_ids: list[int],
-                 logits: torch.Tensor) -> torch.Tensor:
+    def __call__(self, token_ids: list[int], logits: torch.Tensor) -> torch.Tensor:
         if self.mask is None:
-            self.mask = torch.ones((logits.shape[-1], ),
-                                   dtype=torch.bool,
-                                   device=logits.device)
+            self.mask = torch.ones(
+                (logits.shape[-1],), dtype=torch.bool, device=logits.device
+            )
             self.mask[self.allowed_ids] = False
             self.allowed_ids = None
         logits.masked_fill_(self.mask, float("-inf"))
@@ -39,8 +37,7 @@ def _get_allowed_token_ids_logits_processor(
     if not allowed_token_ids:
         raise ValueError("Empty allowed_token_ids provided")
     if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
-        raise ValueError("allowed_token_ids contains "
-                         "out-of-vocab token id")
+        raise ValueError("allowed_token_ids contains out-of-vocab token id")
     return AllowedTokenIdsLogitsProcessor(allowed_token_ids)
 
 
@@ -55,8 +52,8 @@ def logit_bias_logits_processor(
 
 
 def get_logits_processors(
-    logit_bias: Optional[Union[dict[int, float], dict[str, float]]],
-    allowed_token_ids: Optional[list[int]],
+    logit_bias: dict[int, float] | dict[str, float] | None,
+    allowed_token_ids: list[int] | None,
     tokenizer: AnyTokenizer,
 ) -> list[LogitsProcessor]:
     logits_processors: list[LogitsProcessor] = []
@@ -71,20 +68,25 @@ def get_logits_processors(
         except ValueError as exc:
             raise ValueError(
                 "Found token_id in logit_bias that is not "
-                "an integer or string representing an integer") from exc
+                "an integer or string representing an integer"
+            ) from exc
 
         # Check if token_id is within the vocab size
         for token_id, bias in clamped_logit_bias.items():
             if token_id < 0 or token_id >= len(tokenizer):
-                raise ValueError(f"token_id {token_id} in logit_bias contains "
-                                 "out-of-vocab token id")
+                raise ValueError(
+                    f"token_id {token_id} in logit_bias contains out-of-vocab token id"
+                )
 
         logits_processors.append(
-            partial(logit_bias_logits_processor, clamped_logit_bias))
+            partial(logit_bias_logits_processor, clamped_logit_bias)
+        )
 
     if allowed_token_ids is not None:
         logits_processors.append(
             _get_allowed_token_ids_logits_processor(
-                frozenset(allowed_token_ids), len(tokenizer)))
+                frozenset(allowed_token_ids), len(tokenizer)
+            )
+        )
 
     return logits_processors

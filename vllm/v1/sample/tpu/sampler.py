@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampler layer implementing TPU supported operations."""
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
@@ -14,7 +12,6 @@ _SAMPLING_EPS = 1e-5
 
 
 class Sampler(nn.Module):
-
     def __init__(self):
         # TODO(houseroad): Add support for logprobs_mode.
         super().__init__()
@@ -35,7 +32,8 @@ class Sampler(nn.Module):
             # [num_requests, 1], where each row represents one generated
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
-            logprobs_tensors=None)
+            logprobs_tensors=None,
+        )
         return sampler_output
 
     def apply_temperature(
@@ -73,11 +71,13 @@ class Sampler(nn.Module):
 
         # Random sample.
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        random_sampled = self.random_sample(probs,
-                                            sampling_metadata.generators)
+        random_sampled = self.random_sample(probs, sampling_metadata.generators)
 
-        sampled = torch.where(sampling_metadata.temperature < _SAMPLING_EPS,
-                              greedy_sampled, random_sampled)
+        sampled = torch.where(
+            sampling_metadata.temperature < _SAMPLING_EPS,
+            greedy_sampled,
+            random_sampled,
+        )
         return sampled
 
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
@@ -107,9 +107,7 @@ class Sampler(nn.Module):
           Sampled token rank tensor, (num tokens)
         """
         # Find the topK values.
-        topk_logprobs, topk_indices = torch.topk(logprobs,
-                                                 num_logprobs,
-                                                 dim=-1)
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
@@ -138,9 +136,7 @@ class Sampler(nn.Module):
         # Convert logits to probability distribution
         probability_values = torch.nn.functional.softmax(logits, dim=-1)
         # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
+        max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
         # Reshape min_p for broadcasting
         adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
         # Identify valid tokens using threshold comparison
@@ -168,8 +164,8 @@ class Sampler(nn.Module):
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     Apply top-k and top-p optimized for TPU.

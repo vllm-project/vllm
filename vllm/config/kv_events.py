@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 from pydantic.dataclasses import dataclass
 
@@ -26,7 +25,7 @@ class KVEventsConfig:
     """The zmq endpoint to use for publishing kv events.
     """
 
-    replay_endpoint: Optional[str] = None
+    replay_endpoint: str | None = None
     """The zmq endpoint to use for replaying kv events.
     """
 

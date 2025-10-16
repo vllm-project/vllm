@@ -5,20 +5,14 @@ import torch
 
 from vllm.utils import get_cuda_view_from_cpu_tensor, is_uva_available
 
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_cpu_write(device):
     torch.set_default_device(device)
-    cpu_tensor = torch.zeros(10,
-                             10,
-                             device="cpu",
-                             pin_memory=True,
-                             dtype=torch.int32)
+    cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     cuda_view = get_cuda_view_from_cpu_tensor(cpu_tensor)
     assert cuda_view.device.type == "cuda"
 
@@ -40,11 +34,7 @@ def test_cpu_write(device):
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_gpu_write(device):
     torch.set_default_device(device)
-    cpu_tensor = torch.zeros(10,
-                             10,
-                             device="cpu",
-                             pin_memory=True,
-                             dtype=torch.int32)
+    cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     cuda_view = get_cuda_view_from_cpu_tensor(cpu_tensor)
     assert cuda_view.device.type == "cuda"
 

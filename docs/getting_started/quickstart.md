@@ -8,7 +8,7 @@ This guide will help you quickly get started with vLLM to perform:
 ## Prerequisites
 
 - OS: Linux
-- Python: 3.9 -- 3.13
+- Python: 3.10 -- 3.13
 
 ## Installation
 
@@ -194,8 +194,10 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
         api_key=openai_api_key,
         base_url=openai_api_base,
     )
-    completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
-                                        prompt="San Francisco is a")
+    completion = client.completions.create(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        prompt="San Francisco is a",
+    )
     print("Completion result:", completion)
     ```
 
@@ -239,7 +241,7 @@ Alternatively, you can use the `openai` Python package:
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Tell me a joke."},
-        ]
+        ],
     )
     print("Chat response:", chat_response)
     ```

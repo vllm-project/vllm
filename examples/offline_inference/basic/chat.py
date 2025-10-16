@@ -87,6 +87,7 @@ def main(args: dict):
             use_tqdm=False,
             chat_template=chat_template,
         )
+        print_outputs(outputs)
 
 
 if __name__ == "__main__":

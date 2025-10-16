@@ -7,6 +7,10 @@ Benchmark script for device communicators:
 CustomAllreduce (oneshot, twoshot), PyNcclCommunicator,
 and SymmMemCommunicator (multimem, two-shot).
 
+for NCCL symmetric memory you need to set the environment variables
+NCCL_NVLS_ENABLE=1 NCCL_CUMEM_ENABLE=1 VLLM_USE_NCCL_SYMM_MEM=1, otherwise NCCL does
+not use fast NVLS implementation for all reduce.
+
 Usage:
     torchrun --nproc_per_node=<N> benchmark_device_communicators.py [options]
 
@@ -18,15 +22,21 @@ Example:
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.device_communicators.pynccl import (
+    PyNcclCommunicator,
+    register_nccl_symmetric_ops,
+)
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    set_graph_pool_id,
+)
 from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
@@ -98,6 +108,7 @@ class CommunicatorBenchmark:
             )
             if not self.pynccl_comm.disabled:
                 logger.info("Rank %s: PyNcclCommunicator initialized", self.rank)
+                register_nccl_symmetric_ops(self.pynccl_comm)
             else:
                 logger.info("Rank %s: PyNcclCommunicator disabled", self.rank)
                 self.pynccl_comm = None
@@ -194,6 +205,15 @@ class CommunicatorBenchmark:
                     None,  # no env variable needed
                 )
             )
+            communicators.append(
+                (
+                    "pynccl-symm",
+                    lambda t: torch.ops.vllm.all_reduce_symmetric_with_copy(t),
+                    lambda t: True,  # Always available if initialized
+                    nullcontext(),
+                    None,  # no env variable needed
+                )
+            )
 
         if self.symm_mem_comm_multimem is not None:
             comm = self.symm_mem_comm_multimem
@@ -244,12 +264,12 @@ class CommunicatorBenchmark:
     def benchmark_allreduce_single(
         self,
         sequence_length: int,
-        allreduce_fn: Callable[[torch.Tensor], Optional[torch.Tensor]],
+        allreduce_fn: Callable[[torch.Tensor], torch.Tensor | None],
         should_use_fn: Callable[[torch.Tensor], bool],
         context,
         num_warmup: int,
         num_trials: int,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Benchmark method with CUDA graph optimization."""
         try:
             # Create test tensor (2D: sequence_length x hidden_size)
@@ -271,7 +291,9 @@ class CommunicatorBenchmark:
                 # Capture the graph using context manager
                 with context:
                     graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph):
+                    graph_pool = torch.cuda.graph_pool_handle()
+                    set_graph_pool_id(graph_pool)
+                    with torch.cuda.graph(graph, pool=graph_pool):
                         for _ in range(CUDA_GRAPH_CAPTURE_CYCLES):
                             allreduce_fn(graph_input)
 
