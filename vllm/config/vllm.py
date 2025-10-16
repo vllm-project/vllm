@@ -335,8 +335,6 @@ class VllmConfig:
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = True
-        if self.compilation_config.pass_config.enable_sequence_parallelism:
-            self.compilation_config.custom_ops.append("+rms_norm")
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode is not explicitly set by users, set default
