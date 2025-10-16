@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlexAttention."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import ClassVar
 
 import torch
 import torch._dynamo.decorators
@@ -42,6 +43,76 @@ create_block_mask_compiled = torch.compile(
     create_block_mask, fullgraph=True, mode="reduce-overhead"
 )
 flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
+
+
+def _create_dense_block_mask(
+    q_len: int,
+    kv_len: int,
+    q_block_size: int,
+    kv_block_size: int,
+    mask_mod: _mask_mod_signature | None,
+    device: torch.device,
+) -> BlockMask:
+    """Create a dense mask enabling all blocks up to the provided lengths."""
+    q_len = max(int(q_len), 1)
+    kv_len = max(int(kv_len), 1)
+
+    num_q_blocks = max(1, cdiv(q_len, q_block_size))
+    num_kv_blocks = max(1, cdiv(kv_len, kv_block_size))
+
+    kv_indices = torch.arange(num_kv_blocks, device=device, dtype=torch.int32)
+    kv_indices = kv_indices.repeat(num_q_blocks, 1).unsqueeze(0).unsqueeze(0)
+
+    kv_num_blocks = torch.full(
+        (1, 1, num_q_blocks), num_kv_blocks, dtype=torch.int32, device=device
+    )
+
+    return BlockMask.from_kv_blocks(
+        seq_lengths=(num_q_blocks * q_block_size, num_kv_blocks * kv_block_size),
+        kv_num_blocks=kv_num_blocks,
+        kv_indices=kv_indices,
+        full_kv_num_blocks=None,
+        full_kv_indices=None,
+        BLOCK_SIZE=(q_block_size, kv_block_size),
+        mask_mod=mask_mod,
+    )
+
+
+def _slice_block_mask_capacity(
+    capacity: BlockMask, q_len: int, kv_len: int
+) -> BlockMask:
+    """Slice a capacity mask down to block-aligned lengths."""
+    block_m, block_n = capacity.BLOCK_SIZE
+    q_blocks = max(1, cdiv(q_len, block_m))
+    kv_blocks = max(1, cdiv(kv_len, block_n))
+
+    q_len_aligned = q_blocks * block_m
+    kv_len_aligned = kv_blocks * block_n
+
+    kv_num_blocks = capacity.kv_num_blocks[..., :q_blocks].contiguous()
+    kv_indices = capacity.kv_indices[..., :q_blocks, :kv_blocks].contiguous()
+
+    full_kv_num_blocks = (
+        None
+        if capacity.full_kv_num_blocks is None
+        else capacity.full_kv_num_blocks[..., :q_blocks].contiguous()
+    )
+    full_kv_indices = (
+        None
+        if capacity.full_kv_indices is None
+        else capacity.full_kv_indices[..., :q_blocks, :kv_blocks].contiguous()
+    )
+
+    return BlockMask.from_kv_blocks(
+        seq_lengths=(q_len_aligned, kv_len_aligned),
+        kv_num_blocks=kv_num_blocks,
+        kv_indices=kv_indices,
+        full_kv_num_blocks=full_kv_num_blocks,
+        full_kv_indices=full_kv_indices,
+        BLOCK_SIZE=capacity.BLOCK_SIZE,
+        mask_mod=capacity.mask_mod,
+    )
+
 
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
     device = offsets.device
@@ -308,6 +379,11 @@ class FlexAttentionMetadata:
     kv_block_size: int = 16
     transformed_score_mod: _score_mod_signature | None = None
     sliding_window: int | None = None
+    block_mask_capacity: BlockMask | None = None
+    dummy_block_mask: BlockMask | None = None
+    cached_block_masks: dict[tuple[int, int], BlockMask] = field(
+        default_factory=dict
+    )
 
     def _convert_physical_to_logical(
         self,
@@ -538,7 +614,7 @@ class FlexAttentionMetadata:
             block_mask_kwargs["compute_q_blocks"] = False
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
-    def _get_effective_mask_mod(self) -> Optional[_mask_mod_signature]:
+    def _get_effective_mask_mod(self) -> _mask_mod_signature | None:
         """Return the mask_mod to use for block-mask materialization."""
 
         mask_mod = self.mask_mod
@@ -547,6 +623,56 @@ class FlexAttentionMetadata:
         if self.causal and (self.doc_ids is None or self.doc_ids.numel() == 0):
             return None
         return mask_mod
+
+    def _get_block_mask_during_capture(
+        self, cache_key: tuple[int, int], aligned_q_len: int, aligned_kv_len: int
+    ) -> BlockMask:
+        """Get block mask during CUDA graph capture using pre-allocated masks."""
+        cached = self.cached_block_masks.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if (self.block_mask_capacity is not None
+                and self.block_mask_capacity.seq_lengths[0] >= aligned_q_len
+                and self.block_mask_capacity.seq_lengths[1] >= aligned_kv_len):
+            mask = _slice_block_mask_capacity(
+                self.block_mask_capacity, aligned_q_len, aligned_kv_len
+            )
+            self.cached_block_masks[cache_key] = mask
+            return mask
+
+        if self.dummy_block_mask is not None:
+            logger.warning(
+                "Using dummy block_mask (%s) during CUDA graph capture for "
+                "requested lengths (%s, %s).",
+                self.dummy_block_mask.seq_lengths,
+                aligned_q_len,
+                aligned_kv_len,
+            )
+            return self.dummy_block_mask
+
+        raise RuntimeError(
+            "No suitable block_mask available during CUDA graph capture."
+        )
+
+    def _get_or_build_block_mask(
+        self, aligned_q_len: int, aligned_kv_len: int
+    ) -> BlockMask:
+        """Get block mask from capacity or build a new dense mask."""
+        if (
+            self.block_mask_capacity is not None
+            and self.block_mask_capacity.seq_lengths[0] >= aligned_q_len
+            and self.block_mask_capacity.seq_lengths[1] >= aligned_kv_len
+        ):
+            return _slice_block_mask_capacity(
+                self.block_mask_capacity, aligned_q_len, aligned_kv_len
+            )
+        else:
+            return self._build_dense_block_mask(
+                aligned_q_len,
+                aligned_kv_len,
+                self._get_effective_mask_mod(),
+            )
 
     def build_block_mask(self) -> BlockMask:
         mask_mod = self._get_effective_mask_mod()
@@ -580,7 +706,7 @@ class FlexAttentionMetadata:
         self,
         q_len: int,
         kv_len: int,
-        mask_mod: Optional[_mask_mod_signature],
+        mask_mod: _mask_mod_signature | None,
     ) -> BlockMask:
         """Create a dense block mask covering the provided logical lengths.
 
@@ -626,15 +752,40 @@ class FlexAttentionMetadata:
         q_len = max(int(q_len), 1)
         kv_len = max(int(kv_len), 1)
 
+        block_m = max(getattr(self, "q_block_size", 1), 1)
+        block_n = max(getattr(self, "kv_block_size", 1), 1)
+        aligned_q_len = max(1, cdiv(q_len, block_m)) * block_m
+        aligned_kv_len = max(1, cdiv(kv_len, block_n)) * block_n
+        cache_key = (aligned_q_len, aligned_kv_len)
+
+        capturing = (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+
+        if capturing:
+            return self._get_block_mask_during_capture(
+                cache_key, aligned_q_len, aligned_kv_len
+            )
+
+        # Non-capturing path: try to reuse existing mask first.
         current = self.block_mask
-        if (current is not None and current.seq_lengths[0] >= q_len
-                and current.seq_lengths[1] >= kv_len):
+        if (
+            current is not None
+            and current.seq_lengths[0] >= aligned_q_len
+            and current.seq_lengths[1] >= aligned_kv_len
+        ):
+            if current.seq_lengths != cache_key:
+                current = current._adjust(aligned_q_len, aligned_kv_len)
+            self.cached_block_masks[cache_key] = current
             return current
 
-        rebuilt: Optional[BlockMask] = None
-        if (self.doc_ids is not None and self.doc_ids.numel() > 0
-                and self.num_actual_tokens > 0
-                and self.total_cache_tokens > 0):
+        rebuilt: BlockMask | None = None
+        if (
+            self.doc_ids is not None
+            and self.doc_ids.numel() > 0
+            and self.num_actual_tokens > 0
+            and self.total_cache_tokens > 0
+        ):
             try:
                 if self.direct_build and self.causal:
                     rebuilt = self._build_block_mask_direct()
@@ -644,17 +795,21 @@ class FlexAttentionMetadata:
                 logger.warning(
                     "Failed to build block mask due to: %s. "
                     "Falling back to a dense block mask. "
-                    "This may impact performance.", e)
+                    "This may impact performance.",
+                    e,
+                )
                 rebuilt = None
 
         if rebuilt is None:
-            rebuilt = self._build_dense_block_mask(
-                q_len,
-                kv_len,
-                self._get_effective_mask_mod(),
+            rebuilt = self._get_or_build_block_mask(
+                aligned_q_len, aligned_kv_len
             )
 
+        if rebuilt.seq_lengths != cache_key:
+            rebuilt = rebuilt._adjust(aligned_q_len, aligned_kv_len)
+
         self.block_mask = rebuilt
+        self.cached_block_masks[cache_key] = rebuilt
         return rebuilt
 
     def __post_init__(self):
@@ -696,6 +851,7 @@ class FlexAttentionMetadataBuilder(
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
+        self.device = device
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config
@@ -784,6 +940,44 @@ class FlexAttentionMetadataBuilder(
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
         )
+
+        # Prepare reusable masks for CUDA graph compatibility.
+        q_block = max(self.q_block_size, 1)
+        kv_block = max(self.kv_block_size, 1)
+        conservative_capacity = max(
+            total_cache_tokens, max_possible_seq_len * 2048, 4_000_000
+        )
+
+        out.block_mask_capacity = _create_dense_block_mask(
+            q_block,
+            conservative_capacity,
+            self.q_block_size,
+            self.kv_block_size,
+            None,
+            self.device,
+        )
+        out.dummy_block_mask = _create_dense_block_mask(
+            q_block,
+            kv_block,
+            self.q_block_size,
+            self.kv_block_size,
+            None,
+            self.device,
+        )
+        out.cached_block_masks[out.dummy_block_mask.seq_lengths] = out.dummy_block_mask
+
+        if out.block_mask is not None:
+            out.cached_block_masks[out.block_mask.seq_lengths] = out.block_mask
+
+        # Seed cache with a mask matching the full KV cache capacity.
+        if (
+            out.block_mask_capacity.seq_lengths[1] >= total_cache_tokens
+        ):
+            full_capacity_mask = _slice_block_mask_capacity(
+                out.block_mask_capacity, q_block, total_cache_tokens
+            )
+            out.cached_block_masks[full_capacity_mask.seq_lengths] = full_capacity_mask
+
         return out
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -983,12 +1177,26 @@ class FlexAttentionImpl(AttentionImpl):
         block_mask = attn_metadata.ensure_block_mask_capacity(
             actual_q_len, actual_kv_len)
 
-        if block_mask.seq_lengths != (actual_q_len, actual_kv_len):
-            block_mask = block_mask._adjust(actual_q_len, actual_kv_len)
+        target_q_len, target_kv_len = block_mask.seq_lengths
+        original_num_actual_tokens = num_actual_tokens
+
+        if query.size(-2) < target_q_len:
+            pad_q = target_q_len - query.size(-2)
+            query = F.pad(query, (0, 0, 0, pad_q))
+        elif query.size(-2) > target_q_len:
+            query = query[:, :, :target_q_len, :]
+            num_actual_tokens = min(num_actual_tokens, target_q_len)
+
+        if key_tensor.size(-2) < target_kv_len:
+            pad_kv = target_kv_len - key_tensor.size(-2)
+            key_tensor = F.pad(key_tensor, (0, 0, 0, pad_kv))
+            value_tensor = F.pad(value_tensor, (0, 0, 0, pad_kv))
+        elif key_tensor.size(-2) > target_kv_len:
+            key_tensor = key_tensor[:, :, :target_kv_len, :]
+            value_tensor = value_tensor[:, :, :target_kv_len, :]
 
         attn_metadata.block_mask = block_mask
-        assert attn_metadata.block_mask is not None
-        block_m, block_n = attn_metadata.block_mask.BLOCK_SIZE
+        block_m, block_n = block_mask.BLOCK_SIZE
 
         kernel_options = get_kernel_options(
             query, block_m, block_n, attn_metadata.direct_build
@@ -1000,7 +1208,7 @@ class FlexAttentionImpl(AttentionImpl):
             key_tensor,
             value_tensor,
             attn_metadata.transformed_score_mod,
-            attn_metadata.block_mask,
+            block_mask,
             self.scale,
             enable_gqa=enable_gqa,
             kernel_options=kernel_options,
@@ -1009,7 +1217,9 @@ class FlexAttentionImpl(AttentionImpl):
         # Flex doesn't have an out variant today, rely on epilogue fusion
         out = out.permute(0, 2, 1, 3).squeeze(0)
 
-        output[:num_actual_tokens, :, :].copy_(out)
+        output[:original_num_actual_tokens, :, :].copy_(
+            out[:original_num_actual_tokens]
+        )
         return output
 
 
