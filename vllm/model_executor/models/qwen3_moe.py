@@ -26,10 +26,11 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from torch import nn
+from vllm.platforms import current_platform
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -76,6 +77,7 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+device_module = torch.get_device_module()
 
 
 class Qwen3MoeMLP(nn.Module):
@@ -224,6 +226,7 @@ class Qwen3MoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        alt_stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -293,6 +296,7 @@ class Qwen3MoeAttention(nn.Module):
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.alt_stream = alt_stream
 
     def forward(
         self,
@@ -302,13 +306,25 @@ class Qwen3MoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
+        if self.alt_stream is not None:
+            current_stream = device_module.current_stream()
+            self.alt_stream.wait_stream(current_stream)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_by_head = self.q_norm(q_by_head)
+            q = q_by_head.view(q.shape)
+            with device_module.stream(self.alt_stream):
+                k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+                k_by_head = self.k_norm(k_by_head)
+                k = k_by_head.view(k.shape)
+            current_stream.wait_stream(self.alt_stream)
+        else:
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_by_head = self.q_norm(q_by_head)
+            q = q_by_head.view(q.shape)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            k_by_head = self.k_norm(k_by_head)
+            k = k_by_head.view(k.shape)
 
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -316,7 +332,8 @@ class Qwen3MoeAttention(nn.Module):
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "",
+                 alt_stream: Optional[torch.cuda.Stream] = None,) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -344,6 +361,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             dual_chunk_attention_config=dual_chunk_attention_config,
+            alt_stream=alt_stream,
         )
 
         # `mlp_only_layers` in the config.
@@ -413,9 +431,12 @@ class Qwen3MoeModel(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
+        alt_stream = None
+        if current_platform.is_cuda() or current_platform.is_out_of_tree():
+            alt_stream = device_module.Stream()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Qwen3MoeDecoderLayer(vllm_config=vllm_config, prefix=prefix),
+            lambda prefix: Qwen3MoeDecoderLayer(vllm_config=vllm_config, prefix=prefix, alt_stream=alt_stream),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

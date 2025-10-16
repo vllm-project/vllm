@@ -27,11 +27,12 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from torch import nn
 from transformers import Qwen2Config
+from vllm.platforms import current_platform
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
@@ -297,6 +298,7 @@ class Qwen2Model(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         decoder_layer_type: type[nn.Module] = Qwen2DecoderLayer,
+        alt_stream: Optional[torch.cuda.Stream] = None,
     ):
         super().__init__()
 
@@ -341,6 +343,7 @@ class Qwen2Model(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                alt_stream=alt_stream,
             ),
             prefix=f"{prefix}.layers",
         )
