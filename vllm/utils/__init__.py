@@ -8,8 +8,6 @@ import gc
 import getpass
 import hashlib
 import importlib
-import importlib.metadata
-import importlib.util
 import inspect
 import ipaddress
 import json
@@ -799,8 +797,6 @@ def find_nccl_include_paths() -> list[str] | None:
         paths.append(inc)
 
     try:
-        import importlib.util
-
         spec = importlib.util.find_spec("nvidia.nccl")
         if spec and getattr(spec, "submodule_search_locations", None):
             for loc in spec.submodule_search_locations:
