@@ -8,7 +8,6 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -213,8 +212,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
-@dataclass
-class ExecuteModelState:
+class ExecuteModelState(NamedTuple):
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None
@@ -2596,23 +2594,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        execute_model_state = self.execute_model_state
-        if execute_model_state is None:
+        if self.execute_model_state is None:
             raise RuntimeError(
                 "State error: sample_tokens() must only be called "
                 "after execute_model() returns None"
             )
+        # Unpack ephemeral state.
+        (
+            scheduler_output,
+            logits,
+            spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            hidden_states,
+            sample_hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+        ) = self.execute_model_state
+        # Clear ephemeral state.
         self.execute_model_state = None
-        scheduler_output = execute_model_state.scheduler_output
-        logits = execute_model_state.logits
-        spec_decode_metadata = execute_model_state.spec_decode_metadata
-        spec_decode_common_attn_metadata = (
-            execute_model_state.spec_decode_common_attn_metadata
-        )
-        hidden_states = execute_model_state.hidden_states
-        aux_hidden_states = execute_model_state.aux_hidden_states
-        sample_hidden_states = execute_model_state.sample_hidden_states
-        kv_connector_output = execute_model_state.kv_connector_output
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
