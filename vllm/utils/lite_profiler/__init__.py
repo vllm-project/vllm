@@ -3,11 +3,11 @@
 """Lightweight profiler for timing code execution with minimal overhead."""
 
 from vllm.utils.lite_profiler.lite_profiler import (
-    LiteScope,
+    LiteProfilerScope,
     maybe_emit_lite_profiler_report,
 )
 
 __all__ = [
-    "LiteScope",
+    "LiteProfilerScope",
     "maybe_emit_lite_profiler_report",
 ]

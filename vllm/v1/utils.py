@@ -26,7 +26,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils import kill_process_tree
-from vllm.utils.lite_profiler.lite_profiler import LiteScope
+from vllm.utils.lite_profiler.lite_profiler import LiteProfilerScope
 from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
 
 if TYPE_CHECKING:
@@ -389,7 +389,7 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
 
     func = contextlib.nullcontext
     if envs.VLLM_LITE_PROFILER_LOG_PATH:
-        func = LiteScope
+        func = LiteProfilerScope
     elif envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
         func = record_function
     elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
