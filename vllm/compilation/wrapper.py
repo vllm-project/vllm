@@ -22,6 +22,12 @@ class TorchCompileGuardsStripWrapper:
     since we drop all guards.
     """
 
+    def check_invariantes_and_forward(self, *args, **kwargs):
+        assert hasattr(self, "_check_shape_invariants")
+        self._check_shape_invariants(*args, **kwargs)
+
+        return self.forward(*args, **kwargs)
+
     def __init__(self):
         self.compiled = False
 
@@ -50,7 +56,7 @@ class TorchCompileGuardsStripWrapper:
                 logger.warning(msg)
 
         self._compiled_callable = torch.compile(
-            self.forward,
+            self.check_invariantes_and_forward,
             fullgraph=True,
             backend=backend,
             options=options,

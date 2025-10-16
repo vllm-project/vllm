@@ -137,6 +137,97 @@ class PassConfig:
                 )
 
 
+"""
+Note on dynamic shapes guard-dropping and reliability:
+=====================================================
+torch.compile() is designed to guard on dynamic shapes with no hesitation
+when needed. This contradicts with vLLM's torch.compile() approach of
+dropping the guards since many of those guards could be material.
+
+torch.compile() provides two kinds of dynamic shapes: backed and unbacked.
+torch.compile() guards on backed dynamic shapes and does not provide a
+guarantee that no guards will be added to them. User code, dynamo,
+inductor, and autograd all can add guards. Moreover, for 0/1
+specializations, backed symbols are specialized unconditionally to 0, 1,
+or >2 even without encountering a branching on those ranges.
+
+On the contrary, unbacked dynamic shapes are guaranteed not to be guarded
+on and are not 0/1 specialized. However, there is a possibility of
+throwing a data dependent error when a branch that requires their value is
+encountered and no explicit unbacked handling is defined. The framework is
+converging to a state where it won't throw DDE but rather pick general
+paths. One downside of using unbacked is missed optimization opportunities
+due to either perf bugs or picking general paths, also using a fixed
+non-example input-based hint (this will be fixed soon with override_hint
+API). An example of picking general paths is assuming input not contiguous
+in functions call contiguous() and reshape() when can't be symbolically proven
+with a change of introducing a clone.
+
+backed_size_oblivious is a flag that enables treating backed symbols as
+unbacked wherever explicit handling for unbacked is defined. With this
+mode, 0/1 specializations are mostly avoided in framework code and the
+default 0/1 specialization does not happen. However, there is still no
+guarantee that torch.compile won't guard, especially due to user code or
+custom passes. backed_size_oblivious is experimental in PyTorch compile
+and could be deprecated. That said, it's a safer option to use than
+backed and the probability of reducing performance is lower than
+unbacked.
+"""
+
+
+class DynamicShapesType(str, enum.Enum):
+    """Types of dynamic shapes handling in torch.compile()."""
+
+    BACKED = "backed"
+    """Use backed dynamic shapes. torch.compile() guards on backed dynamic
+    shapes and may add guards. Symbols are specialized to 0, 1, or >2 even
+    without encountering branching on those ranges."""
+
+    UNBACKED = "unbacked"
+    """Use unbacked dynamic shapes. Guaranteed not to be guarded on and not
+    0/1 specialized, but may throw data dependent errors when branches require
+    their value without explicit unbacked handling."""
+
+    BACKED_SIZE_OBLIVIOUS = "backed_size_oblivious"
+    """Experimental flag that treats backed symbols as unbacked when explicit
+    unbacked handling is defined."""
+
+
+@config
+@dataclass
+class DynamicShapesConfig:
+    """Configuration to control/debug torch compile dynamic shapes."""
+
+    dynamic_shapes_type: DynamicShapesType = DynamicShapesType.UNBACKED
+    """Controls the type of dynamic shapes handling to use with torch.compile().
+
+    - BACKED: Default PyTorch behavior with potential guards ignored.
+    - UNBACKED: No guards guaranteed (most sound) but may throw
+      data dependent errors.
+    - BACKED_SIZE_OBLIVIOUS: Experimental safer alternative to
+      backed/unbacked.
+    """
+
+    # TODO add a debug mode to fail
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: list[Any] = []
+        factors.append(self.dynamic_shapes_type.value)
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        return hash_str
+
+
 @config
 @dataclass
 class CompilationConfig:
@@ -274,14 +365,17 @@ class CompilationConfig:
 
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
+    # TODO move this inside dynamic shapes config.
     """
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
+
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
+
     inductor_passes: dict[str, str] = field(default_factory=dict)
     """Additional passes for inductor. It is a dictionary
     from pass name to pass function qualified name. We use function
@@ -307,23 +401,23 @@ class CompilationConfig:
     FULL mode: Capture full cudagraph for all batches. Can be good for small
     models or workloads with small prompts; not supported by many backends.
     Generally for performance FULL_AND_PIECEWISE is better.
-    
+
     FULL_DECODE_ONLY mode: Capture full cudagraph for decode batches only.
     Mixed prefill-decode batches are run without cudagraphs. Can be good for
     decode instances in a P/D setup where prefill is not as important so we
     can save some memory.
-    
+
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
     This is the most performant mode for most models and is the default.
 
     Currently, the cudagraph mode is only used for the v1 engine.
-    Note that the cudagraph logic is generally orthogonal to the 
-    compilation logic. While piecewise cudagraphs require piecewise 
+    Note that the cudagraph logic is generally orthogonal to the
+    compilation logic. While piecewise cudagraphs require piecewise
     compilation (mode=VLLM_COMPILE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
-    
-    Warning: This flag is new and subject to change in addition 
+
+    Warning: This flag is new and subject to change in addition
     more modes may be added.
     """
     use_cudagraph: bool = True
@@ -354,7 +448,7 @@ class CompilationConfig:
     cudagraph. If the caller can guarantee that the same input buffers
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False. 
+    internally managed buffer. Default is False.
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
     full_cuda_graph: bool | None = False
@@ -383,7 +477,7 @@ class CompilationConfig:
     outside the partition functions. For a graph with N cudagraph-unsafe ops
     (e.g., Attention), there would be N+1 partitions. To mark an op as
     cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
-    register the custom op. 
+    register the custom op.
 
     This config supports both full cudagraph and piecewise cudagraph without
     compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
@@ -397,6 +491,11 @@ class CompilationConfig:
 
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
+
+    dynamic_shapes_config: DynamicShapesConfig = field(
+        default_factory=DynamicShapesConfig
+    )
+    """Configuration for dynamic shapes options"""
 
     max_capture_size: int = field(default=None, init=False)  # type: ignore
     """not configurable, computed after init"""
@@ -464,6 +563,8 @@ class CompilationConfig:
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
+        factors.append(self.pass_config.uuid())
+        factors.append(self.dynamic_shapes_config.compute_hash())
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __repr__(self) -> str:
