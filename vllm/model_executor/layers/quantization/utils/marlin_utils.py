@@ -75,6 +75,9 @@ def _check_marlin_supported(
     has_zp: bool,
     device_capability: int | None = None,
 ) -> tuple[bool, str | None]:
+    if current_platform.is_rocm():
+        return False, "Marlin quantization is not supported on ROCm platform."
+
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
         device_capability = (
@@ -174,6 +177,9 @@ def check_marlin_supports_shape(
 
 
 def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+    # Marlin is not available on ROCm
+    if current_platform.is_rocm():
+        return False
     output_size_per_partition = (
         getattr(layer, "output_size_per_partition", None) or layer.output_size
     )
