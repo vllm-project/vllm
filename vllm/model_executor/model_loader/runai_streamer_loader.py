@@ -3,7 +3,6 @@
 # ruff: noqa: SIM117
 import os
 from collections.abc import Generator
-from typing import Optional
 
 import torch
 from torch import nn
@@ -51,7 +50,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
 
     def _prepare_weights(
-        self, model_name_or_path: str, revision: Optional[str]
+        self, model_name_or_path: str, revision: str | None
     ) -> list[str]:
         """Prepare weights for the model.
 

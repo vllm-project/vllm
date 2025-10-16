@@ -3,7 +3,6 @@
 
 import inspect
 from collections.abc import Sequence
-from typing import Optional
 
 import numpy as np
 import pytest
@@ -170,6 +169,7 @@ def _construct_expected_sampling_metadata(
             repetition_penalties, dtype=torch.float, device=device
         ),
         output_token_ids=output_token_ids,
+        spec_token_ids=[[] for _ in range(len(output_token_ids))],
         no_penalties=(
             all(x == 0 for x in presence_penalties)
             and all(x == 0 for x in frequency_penalties)
@@ -240,6 +240,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}
@@ -269,7 +270,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         reqs, req_ids_retained, input_batch.req_id_to_index, device=torch.device(device)
     )
 
-    def same(t1: Optional[torch.Tensor], t2: Optional[torch.Tensor]) -> bool:
+    def same(t1: torch.Tensor | None, t2: torch.Tensor | None) -> bool:
         return (t1 is None and t2 is None) or (
             t1 is not None and t2 is not None and torch.allclose(t1, t2)
         )
@@ -334,6 +335,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
     ref_input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
@@ -343,6 +345,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
 
     reqs: list[CachedRequestState] = []

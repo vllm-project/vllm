@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from collections.abc import Callable
 from functools import cache
 from importlib.util import find_spec
-from typing import Callable, Optional
 
 import torch
 
@@ -72,7 +72,7 @@ def apply_rotary_emb_dispatch(
 
 @cache
 def dispatch_rotary_emb_function(
-    default: Optional[Callable[..., torch.Tensor]] = None,
+    default: Callable[..., torch.Tensor] | None = None,
 ) -> Callable[..., torch.Tensor]:
     if current_platform.is_cuda():
         return apply_rotary_emb

@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 
-import asyncio
 import hashlib
 import json
 import os
 import pickle
 import socket
 import tempfile
-from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,17 +21,13 @@ from vllm_test_utils.monitor import monitor
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 
-# isort: off
 from vllm.utils import (
-    CacheInfo,
     FlexibleArgumentParser,
-    LRUCache,
     MemorySnapshot,
     PlaceholderModule,
     bind_kv_cache,
     common_broadcastable_dtype,
     current_stream,
-    deprecate_kwargs,
     get_open_port,
     get_tcp_uri,
     is_lossless_cast,
@@ -41,106 +35,13 @@ from vllm.utils import (
     make_zmq_path,
     make_zmq_socket,
     memory_profiling,
-    merge_async_iterators,
     sha256,
     split_host_port,
     split_zmq_path,
-    supports_kw,
-    swap_dict_values,
     unique_filepath,
 )
 
-# isort: on
-from ..utils import create_new_process_for_each_test, error_on_warning
-
-
-@pytest.mark.asyncio
-async def test_merge_async_iterators():
-    async def mock_async_iterator(idx: int):
-        try:
-            while True:
-                yield f"item from iterator {idx}"
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            print(f"iterator {idx} cancelled")
-
-    iterators = [mock_async_iterator(i) for i in range(3)]
-    merged_iterator = merge_async_iterators(*iterators)
-
-    async def stream_output(generator: AsyncIterator[tuple[int, str]]):
-        async for idx, output in generator:
-            print(f"idx: {idx}, output: {output}")
-
-    task = asyncio.create_task(stream_output(merged_iterator))
-    await asyncio.sleep(0.5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    for iterator in iterators:
-        try:
-            # Can use anext() in python >= 3.10
-            await asyncio.wait_for(iterator.__anext__(), 1)
-        except StopAsyncIteration:
-            # All iterators should be cancelled and print this message.
-            print("Iterator was cancelled normally")
-        except (Exception, asyncio.CancelledError) as e:
-            raise AssertionError() from e
-
-
-def test_deprecate_kwargs_always():
-    @deprecate_kwargs("old_arg", is_deprecated=True)
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with pytest.warns(DeprecationWarning, match="'old_arg'"):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-
-def test_deprecate_kwargs_never():
-    @deprecate_kwargs("old_arg", is_deprecated=False)
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with error_on_warning(DeprecationWarning):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-
-def test_deprecate_kwargs_dynamic():
-    is_deprecated = True
-
-    @deprecate_kwargs("old_arg", is_deprecated=lambda: is_deprecated)
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with pytest.warns(DeprecationWarning, match="'old_arg'"):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-    is_deprecated = False
-
-    with error_on_warning(DeprecationWarning):
-        dummy(old_arg=1)
-
-    with error_on_warning(DeprecationWarning):
-        dummy(new_arg=1)
-
-
-def test_deprecate_kwargs_additional_message():
-    @deprecate_kwargs("old_arg", is_deprecated=True, additional_message="abcd")
-    def dummy(*, old_arg: object = None, new_arg: object = None):
-        pass
-
-    with pytest.warns(DeprecationWarning, match="abcd"):
-        dummy(old_arg=1)
+from ..utils import create_new_process_for_each_test
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -304,7 +205,7 @@ def test_dict_args(parser):
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
-        # Test compile config and compilation level
+        # Test compile config and compilation mode
         "-O.use_inductor=true",
         "-O.backend",
         "custom",
@@ -357,7 +258,7 @@ def test_dict_args(parser):
         },
     }
     assert parsed_args.compilation_config == {
-        "level": 1,
+        "mode": 1,
         "use_inductor": True,
         "backend": "custom",
         "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
@@ -372,7 +273,7 @@ def test_duplicate_dict_args(caplog_vllm, parser):
         "--hf-overrides.key1",
         "val2",
         "-O1",
-        "-O.level",
+        "-O.mode",
         "2",
         "-O3",
     ]
@@ -380,45 +281,12 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     parsed_args = parser.parse_args(args)
     # Should be the last value
     assert parsed_args.hf_overrides == {"key1": "val2"}
-    assert parsed_args.compilation_config == {"level": 3}
+    assert parsed_args.compilation_config == {"mode": 3}
 
     assert len(caplog_vllm.records) == 1
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
-    assert "-O.level" in caplog_vllm.text
-
-
-@pytest.mark.parametrize(
-    "callable,kw_name,requires_kw_only,allow_var_kwargs,is_supported",
-    [
-        # Tests for positional argument support
-        (lambda foo: None, "foo", True, True, False),
-        (lambda foo: None, "foo", False, True, True),
-        # Tests for positional or keyword / keyword only
-        (lambda foo=100: None, "foo", True, True, False),
-        (lambda *, foo: None, "foo", False, True, True),
-        # Tests to make sure the names of variadic params are NOT supported
-        (lambda *args: None, "args", False, True, False),
-        (lambda **kwargs: None, "kwargs", False, True, False),
-        # Tests for if we allow var kwargs to add support
-        (lambda foo: None, "something_else", False, True, False),
-        (lambda foo, **kwargs: None, "something_else", False, True, True),
-        (lambda foo, **kwargs: None, "kwargs", True, True, False),
-        (lambda foo, **kwargs: None, "foo", True, True, False),
-    ],
-)
-def test_supports_kw(
-    callable, kw_name, requires_kw_only, allow_var_kwargs, is_supported
-):
-    assert (
-        supports_kw(
-            callable=callable,
-            kw_name=kw_name,
-            requires_kw_only=requires_kw_only,
-            allow_var_kwargs=allow_var_kwargs,
-        )
-        == is_supported
-    )
+    assert "-O.mode" in caplog_vllm.text
 
 
 @create_new_process_for_each_test()
@@ -557,128 +425,6 @@ def test_bind_kv_cache_pp():
         assert ctx["layers.0.self_attn"].kv_cache[1] is kv_cache[1][0]
 
 
-class TestLRUCache(LRUCache):
-    def _on_remove(self, key, value):
-        if not hasattr(self, "_remove_counter"):
-            self._remove_counter = 0
-        self._remove_counter += 1
-
-
-def test_lru_cache():
-    cache = TestLRUCache(3)
-    assert cache.stat() == CacheInfo(hits=0, total=0)
-    assert cache.stat(delta=True) == CacheInfo(hits=0, total=0)
-
-    cache.put(1, 1)
-    assert len(cache) == 1
-
-    cache.put(1, 1)
-    assert len(cache) == 1
-
-    cache.put(2, 2)
-    assert len(cache) == 2
-
-    cache.put(3, 3)
-    assert len(cache) == 3
-    assert set(cache.cache) == {1, 2, 3}
-
-    cache.put(4, 4)
-    assert len(cache) == 3
-    assert set(cache.cache) == {2, 3, 4}
-    assert cache._remove_counter == 1
-
-    assert cache.get(2) == 2
-    assert cache.stat() == CacheInfo(hits=1, total=1)
-    assert cache.stat(delta=True) == CacheInfo(hits=1, total=1)
-
-    assert cache[2] == 2
-    assert cache.stat() == CacheInfo(hits=2, total=2)
-    assert cache.stat(delta=True) == CacheInfo(hits=1, total=1)
-
-    cache.put(5, 5)
-    assert set(cache.cache) == {2, 4, 5}
-    assert cache._remove_counter == 2
-
-    assert cache.pop(5) == 5
-    assert len(cache) == 2
-    assert set(cache.cache) == {2, 4}
-    assert cache._remove_counter == 3
-
-    assert cache.get(-1) is None
-    assert cache.stat() == CacheInfo(hits=2, total=3)
-    assert cache.stat(delta=True) == CacheInfo(hits=0, total=1)
-
-    cache.pop(10)
-    assert len(cache) == 2
-    assert set(cache.cache) == {2, 4}
-    assert cache._remove_counter == 3
-
-    cache.get(10)
-    assert len(cache) == 2
-    assert set(cache.cache) == {2, 4}
-    assert cache._remove_counter == 3
-
-    cache.put(6, 6)
-    assert len(cache) == 3
-    assert set(cache.cache) == {2, 4, 6}
-    assert 2 in cache
-    assert 4 in cache
-    assert 6 in cache
-
-    cache.remove_oldest()
-    assert len(cache) == 2
-    assert set(cache.cache) == {2, 6}
-    assert cache._remove_counter == 4
-
-    cache.clear()
-    assert len(cache) == 0
-    assert cache._remove_counter == 6
-    assert cache.stat() == CacheInfo(hits=0, total=0)
-    assert cache.stat(delta=True) == CacheInfo(hits=0, total=0)
-
-    cache._remove_counter = 0
-
-    cache[1] = 1
-    assert len(cache) == 1
-
-    cache[1] = 1
-    assert len(cache) == 1
-
-    cache[2] = 2
-    assert len(cache) == 2
-
-    cache[3] = 3
-    assert len(cache) == 3
-    assert set(cache.cache) == {1, 2, 3}
-
-    cache[4] = 4
-    assert len(cache) == 3
-    assert set(cache.cache) == {2, 3, 4}
-    assert cache._remove_counter == 1
-    assert cache[2] == 2
-
-    cache[5] = 5
-    assert set(cache.cache) == {2, 4, 5}
-    assert cache._remove_counter == 2
-
-    del cache[5]
-    assert len(cache) == 2
-    assert set(cache.cache) == {2, 4}
-    assert cache._remove_counter == 3
-
-    cache.pop(10)
-    assert len(cache) == 2
-    assert set(cache.cache) == {2, 4}
-    assert cache._remove_counter == 3
-
-    cache[6] = 6
-    assert len(cache) == 3
-    assert set(cache.cache) == {2, 4, 6}
-    assert 2 in cache
-    assert 4 in cache
-    assert 6 in cache
-
-
 @pytest.mark.parametrize(
     ("src_dtype", "tgt_dtype", "expected_result"),
     [
@@ -767,30 +513,6 @@ def test_placeholder_module_error_handling():
     with build_ctx():
         # Test conflict with internal __module attribute
         _ = placeholder_attr.module
-
-
-@pytest.mark.parametrize(
-    "obj,key1,key2",
-    [
-        # Tests for both keys exist
-        ({1: "a", 2: "b"}, 1, 2),
-        # Tests for one key does not exist
-        ({1: "a", 2: "b"}, 1, 3),
-        # Tests for both keys do not exist
-        ({1: "a", 2: "b"}, 3, 4),
-    ],
-)
-def test_swap_dict_values(obj, key1, key2):
-    original_obj = obj.copy()
-    swap_dict_values(obj, key1, key2)
-    if key1 in original_obj:
-        assert obj[key2] == original_obj[key1]
-    else:
-        assert key2 not in obj
-    if key2 in original_obj:
-        assert obj[key1] == original_obj[key2]
-    else:
-        assert key1 not in obj
 
 
 def test_model_specification(
@@ -988,36 +710,6 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
-
-
-def test_json_count_leaves():
-    """Test json_count_leaves function from jsontree utility."""
-    from vllm.utils.jsontree import json_count_leaves
-
-    # Single leaf values
-    assert json_count_leaves(42) == 1
-    assert json_count_leaves("hello") == 1
-    assert json_count_leaves(None) == 1
-
-    # Empty containers
-    assert json_count_leaves([]) == 0
-    assert json_count_leaves({}) == 0
-    assert json_count_leaves(()) == 0
-
-    # Flat structures
-    assert json_count_leaves([1, 2, 3]) == 3
-    assert json_count_leaves({"a": 1, "b": 2}) == 2
-    assert json_count_leaves((1, 2, 3)) == 3
-
-    # Nested structures
-    nested_dict = {"a": 1, "b": {"c": 2, "d": 3}}
-    assert json_count_leaves(nested_dict) == 3
-
-    nested_list = [1, [2, 3], 4]
-    assert json_count_leaves(nested_list) == 4
-
-    mixed_nested = {"list": [1, 2], "dict": {"x": 3}, "value": 4}
-    assert json_count_leaves(mixed_nested) == 4
 
 
 def test_convert_ids_list_to_tokens():
