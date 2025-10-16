@@ -31,7 +31,6 @@ from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -223,6 +222,8 @@ class LightOnOCRMultiModalProjector(Mistral3MultiModalProjector):
 class LightOnOCRForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -288,7 +289,7 @@ class LightOnOCRForConditionalGeneration(
             return None
 
         return LightOnOCRImagePixelInputs(
-            type="pixel_values_pixtral", pixel_values=flatten_bn(pixel_values)
+            type="pixel_values_pixtral", pixel_values=pixel_values
         )
 
     def _process_image_input(self, image_input: LightOnOCRImagePixelInputs):
