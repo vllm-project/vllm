@@ -243,6 +243,8 @@ ARG DEEPGEMM_GIT_REF
 COPY --chmod=755 tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} --wheel-dir /tmp/deepgemm/dist
+# Ensure the wheel dir exists so later-stage COPY won't fail when DeepGEMM is skipped
+RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
 # Build EP kernels wheels (pplx-kernels and DeepEP)
 COPY --chmod=755 tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
@@ -374,7 +376,11 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # Install deepgemm wheel that has been built in the `build` stage
 COPY --from=build /tmp/deepgemm/dist /tmp/deepgemm/dist
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /tmp/deepgemm/dist/*.whl
+    sh -c 'if ls /tmp/deepgemm/dist/*.whl >/dev/null 2>&1; then \
+              uv pip install --system /tmp/deepgemm/dist/*.whl; \
+           else \
+              echo "No DeepGEMM wheels to install; skipping."; \
+           fi'
 
 # Copy nvshmem binary that has been downloaded in the `build` stage
 COPY --from=build /tmp/ep_kernels_workspace/nvshmem /opt/nvshmem
