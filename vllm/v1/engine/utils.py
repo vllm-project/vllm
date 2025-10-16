@@ -20,7 +20,13 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx, make_zmq_socket, generate_identity
+from vllm.utils import (
+    generate_identity,
+    get_mp_context,
+    get_open_zmq_ipc_path,
+    make_zmq_socket,
+    zmq_socket_ctx,
+)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
@@ -113,8 +119,13 @@ class CoreEngineProcManager:
         if fault_report_address:
             zmq_ctx = zmq.Context()
             identity = generate_identity()
-            self.engine_down_socket = make_zmq_socket(ctx=zmq_ctx, path=fault_report_address, socket_type=zmq.DEALER,
-                                                      bind=True, identity=identity)
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=fault_report_address,
+                socket_type=zmq.DEALER,
+                bind=True,
+                identity=identity,
+            )
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
@@ -157,10 +168,12 @@ class CoreEngineProcManager:
     def _report_engine_dead(self, dead_message):
         """Send engine dead message to ClientGuard"""
         try:
-            self.engine_down_socket.send_multipart([
-                b'',  # Empty frame separator
-                dead_message.encode('utf-8')
-            ])
+            self.engine_down_socket.send_multipart(
+                [
+                    b"",  # Empty frame separator
+                    dead_message.encode("utf-8"),
+                ]
+            )
             logger.info("Sent message to ClientGuard: %s", dead_message)
         except Exception as e:
             logger.error("Failed to send message: %s", e)
