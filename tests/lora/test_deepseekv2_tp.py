@@ -35,6 +35,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     for i in range(len(expected_lora_output)):
         assert generated_texts[i].startswith(expected_lora_output[i])
 
+
 def test_deepseekv2_lora(deepseekv2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
@@ -47,7 +48,7 @@ def test_deepseekv2_lora(deepseekv2_lora_files):
         trust_remote_code=True,
         enable_chunked_prefill=True,
     )
-    generate_and_test(llm,deepseekv2_lora_files,1)
+    generate_and_test(llm, deepseekv2_lora_files, 1)
 
 
 def test_deepseekv2(deepseekv2_lora_files):
@@ -61,7 +62,7 @@ def test_deepseekv2(deepseekv2_lora_files):
         enforce_eager=True,
         trust_remote_code=True,
     )
-    generate_and_test(llm,deepseekv2_lora_files,1)
+    generate_and_test(llm, deepseekv2_lora_files, 1)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -75,9 +76,9 @@ def test_deepseekv2_tp2(deepseekv2_lora_files):
         max_loras=1,
         enforce_eager=True,
         trust_remote_code=True,
-        tensor_parallel_size=2
+        tensor_parallel_size=2,
     )
-    generate_and_test(llm,deepseekv2_lora_files,2)
+    generate_and_test(llm, deepseekv2_lora_files, 2)
 
 
 @multi_gpu_test(num_gpus=4)
@@ -91,9 +92,6 @@ def test_deepseekv2_tp4(deepseekv2_lora_files):
         max_loras=1,
         enforce_eager=True,
         trust_remote_code=True,
-        tensor_parallel_size=4
+        tensor_parallel_size=4,
     )
-    generate_and_test(llm,deepseekv2_lora_files,2)
-
-
-
+    generate_and_test(llm, deepseekv2_lora_files, 2)

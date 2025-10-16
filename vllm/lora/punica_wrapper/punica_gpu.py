@@ -301,7 +301,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         pad_sorted_ids: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Aligns tokens and experts into block-sized chunks for LoRA-based 
+        Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
         """
         max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)

@@ -20,6 +20,9 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -419,6 +422,10 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
+        # Enable batch invariance settings if requested
+        if vllm_kernel_override_batch_invariant():
+            self.enforce_eager = True
+
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -1202,6 +1209,23 @@ class ModelConfig:
                 "Supported models implement the `SupportsPP` interface."
             )
 
+        decode_context_parallel_size = parallel_config.decode_context_parallel_size
+        if decode_context_parallel_size > 1 and not self.use_mla:
+            total_num_kv_heads = self.get_total_num_kv_heads()
+            assert tensor_parallel_size > total_num_kv_heads, (
+                f"tensor parallel size {tensor_parallel_size} must be greater "
+                f"than total num kv heads {total_num_kv_heads} when enable "
+                f"decode context parallel for GQA/MQA"
+            )
+
+            max_dcp_size = tensor_parallel_size // total_num_kv_heads
+            assert decode_context_parallel_size <= max_dcp_size, (
+                f"decode context parallel size must less than or equal to "
+                f"(tensor parallel size {tensor_parallel_size} // total "
+                f"num kv heads {total_num_kv_heads}) = {max_dcp_size}, "
+                f"but got {decode_context_parallel_size}"
+            )
+
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
         return getattr(self.hf_text_config, "sliding_window", None)
@@ -1623,10 +1647,6 @@ class ModelConfig:
         return self._model_info.has_inner_state
 
     @property
-    def is_v1_compatible(self) -> bool:
-        return not self._model_info.supports_v0_only
-
-    @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
@@ -1824,18 +1844,18 @@ def _find_dtype(
     *,
     revision: str | None,
 ):
-    # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
-    # because config.torch_dtype can be None.
-    config_dtype = getattr(config, "torch_dtype", None)
+    # NOTE: getattr(config, "dtype", torch.float32) is not correct
+    # because config.dtype can be None.
+    config_dtype = getattr(config, "dtype", None)
 
     # Fallbacks for multi-modal models if the root config
-    # does not define torch_dtype
+    # does not define dtype
     if config_dtype is None:
-        config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
+        config_dtype = getattr(config.get_text_config(), "dtype", None)
     if config_dtype is None and hasattr(config, "vision_config"):
-        config_dtype = getattr(config.vision_config, "torch_dtype", None)
+        config_dtype = getattr(config.vision_config, "dtype", None)
     if config_dtype is None and hasattr(config, "encoder_config"):
-        config_dtype = getattr(config.encoder_config, "torch_dtype", None)
+        config_dtype = getattr(config.encoder_config, "dtype", None)
 
     # Try to read the dtype of the weights if they are in safetensors format
     if config_dtype is None:

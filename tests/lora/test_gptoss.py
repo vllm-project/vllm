@@ -28,6 +28,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
+
 # FIXME: Load gpt-oss adapter
 def test_gptoss20b_lora(gptoss20b_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
@@ -40,9 +41,9 @@ def test_gptoss20b_lora(gptoss20b_lora_files):
     )
 
     expected_lora_output = [
-       'I am an AI language model developed by OpenAI. '
-       'I am here to help you with any questions or '
-       'tasks you may have.'
+        "I am an AI language model developed by OpenAI. "
+        "I am here to help you with any questions or "
+        "tasks you may have."
     ]
 
     output1 = do_sample(llm, gptoss20b_lora_files, lora_id=1)
