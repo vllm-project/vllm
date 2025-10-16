@@ -16,6 +16,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.load import LoadConfig
+from vllm.config.optimization import build_defaults
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel
 from vllm.model_executor.layers.pooler import PoolingType
@@ -591,7 +592,7 @@ def test_vllm_config_defaults_are_none():
     config = object.__new__(VllmConfig)
     # Construct CompilationConfig with __post_init__.
     config.compilation_config = CompilationConfig()
-    default_config = config._build_defaults()
+    default_config = build_defaults(optimization_level=config.optimization_level)
     # Apply optimization level default if not set by user.
     for k, v in default_config["general"].items():
         if k == "pass_config":
@@ -629,6 +630,7 @@ def test_vllm_config_defaults_are_none():
     ],
 )
 def test_vllm_conifg_defaults(model_id, optimization_level):
+    model_config = None
     if model_id is not None:
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
@@ -637,7 +639,9 @@ def test_vllm_conifg_defaults(model_id, optimization_level):
     else:
         vllm_config = VllmConfig(optimization_level=optimization_level)
 
-    default_config = vllm_config._build_defaults()
+    default_config = build_defaults(
+        optimization_level=vllm_config.optimization_level, model_config=model_config
+    )
     for k, v in default_config["general"].items():
         if k == "pass_config":
             for pass_k, pass_v in default_config["general"]["pass_config"].items():
