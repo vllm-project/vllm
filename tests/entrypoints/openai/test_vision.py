@@ -34,7 +34,7 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
     [
         "The image shows a Venn diagram with three over",
-        "This image shows a Venn diagram with three over",
+        "The image shows a colorful Venn diagram with",
     ],
     [
         "This image displays a gradient of colors ranging from",
