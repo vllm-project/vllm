@@ -29,7 +29,7 @@ from vllm.utils import (
     get_open_zmq_inproc_path,
     make_zmq_socket,
 )
-from vllm.utils.async_utils import in_loop
+from vllm.utils.asyncio import in_loop
 from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
