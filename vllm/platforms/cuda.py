@@ -463,6 +463,12 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
+        logger.warning_once(
+            "check_if_supports_dtype is deprecated and will be removed in"
+            "v0.12.0 or v1.0.1. It's replaced by "
+            "`vllm.utils.platform_utils.check_if_supports_dtype` for cuda like "
+            "devices."
+        )
         if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()

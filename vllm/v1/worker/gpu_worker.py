@@ -41,6 +41,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.platform_utils import check_if_supports_dtype
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -208,9 +209,7 @@ class Worker(WorkerBase):
 
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
-
-            current_platform.check_if_supports_dtype(self.model_config.dtype)
-
+            check_if_supports_dtype(self.model_config.dtype)
             # Initialize the distributed environment BEFORE taking
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure

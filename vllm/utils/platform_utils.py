@@ -57,3 +57,26 @@ def is_uva_available() -> bool:
     # UVA requires pinned memory.
     # TODO: Add more requirements for UVA if needed.
     return is_pin_memory_available()
+
+
+def check_if_supports_dtype(dtype: torch.dtype):
+    from vllm.platforms import current_platform
+
+    if dtype == torch.bfloat16:  # noqa: SIM102
+        if not current_platform.has_device_capability(80):
+            capability = current_platform.get_device_capability()
+            gpu_name = current_platform.get_device_name()
+
+            if capability is None:
+                compute_str = "does not have a compute capability"
+            else:
+                version_str = capability.as_version_str()
+                compute_str = f"has compute capability {version_str}"
+
+            raise ValueError(
+                "Bfloat16 is only supported on GPUs "
+                "with compute capability of at least 8.0. "
+                f"Your {gpu_name} GPU {compute_str}. "
+                "You can use float16 instead by explicitly setting the "
+                "`dtype` flag in CLI, for example: --dtype=half."
+            )

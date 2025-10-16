@@ -571,6 +571,9 @@ class Platform:
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         """
         Check if the dtype is supported by the current platform.
+
+        This method is deprecated and will be removed in v0.12.0 or v1.0.1.
+        Do not use it in the plugin project.
         """
         raise NotImplementedError
 

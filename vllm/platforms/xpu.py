@@ -228,18 +228,6 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def check_if_supports_dtype(cls, dtype: torch.dtype):
-        if dtype == torch.bfloat16:  # noqa: SIM102
-            device_name = cls.get_device_name().lower()
-            # client gpu a770
-            if device_name.count("a770") > 0:
-                raise ValueError(
-                    "Intel Arc A770 have bfloat16 accuracy known issue. "
-                    "You can use float16 instead by explicitly setting the "
-                    "`dtype` flag in CLI, for example: --dtype=half."
-                )
-
-    @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
 
