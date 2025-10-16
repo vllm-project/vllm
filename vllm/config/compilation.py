@@ -109,8 +109,7 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_size_mb: dict[int,
-                                          float] = field(default_factory=dict)
+    fi_allreduce_fusion_max_size_mb: dict[int, float] = field(default_factory=dict)
     """The thresholds of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
     dictionary mapping each world size to the threshold in MB
@@ -131,7 +130,7 @@ class PassConfig:
 
     # TODO(luka) better pass enabling system.
 
-    def flashinfer_max_size(self, world_size: int) -> Optional[int]:
+    def flashinfer_max_size(self, world_size: int) -> int | None:
         """
         Returns the max communication size in bytes for flashinfer
         allreduce fusion for the given world size. Returns None if world size
@@ -140,15 +139,15 @@ class PassConfig:
 
         # import here to avoid circular dependencies
         from vllm.platforms import current_platform
+
         MiB = 1024 * 1024
 
-        device_capability = current_platform.get_device_capability(
-        ).as_version_str()
-        fi_allreduce_fusion_max_size_mb = \
-            self.fi_allreduce_fusion_max_size_mb.get(device_capability, {})
+        device_capability = current_platform.get_device_capability().as_version_str()
+        fi_allreduce_fusion_max_size_mb = self.fi_allreduce_fusion_max_size_mb.get(
+            device_capability, {}
+        )
         max_sizes = {
-            k: int(v * MiB)
-            for k, v in fi_allreduce_fusion_max_size_mb.items()
+            k: int(v * MiB) for k, v in fi_allreduce_fusion_max_size_mb.items()
         }
         # return None if world size is not supported by flashinfer
         return max_sizes.get(world_size)
@@ -197,8 +196,7 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }
-        device_capability = current_platform.get_device_capability(
-        ).as_version_str()
+        device_capability = current_platform.get_device_capability().as_version_str()
 
         max_sizes = fi_allreduce_fusion_max_size_mb.get(device_capability, {})
         max_sizes.update(self.fi_allreduce_fusion_max_size_mb)
