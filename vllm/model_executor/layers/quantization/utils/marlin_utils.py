@@ -190,6 +190,10 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
 
 
 def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+    # Marlin is not available on ROCm
+    if current_platform.is_rocm():
+        return False
+        
     hidden_size = layer.hidden_size
     intermediate_size_per_partition = layer.intermediate_size_per_partition
     # apply_router_weight_on_input is not supported for moe marlin
