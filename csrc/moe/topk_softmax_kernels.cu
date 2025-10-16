@@ -59,6 +59,8 @@ __device__ __forceinline__ float toFloat(T value) {
         return __bfloat162float(value);
     } else if constexpr (std::is_same_v<T, __half>) {
         return __half2float(value);
+    } else {
+        static_assert(!sizeof(T), "Unsupported type in toFloat");
     }
 }
 
@@ -634,6 +636,44 @@ void topkGatingSoftmaxKernelLauncher(
 } // namespace moe
 } // namespace vllm
 
+
+template<typename ComputeType>
+void dispatch_topk_softmax_launch(
+    torch::Tensor& gating_output,
+    torch::Tensor& topk_weights,
+    torch::Tensor& topk_indices,
+    torch::Tensor& token_expert_indices,
+    torch::Tensor& softmax_workspace,
+    int num_tokens, int num_experts, int topk, bool renormalize, cudaStream_t stream)
+{
+    if (topk_indices.scalar_type() == at::ScalarType::Int) {
+        vllm::moe::topkGatingSoftmaxKernelLauncher<int, ComputeType>(
+            reinterpret_cast<const ComputeType*>(gating_output.data_ptr()),
+            topk_weights.data_ptr<float>(),
+            topk_indices.data_ptr<int>(),
+            token_expert_indices.data_ptr<int>(),
+            softmax_workspace.data_ptr<float>(),
+            num_tokens, num_experts, topk, renormalize, stream);
+    } else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
+        vllm::moe::topkGatingSoftmaxKernelLauncher<uint32_t, ComputeType>(
+            reinterpret_cast<const ComputeType*>(gating_output.data_ptr()),
+            topk_weights.data_ptr<float>(),
+            topk_indices.data_ptr<uint32_t>(),
+            token_expert_indices.data_ptr<int>(),
+            softmax_workspace.data_ptr<float>(),
+            num_tokens, num_experts, topk, renormalize, stream);
+    } else {
+        TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
+        vllm::moe::topkGatingSoftmaxKernelLauncher<int64_t, ComputeType>(
+            reinterpret_cast<const ComputeType*>(gating_output.data_ptr()),
+            topk_weights.data_ptr<float>(),
+            topk_indices.data_ptr<int64_t>(),
+            token_expert_indices.data_ptr<int>(),
+            softmax_workspace.data_ptr<float>(),
+            num_tokens, num_experts, topk, renormalize, stream);
+    }
+}
+
 void topk_softmax(
     torch::Tensor& topk_weights,                // [num_tokens, topk]
     torch::Tensor& topk_indices,                // [num_tokens, topk]
@@ -655,96 +695,15 @@ void topk_softmax(
     torch::Tensor softmax_workspace = torch::empty({workspace_size}, workspace_options);
 
     if (gating_output.scalar_type() == at::ScalarType::Float) {
-        if(topk_indices.scalar_type() == at::ScalarType::Int) {
-            vllm::moe::topkGatingSoftmaxKernelLauncher<int, float>(
-                gating_output.data_ptr<float>(),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<int>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-        else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
-            vllm::moe::topkGatingSoftmaxKernelLauncher<uint32_t, float>(
-                gating_output.data_ptr<float>(),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<uint32_t>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-        else {
-            TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
-            vllm::moe::topkGatingSoftmaxKernelLauncher<int64_t, float>(
-                gating_output.data_ptr<float>(),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<int64_t>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-    }
-    else if (gating_output.scalar_type() == at::ScalarType::Half) {
-        if(topk_indices.scalar_type() == at::ScalarType::Int) {
-            vllm::moe::topkGatingSoftmaxKernelLauncher<int, __half>(
-                reinterpret_cast<const __half*>(gating_output.data_ptr()),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<int>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-        else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
-            vllm::moe::topkGatingSoftmaxKernelLauncher<uint32_t, __half>(
-                reinterpret_cast<const __half*>(gating_output.data_ptr()),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<uint32_t>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-        else {
-            TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
-            vllm::moe::topkGatingSoftmaxKernelLauncher<int64_t, __half>(
-                reinterpret_cast<const __half*>(gating_output.data_ptr()),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<int64_t>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-    }
-    else if (gating_output.scalar_type() == at::ScalarType::BFloat16) {
-        if(topk_indices.scalar_type() == at::ScalarType::Int) {
-            vllm::moe::topkGatingSoftmaxKernelLauncher<int, __nv_bfloat16>(
-                reinterpret_cast<__nv_bfloat16*>(gating_output.data_ptr()),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<int>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-        else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
-            vllm::moe::topkGatingSoftmaxKernelLauncher<uint32_t, __nv_bfloat16>(
-                reinterpret_cast<__nv_bfloat16*>(gating_output.data_ptr()),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<uint32_t>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-        else {
-            TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
-            vllm::moe::topkGatingSoftmaxKernelLauncher<int64_t, __nv_bfloat16>(
-                reinterpret_cast<__nv_bfloat16*>(gating_output.data_ptr()),
-                topk_weights.data_ptr<float>(),
-                topk_indices.data_ptr<int64_t>(),
-                token_expert_indices.data_ptr<int>(),
-                softmax_workspace.data_ptr<float>(),
-                num_tokens, num_experts, topk, renormalize, stream);
-        }
-    }
-    else {
+        dispatch_topk_softmax_launch<float>(gating_output, topk_weights, topk_indices, 
+            token_expert_indices, softmax_workspace, num_tokens, num_experts, topk, renormalize, stream);
+    } else if (gating_output.scalar_type() == at::ScalarType::Half) {
+        dispatch_topk_softmax_launch<__half>(gating_output, topk_weights, topk_indices, 
+            token_expert_indices, softmax_workspace, num_tokens, num_experts, topk, renormalize, stream);
+    } else if (gating_output.scalar_type() == at::ScalarType::BFloat16) {
+        dispatch_topk_softmax_launch<__nv_bfloat16>(gating_output, topk_weights, topk_indices, 
+            token_expert_indices, softmax_workspace, num_tokens, num_experts, topk, renormalize, stream);
+    } else {
         TORCH_CHECK(false, "Unsupported gating_output data type: ", gating_output.scalar_type());
     }
 }
