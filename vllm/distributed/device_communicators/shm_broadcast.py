@@ -233,7 +233,7 @@ class MessageQueue:
         n_reader,  # number of all readers
         n_local_reader,  # number of local readers through shared memory
         local_reader_ranks: list[int] | None = None,
-        max_chunk_bytes: int = 1024 * 1024 * 32,
+        max_chunk_bytes: int = 1024 * 1024 * 24,  # 24MiB
         max_chunks: int = 10,
         connect_ip: str | None = None,
     ):
