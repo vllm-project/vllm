@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 from typing import Any
 
+from vllm.model_executor.layers.fused_moe.aiter_experts import AiterExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
@@ -93,6 +94,7 @@ if HAS_TRITON:
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
         "BatchedTritonOrDeepGemmExperts",
+        "AiterExperts",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders
