@@ -33,9 +33,9 @@ class TTSamplingParams:
     """
     Used by TTModelInput.
     """
-    temperature: float
-    top_k: int
-    top_p: float
+    temperature: Union[float, list[float]]
+    top_k: Union[int, list[int]]
+    top_p: Union[float, list[float]]
 
 
 @dataclass(frozen=True)
@@ -371,9 +371,16 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             sampling_params = seq_group_metadata.sampling_params
             if compat_sampling_used:
                 sampling_params_list.append(sampling_params)
+            elif TTPlatform.non_greedy_decoding_on_device:
+                # non-uniform sampling
+
+                # initializing an empty list for each value on first iter
+                # fill values after first iter
+                for key in ["temperature", "top_k", "top_p"]:
+                    top_pk_sampling_params.setdefault(key, []).append(
+                        getattr(sampling_params, key))
             else:
-                # TODO: Add support for different sampling
-                # params in the same batch
+                # uniform sampling
                 if len(top_pk_sampling_params) == 0:
                     top_pk_sampling_params[
                         "temperature"] = sampling_params.temperature
