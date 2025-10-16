@@ -593,7 +593,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             # file not changed, use cached _ModelInfo properties
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
-            logger.exception(
+            logger.debug(
                 ("Cached model info for class %s.%s error. "),
                 self.module_name,
                 self.class_name,

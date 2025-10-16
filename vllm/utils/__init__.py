@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import contextlib
 import datetime
 import enum
@@ -38,32 +37,19 @@ from argparse import (
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
 )
-from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
-from collections import UserDict, defaultdict
+from collections import defaultdict
 from collections.abc import (
-    AsyncGenerator,
     Callable,
     Collection,
     Generator,
-    Hashable,
-    Iterable,
     Iterator,
-    Mapping,
     Sequence,
 )
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Generic,
-    Literal,
-    TextIO,
-    TypeVar,
-)
+from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -82,8 +68,7 @@ import zmq.asyncio
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
-from transformers.tokenization_utils_base import BatchEncoding
-from typing_extensions import Never, TypeIs, assert_never
+from typing_extensions import Never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -175,9 +160,6 @@ def set_default_torch_num_threads(num_threads: int):
 T = TypeVar("T")
 U = TypeVar("U")
 
-_K = TypeVar("_K", bound=Hashable)
-_V = TypeVar("_V")
-
 
 class Device(enum.Enum):
     GPU = enum.auto()
@@ -223,276 +205,10 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-class AsyncMicrobatchTokenizer:
-    """Asynchronous tokenizer with micro-batching.
-
-    Pulls pending encode/decode requests from a queue and batches them
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used
-    so the event loop stays responsive.
-    """
-
-    def __init__(
-        self,
-        tokenizer,
-        max_batch_size: int = 32,
-        batch_wait_timeout_s: float = 0.002,
-    ) -> None:
-        self.tokenizer = tokenizer
-        self.max_batch_size = max_batch_size
-        self.batch_wait_timeout_s = batch_wait_timeout_s
-
-        self._loop = asyncio.get_running_loop()
-        self._queues: dict[
-            tuple,
-            asyncio.Queue[
-                tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
-            ],
-        ] = {}
-        self._batcher_tasks: list[asyncio.Task] = []
-
-        # Single-thread executor for blocking tokenizer calls.
-        self._executor = ThreadPoolExecutor(max_workers=1)
-
-    # === Public async API ===
-    async def __call__(self, prompt, **kwargs):
-        result_future: asyncio.Future = self._loop.create_future()
-        key = self._queue_key("encode", kwargs)
-        queue = self._get_queue(self._loop, key)
-        await queue.put((prompt, kwargs, result_future))
-        return await result_future
-
-    async def decode(self, token_ids, **kwargs):
-        result_future: asyncio.Future = self._loop.create_future()
-        key = self._queue_key("decode", kwargs)
-        queue = self._get_queue(self._loop, key)
-        await queue.put((token_ids, result_future))
-        return await result_future
-
-    # === Internal helpers ===
-    def _get_queue(
-        self, loop: asyncio.AbstractEventLoop, key: tuple
-    ) -> asyncio.Queue[
-        tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
-    ]:
-        """Get the request queue for the given operation key, creating a new
-        queue and batcher task if needed."""
-        queue = self._queues.get(key)
-        if queue is None:
-            self._queues[key] = queue = asyncio.Queue()
-            if key[0] == "encode":
-                can_batch = key[1] != "other"
-                coro = self._batch_encode_loop(queue, can_batch)
-            else:
-                assert key[0] == "decode", f"Unknown operation type: {key[0]}."
-                coro = self._batch_decode_loop(queue)
-            self._batcher_tasks.append(loop.create_task(coro))
-        return queue
-
-    async def _batch_encode_loop(self, queue: asyncio.Queue, can_batch: bool):
-        """Batch incoming encode requests for efficiency."""
-        while True:
-            prompt, kwargs, result_future = await queue.get()
-            prompts = [prompt]
-            kwargs_list = [kwargs]
-            result_futures = [result_future]
-            deadline = self._loop.time() + self.batch_wait_timeout_s
-
-            while len(prompts) < self.max_batch_size:
-                timeout = deadline - self._loop.time()
-                if timeout <= 0:
-                    break
-                try:
-                    prompt, kwargs, result_future = await asyncio.wait_for(
-                        queue.get(), timeout
-                    )
-                    prompts.append(prompt)
-                    result_futures.append(result_future)
-                    if not can_batch:
-                        kwargs_list.append(kwargs)
-                except asyncio.TimeoutError:
-                    break
-
-            try:
-                # If every request uses identical kwargs we can run a single
-                # batched tokenizer call for a big speed-up.
-                if can_batch and len(prompts) > 1:
-                    batch_encode_fn = partial(self.tokenizer, prompts, **kwargs)
-                    results = await self._loop.run_in_executor(
-                        self._executor, batch_encode_fn
-                    )
-
-                    for i, fut in enumerate(result_futures):
-                        if not fut.done():
-                            data = {k: v[i] for k, v in results.items()}
-                            fut.set_result(BatchEncoding(data))
-                else:
-                    encode_fn = lambda prompts=prompts, kwargs=kwargs_list: [
-                        self.tokenizer(p, **kw) for p, kw in zip(prompts, kwargs)
-                    ]
-                    results = await self._loop.run_in_executor(
-                        self._executor, encode_fn
-                    )
-
-                    for fut, res in zip(result_futures, results):
-                        if not fut.done():
-                            fut.set_result(res)
-            except Exception as e:
-                for fut in result_futures:
-                    if not fut.done():
-                        fut.set_exception(e)
-
-    async def _batch_decode_loop(self, queue: asyncio.Queue):
-        """Batch incoming decode requests for efficiency."""
-        while True:
-            token_ids, result_future = await queue.get()
-            token_ids_list = [token_ids]
-            result_futures = [result_future]
-            deadline = self._loop.time() + self.batch_wait_timeout_s
-
-            while len(token_ids_list) < self.max_batch_size:
-                timeout = deadline - self._loop.time()
-                if timeout <= 0:
-                    break
-                try:
-                    token_ids, result_future = await asyncio.wait_for(
-                        queue.get(), timeout
-                    )
-                    token_ids_list.append(token_ids)
-                    result_futures.append(result_future)
-                except asyncio.TimeoutError:
-                    break
-
-            try:
-                # Perform a single batched decode call for all requests
-                results = await self._loop.run_in_executor(
-                    self._executor, self.tokenizer.batch_decode, token_ids_list
-                )
-                for fut, res in zip(result_futures, results):
-                    if not fut.done():
-                        fut.set_result(res)
-            except Exception as e:
-                for fut in result_futures:
-                    if not fut.done():
-                        fut.set_exception(e)
-
-    def _queue_key(self, op: str, kwargs: dict) -> tuple:
-        """
-        Return a normalized key describing operation + kwargs.
-
-        - `add_special_tokens`: {True/False}
-        - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None),
-            returns a key for a can_batch queue.
-          - If `truncation` is True and `max_length` is None or equals
-            `tokenizer.model_max_length`, returns a key for a can_batch queue.
-          - Otherwise, returns a key for a cannot_batch queue.
-
-        Examples:
-          - Decode: ("decode",)
-          - Encode typical:
-            ("encode", add_special_tokens, bool_truncation, max_length_label)
-          - Fallback: ("encode", "other")
-        """
-
-        if op == "decode":
-            return ("decode",)
-
-        add_special_tokens = kwargs.get("add_special_tokens", True)
-        truncation = kwargs.get("truncation", False)
-        max_length = kwargs.get("max_length")
-
-        if not truncation:
-            return "encode", add_special_tokens, False, None
-
-        model_max = getattr(self.tokenizer, "model_max_length", None)
-        if max_length is None or (model_max is not None and max_length == model_max):
-            return "encode", add_special_tokens, True, "model_max"
-
-        return "encode", "other"
-
-    def __del__(self):
-        if (
-            (tasks := getattr(self, "_batcher_tasks", None))
-            and (loop := getattr(self, "_loop", None))
-            and not loop.is_closed()
-        ):
-
-            def cancel_tasks():
-                for task in tasks:
-                    task.cancel()
-
-            loop.call_soon_threadsafe(cancel_tasks)
-
-
-def cancel_task_threadsafe(task: Task):
-    if task and not task.done():
-        run_in_loop(task.get_loop(), task.cancel)
-
-
 def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
     for sock in sockets:
         if sock is not None:
             sock.close(linger=0)
-
-
-def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
-    if in_loop(loop):
-        function(*args)
-    elif not loop.is_closed():
-        loop.call_soon_threadsafe(function, *args)
-
-
-def in_loop(event_loop: AbstractEventLoop) -> bool:
-    try:
-        return asyncio.get_running_loop() == event_loop
-    except RuntimeError:
-        return False
-
-
-async def merge_async_iterators(
-    *iterators: AsyncGenerator[T, None],
-) -> AsyncGenerator[tuple[int, T], None]:
-    """Merge multiple asynchronous iterators into a single iterator.
-
-    This method handle the case where some iterators finish before others.
-    When it yields, it yields a tuple (i, item) where i is the index of the
-    iterator that yields the item.
-    """
-    if len(iterators) == 1:
-        # Fast-path single iterator case.
-        async for item in iterators[0]:
-            yield 0, item
-        return
-
-    loop = asyncio.get_running_loop()
-
-    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
-    try:
-        while awaits:
-            done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
-            for d in done:
-                pair = awaits.pop(d)
-                try:
-                    item = await d
-                    i, it = pair
-                    awaits[loop.create_task(anext(it))] = pair
-                    yield i, item
-                except StopAsyncIteration:
-                    pass
-    finally:
-        # Cancel any remaining iterators
-        for f, (_, it) in awaits.items():
-            with contextlib.suppress(BaseException):
-                f.cancel()
-                await it.aclose()
-
-
-async def collect_from_async_generator(iterator: AsyncGenerator[T, None]) -> list[T]:
-    """Collect all items from an async generator into a list."""
-    items = []
-    async for item in iterator:
-        items.append(item)
-    return items
 
 
 def get_ip() -> str:
@@ -690,12 +406,6 @@ def update_environment_variables(envs: dict[str, str]):
                 v,
             )
         os.environ[k] = v
-
-
-def chunk_list(lst: list[T], chunk_size: int):
-    """Yield successive chunk_size chunks from lst."""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
 
 
 def cdiv(a: int, b: int) -> int:
@@ -1012,53 +722,6 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
         dtypes,
         key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
     )
-
-
-def as_list(maybe_list: Iterable[T]) -> list[T]:
-    """Convert iterable to list, unless it's already a list."""
-    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
-
-
-def as_iter(obj: T | Iterable[T]) -> Iterable[T]:
-    if isinstance(obj, str) or not isinstance(obj, Iterable):
-        return [obj]  # type: ignore[list-item]
-    return obj
-
-
-# `collections` helpers
-def is_list_of(
-    value: object,
-    typ: type[T] | tuple[type[T], ...],
-    *,
-    check: Literal["first", "all"] = "first",
-) -> TypeIs[list[T]]:
-    if not isinstance(value, list):
-        return False
-
-    if check == "first":
-        return len(value) == 0 or isinstance(value[0], typ)
-    elif check == "all":
-        return all(isinstance(v, typ) for v in value)
-
-    assert_never(check)
-
-
-def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
-    """Flatten a list of lists to a single list."""
-    return [item for sublist in lists for item in sublist]
-
-
-def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
-    """
-    Unlike [`itertools.groupby`][], groups are not broken by
-    non-contiguous data.
-    """
-    groups = defaultdict[_K, list[_V]](list)
-
-    for value in values:
-        groups[key(value)].append(value)
-
-    return groups.items()
 
 
 # TODO: This function can be removed if transformer_modules classes are
@@ -1803,12 +1466,6 @@ class FlexibleArgumentParser(ArgumentParser):
         return processed_args
 
 
-async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args, **kwargs):
-    """Utility function to run async task in a lock"""
-    async with lock:
-        return await task(*args, **kwargs)
-
-
 # Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
 # In particular, the FakeScalarType is not supported for earlier versions of
 # PyTorch which breaks dynamo for any ops registered using ScalarType.
@@ -1853,50 +1510,6 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
-
-
-# Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping[str, T], Generic[T]):
-    def __init__(self, factory: dict[str, Callable[[], T]]):
-        self._factory = factory
-        self._dict: dict[str, T] = {}
-
-    def __getitem__(self, key: str) -> T:
-        if key not in self._dict:
-            if key not in self._factory:
-                raise KeyError(key)
-            self._dict[key] = self._factory[key]()
-        return self._dict[key]
-
-    def __setitem__(self, key: str, value: Callable[[], T]):
-        self._factory[key] = value
-
-    def __iter__(self):
-        return iter(self._factory)
-
-    def __len__(self):
-        return len(self._factory)
-
-
-class ClassRegistry(UserDict[type[T], _V]):
-    def __getitem__(self, key: type[T]) -> _V:
-        for cls in key.mro():
-            if cls in self.data:
-                return self.data[cls]
-
-        raise KeyError(key)
-
-    def __contains__(self, key: object) -> bool:
-        return self.contains(key)
-
-    def contains(self, key: object, *, strict: bool = False) -> bool:
-        if not isinstance(key, type):
-            return False
-
-        if strict:
-            return key in self.data
-
-        return any(cls in self.data for cls in key.mro())
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -2863,22 +2476,6 @@ class LazyLoader(types.ModuleType):
         if self._module is None:
             self._module = self._load()
         return dir(self._module)
-
-
-def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
-    """
-    Helper function to swap values for two keys
-    """
-    v1 = obj.get(key1)
-    v2 = obj.get(key2)
-    if v1 is not None:
-        obj[key2] = v1
-    else:
-        obj.pop(key2, None)
-    if v2 is not None:
-        obj[key1] = v2
-    else:
-        obj.pop(key1, None)
 
 
 @contextlib.contextmanager
