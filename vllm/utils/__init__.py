@@ -2691,6 +2691,45 @@ def has_tilelang() -> bool:
     return _has_module("tilelang")
 
 
+def calculate_ranks_from_config(
+    rank: int,
+    tensor_parallel_size: int,
+    pipeline_parallel_size: int,
+    data_parallel_size: int,
+) -> tuple[int, int, int, int]:
+    """
+    Calculate individual parallel ranks from global rank and parallel config
+    without requiring distributed environment to be initialized.
+
+    Uses same rank layout as initialize_model_parallel: ExternalDP x DP x PP x TP
+
+    Args:
+        rank: Global rank of current process
+        tensor_parallel_size: Number of tensor parallel groups
+        pipeline_parallel_size: Number of pipeline parallel groups
+        data_parallel_size: Number of data parallel groups
+
+    Returns:
+        Tuple of (dp_rank, pp_rank, tp_rank, ep_rank)
+    """
+    # Calculate world_size for this worker (not including external DP)
+    world_size_per_dp = pipeline_parallel_size * tensor_parallel_size
+
+    # TP rank: innermost dimension
+    tp_rank = rank % tensor_parallel_size
+
+    # PP rank: middle dimension
+    pp_rank = (rank // tensor_parallel_size) % pipeline_parallel_size
+
+    # DP rank: outermost dimension (within this DP group)
+    dp_rank = rank // world_size_per_dp
+
+    # EP rank: combination of DP and TP
+    ep_rank = dp_rank * tensor_parallel_size + tp_rank
+
+    return dp_rank, pp_rank, tp_rank, ep_rank
+
+
 def set_process_title(
     name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
 ) -> None:

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-import os
 import pickle
 import queue
 import signal
@@ -21,22 +20,19 @@ from threading import Thread
 from typing import Any, cast
 
 import cloudpickle
-import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import (destroy_distributed_environment,
-                              destroy_model_parallel)
-from vllm.distributed.device_communicators.shm_broadcast import (Handle,
-                                                                 MessageQueue)
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.executor.multiproc_worker_utils import (
-    set_multiprocessing_worker_envs)
+from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
+from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.executor.multiproc_worker_utils import set_multiprocessing_worker_envs
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import (get_distributed_init_method, get_loopback_ip,
-                        get_mp_context, get_open_port)
+from vllm.utils import (
+    get_distributed_init_method,
+    get_loopback_ip,
+    get_mp_context,
+    get_open_port,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
