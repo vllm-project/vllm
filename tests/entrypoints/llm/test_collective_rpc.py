@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 from vllm import LLM
 
@@ -12,6 +13,8 @@ from ...utils import create_new_process_for_each_test
 @pytest.mark.parametrize("backend", ["mp", "ray"])
 @create_new_process_for_each_test()
 def test_collective_rpc(tp_size, backend, monkeypatch):
+    if torch.cuda.device_count() < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
     if tp_size == 1 and backend == "ray":
         pytest.skip("Skip duplicate test case")
     if tp_size == 1:
@@ -24,7 +27,7 @@ def test_collective_rpc(tp_size, backend, monkeypatch):
 
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = LLM(
-        model="meta-llama/Llama-3.2-1B-Instruct",
+        model="hmellor/tiny-random-LlamaForCausalLM",
         enforce_eager=True,
         load_format="dummy",
         tensor_parallel_size=tp_size,

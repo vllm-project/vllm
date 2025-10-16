@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParserManager
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -331,6 +332,17 @@ async def run_request(
     return batch_output
 
 
+def validate_run_batch_args(args):
+    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    if (
+        reasoning_parser := args.structured_outputs_config.reasoning_parser
+    ) and reasoning_parser not in valid_reasoning_parses:
+        raise KeyError(
+            f"invalid reasoning parser: {reasoning_parser} "
+            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+        )
+
+
 async def run_batch(
     engine_client: EngineClient,
     args: Namespace,
@@ -359,6 +371,7 @@ async def run_batch(
         base_model_paths=base_model_paths,
         lora_modules=None,
     )
+
     openai_serving_chat = (
         OpenAIServingChat(
             engine_client,
@@ -367,12 +380,14 @@ async def run_batch(
             request_logger=request_logger,
             chat_template=None,
             chat_template_content_format="auto",
+            reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
         )
         if "generate" in supported_tasks
         else None
     )
+
     openai_serving_embedding = (
         OpenAIServingEmbedding(
             engine_client,
@@ -503,6 +518,8 @@ async def run_batch(
 async def main(args: Namespace):
     from vllm.entrypoints.openai.api_server import build_async_engine_client
     from vllm.usage.usage_lib import UsageContext
+
+    validate_run_batch_args(args)
 
     async with build_async_engine_client(
         args,
