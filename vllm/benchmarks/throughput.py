@@ -34,7 +34,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.asyncio import merge_async_iterators
 
 
 def run_vllm(
