@@ -37,7 +37,7 @@ from vllm.utils import (
     split_zmq_path,
     unique_filepath,
 )
-from vllm.utils.torch import (
+from vllm.utils.torch_utils import (
     common_broadcastable_dtype,
     current_stream,
     is_lossless_cast,

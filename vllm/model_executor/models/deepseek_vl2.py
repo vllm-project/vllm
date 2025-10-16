@@ -50,7 +50,7 @@ from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processo
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils.collections import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch import set_default_torch_dtype
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (

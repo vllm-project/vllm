@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class QuantMethod(IntEnum):

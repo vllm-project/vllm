@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.triton_utils import triton
 from vllm.utils import FlexibleArgumentParser
-from vllm.utils.torch import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
 def with_triton_mode(fn):

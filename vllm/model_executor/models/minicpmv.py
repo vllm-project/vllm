@@ -87,7 +87,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collections import flatten_2d_lists
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch import set_default_torch_dtype
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (

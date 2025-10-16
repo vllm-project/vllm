@@ -7,7 +7,7 @@ import torch
 
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
-from vllm.utils.torch import current_stream
+from vllm.utils.torch_utils import current_stream
 
 _THREAD_ID_TO_CONTEXT: dict = {}
 _CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = [None, None]

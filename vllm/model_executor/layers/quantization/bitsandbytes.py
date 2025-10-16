@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization import (
     QuantizationMethods,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class BitsAndBytesConfig(QuantizationConfig):

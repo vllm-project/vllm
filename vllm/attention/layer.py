@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
 from vllm.utils import GiB_bytes
-from vllm.utils.torch import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)

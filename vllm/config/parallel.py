@@ -19,7 +19,7 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.platforms import current_platform
 from vllm.utils import get_open_ports_list
-from vllm.utils.torch import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv

@@ -53,7 +53,7 @@ from vllm.utils import (
     get_distributed_init_method,
     resolve_obj_by_qualname,
 )
-from vllm.utils.torch import (
+from vllm.utils.torch_utils import (
     direct_register_custom_op,
     supports_custom_op,
 )

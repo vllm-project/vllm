@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from vllm.utils import is_uva_available
-from vllm.utils.torch import get_cuda_view_from_cpu_tensor
+from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 

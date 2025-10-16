@@ -17,7 +17,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 try:
     ops.meta_size()

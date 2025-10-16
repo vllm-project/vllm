@@ -29,7 +29,7 @@ if current_platform.is_rocm():
     import aiter
 
     from vllm.triton_utils import tl, triton
-    from vllm.utils.torch import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     @triton.jit
     def _vllm_layout_trans_kernel(

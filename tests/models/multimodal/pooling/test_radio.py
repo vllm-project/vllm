@@ -9,7 +9,7 @@ from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.models.radio import RadioModel
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.utils.torch import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
 

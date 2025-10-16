@@ -48,7 +48,7 @@ from vllm.utils import (
     GB_bytes,
     get_open_port,
 )
-from vllm.utils.torch import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if current_platform.is_rocm():
     from amdsmi import (

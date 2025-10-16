@@ -9,7 +9,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
