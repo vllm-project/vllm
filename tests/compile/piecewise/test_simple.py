@@ -151,7 +151,6 @@ def test_simple_inductor_graph_partition(monkeypatch):
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     _run_simple_model(
-        # Inductor graph partition automatically resets splitting_ops to an empty list
         splitting_ops=["silly::attention"],
         use_inductor_graph_partition=True,
         use_inductor=True,
