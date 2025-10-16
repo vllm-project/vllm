@@ -85,7 +85,7 @@ and timeout. Additionally, since vLLM's fastcheck pipeline runs in read-only mod
 it doesn't populate the cache, so re-running it to warm up the cache
 is ineffective.
 
-While ongoing efforts like [#17419](https://github.com/vllm-project/vllm/issues/17419)
+While ongoing efforts like <https://github.com/vllm-project/vllm/issues/17419>
 address the long build time at its source, the current workaround is to set `VLLM_CI_BRANCH`
 to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
 when manually triggering a build on Buildkite. This branch accomplishes two things:
