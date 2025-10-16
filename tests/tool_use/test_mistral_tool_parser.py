@@ -71,6 +71,44 @@ def assert_tool_calls(
         ), f"got wrong function argument:${actual_tool_call.function.arguments}"
 
 
+def fix_tool_call_tokenization(
+    tokens: list[int],
+    mistral_tool_parser: MistralToolParser,
+    mistral_tokenizer: AnyTokenizer,
+):
+    """
+    Replaces the textual token sequence for [TOOL_CALLS]
+    with its single special token ID.
+    """
+    textual_tool_call_token_ids = mistral_tokenizer.encode(
+        text=mistral_tool_parser.bot_token,
+        add_special_tokens=False,
+    )
+    # textual_tool_call_token_ids must not contain special tokens like bos, eos etc
+    special_tool_call_token_ids = [mistral_tool_parser.bot_token_id]
+
+    # If the input is too short to contain the sequence, no replacement is possible
+    if not tokens or len(tokens) < len(textual_tool_call_token_ids):
+        return tokens
+
+    result_tokens = []
+    i = 0
+    target_len = len(textual_tool_call_token_ids)
+
+    while i < len(tokens):
+        # Check if the slice from the current position matches the target sequence
+        if tokens[i : i + target_len] == textual_tool_call_token_ids:
+            # If it matches, add the replacement and jump the index forward
+            result_tokens.extend(special_tool_call_token_ids)
+            i += target_len
+        else:
+            # Otherwise, just add the current token and move to the next one
+            result_tokens.append(tokens[i])
+            i += 1
+
+    return result_tokens
+
+
 def stream_delta_message_generator(
     mistral_tool_parser: MistralToolParser,
     mistral_tokenizer: AnyTokenizer,
@@ -97,6 +135,10 @@ def stream_delta_message_generator(
     else:
         assert model_output is not None
         all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
+
+    all_token_ids = fix_tool_call_tokenization(
+        all_token_ids, mistral_tool_parser, mistral_tokenizer
+    )
 
     previous_text = ""
     previous_tokens = None
@@ -628,17 +670,26 @@ def test_extract_tool_calls_streaming(
 )
 def test_extract_tool_calls_streaming_one_chunk(
     mistral_tool_parser,
+    mistral_tokenizer,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
+    if isinstance(mistral_tokenizer, MistralTokenizer):
+        all_token_ids = mistral_tokenizer.encode(model_output)
+    else:
+        all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
+    all_token_ids = fix_tool_call_tokenization(
+        all_token_ids, mistral_tool_parser, mistral_tokenizer
+    )
+
     delta_message = mistral_tool_parser.extract_tool_calls_streaming(
         previous_text="",
         current_text=model_output,
         delta_text=model_output,
         previous_token_ids=[],
-        current_token_ids=[],
-        delta_token_ids=[],
+        current_token_ids=all_token_ids,
+        delta_token_ids=all_token_ids,
         request=None,
     )  # type: ignore[arg-type]
     assert isinstance(delta_message, DeltaMessage)
@@ -754,17 +805,28 @@ def test_extract_tool_calls_streaming_one_chunk(
 )
 def test_extract_tool_calls_streaming_pre_v11_tokenizer_one_chunk(
     mistral_pre_v11_tool_parser,
+    mistral_pre_v11_tokenizer,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
+    if isinstance(mistral_pre_v11_tokenizer, MistralTokenizer):
+        all_token_ids = mistral_pre_v11_tokenizer.encode(model_output)
+    else:
+        all_token_ids = mistral_pre_v11_tokenizer.encode(
+            model_output, add_special_tokens=False
+        )
+    all_token_ids = fix_tool_call_tokenization(
+        all_token_ids, mistral_pre_v11_tool_parser, mistral_pre_v11_tokenizer
+    )
+
     delta_message = mistral_pre_v11_tool_parser.extract_tool_calls_streaming(
         previous_text="",
         current_text=model_output,
         delta_text=model_output,
         previous_token_ids=[],
-        current_token_ids=[],
-        delta_token_ids=[],
+        current_token_ids=all_token_ids,
+        delta_token_ids=all_token_ids,
         request=None,
     )  # type: ignore[arg-type]
     assert isinstance(delta_message, DeltaMessage)

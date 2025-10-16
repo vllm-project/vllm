@@ -217,7 +217,7 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
-        if self.bot_token not in current_text:
+        if self.bot_token_id not in current_token_ids:
             # if the tool call token is not in the tokens generated so far,
             # append output to contents since it's not a tool
             return DeltaMessage(content=delta_text)
@@ -228,13 +228,17 @@ class MistralToolParser(ToolParser):
         if _is_pre_v11_tokeniser(self.model_tokenizer):
             return self._extract_tool_calls_streaming_pre_v11_tokenizer(
                 delta_text=delta_text,
+                delta_token_ids=delta_token_ids,
             )
         else:
-            return self._extract_tool_calls_streaming(delta_text=delta_text)
+            return self._extract_tool_calls_streaming(
+                delta_text=delta_text, delta_token_ids=delta_token_ids
+            )
 
     def _extract_tool_calls_streaming(
         self,
         delta_text: str,
+        delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
         """
         Extracts tool calls for Mistral models
@@ -244,7 +248,7 @@ class MistralToolParser(ToolParser):
         additional_content: str = ""
         if self.streaming_state == StreamingState.WAITING_FOR_TOOL_START:
             # this is the first tool call
-            assert self.bot_token in delta_text
+            assert self.bot_token_id in delta_token_ids
             if not delta_text.startswith(self.bot_token):
                 additional_content += delta_text.split(self.bot_token)[0]
                 delta_text = self.bot_token + "".join(
@@ -364,7 +368,9 @@ class MistralToolParser(ToolParser):
                 self.streaming_state = StreamingState.ALL_TOOLS_COMPLETE
 
     def _extract_tool_calls_streaming_pre_v11_tokenizer(
-        self, delta_text: str
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
         """
         Extracts tool calls for Mistral models
@@ -378,7 +384,7 @@ class MistralToolParser(ToolParser):
             index=self.current_tool_id, type="function"
         )
         current_tool_call_modified = False
-        if self.bot_token in delta_text:
+        if self.bot_token_id in delta_token_ids:
             # this is the first tool call
             if not delta_text.startswith(self.bot_token):
                 content = delta_text.split(self.bot_token)[0]
