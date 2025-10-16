@@ -131,7 +131,7 @@ class StructuredOutputManager:
     def _async_create_grammar(
         self,
         request: Request,
-    ) -> StructuredOutputGrammar:
+    ) -> StructuredOutputGrammar | Exception:
         key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
 
         # Note that the request was validated in the engine core client,
@@ -140,9 +140,17 @@ class StructuredOutputManager:
         # TODO: we still need to handle xgrammar compilation failures,
         # though it should be unlikely as we test that up front as well.
         request_type, grammar_spec = key
-
-        assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        try:
+            assert self.backend is not None
+            comliped_grammar = self.backend.compile_grammar(request_type, grammar_spec)
+            return comliped_grammar
+        except Exception as e:
+            logger.warning(
+                "Grammar compilation failed for request_type=%s",
+                request_type,
+                exc_info=True,
+            )
+            return e
 
     def _fill_bitmasks(
         self,

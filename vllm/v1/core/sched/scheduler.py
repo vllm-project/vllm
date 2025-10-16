@@ -122,6 +122,9 @@ class Scheduler(SchedulerInterface):
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
+        # structured output
+        self.structured_output_compiled_failed_reqs: list[Request] = []
+
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -371,7 +374,13 @@ class Scheduler(SchedulerInterface):
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
                     if structured_output_req and structured_output_req.grammar:
-                        request.status = RequestStatus.WAITING
+                        if issubclass(type(structured_output_req.grammar), Exception):
+                            request.status = RequestStatus.FINISHED_ABORTED
+                            self.structured_output_compiled_failed_reqs.append(request)
+                            self.waiting.pop_request()
+                            continue
+                        else:
+                            request.status = RequestStatus.WAITING
                     else:
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
@@ -1041,6 +1050,25 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
+        for compiled_failed_req in self.structured_output_compiled_failed_reqs:
+            req_id = compiled_failed_req.request_id
+            request = self.requests.get(req_id)
+            assert compiled_failed_req.structured_output_request is not None
+            assert request is not None
+            stop_reason = compiled_failed_req.structured_output_request.grammar
+            outputs[request.client_index].append(
+                EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=[0],
+                    finish_reason=compiled_failed_req.get_finished_reason(),
+                    new_logprobs=None,
+                    new_prompt_logprobs_tensors=None,
+                    stop_reason=f"Grammar Compiled Failed: {stop_reason}",
+                    events=compiled_failed_req.take_events(),
+                    trace_headers=compiled_failed_req.trace_headers,
+                )
+            )
+        self.structured_output_compiled_failed_reqs.clear()
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)

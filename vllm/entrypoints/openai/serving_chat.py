@@ -1077,6 +1077,8 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
+                        if output.finish_reason == "abort":
+                            raise ValueError(output.stop_reason)
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
@@ -1279,6 +1281,8 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            if output.finish_reason == "abort":
+                return self.create_error_response(str(output.stop_reason))
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
