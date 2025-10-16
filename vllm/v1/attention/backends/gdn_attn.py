@@ -181,8 +181,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
 
             max_num_prefill_chunks = (
-                vllm_config.model_config.max_model_len // kv_cache_spec.block_size
-            ) * self.decode_cudagraph_max_bs
+                cdiv(vllm_config.model_config.max_model_len, self.chunk_size)
+                * self.decode_cudagraph_max_bs
+            )
             self.seq_idx_p_buf = torch.empty(
                 (max_num_prefill_chunks,),
                 dtype=torch.int32,
@@ -450,6 +451,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     num_computed_tokens_p_cpu = num_computed_tokens_cpu_non_spec[
                         num_decodes:
                     ]
+                    assert non_spec_query_start_loc_cpu is not None
                     query_start_loc_p_cpu = (
                         non_spec_query_start_loc_cpu[-num_prefills - 1 :]
                         - num_decode_tokens
