@@ -96,8 +96,7 @@ class InductorPass(CustomGraphPass):
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def is_applicable_for_range(self, compile_range: tuple[int,
-                                                                    int] | None):
+    def is_applicable_for_range(self, compile_range: tuple[int, int] | None):
         return True
 
 

@@ -75,7 +75,7 @@ class PostGradPassManager(CustomGraphPass):
                 pass_(graph)
                 VllmInductorPass.dump_prefix += 1
             else:
-                logger.debug("Skipping %s with shape %s", pass_, shape)
+                logger.debug("Skipping %s with compile range %s", pass_, compile_range)
 
         # post-cleanup goes before fix_functionalization
         # because it requires a functional graph
