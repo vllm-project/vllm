@@ -68,7 +68,7 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
+    [`__getattr__`][vllm.utils.import_utils._PlaceholderBase.__getattr__]
     is not called when they are accessed.
 
     Info:
