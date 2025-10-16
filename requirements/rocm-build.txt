@@ -1,7 +1,7 @@
 # Common dependencies
 -r common.txt
 
---extra-index-url https://download.pytorch.org/whl/test/rocm6.3
+--extra-index-url https://download.pytorch.org/whl/rocm6.4
 torch==2.9.0
 torchvision==0.24.0
 torchaudio==2.9.0

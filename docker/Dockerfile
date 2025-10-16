@@ -55,7 +55,7 @@ ARG UV_INDEX_URL=${PIP_INDEX_URL}
 ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 
 # PyTorch provides its own indexes for standard and nightly builds
-ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl/test
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
 ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
 
 # PIP supports multiple authentication schemes, including keyring
