@@ -108,8 +108,8 @@ def disable_inductor_graph_partition(func):
     def op_eager_code(...):
         ...
 
-    Note that `@disable_inductor_graph_partition` should be applied before
-    `@torch.compile()`
+    Note that `@disable_inductor_graph_partition` should be applied on top of 
+    `torch.compile()`
     """
 
     def wrapper(*args, **kwargs):
