@@ -712,13 +712,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     Tensor scale) -> ()");
   cache_ops.impl("concat_and_cache_mla", torch::kCUDA, &concat_and_cache_mla);
 
-  cache_ops.def(
-      "upconvert_ds_mla_tokens(Tensor src_cache, Tensor! dst_workspace,"
-      "                        Tensor indices, Tensor? unique_count=None) -> "
-      "()");
-  cache_ops.impl("upconvert_ds_mla_tokens", torch::kCUDA,
-                 &upconvert_ds_mla_tokens);
-
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(
       "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "

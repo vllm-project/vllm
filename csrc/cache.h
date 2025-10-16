@@ -74,7 +74,10 @@ void cp_gather_indexer_k_quant_cache(
     const torch::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::Tensor& cu_seq_lens);  // [batch_size + 1]
 
-void upconvert_ds_mla_tokens(
-    torch::Tensor const& src_cache, torch::Tensor& dst_workspace,
-    torch::Tensor const& indices,
-    c10::optional<torch::Tensor> const& unique_count_opt = c10::nullopt);
+torch::Tensor convert_req_index_to_global_index(
+    torch::Tensor req_id, torch::Tensor block_table,
+    torch::Tensor token_indices, int64_t block_size,
+    const std::optional<torch::Tensor>& prefill_mask,
+    const std::optional<torch::Tensor>& prefill_seen,
+    const std::optional<torch::Tensor>& prefill_bf16_workspace,
+    const std::optional<torch::Tensor>& kv_cache);

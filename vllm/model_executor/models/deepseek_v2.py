@@ -554,8 +554,8 @@ def sparse_attn_indexer(
             name="sparse_attn_indexer.k_fp8",
         )
         k_scale_spec = WorkspaceSpec(
-            shape=(total_seq_lens, 1),
-            dtype=torch.float32,
+            shape=(total_seq_lens, 4),
+            dtype=torch.uint8,
             name="sparse_attn_indexer.k_scale",
         )
 
