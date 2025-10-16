@@ -808,8 +808,8 @@ steps:
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
-- label: Blackwell Test # TODO min
-  timeout_in_minutes: 70
+- label: Blackwell Test # 21 min
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   gpu: b200
   # optional: true
@@ -844,8 +844,8 @@ steps:
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
 
-- label: Blackwell Fusion Tests # TODO min
-  timeout_in_minutes: 70
+- label: Blackwell Fusion Tests # 30 min
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   gpu: b200
   source_file_dependencies:
