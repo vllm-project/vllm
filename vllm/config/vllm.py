@@ -469,6 +469,10 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
+        if model.enforce_eager:
+            logger.warning("Enforce eager set, overriding optimization level to -O0")
+            self.level = OptimizationLevel.O0
+
         # Apply optimization level-specific defaults
         default_config = self._build_defaults()
         self._apply_optimization_level_defaults(default_config)
