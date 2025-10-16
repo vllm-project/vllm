@@ -21,12 +21,18 @@ from vllm.utils.flashinfer import has_flashinfer
 from ..utils import flat_product, multi_gpu_test
 
 
+class Matches(NamedTuple):
+    attention_fusion: int
+    allreduce_fusion: int = 0
+    sequence_parallel: int = 0
+    async_tp: int = 0
+
+
 class ModelBackendTestCase(NamedTuple):
     model_name: str
     model_kwargs: dict[str, Any]
     backend: _Backend
-    attention_fusions: int
-    allreduce_fusions: int | None = None
+    matches: Matches
 
 
 MODELS_FP8: list[ModelBackendTestCase] = []
@@ -40,15 +46,23 @@ if current_platform.is_cuda():
             model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024),
             backend=_Backend.TRITON_ATTN,
-            attention_fusions=32,
-            allreduce_fusions=65,
+            matches=Matches(
+                attention_fusion=32,
+                allreduce_fusion=65,
+                sequence_parallel=65,
+                async_tp=128,
+            ),
         ),
         ModelBackendTestCase(
             model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
             backend=_Backend.FLASHINFER,
-            attention_fusions=48,
-            allreduce_fusions=96,
+            matches=Matches(
+                attention_fusion=48,
+                allreduce_fusion=96,
+                sequence_parallel=96,
+                async_tp=190,
+            ),
         ),
     ]
 
@@ -57,8 +71,12 @@ if current_platform.is_cuda():
             model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
             backend=_Backend.FLASHINFER,
-            attention_fusions=48,
-            allreduce_fusions=96,
+            matches=Matches(
+                attention_fusion=48,
+                allreduce_fusion=96,
+                sequence_parallel=96,
+                async_tp=190,
+            ),
         ),
     ]
 
@@ -68,8 +86,12 @@ if current_platform.is_cuda():
             model_name="meta-llama/Llama-3.1-8B-Instruct",
             model_kwargs=dict(max_model_len=1024),
             backend=_Backend.TRITON_ATTN,
-            attention_fusions=0,
-            allreduce_fusions=65,
+            matches=Matches(
+                attention_fusion=0,
+                allreduce_fusion=65,
+                sequence_parallel=65,
+                async_tp=128,
+            ),
         ),
     ]
 
@@ -79,19 +101,19 @@ elif current_platform.is_rocm():
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(max_model_len=1024),
             backend=_Backend.TRITON_ATTN,
-            attention_fusions=32,
+            matches=Matches(attention_fusion=32),
         ),
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(max_model_len=1024),
             backend=_Backend.ROCM_ATTN,
-            attention_fusions=32,
+            matches=Matches(attention_fusion=32),
         ),
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(max_model_len=1024),
             backend=_Backend.ROCM_AITER_UNIFIED_ATTN,
-            attention_fusions=32,
+            matches=Matches(attention_fusion=32),
         ),
     ]
 
@@ -100,8 +122,7 @@ CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
 
 
 @pytest.mark.parametrize(
-    "model_name, model_kwargs, backend, "
-    "attention_fusions, allreduce_fusions, custom_ops",
+    "model_name, model_kwargs, backend, matches, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
     list(flat_product(MODELS_FP8, CUSTOM_OPS_FP8))
     # quant_fp4 only has the custom impl
@@ -112,8 +133,7 @@ def test_attn_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
     backend: _Backend,
-    attention_fusions: int,
-    allreduce_fusions: int,
+    matches: Matches,
     custom_ops: str,
     inductor_graph_partition: bool,
     caplog_mp_spawn,
@@ -165,12 +185,12 @@ def test_attn_quant(
     with caplog_mp_spawn(logging.DEBUG) as log_holder:
         run_model(compilation_config, model_name, **model_kwargs)
 
-    matches = re.findall(
+    log_matches = re.findall(
         r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
         log_holder.text,
     )
-    assert len(matches) == 1, log_holder.text
-    assert int(matches[0]) == attention_fusions
+    assert len(log_matches) == 1, log_holder.text
+    assert int(log_matches[0]) == matches.attention_fusion
 
 
 # TODO(luka) test both in nightly
@@ -184,8 +204,7 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, model_kwargs, backend, "
-    "attention_fusions, allreduce_fusions, custom_ops",
+    "model_name, model_kwargs, backend, matches, custom_ops",
     # Toggle RMSNorm and QuantFP8 for FP8 models
     list(
         flat_product(
@@ -206,8 +225,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     model_name: str,
     model_kwargs: dict,
     backend: _Backend,
-    attention_fusions: int,
-    allreduce_fusions: int,
+    matches: Matches,
     custom_ops: str,
     inductor_graph_partition: bool,
     caplog_mp_spawn,
@@ -260,23 +278,23 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         run_model(
             compilation_config, model_name, tensor_parallel_size=2, **model_kwargs
         )
-    matches = re.findall(
+    log_matches = re.findall(
         r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
         log_holder.text,
     )
-    assert len(matches) == 2, log_holder.text
+    assert len(log_matches) == 2, log_holder.text
 
-    assert int(matches[0]) == attention_fusions
-    assert int(matches[1]) == attention_fusions
+    assert int(log_matches[0]) == matches.attention_fusion
+    assert int(log_matches[1]) == matches.attention_fusion
 
-    matches = re.findall(
+    log_matches = re.findall(
         r"collective_fusion.py:\d+] Replaced (\d+) patterns",
         log_holder.text,
     )
-    assert len(matches) == 2, log_holder.text
+    assert len(log_matches) == 2, log_holder.text
 
-    assert int(matches[0]) == allreduce_fusions
-    assert int(matches[1]) == allreduce_fusions
+    assert int(log_matches[0]) == matches.allreduce_fusion
+    assert int(log_matches[1]) == matches.allreduce_fusion
 
 
 def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
