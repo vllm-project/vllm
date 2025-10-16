@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 import atexit
+import functools
 import multiprocessing
 import os
 import time
-from functools import cache
 from types import TracebackType
 from typing import TextIO
 
@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@cache
+@functools.cache
 def _should_log_results() -> bool:
     """Check if the current process should log results.
     Only the data-parallel rank 0 engine core and worker 0 should emit logs in
