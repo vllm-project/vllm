@@ -1,7 +1,6 @@
 # Common dependencies
 -r common.txt
 tblib==3.1.0
-mteb>=1.38.11, <2
 bm25s==0.2.13
 pystemmer==3.0.0
 
@@ -17,7 +16,6 @@ pooch==1.8.2
 soundfile==0.13.1
 soxr==0.5.0.post1
 librosa==0.10.2.post1
-schemathesis==3.39.15
 
 # entrypoints test
 #vllm[video] # required by entrypoints/openai/test_video.py
@@ -33,6 +31,11 @@ matplotlib==3.10.3
 # Multi-Modal Models Test (Extended) 3
 blobfile==3.0.0
 
-schemathesis==3.39.15 # Required for openai schema test.
+# Required for openai schema test.
+schemathesis==3.39.15 
 
-mteb[bm25s]>=1.38.11, <2 # required for mteb test
+# required for mteb test
+mteb[bm25s]>=1.38.11, <2 
+
+# PrithviMAE test
+terratorch @ git+https://github.com/IBM/terratorch.git@1.1.rc3
