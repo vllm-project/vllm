@@ -11,8 +11,8 @@ from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
 hopper_only = pytest.mark.skipif(
-    not current_platform.is_device_capability(90),
-    reason="Batch invariance tests only supported on Hopper (SM90)",
+    not (torch.cuda.is_available() and current_platform.is_device_capability(90)),
+    reason="Requires CUDA and Hopper (SM90)",
 )
 
 
@@ -217,10 +217,6 @@ def _extract_step_logprobs(request_output):
 
 
 @hopper_only
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Requires CUDA to match production inference path.",
-)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
@@ -482,10 +478,6 @@ def test_simple_generation():
 
 
 @hopper_only
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Requires CUDA to match production inference path.",
-)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.forked
 def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
@@ -701,10 +693,6 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
 
 
 @hopper_only
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Requires CUDA to match production inference path.",
-)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.forked
 def test_decode_logprobs_match_prefill_logprobs(backend):
