@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 import torch
@@ -55,7 +54,7 @@ vllm_config.scheduler_config.max_model_len = 8192
 @dataclass
 class BatchedMMConfig:
     in_dtype: torch.dtype
-    quant_dtype: Optional[torch.dtype]
+    quant_dtype: torch.dtype | None
     out_dtype: torch.dtype
     num_experts: int
     max_tokens_per_expert: int
@@ -115,7 +114,7 @@ def test_batched_mm(
     K: int,
     N: int,
     dtype: torch.dtype,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
     per_act_token_quant: bool,
 ):
     current_platform.seed_everything(7)
@@ -242,7 +241,7 @@ def test_fused_moe_batched_experts(
     topk: int,
     dtype: torch.dtype,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
     input_scales: bool,
 ):
     current_platform.seed_everything(7)

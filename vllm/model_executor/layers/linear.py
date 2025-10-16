@@ -3,7 +3,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -187,7 +187,7 @@ class LinearMethodBase(QuantizeMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply the weights in layer to the input tensor.
         Expects create_weights to have been called before on the layer."""
@@ -252,7 +252,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
@@ -276,8 +276,8 @@ class LinearBase(CustomOp):
         input_size: int,
         output_size: int,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -295,7 +295,7 @@ class LinearBase(CustomOp):
         self.quant_config = quant_config
         self.prefix = prefix
         if quant_config is None:
-            self.quant_method: Optional[QuantizeMethodBase] = UnquantizedLinearMethod()
+            self.quant_method: QuantizeMethodBase | None = UnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias
@@ -333,8 +333,8 @@ class ReplicatedLinear(LinearBase):
         output_size: int,
         bias: bool = True,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -409,7 +409,7 @@ class ReplicatedLinear(LinearBase):
     def forward(
         self,
         x: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
 
@@ -461,9 +461,9 @@ class ColumnParallelLinear(LinearBase):
         bias: bool = True,
         gather_output: bool = False,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        output_sizes: Optional[list[int]] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        output_sizes: list[int] | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -574,7 +574,7 @@ class ColumnParallelLinear(LinearBase):
     def forward(
         self,
         input_,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -633,8 +633,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         bias: bool = True,
         gather_output: bool = False,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -662,7 +662,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self,
         param: Parameter,
         loaded_weight: torch.Tensor,
-        loaded_shard_id: Optional[int] = None,
+        loaded_shard_id: int | None = None,
     ):
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
@@ -838,7 +838,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self,
         param: BasevLLMParameter,
         loaded_weight: torch.Tensor,
-        loaded_shard_id: Optional[int] = None,
+        loaded_shard_id: int | None = None,
     ):
         if loaded_shard_id is None:
             if isinstance(param, PerTensorScaleParameter):
@@ -914,11 +914,11 @@ class QKVParallelLinear(ColumnParallelLinear):
         hidden_size: int,
         head_size: int,
         total_num_heads: int,
-        total_num_kv_heads: Optional[int] = None,
+        total_num_kv_heads: int | None = None,
         bias: bool = True,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -1027,7 +1027,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         self,
         param: BasevLLMParameter,
         loaded_weight: torch.Tensor,
-        loaded_shard_id: Optional[str] = None,
+        loaded_shard_id: str | None = None,
     ):
         if loaded_shard_id is None:  # special case for certain models
             if isinstance(param, PerTensorScaleParameter):
@@ -1071,7 +1071,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         self,
         param: Parameter,
         loaded_weight: torch.Tensor,
-        loaded_shard_id: Optional[str] = None,
+        loaded_shard_id: str | None = None,
     ):
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
@@ -1229,10 +1229,10 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             if loaded_shard_id == "q":
-                shard_id = self.tp_rank
+                shard_rank = self.tp_rank
             else:
-                shard_id = self.tp_rank // self.num_kv_head_replicas
-            start_idx = shard_id * shard_size
+                shard_rank = self.tp_rank // self.num_kv_head_replicas
+            start_idx = shard_rank * shard_size
 
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
@@ -1296,9 +1296,9 @@ class RowParallelLinear(LinearBase):
         bias: bool = True,
         input_is_parallel: bool = True,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
         reduce_results: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -1405,7 +1405,7 @@ class RowParallelLinear(LinearBase):
     def forward(
         self,
         input_,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.input_is_parallel:
             input_parallel = input_
         else:

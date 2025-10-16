@@ -5,8 +5,6 @@
 Run `pytest tests/v1/tpu/test_perf.py`.
 """
 
-from __future__ import annotations
-
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -20,6 +18,8 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 
 @dataclass

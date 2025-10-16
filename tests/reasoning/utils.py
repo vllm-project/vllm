@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.reasoning import ReasoningParser
@@ -34,9 +33,9 @@ class StreamingReasoningReconstructor:
 def run_reasoning_extraction(
     reasoning_parser: ReasoningParser,
     model_output: list[str],
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
     streaming: bool = False,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     if streaming:
         reconstructor = run_reasoning_extraction_streaming(
             reasoning_parser,
@@ -57,9 +56,9 @@ def run_reasoning_extraction(
 def run_reasoning_extraction_mistral(
     reasoning_parser: ReasoningParser,
     model_output: list[int],
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
     streaming: bool = False,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     assert isinstance(reasoning_parser.model_tokenizer, MistralTokenizer), type(
         reasoning_parser.model_tokenizer
     )
@@ -86,8 +85,8 @@ def run_reasoning_extraction_mistral(
 def run_reasoning_extraction_nonstreaming(
     reasoning_parser: ReasoningParser,
     model_output: list[str],
-    request: Union[ChatCompletionRequest, None] = None,
-) -> tuple[Optional[str], Optional[str]]:
+    request: ChatCompletionRequest | None = None,
+) -> tuple[str | None, str | None]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return reasoning_parser.extract_reasoning_content(
         model_output="".join(model_output), request=request
@@ -97,7 +96,7 @@ def run_reasoning_extraction_nonstreaming(
 def run_reasoning_extraction_streaming(
     reasoning_parser: ReasoningParser,
     model_deltas: list[str],
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
 ) -> StreamingReasoningReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingReasoningReconstructor()
@@ -129,7 +128,7 @@ def run_reasoning_extraction_streaming(
 def run_reasoning_extraction_streaming_mistral(
     reasoning_parser: ReasoningParser,
     model_deltas: list[int],
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
 ) -> StreamingReasoningReconstructor:
     assert isinstance(reasoning_parser.model_tokenizer, MistralTokenizer), type(
         reasoning_parser.model_tokenizer

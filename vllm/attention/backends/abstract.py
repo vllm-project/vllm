@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, Optional, Protocol, TypeVar, Union
+from typing import Generic, Protocol, TypeVar
 
 import torch
 
@@ -41,14 +41,6 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
 
-    # Whether this backend supports receiving pre-quantized query input.
-    # If True, the attention layer will handle query quantization instead
-    # of the backend, allowing torch.compile to fuse quantization with
-    # previous operations.
-    # Needs to be worked through for all backends
-    # https://github.com/vllm-project/vllm/issues/25584
-    supports_quant_query_input: bool = False
-
     @staticmethod
     @abstractmethod
     def get_name() -> str:
@@ -65,7 +57,7 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
         return cls.get_impl_cls().get_supported_kernel_block_size()
 
     @classmethod
@@ -158,18 +150,18 @@ class AttentionImpl(ABC, Generic[T]):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[list[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        sliding_window: int | None = None,
         kv_cache_dtype: str = "auto",
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         raise NotImplementedError
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
         # TODO: implement this function for all backends.
         return [MultipleOf(1)]
 
@@ -182,9 +174,9 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -199,6 +191,22 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
+    def supports_quant_query_input(self) -> bool:
+        """
+        Check if this attention implementation supports pre-quantized query input.
+
+        When True, the attention layer will quantize queries before passing them
+        to this backend, allowing torch.compile to fuse the quantization with
+        previous operations. This is typically supported when using FP8 KV cache
+        with compatible attention kernels (e.g., TRT-LLM).
+        TODO add support to more backends:
+        https://github.com/vllm-project/vllm/issues/25584
+
+        Returns:
+            bool: True if the implementation can accept pre-quantized queries.
+        """
+        return False
+
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     @abstractmethod
@@ -208,21 +216,21 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
-        indexer: Optional[object] = None,
+        indexer: object | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -235,9 +243,9 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

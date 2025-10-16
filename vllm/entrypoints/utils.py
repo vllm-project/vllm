@@ -6,7 +6,7 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from typing import Any, Optional, Union
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -14,7 +14,11 @@ from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    StreamOptions,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
@@ -164,9 +168,9 @@ def cli_env_setup():
 
 def _validate_truncation_size(
     max_model_len: int,
-    truncate_prompt_tokens: Optional[int],
-    tokenization_kwargs: Optional[dict[str, Any]] = None,
-) -> Optional[int]:
+    truncate_prompt_tokens: int | None,
+    tokenization_kwargs: dict[str, Any] | None = None,
+) -> int | None:
     if truncate_prompt_tokens is not None:
         if truncate_prompt_tokens <= -1:
             truncate_prompt_tokens = max_model_len
@@ -191,7 +195,7 @@ def _validate_truncation_size(
 
 def get_max_tokens(
     max_model_len: int,
-    request: Union[ChatCompletionRequest, CompletionRequest],
+    request: ChatCompletionRequest | CompletionRequest,
     input_length: int,
     default_sampling_params: dict,
 ) -> int:
@@ -211,7 +215,7 @@ def get_max_tokens(
     )
 
 
-def log_non_default_args(args: Union[Namespace, EngineArgs]):
+def log_non_default_args(args: Namespace | EngineArgs):
     non_default_args = {}
 
     # Handle Namespace
@@ -237,3 +241,16 @@ def log_non_default_args(args: Union[Namespace, EngineArgs]):
         )
 
     logger.info("non-default args: %s", non_default_args)
+
+
+def should_include_usage(
+    stream_options: StreamOptions | None, enable_force_include_usage: bool
+) -> tuple[bool, bool]:
+    if stream_options:
+        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_continuous_usage = include_usage and bool(
+            stream_options.continuous_usage_stats
+        )
+    else:
+        include_usage, include_continuous_usage = enable_force_include_usage, False
+    return include_usage, include_continuous_usage

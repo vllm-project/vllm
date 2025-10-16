@@ -4,7 +4,6 @@ import copy
 import multiprocessing
 import time
 import weakref
-from typing import Optional
 
 import msgspec.msgpack
 import zmq
@@ -155,7 +154,7 @@ class DPCoordinatorProc:
         stats_changed = False
         last_stats_step = -1
         last_stats_wave = -1
-        last_step_counts: Optional[list[list[int]]] = None
+        last_step_counts: list[list[int]] | None = None
 
         with (
             make_zmq_socket(
@@ -360,7 +359,7 @@ class DPCoordinatorProc:
 
     @staticmethod
     def _send_start_wave(
-        socket: zmq.Socket, wave: int, exclude_engine_index: Optional[int]
+        socket: zmq.Socket, wave: int, exclude_engine_index: int | None
     ):
         """Broadcast the START_DP_WAVE message to all the engines.
         It includes the current wave number and index of engine which

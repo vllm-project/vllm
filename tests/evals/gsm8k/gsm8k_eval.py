@@ -12,7 +12,6 @@ import json
 import os
 import time
 from collections.abc import Generator
-from typing import Optional, Union
 
 import aiohttp
 import numpy as np
@@ -23,7 +22,7 @@ from tqdm.asyncio import tqdm
 INVALID = -9999999
 
 
-def download_and_cache_file(url: str, filename: Optional[str] = None) -> str:
+def download_and_cache_file(url: str, filename: str | None = None) -> str:
     """Download and cache a file from a URL."""
     if filename is None:
         filename = os.path.join("/tmp", url.split("/")[-1])
@@ -81,9 +80,9 @@ async def call_vllm_api(
     prompt: str,
     temperature: float,
     max_tokens: int,
-    stop: Optional[list[str]] = None,
-    url: Optional[str] = None,
-    seed: Optional[int] = None,
+    stop: list[str] | None = None,
+    url: str | None = None,
+    seed: int | None = None,
 ) -> str:
     """Call vLLM's OpenAI-compatible completions endpoint."""
     data = {
@@ -112,8 +111,8 @@ def evaluate_gsm8k(
     host: str = "http://127.0.0.1",
     port: int = 8000,
     temperature: float = 0.0,
-    seed: Optional[int] = 42,
-) -> dict[str, Union[float, int]]:
+    seed: int | None = 42,
+) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
 

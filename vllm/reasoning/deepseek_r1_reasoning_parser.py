@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Union
 
 from vllm.entrypoints.openai.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
@@ -36,7 +35,7 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         ret = super().extract_reasoning_content_streaming(
             previous_text,
             current_text,

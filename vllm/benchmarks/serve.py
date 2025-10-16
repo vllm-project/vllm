@@ -31,7 +31,7 @@ from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import aiohttp
 import numpy as np
@@ -107,9 +107,9 @@ class EmbedBenchmarkMetrics:
 
 
 def _get_current_request_rate(
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
-    ramp_up_start_rps: Optional[int],
-    ramp_up_end_rps: Optional[int],
+    ramp_up_strategy: Literal["linear", "exponential"] | None,
+    ramp_up_start_rps: int | None,
+    ramp_up_end_rps: int | None,
     request_index: int,
     total_requests: int,
     request_rate: float,
@@ -135,9 +135,9 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -474,7 +474,7 @@ async def benchmark(
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: list[SampleRequest],
-    logprobs: Optional[int],
+    logprobs: int | None,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
@@ -483,13 +483,13 @@ async def benchmark(
     selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
-    max_concurrency: Optional[int],
-    lora_modules: Optional[Iterable[str]],
-    extra_headers: Optional[dict],
-    extra_body: Optional[dict],
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    max_concurrency: int | None,
+    lora_modules: Iterable[str] | None,
+    extra_headers: dict | None,
+    extra_body: dict | None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
 ):
     try:
@@ -1230,6 +1230,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "the ready check will be skipped.",
     )
 
+    parser.add_argument(
+        "--extra-body",
+        help="A JSON string representing extra body parameters to include "
+        "in each request."
+        'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
+        type=json.loads,
+        default=None,
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1330,6 +1339,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     else:
         sampling_params = {}
 
+    extra_body = args.extra_body or {}
+    extra_body = {**sampling_params, **extra_body}
+
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
@@ -1355,7 +1367,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
         extra_headers=headers,
-        extra_body=sampling_params,
+        extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,

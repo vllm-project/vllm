@@ -43,6 +43,7 @@ def test_basic_lifecycle():
     # STEP (1): Prefill.
     # (1a): schedule()
     scheduler_output = scheduler.schedule()
+    assert len(scheduler.requests) == 1
     assert len(scheduler.running) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 1
 
@@ -67,6 +68,7 @@ def test_basic_lifecycle():
     assert len(scheduler.waiting) == 0
 
     # ... but blocks should not be freed.
+    assert len(scheduler.requests) == 1
     blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
         0
     ].req_to_blocks[request_id]
@@ -76,6 +78,7 @@ def test_basic_lifecycle():
     # STEP (2): Send Finished to PB.
     # (2a): schedule() - pass finished request to PB.
     scheduler_output = scheduler.schedule()
+    assert len(scheduler.requests) == 1
     assert len(scheduler.running) == 0
     assert len(scheduler_output.finished_req_ids) == 1
     assert request_id in scheduler_output.finished_req_ids
@@ -92,6 +95,7 @@ def test_basic_lifecycle():
     # STEP (3): Finished sending.
     # (3a): schedule() - pass finished request to PB.
     scheduler_output = scheduler.schedule()
+    assert len(scheduler.requests) == 1
     assert len(scheduler.running) == 0
     assert len(scheduler_output.finished_req_ids) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 0
@@ -133,6 +137,7 @@ def test_short_prompt_lifecycle():
     # STEP (1): Prefill.
     # (1a): schedule()
     scheduler_output = scheduler.schedule()
+    assert len(scheduler.requests) == 1
     assert len(scheduler.running) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 1
 
@@ -178,7 +183,7 @@ def test_prefix_cache_lifecycle():
         reqs=[request_normal], use_eos=True
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
-    scheduler.schedule()
+    scheduler_output = scheduler.schedule()
     scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
 
     #####################
@@ -210,6 +215,48 @@ def test_prefix_cache_lifecycle():
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
         finished_sending={request_remote.request_id}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert_scheduler_empty(scheduler)
+
+
+def test_abort_during_kv_transfer():
+    """Test aborting request does not release blocks for remote decode."""
+
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    # Prime the KVCache.
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_EXTERNAL_FULL_BLOCKS = 2
+    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
+
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=NUM_TOKENS,
+        do_remote_decode=True,
+    )
+
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[request])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # Request removed from PB but blocks should not be freed.
+    assert len(scheduler.requests) == 1
+
+    # Abort the request, and check the blocks are still not freed
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+    assert len(scheduler.requests) == 1
+
+    # Simulate a finished sending notification
+    scheduler_output = scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_sending=[request.request_id]
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)

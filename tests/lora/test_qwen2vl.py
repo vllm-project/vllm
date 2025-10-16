@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 
@@ -20,7 +19,7 @@ class TestConfig:
     max_loras: int = 2
     max_lora_rank: int = 16
     max_model_len: int = 4096
-    mm_processor_kwargs: Optional[dict[str, int]] = None
+    mm_processor_kwargs: dict[str, int] | None = None
 
     def __post_init__(self):
         if self.mm_processor_kwargs is None:
@@ -61,7 +60,7 @@ class Qwen2VLTester:
         self,
         images: list[ImageAsset],
         expected_outputs: list[str],
-        lora_id: Optional[int] = None,
+        lora_id: int | None = None,
         temperature: float = 0,
         max_tokens: int = 5,
     ):
@@ -92,7 +91,7 @@ class Qwen2VLTester:
         self,
         images: list[ImageAsset],
         expected_outputs: list[list[str]],
-        lora_id: Optional[int] = None,
+        lora_id: int | None = None,
         temperature: float = 0,
         beam_width: int = 2,
         max_tokens: int = 5,

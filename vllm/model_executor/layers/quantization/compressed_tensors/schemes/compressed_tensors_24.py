@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from compressed_tensors import CompressionFormat, ModelCompressor
@@ -42,23 +43,23 @@ class CompressedTensors24(CompressedTensorsScheme):
     def __init__(
         self,
         quantized: bool = False,
-        weight_quant: Optional[QuantizationArgs] = None,
-        input_quant: Optional[QuantizationArgs] = None,
-        model_compression_config: Optional[dict[str, Any]] = None,
+        weight_quant: QuantizationArgs | None = None,
+        input_quant: QuantizationArgs | None = None,
+        model_compression_config: dict[str, Any] | None = None,
     ):
         self.quantized = quantized
         self.weight_quant = weight_quant
         self.input_quant = input_quant
-        self.model_compressor = (
-            ModelCompressor.from_compression_config(model_compression_config)
-            if model_compression_config is not None
-            else None
+        model_compressor = ModelCompressor.from_compression_config(
+            model_compression_config
         )
         self.do_sparse_decompress = (
-            self.model_compressor is not None
-            and self.model_compressor.sparsity_config.format
+            model_compressor is not None
+            and model_compressor.sparsity_config.format
             == CompressionFormat.sparse_24_bitmask.value
         )
+        if self.do_sparse_decompress:
+            self.model_compressor = model_compressor
 
         if (
             quantized
@@ -247,7 +248,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Returns the output tensor for the layer with 2:4

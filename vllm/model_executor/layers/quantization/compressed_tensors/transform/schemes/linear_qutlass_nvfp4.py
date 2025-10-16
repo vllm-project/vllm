@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -17,7 +16,7 @@ __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
 
 
 def is_qutlass_fp4_scheme(
-    quant_scheme: Optional[CompressedTensorsScheme],
+    quant_scheme: CompressedTensorsScheme | None,
     input_tfms: dict[int, TransformTuple],
 ) -> bool:
     return (
@@ -60,6 +59,6 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError()

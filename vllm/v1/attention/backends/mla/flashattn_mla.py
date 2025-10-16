@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
@@ -24,6 +24,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -55,7 +56,7 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
     query_start_loc: torch.Tensor
     max_query_len: int
     max_seq_len: int
-    scheduler_metadata: Optional[torch.Tensor] = None
+    scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
 
 
@@ -66,8 +67,8 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-
-    reorder_batch_threshold: int = 512
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
+    reorder_batch_threshold: int = 512  # process small prefills with decode pathway
 
     def __init__(
         self,
@@ -135,7 +136,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        dcp_tot_seq_lens_device: Optional[torch.Tensor],
+        dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
@@ -195,12 +196,12 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -242,11 +243,11 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashAttnMLAMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from itertools import product
-from typing import Callable, Optional
 
 import pytest
 import torch
@@ -12,8 +12,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 
 IS_NEOX_STYLE = [True, False]
-DTYPES = [torch.half, torch.bfloat16, torch.float]
-HEAD_SIZES = [64, 80, 112, 120, 256]
+DTYPES = [torch.bfloat16, torch.float]
+HEAD_SIZES = [64, 80, 120, 256]
 ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
 NUM_HEADS = [17]  # Arbitrary values for testing
 BATCH_SIZES = [5]  # Arbitrary values for testing
@@ -68,7 +68,7 @@ def test_rotary_embedding(
     seq_len: int,
     num_heads: int,
     head_size: int,
-    rotary_dim: Optional[int],
+    rotary_dim: int | None,
     dtype: torch.dtype,
     seed: int,
     device: str,

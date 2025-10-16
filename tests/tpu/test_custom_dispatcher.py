@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.config import CompilationLevel
+from vllm.config import CompilationMode
 
 from ..utils import compare_two_settings
 
@@ -21,13 +21,13 @@ def test_custom_dispatcher(monkeypatch: pytest.MonkeyPatch):
                 "--max-model-len=256",
                 "--max-num-seqs=32",
                 "--enforce-eager",
-                f"-O{CompilationLevel.DYNAMO_ONCE}",
+                f"-O{CompilationMode.DYNAMO_TRACE_ONCE}",
             ],
             arg2=[
                 "--max-model-len=256",
                 "--max-num-seqs=32",
                 "--enforce-eager",
-                f"-O{CompilationLevel.DYNAMO_AS_IS}",
+                f"-O{CompilationMode.STOCK_TORCH_COMPILE}",
             ],
             env1={},
             env2={},

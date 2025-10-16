@@ -156,6 +156,16 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     NixlConnector currently does not distinguish `kv_role`; the actual prefiller/decoder roles are determined by the upper-level proxy (e.g., `toy_proxy_server.py` using `--prefiller-hosts` and `--decoder-hosts`).
     Therefore, `kv_role` in `--kv-transfer-config` is effectively a placeholder and does not affect NixlConnector's behavior.
 
+## Experimental Feature
+
+### Heterogenuous KV Layout support
+
+Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
+
+```bash
+--kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
+```
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:

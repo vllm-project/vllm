@@ -32,28 +32,28 @@ This is the easiest way to get started with vLLM on Hugging Face Inference Endpo
     import os
 
     client = OpenAI(
-        base_url = DEPLOYMENT_URL,
-        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+        base_url=DEPLOYMENT_URL,
+        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
     )
 
     chat_completion = client.chat.completions.create(
-        model = "HuggingFaceTB/SmolLM3-3B",
-        messages = [
+        model="HuggingFaceTB/SmolLM3-3B",
+        messages=[
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": "Give me a brief explanation of gravity in simple terms."
+                        "text": "Give me a brief explanation of gravity in simple terms.",
                     }
-                ]
+                ],
             }
         ],
-        stream = True
+        stream=True,
     )
 
     for message in chat_completion:
-        print(message.choices[0].delta.content, end = "")
+        print(message.choices[0].delta.content, end="")
     ```
 
 !!! note
@@ -86,34 +86,34 @@ This method applies to models with the [`transformers` library tag](https://hugg
     import os
 
     client = OpenAI(
-        base_url = DEPLOYMENT_URL,
-        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+        base_url=DEPLOYMENT_URL,
+        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
     )
 
     chat_completion = client.chat.completions.create(
-        model = "ibm-granite/granite-docling-258M",
-        messages = [
+        model="ibm-granite/granite-docling-258M",
+        messages=[
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
-                        }
+                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png",
+                        },
                     },
                     {
                         "type": "text",
-                        "text": "Convert this page to docling."
-                    }
+                        "text": "Convert this page to docling.",
+                    },
                 ]
             }
         ],
-        stream = True
+        stream=True,
     )
 
     for message in chat_completion:
-        print(message.choices[0].delta.content, end = "")
+        print(message.choices[0].delta.content, end="")
     ```
 
 !!! note

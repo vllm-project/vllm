@@ -3,7 +3,6 @@
 
 import math
 import time
-from typing import Optional
 
 import pytest
 
@@ -118,13 +117,13 @@ def test_incremental_detokenization(
 
 def _validate_logprobs(
     gen_tokens: dict[str, list[int]],
-    gen_logprobs: dict[str, Optional[SampleLogprobs]],
-    gen_prompt_logprobs: dict[str, Optional[PromptLogprobs]],
+    gen_logprobs: dict[str, SampleLogprobs | None],
+    gen_prompt_logprobs: dict[str, PromptLogprobs | None],
     gen_cumulative_logprob: dict[str, float],
     dtv: DummyOutputProcessorTestVectors,
     request_id_list: list[str],
-    num_sample_logprobs: Optional[int],
-    num_prompt_logprobs: Optional[int],
+    num_sample_logprobs: int | None,
+    num_prompt_logprobs: int | None,
 ) -> None:
     for req_idx, req_id in enumerate(request_id_list):
         new_tokens = gen_tokens[req_id]
@@ -413,8 +412,8 @@ def _validate_logprobs(
 @pytest.mark.parametrize("num_prompt_logprobs", [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
 def test_logprobs_processor(
     request_output_kind: RequestOutputKind,
-    num_sample_logprobs: Optional[int],
-    num_prompt_logprobs: Optional[int],
+    num_sample_logprobs: int | None,
+    num_prompt_logprobs: int | None,
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
@@ -530,7 +529,7 @@ def test_logprobs_processor(
 )
 def test_stop_token(
     include_stop_str_in_output: bool,
-    num_sample_logprobs: Optional[int],
+    num_sample_logprobs: int | None,
     stop_token_type: str,
     ignore_eos: bool,
     dummy_test_vectors,
@@ -696,7 +695,7 @@ def test_stop_token(
 @pytest.mark.parametrize("num_sample_logprobs", [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 def test_stop_string(
     include_stop_str_in_output: bool,
-    num_sample_logprobs: Optional[int],
+    num_sample_logprobs: int | None,
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)

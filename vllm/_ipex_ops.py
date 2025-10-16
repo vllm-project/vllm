@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import torch
 
@@ -65,7 +64,7 @@ class ipex_ops:
         context_lens: torch.Tensor,
         block_size: int,
         max_context_len: int,
-        alibi_slopes: Optional[torch.Tensor],
+        alibi_slopes: torch.Tensor | None,
         kv_cache_dtype: str,
         k_scale: float,
         v_scale: float,
@@ -107,7 +106,7 @@ class ipex_ops:
         context_lens: torch.Tensor,
         block_size: int,
         max_context_len: int,
-        alibi_slopes: Optional[torch.Tensor],
+        alibi_slopes: torch.Tensor | None,
         kv_cache_dtype: str,
         k_scale: float,
         v_scale: float,
@@ -174,7 +173,7 @@ class ipex_ops:
         out: torch.Tensor,
         seqlen_q: torch.Tensor,
         seqlen_k: torch.Tensor,
-        alibi_slopes: Optional[torch.Tensor],
+        alibi_slopes: torch.Tensor | None,
         max_seqlen_q: int,
         max_seqlen_k: int,
         pdropout: float,
@@ -254,8 +253,8 @@ class ipex_ops:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: Optional[torch.Tensor] = None,
-        v_scale: Optional[torch.Tensor] = None,
+        k_scale: torch.Tensor | None = None,
+        v_scale: torch.Tensor | None = None,
         k_scale_float: float = 1.0,
         v_scale_float: float = 1.0,
     ) -> None:
@@ -283,10 +282,10 @@ class ipex_ops:
         softmax_scale: float,
         causal: bool,
         block_table: torch.Tensor,
-        alibi_slopes: Optional[torch.Tensor],
-        window_size: Optional[list[int]] = None,
-        softcap: Optional[float] = 0.0,
-        cu_seqlens_k: Optional[torch.Tensor] = None,
+        alibi_slopes: torch.Tensor | None,
+        window_size: list[int] | None = None,
+        softcap: float | None = 0.0,
+        cu_seqlens_k: torch.Tensor | None = None,
         # The following parameters are not used in ipex kernel currently,
         # we keep API compatible to CUDA's.
         scheduler_metadata=None,
@@ -295,7 +294,7 @@ class ipex_ops:
         k_descale=None,
         v_descale=None,
         num_splits=0,
-        s_aux: Optional[torch.Tensor] = None,
+        s_aux: torch.Tensor | None = None,
     ):
         if cu_seqlens_k is None:
             # cu_seqlens_k is not used in ipex kernel.
@@ -344,10 +343,10 @@ class ipex_ops:
         cache_seqlens: torch.Tensor,
         qkv_dtype=torch.bfloat16,
         headdim_v=None,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_k_new: Optional[torch.Tensor] = None,
-        cache_leftpad: Optional[torch.Tensor] = None,
-        page_size: Optional[int] = None,
+        cu_seqlens_q: torch.Tensor | None = None,
+        cu_seqlens_k_new: torch.Tensor | None = None,
+        cache_leftpad: torch.Tensor | None = None,
+        page_size: int | None = None,
         max_seqlen_k_new=0,
         causal=False,
         window_size=(-1, -1),  # -1 means infinite context window
@@ -382,11 +381,11 @@ class ipex_ops:
     @staticmethod
     def scaled_fp8_quant(
         input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        num_token_padding: Optional[int] = None,
-        scale_ub: Optional[torch.Tensor] = None,
+        scale: torch.Tensor | None = None,
+        num_token_padding: int | None = None,
+        scale_ub: torch.Tensor | None = None,
         use_per_token_if_dynamic: bool = False,
-        output: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -414,7 +413,7 @@ class ipex_ops:
         """
         # This code assumes batch_dim and num_tokens are flattened
         assert input.ndim == 2
-        shape: Union[tuple[int, int], torch.Size] = input.shape
+        shape: tuple[int, int] | torch.Size = input.shape
         out_dtype: torch.dtype = current_platform.fp8_dtype()
         if num_token_padding:
             shape = (max(num_token_padding, input.shape[0]), shape[1])

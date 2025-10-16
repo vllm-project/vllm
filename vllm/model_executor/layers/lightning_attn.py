@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -529,7 +528,7 @@ def lightning_attention(
     v: torch.Tensor,
     ed: torch.Tensor,
     block_size: int = 256,
-    kv_history: Optional[torch.Tensor] = None,
+    kv_history: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply lightning attention algorithm

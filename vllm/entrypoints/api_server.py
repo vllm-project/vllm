@@ -13,7 +13,7 @@ import json
 import ssl
 from argparse import Namespace
 from collections.abc import AsyncGenerator
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -101,7 +101,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 async def init_app(
     args: Namespace,
-    llm_engine: Optional[AsyncLLMEngine] = None,
+    llm_engine: AsyncLLMEngine | None = None,
 ) -> FastAPI:
     app = build_app(args)
 
@@ -120,7 +120,7 @@ async def init_app(
 
 
 async def run_server(
-    args: Namespace, llm_engine: Optional[AsyncLLMEngine] = None, **uvicorn_kwargs: Any
+    args: Namespace, llm_engine: AsyncLLMEngine | None = None, **uvicorn_kwargs: Any
 ) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)

@@ -18,8 +18,16 @@ from vllm import version
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODELS = {
+    "text": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "multimodal": "HuggingFaceTB/SmolVLM-256M-Instruct",
+}
 PREV_MINOR_VERSION = version._prev_minor_version()
+
+
+@pytest.fixture(scope="module", params=list(MODELS.keys()))
+def model_key(request):
+    yield request.param
 
 
 @pytest.fixture(scope="module")
@@ -45,11 +53,12 @@ def default_server_args():
         f"--show-hidden-metrics-for-version={PREV_MINOR_VERSION}",
     ],
 )
-def server(default_server_args, request):
+def server(model_key, default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
 
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+    model_name = MODELS[model_key]
+    with RemoteOpenAIServer(model_name, default_server_args) as remote_server:
         yield remote_server
 
 
@@ -60,64 +69,70 @@ async def client(server):
 
 
 _PROMPT = "Hello my name is Robert and I love magic"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-_TOKENIZED_PROMPT = tokenizer(_PROMPT)["input_ids"]
+_IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
-_NUM_REQUESTS = 10
-_NUM_PROMPT_TOKENS_PER_REQUEST = len(_TOKENIZED_PROMPT)
-_NUM_GENERATION_TOKENS_PER_REQUEST = 10
 
-# {metric_family: [(suffix, expected_value)]}
-EXPECTED_VALUES = {
-    "vllm:time_to_first_token_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:time_per_output_token_seconds": [
-        ("_count", _NUM_REQUESTS * (_NUM_GENERATION_TOKENS_PER_REQUEST - 1))
-    ],
-    "vllm:e2e_request_latency_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_queue_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_prompt_tokens": [
-        ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS),
-    ],
-    "vllm:request_generation_tokens": [
-        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS),
-    ],
-    "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
-    "vllm:request_params_max_tokens": [
-        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS),
-    ],
-    "vllm:iteration_tokens_total": [
-        (
-            "_sum",
-            _NUM_REQUESTS
-            * (_NUM_PROMPT_TOKENS_PER_REQUEST + _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ),
-        ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-    ],
-    "vllm:prompt_tokens": [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
-    "vllm:generation_tokens": [
-        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
-    ],
-    "vllm:request_success": [("_total", _NUM_REQUESTS)],
-}
+def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: int):
+    num_prompt_tokens = len(prompt_ids)
+
+    # {metric_family: [(suffix, expected_value)]}
+    return {
+        "vllm:time_to_first_token_seconds": [("_count", num_requests)],
+        "vllm:time_per_output_token_seconds": [
+            ("_count", num_requests * (max_tokens - 1))
+        ],
+        "vllm:e2e_request_latency_seconds": [("_count", num_requests)],
+        "vllm:request_queue_time_seconds": [("_count", num_requests)],
+        "vllm:request_inference_time_seconds": [("_count", num_requests)],
+        "vllm:request_prefill_time_seconds": [("_count", num_requests)],
+        "vllm:request_decode_time_seconds": [("_count", num_requests)],
+        "vllm:request_prompt_tokens": [
+            ("_sum", num_requests * num_prompt_tokens),
+            ("_count", num_requests),
+        ],
+        "vllm:request_generation_tokens": [
+            ("_sum", num_requests * max_tokens),
+            ("_count", num_requests),
+        ],
+        "vllm:request_params_n": [("_count", num_requests)],
+        "vllm:request_params_max_tokens": [
+            ("_sum", num_requests * max_tokens),
+            ("_count", num_requests),
+        ],
+        "vllm:iteration_tokens_total": [
+            (
+                "_sum",
+                num_requests * (num_prompt_tokens + max_tokens),
+            ),
+            ("_count", num_requests * max_tokens),
+        ],
+        "vllm:prompt_tokens": [("_total", num_requests * num_prompt_tokens)],
+        "vllm:generation_tokens": [("_total", num_requests * max_tokens)],
+        "vllm:request_success": [("_total", num_requests)],
+    }
 
 
 @pytest.mark.asyncio
 async def test_metrics_counts(
     server: RemoteOpenAIServer,
     client: openai.AsyncClient,
+    model_key: str,
 ):
-    for _ in range(_NUM_REQUESTS):
+    if model_key == "multimodal":
+        pytest.skip("Unnecessary test")
+
+    model_name = MODELS[model_key]
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    prompt_ids = tokenizer.encode(_PROMPT)
+    num_requests = 10
+    max_tokens = 10
+
+    for _ in range(num_requests):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
-            model=MODEL_NAME,
-            prompt=_TOKENIZED_PROMPT,
-            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST,
+            model=model_name,
+            prompt=prompt_ids,
+            max_tokens=max_tokens,
         )
 
     response = requests.get(server.url_for("metrics"))
@@ -125,8 +140,9 @@ async def test_metrics_counts(
     assert response.status_code == HTTPStatus.OK
 
     # Loop over all expected metric_families
-    for metric_family, suffix_values_list in EXPECTED_VALUES.items():
-        if (metric_family not in EXPECTED_METRICS_V1) or (
+    expected_values = _get_expected_values(num_requests, prompt_ids, max_tokens)
+    for metric_family, suffix_values_list in expected_values.items():
+        if metric_family not in EXPECTED_METRICS_V1 or (
             not server.show_hidden_metrics
             and metric_family in HIDDEN_DEPRECATED_METRICS
         ):
@@ -217,6 +233,11 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_count",
 ]
 
+EXPECTED_METRICS_MM = [
+    "vllm:mm_cache_queries",
+    "vllm:mm_cache_hits",
+]
+
 HIDDEN_DEPRECATED_METRICS: list[str] = [
     "vllm:gpu_cache_usage_perc",
     "vllm:gpu_prefix_cache_queries",
@@ -231,19 +252,43 @@ HIDDEN_DEPRECATED_METRICS: list[str] = [
 async def test_metrics_exist(
     server: RemoteOpenAIServer,
     client: openai.AsyncClient,
+    model_key: str,
 ):
+    model_name = MODELS[model_key]
+
     # sending a request triggers the metrics to be logged.
-    await client.completions.create(
-        model=MODEL_NAME,
-        prompt="Hello, my name is",
-        max_tokens=5,
-        temperature=0.0,
-    )
+    if model_key == "text":
+        await client.completions.create(
+            model=model_name,
+            prompt="Hello, my name is",
+            max_tokens=5,
+            temperature=0.0,
+        )
+    else:
+        await client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": _IMAGE_URL}},
+                        {"type": "text", "text": "What's in this image?"},
+                    ],
+                }
+            ],
+            max_tokens=5,
+            temperature=0.0,
+        )
 
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
-    for metric in EXPECTED_METRICS_V1:
+    expected_metrics = EXPECTED_METRICS_V1
+    if model_key == "multimodal":
+        # NOTE: Don't use in-place assignment
+        expected_metrics = expected_metrics + EXPECTED_METRICS_MM
+
+    for metric in expected_metrics:
         if metric in HIDDEN_DEPRECATED_METRICS and not server.show_hidden_metrics:
             continue
         assert metric in response.text
@@ -253,9 +298,14 @@ async def test_metrics_exist(
 async def test_abort_metrics_reset(
     server: RemoteOpenAIServer,
     client: openai.AsyncClient,
+    model_key: str,
 ):
+    model_name = MODELS[model_key]
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    prompt_ids = tokenizer.encode(_PROMPT)
+
     running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
-        server
+        server,
     )
 
     # Expect no running requests or kvcache usage
@@ -268,8 +318,8 @@ async def test_abort_metrics_reset(
     for _ in range(3):
         task = asyncio.create_task(
             client.completions.create(
-                model=MODEL_NAME,
-                prompt=_TOKENIZED_PROMPT,
+                model=model_name,
+                prompt=prompt_ids,
                 max_tokens=100,  # Long generation to give time to abort
                 temperature=0.0,
             )
@@ -281,7 +331,7 @@ async def test_abort_metrics_reset(
 
     # Check that we have running requests
     running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
-        server
+        server,
     )
 
     # Expect running requests and kvcache usage

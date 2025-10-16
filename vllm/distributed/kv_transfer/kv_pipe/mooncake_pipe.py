@@ -6,7 +6,6 @@ import os
 import struct
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 import zmq
@@ -26,7 +25,7 @@ NONE_INT = -150886311
 class MooncakeTransferEngineConfig:
     prefill_url: str
     decode_url: str
-    metadata_backend: Union[str, None]
+    metadata_backend: str | None
     metadata_server: str
     protocol: str
     device_name: str
@@ -143,7 +142,7 @@ class MooncakeTransferEngine:
         metadata_server: str,
         protocol: str,
         device_name: str,
-        metadata_backend: Union[str, None],
+        metadata_backend: str | None,
     ) -> None:
         """Initialize the mooncake instance."""
         if metadata_backend is None:
@@ -231,19 +230,20 @@ class MooncakePipe(KVPipeBase):
     """MooncakeTransferEngine based Pipe implementation."""
 
     def __init__(
-        self, local_rank: int, config: KVTransferConfig, device: Optional[str] = None
+        self, local_rank: int, config: KVTransferConfig, device: str | None = None
     ):
         """Initialize the mooncake pipe and set related parameters."""
         self.config = config
         self.local_rank = local_rank
         self.kv_rank = self.config.kv_rank
+        assert self.kv_rank is not None
         if device is None:
             self.device = self._select_device(self.config.kv_buffer_device)
         else:
             self.device = self._select_device(device)
 
         self.transfer_engine = MooncakeTransferEngine(self.kv_rank, self.local_rank)
-        self.transport_thread: Optional[ThreadPoolExecutor] = None
+        self.transport_thread: ThreadPoolExecutor | None = None
         self.none_tensor = torch.tensor([NONE_INT], device=self.device)
 
     def _select_device(self, device: str) -> torch.device:
@@ -267,7 +267,7 @@ class MooncakePipe(KVPipeBase):
         data = self.transfer_engine.recv_bytes()
         return safetensors_load(data)["tensor"].to(self.device)
 
-    def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
+    def send_tensor(self, tensor: torch.Tensor | None) -> None:
         """Send tensor to the target process."""
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
@@ -275,7 +275,7 @@ class MooncakePipe(KVPipeBase):
         assert len(tensor.shape) > 0
         self.transport_thread.submit(self._send_impl, tensor)
 
-    def recv_tensor(self) -> Optional[torch.Tensor]:
+    def recv_tensor(self) -> torch.Tensor | None:
         """Receive tensor from other processes."""
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)

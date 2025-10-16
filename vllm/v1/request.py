@@ -3,9 +3,9 @@
 
 import enum
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -31,20 +31,19 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: Optional[list[int]],
-        sampling_params: Optional[SamplingParams],
-        pooling_params: Optional[PoolingParams],
-        eos_token_id: Optional[int],
+        prompt_token_ids: list[int] | None,
+        sampling_params: SamplingParams | None,
+        pooling_params: PoolingParams | None,
+        eos_token_id: int | None,
         client_index: int = 0,
-        arrival_time: Optional[float] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        mm_features: Optional[list[MultiModalFeatureSpec]] = None,
+        arrival_time: float | None = None,
+        prompt_embeds: torch.Tensor | None = None,
+        mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: Optional["LoRARequest"] = None,
-        structured_output_request: Optional["StructuredOutputRequest"] = None,
-        cache_salt: Optional[str] = None,
+        cache_salt: str | None = None,
         priority: int = 0,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        block_hasher: Optional[Callable[["Request"], list["BlockHash"]]] = None,
+        trace_headers: Mapping[str, str] | None = None,
+        block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -54,16 +53,17 @@ class Request:
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
-        self.structured_output_request = structured_output_request
+        self.structured_output_request = StructuredOutputRequest.from_sampling_params(
+            sampling_params
+        )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
-        self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
-        self.stop_reason: Union[int, str, None] = None
+        self.stop_reason: int | str | None = None
 
         # P/D: Connector-specific KV transfer parameters.
-        self.kv_transfer_params: Optional[dict[str, Any]] = None
+        self.kv_transfer_params: dict[str, Any] | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -72,9 +72,8 @@ class Request:
             # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
-            if sampling_params.structured_outputs is not None:
+            if self.structured_output_request is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
-                self.use_structured_output = True
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = sampling_params.extra_args.get(
@@ -97,7 +96,7 @@ class Request:
         self.num_output_placeholders = 0  # Used in async scheduling.
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
-        self.cache_salt: Optional[str] = cache_salt
+        self.cache_salt: str | None = cache_salt
 
         # Multi-modal related
         self.mm_features = mm_features or []
@@ -123,7 +122,7 @@ class Request:
         self.num_preemptions = 0
 
         self.block_hashes: list[BlockHash] = []
-        self.get_hash_new_full_blocks: Optional[Callable[[], list[BlockHash]]] = None
+        self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
         if block_hasher is not None:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
@@ -132,7 +131,7 @@ class Request:
     def from_engine_core_request(
         cls,
         request: EngineCoreRequest,
-        block_hasher: Optional[Callable[["Request"], list["BlockHash"]]],
+        block_hasher: Callable[["Request"], list["BlockHash"]] | None,
     ) -> "Request":
         return cls(
             request_id=request.request_id,
@@ -145,11 +144,6 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
-            structured_output_request=StructuredOutputRequest(
-                sampling_params=request.sampling_params
-            )
-            if request.sampling_params
-            else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
             trace_headers=request.trace_headers,
@@ -158,7 +152,7 @@ class Request:
 
     def append_output_token_ids(
         self,
-        token_ids: Union[int, list[int]],
+        token_ids: int | list[int],
     ) -> None:
         if isinstance(token_ids, int):
             self._output_token_ids.append(token_ids)
@@ -169,6 +163,10 @@ class Request:
 
         if self.get_hash_new_full_blocks is not None:
             self.block_hashes.extend(self.get_hash_new_full_blocks())
+
+    @property
+    def use_structured_output(self) -> bool:
+        return self.structured_output_request is not None
 
     @property
     def is_output_corrupted(self) -> bool:
@@ -189,7 +187,7 @@ class Request:
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 
-    def get_finished_reason(self) -> Union[FinishReason, None]:
+    def get_finished_reason(self) -> FinishReason | None:
         return RequestStatus.get_finished_reason(self.status)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
@@ -200,11 +198,11 @@ class Request:
     def record_event(
         self,
         event_type: EngineCoreEventType,
-        timestamp: Optional[float] = None,
+        timestamp: float | None = None,
     ) -> None:
         self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
 
-    def take_events(self) -> Optional[list[EngineCoreEvent]]:
+    def take_events(self) -> list[EngineCoreEvent] | None:
         if not self.events:
             return None
         events, self.events = self.events, []
@@ -234,7 +232,7 @@ class RequestStatus(enum.IntEnum):
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
-    def get_finished_reason(status: "RequestStatus") -> Union[FinishReason, None]:
+    def get_finished_reason(status: "RequestStatus") -> FinishReason | None:
         return _FINISHED_REASON_MAP.get(status)
 
 

@@ -8,7 +8,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
-from typing import Optional
 
 import torch
 
@@ -90,7 +89,7 @@ def l2norm_fwd_kernel2(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr):
 
 
 def l2norm_fwd(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
+    x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])

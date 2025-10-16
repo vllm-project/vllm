@@ -4,11 +4,15 @@ import contextlib
 import os
 from collections import namedtuple
 from collections.abc import Callable
-from typing import Any, Union
+from typing import Any
 
 import torch
 
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+
+logger = init_logger(__name__)
 
 
 def _matmul_launch_metadata(
@@ -138,7 +142,7 @@ def matmul_kernel_persistent(
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: Union[torch.Tensor, None] = None
+    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -375,7 +379,7 @@ def mean_dim(
     input: torch.Tensor,
     dim: int,
     keepdim: bool = False,
-    dtype: Union[torch.dtype, None] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Triton implementation of torch.mean with single dimension reduction.
@@ -475,9 +479,7 @@ def _log_softmax_batch_invariant(input, dim, _half_to_float):
     return log_softmax(input, dim=dim)
 
 
-def mean_batch_invariant(
-    input, dim, keepdim=False, dtype: Union[torch.dtype, None] = None
-):
+def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = None):
     assert dtype is None or dtype == torch.float32, f"unsupported dtype: {dtype}"
 
     result = input.to(torch.float32)
@@ -564,5 +566,14 @@ def vllm_kernel_override_batch_invariant():
 def init_batch_invariance():
     # this will hit all the csrc overrides as well
     if vllm_kernel_override_batch_invariant():
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        curr_attn_backend = envs.VLLM_ATTENTION_BACKEND
+        supported_backends = ["FLEX_ATTENTION", "FLASHINFER"]
+        if curr_attn_backend not in supported_backends:
+            warning = (
+                "Forcibly updating attention backend to"
+                f" {supported_backends[0]} for batch_invariant. "
+                f" Supported backends: {supported_backends}."
+            )
+            logger.warning_once(warning)
+            os.environ["VLLM_ATTENTION_BACKEND"] = supported_backends[0]
         enable_batch_invariant_mode()

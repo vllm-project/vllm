@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
@@ -125,7 +125,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return apply_fp8_marlin_linear(
             input=x,

@@ -3,7 +3,8 @@
 
 import asyncio
 import os
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -20,12 +21,12 @@ class Mock: ...
 class CustomMultiprocExecutor(MultiprocExecutor):
     def collective_rpc(
         self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
+        method: str | Callable,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
         non_block: bool = False,
-        unique_reply_rank: Optional[int] = None,
+        unique_reply_rank: int | None = None,
     ) -> list[Any]:
         # Drop marker to show that this was run
         with open(".marker", "w"):

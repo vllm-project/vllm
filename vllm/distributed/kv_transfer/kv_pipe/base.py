@@ -12,7 +12,6 @@ you can bypass this interface and directly start from `kv_lookup_buffer`.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 
@@ -24,7 +23,7 @@ class KVPipeBase(ABC):
     """
 
     @abstractmethod
-    def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
+    def send_tensor(self, tensor: torch.Tensor | None) -> None:
         """Send a tensor, or None, via the pipe.
 
         Need to support sending None -- important for error handling.
@@ -42,7 +41,7 @@ class KVPipeBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def recv_tensor(self) -> Optional[torch.Tensor]:
+    def recv_tensor(self) -> torch.Tensor | None:
         """Receive a tensor (can be None) from the pipeline.
 
         Returns:

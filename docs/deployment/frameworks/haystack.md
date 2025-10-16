@@ -34,7 +34,7 @@ pip install vllm haystack-ai
         api_key=Secret.from_token("VLLM-PLACEHOLDER-API-KEY"),
         model="mistralai/Mistral-7B-Instruct-v0.1",
         api_base_url="http://{your-vLLM-host-ip}:{your-vLLM-host-port}/v1",
-        generation_kwargs = {"max_tokens": 512}
+        generation_kwargs={"max_tokens": 512},
     )
 
     response = generator.run(

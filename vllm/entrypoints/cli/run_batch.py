@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import importlib.metadata
@@ -14,6 +12,8 @@ from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 logger = init_logger(__name__)
 

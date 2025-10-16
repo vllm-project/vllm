@@ -100,7 +100,7 @@ from vllm import LLM
 llm = LLM(
     model="meta-llama/Llama-3.3-70B-Instruct,
     tensor_parallel_size=4,
-    pipeline_parallel_size=2
+    pipeline_parallel_size=2,
 )
 ```
 
@@ -257,18 +257,24 @@ Examples:
 
 ```python
 # Use a larger cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_cache_gb=8)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_cache_gb=8,
+)
 
 # Use a shared-memory based IPC cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          tensor_parallel_size=2,
-          mm_processor_cache_type="shm",
-          mm_processor_cache_gb=8)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    tensor_parallel_size=2,
+    mm_processor_cache_type="shm",
+    mm_processor_cache_gb=8,
+)
 
 # Disable the cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_cache_gb=0)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_cache_gb=0,
+)
 ```
 
 ### Cache Placement

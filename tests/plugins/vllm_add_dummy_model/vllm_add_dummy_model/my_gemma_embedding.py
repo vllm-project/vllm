@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -31,7 +30,7 @@ class MyGemma2Embedding(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_embed": Pooler.for_token_embed(pooler_config),
                 "embed": Pooler.for_embed(pooler_config),
             }
         )
@@ -44,9 +43,9 @@ class MyGemma2Embedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids,
             positions,

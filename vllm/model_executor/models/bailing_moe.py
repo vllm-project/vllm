@@ -26,7 +26,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -75,8 +74,8 @@ class BailingAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ):
@@ -87,13 +86,12 @@ class BailingAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
 
         assert self.total_num_heads % tp_size == 0
-        assert self.total_kv_heads % tp_size == 0
         assert self.total_num_heads >= self.total_kv_heads
 
         self.num_heads = self.total_num_heads // tp_size
         self.head_dim = config.head_dim or (self.hidden_size // self.total_num_heads)
         self.q_size_per_rank = self.head_dim * self.num_heads
-        self.num_kv_heads = self.total_kv_heads // tp_size
+        self.num_kv_heads = max(1, self.total_kv_heads // tp_size)
         self.kv_size_per_rank = self.num_kv_heads * self.head_dim
         self.scale = self.head_dim**-0.5
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
@@ -184,8 +182,8 @@ class BailingMLP(nn.Module):
         self,
         intermediate_size: int,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        reduce_results: Optional[bool] = True,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool | None = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -218,8 +216,8 @@ class BailingMoE(nn.Module):
         self,
         intermediate_size: int,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        reduce_results: Optional[bool] = True,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool | None = True,
         prefix: str = "",
     ):
         super().__init__()
@@ -340,8 +338,8 @@ class BailingMoeBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -370,7 +368,7 @@ class BailingMoeBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
@@ -447,9 +445,9 @@ class BailingMoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -619,9 +617,9 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         model_output = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -630,7 +628,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

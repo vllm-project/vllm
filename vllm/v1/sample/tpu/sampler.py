@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampler layer implementing TPU supported operations."""
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
@@ -166,8 +164,8 @@ class Sampler(nn.Module):
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     Apply top-k and top-p optimized for TPU.

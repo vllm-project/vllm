@@ -3,8 +3,8 @@
 
 import argparse
 import math
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
 from unittest.mock import patch
 
 import torch

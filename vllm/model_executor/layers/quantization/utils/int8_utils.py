@@ -6,7 +6,7 @@ import functools
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -21,8 +21,8 @@ def apply_w8a8_block_int8_linear(
     weight: torch.Tensor,
     block_size: list[int],
     weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
+    input_scale: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert input_scale is None
     # View input as 2D matrix for fp8 methods
@@ -359,7 +359,7 @@ def _w8a8_block_int8_matmul(
 @functools.lru_cache
 def get_w8a8_block_int8_configs(
     N: int, K: int, block_n: int, block_k: int
-) -> Optional[dict[int, Any]]:
+) -> dict[int, Any] | None:
     """
     Return optimized configurations for the w8a8 block fp8 kernel.
 

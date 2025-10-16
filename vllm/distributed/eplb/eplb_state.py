@@ -29,7 +29,6 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -186,9 +185,9 @@ class EplbState:
         model: MixtureOfExperts,
         device: torch.device,
         parallel_config: ParallelConfig,
-        global_expert_load: Optional[torch.Tensor] = None,
-        old_global_expert_indices: Optional[torch.Tensor] = None,
-        rank_mapping: Optional[dict[int, int]] = None,
+        global_expert_load: torch.Tensor | None = None,
+        old_global_expert_indices: torch.Tensor | None = None,
+        rank_mapping: dict[int, int] | None = None,
     ) -> "EplbState":
         """
         Build the initial EPLB state.
@@ -439,9 +438,9 @@ class EplbState:
         model: MixtureOfExperts,
         is_profile: bool = False,
         execute_shuffle: bool = True,
-        global_expert_load: Optional[torch.Tensor] = None,
-        rank_mapping: Optional[dict[int, int]] = None,
-    ) -> Optional[torch.Tensor]:
+        global_expert_load: torch.Tensor | None = None,
+        rank_mapping: dict[int, int] | None = None,
+    ) -> torch.Tensor | None:
         """
         Rearrange the experts according to the current load.
         """
@@ -611,7 +610,7 @@ class EplbState:
 
 
 def _node_count_with_rank_mapping(
-    pg: Union[ProcessGroup, StatelessProcessGroup],
+    pg: ProcessGroup | StatelessProcessGroup,
     rank_mapping: dict[int, int],
 ) -> int:
     if isinstance(pg, ProcessGroup):
