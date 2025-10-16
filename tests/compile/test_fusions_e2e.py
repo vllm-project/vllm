@@ -6,11 +6,10 @@ from __future__ import annotations
 import itertools
 import logging
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import regex as re
-from black.cache import NamedTuple
 
 from tests.v1.attention.utils import _Backend
 from vllm import LLM, SamplingParams
