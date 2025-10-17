@@ -119,7 +119,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.fused_experts: FusedMoEModularKernel | None = None
         self.topk_indices_dtype = None
 
     @abstractmethod
@@ -262,9 +261,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
             assert self.topk_indices_dtype is None
-            assert self.fused_experts is None, (
-                f"Attempt to override experts for {id(self)}!"
-            )
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, layer)
             return FusedMoEModularKernel(
@@ -295,7 +291,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def using_modular_kernel(self) -> bool:
-        return self.fused_experts is not None
+        return False
+
+    @property
+    def supports_eplb(self) -> bool:
+        return False
 
     @abstractmethod
     def apply(
@@ -338,10 +338,21 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         self.moe_quant_config = old_moe_method.moe_quant_config
         self.fused_experts = fused_experts
         self.topk_indices_dtype = old_moe_method.topk_indices_dtype
-
+        self.disable_expert_map = not fused_experts.supports_expert_map()
+        self.old_method_name = old_moe_method.__class__.__name__
+        self._supports_eplb = old_moe_method.supports_eplb
         if isinstance(old_moe_method, torch.nn.Module):
             self.load_state_dict(old_moe_method.state_dict())
-        logger.debug("Swapping out %s", old_moe_method.__class__.__name__)
+        logger.debug("Swapping out %s", self.old_method_name)
+
+    @property
+    def using_modular_kernel(self) -> bool:
+        return True
+
+    @property
+    @abstractmethod
+    def supports_eplb(self) -> bool:
+        return self._supports_eplb
 
     def create_weights(
         self,
@@ -382,11 +393,20 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is not None
-
         # Is getattr needed?
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
+
+        if enable_eplb:
+            if not self.supports_eplb:
+                assert expert_load_view is not None
+                assert logical_to_physical_map is not None
+                assert logical_replica_count is not None
+                assert isinstance(layer, FusedMoE)
+            else:
+                raise NotImplementedError(
+                    f"EPLB is not supported for {self.old_method_name}"
+                )
 
         select_result = FusedMoE.select_experts(
             hidden_states=x,
@@ -423,7 +443,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             activation=activation,
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
+            expert_map=None if self.disable_expert_map else expert_map,
         )
 
         if zero_expert_num != 0 and zero_expert_type is not None:
@@ -763,7 +783,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
 
         if self.rocm_aiter_moe_enabled:
-            assert self.fused_experts is None
             result = self.rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -784,21 +803,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
-        elif self.fused_experts is not None:
-            result = self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-            )
         else:
-            assert fused_experts is not None
             result = fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
