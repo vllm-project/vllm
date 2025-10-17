@@ -430,6 +430,7 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
             explicitly_destroy=True,
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=True,
+            explicitly_destroy=True
         )
         buffer.update_memory_buffers(
             num_ranks=max_num_ep_ranks,
@@ -473,9 +474,9 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
         )
         # kwargs = nixl_kwargs
         
-        buffer_kwargs = sorted((k, v) for k, v in kwargs.items())
+        buffer_kwargs = sorted((k, v) for k, v in nixl_kwargs.items())
         if NIXLDeepEPLLAll2AllManager._persistent_buffer is None:
-            self._init_buffer(**kwargs)
+            self._init_buffer(**nixl_kwargs)
             NIXLDeepEPLLAll2AllManager._buffer_kwargs = buffer_kwargs
         else:
             assert NIXLDeepEPLLAll2AllManager._buffer_kwargs == buffer_kwargs, "NIXL EP buffer kwargs changed"
