@@ -1771,6 +1771,7 @@ class ModelConfig:
         """
         return getattr(self.hf_config, "quantization_config", None) is not None
 
+
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
     """
     If the input is a non-empty list, the first model_name in
