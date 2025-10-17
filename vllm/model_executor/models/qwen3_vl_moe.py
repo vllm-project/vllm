@@ -325,8 +325,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3MoeForCausalLM, self).__init__()
+
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
+
+        # Only perform the following mapping when Qwen3MoeMLP exists
+        if getattr(self.config, "mlp_only_layers", []):
+            self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
+
         self.model = Qwen3MoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -350,6 +356,14 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
@@ -375,6 +389,11 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         self.language_model = Qwen3MoeLLMForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+        )
+        # Whether to include the gate_up_proj mapping is determined by
+        # the language model.
+        self.packed_modules_mapping = (
+            self.packed_modules_mapping | self.language_model.packed_modules_mapping
         )
 
         self.make_empty_intermediate_tensors = (
