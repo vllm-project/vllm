@@ -57,6 +57,10 @@ class PiecewiseBackend:
         log_string = f"PiecewiseBackend: compile_ranges: {self.compile_ranges}"
         logger.debug_once(log_string)
 
+        self.compile_sizes = self.compilation_config.compile_sizes
+        log_string = f"PiecewiseBackend: compile_sizes: {self.compile_sizes}"
+        logger.debug_once(log_string)
+
         self.is_in_range = (
             lambda x, range: range[0] <= x < range[1]
             if range[0] < range[1]
@@ -78,6 +82,12 @@ class PiecewiseBackend:
         self.to_be_compiled_ranges: set[tuple[int, int]] = set(self.compile_ranges)
 
         # We only keep compilation management inside this class directly.
+        for size in self.compile_sizes:
+            range = (size, size)
+            self.range_entries[range] = RangeEntry(
+                compile_range=range,
+            )
+
         for range in self.compile_ranges:
             self.range_entries[range] = RangeEntry(
                 compile_range=range,
@@ -112,20 +122,24 @@ class PiecewiseBackend:
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
+            self.check_for_ending_compilation()
 
-            # Role of the general is taken by the last range
+            # Role of the general graph is taken by the last range graph
             range_entry = self.range_entries[self.compile_ranges[-1]]
             self._maybe_compile_for_range_entry(range_entry, args)
             return range_entry.runnable(*args)
-
         runtime_shape = args[self.sym_shape_indices[0]]
 
         range_found = False
-        for range in self.compile_ranges:
-            if self.is_in_range(runtime_shape, range):
-                range_entry = self.range_entries[range]
-                range_found = True
-                break
+        if runtime_shape in self.compile_sizes:
+            range_entry = self.range_entries[(runtime_shape, runtime_shape)]
+            range_found = True
+        else:
+            for range in self.compile_ranges:
+                if self.is_in_range(runtime_shape, range):
+                    range_entry = self.range_entries[range]
+                    range_found = True
+                    break
         assert range_found, (
             f"Shape out of considered range: {runtime_shape} "
             "[1, max_num_batched_tokens]"

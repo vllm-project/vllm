@@ -929,25 +929,11 @@ class CompilationConfig:
 
     def get_compile_ranges(self) -> list[tuple[int, int]]:
         """Get the compile ranges for the compilation config."""
-        compile_ranges_split_points = self.compile_ranges_split_points
+        split_points = self.compile_ranges_split_points
         compile_ranges = []
-        # max_num_batched_tokens + 1
-        max_split_point = max(compile_ranges_split_points)
-        compile_sizes = set(self.compile_sizes)
-        split_points = sorted(
-            compile_sizes.union(set(self.compile_ranges_split_points))
-        )
-        # filter out split points that are greater
-        # than max_num_batched_tokens + 1
-        split_points = [x for x in split_points if x <= max_split_point]
         for i, s in enumerate(split_points):
             if i == 0:
                 compile_ranges.append((1, s))
             else:
                 compile_ranges.append((split_points[i - 1], s))
-            if s in compile_sizes and s != 1:
-                compile_ranges.append((s, s))
-        assert compile_ranges[-1][1] == max_split_point, (
-            "Last compile range end should be max_split_point"
-        )
-        return sorted(compile_ranges)
+        return compile_ranges
