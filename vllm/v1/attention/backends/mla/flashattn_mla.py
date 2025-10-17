@@ -18,6 +18,9 @@ from vllm.attention.utils.fa_utils import (
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -107,6 +110,9 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # pre-allocated during capture.
             self.max_num_splits = envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
 
+        if vllm_is_batch_invariant():
+            self.max_num_splits = 1
+
     def _schedule_decode(
         self, num_reqs, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
     ):
@@ -175,7 +181,10 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
                 # we only set num_splits when using cuda graphs.
                 max_num_splits = self.max_num_splits
 
-        return FlashAttnMLADecodeMetadata(
+        if vllm_is_batch_invariant():
+            max_num_splits = 1
+
+        metadata = FlashAttnMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
             query_start_loc=query_start_loc_device,
@@ -185,6 +194,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             max_num_splits=max_num_splits,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
+        return metadata
 
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):

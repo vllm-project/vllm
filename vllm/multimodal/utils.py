@@ -31,13 +31,11 @@ if TYPE_CHECKING:
     from .inputs import (
         BatchedTensorInputs,
         MultiModalKwargsItem,
-        MultiModalKwargsItems,
         MultiModalPlaceholderDict,
     )
 else:
     BatchedTensorInputs = Any
     MultiModalKwargsItem = Any
-    MultiModalKwargsItems = Any
     MultiModalPlaceholderDict = Any
 
 global_thread_pool = ThreadPoolExecutor(

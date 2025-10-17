@@ -81,7 +81,8 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.utils import random_uuid, resolve_obj_by_qualname
+from vllm.utils import random_uuid
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 EMBED_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
@@ -1682,7 +1683,7 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     When using plugins IOProcessor plugins, the actual input is processed
     by the plugin itself. Hence, we use a generic type for the request data
     """
-    softmax: bool = True
+    activation: bool = False
 
     embed_dtype: str = Field(
         default="float32",
@@ -1693,7 +1694,7 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     )
 
     def to_pooling_params(self):
-        return PoolingParams(task="encode", softmax=self.softmax)
+        return PoolingParams(task="token_classify", activation=self.activation)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
