@@ -1089,7 +1089,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         pixel_values = (
             rescale_factor * pixel_values.to(torch.float32) - image_mean_tensor
         ) / image_std_tensor
-        pixel_values = pixel_values.to(hf_config.torch_dtype)
+        pixel_values = pixel_values.to(hf_config.dtype)
         return pixel_values
 
     def _call_hf_processor(

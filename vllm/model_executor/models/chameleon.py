@@ -999,7 +999,7 @@ class ChameleonForConditionalGeneration(
             return []
         assert self.model.vqmodel is not None
         image_tokens = self.model.get_image_tokens(
-            image_input["data"].to(self.config.torch_dtype)
+            image_input["data"].to(self.config.dtype)
         )
         vision_embeddings = self.model.get_input_embeddings(image_tokens)
         return vision_embeddings

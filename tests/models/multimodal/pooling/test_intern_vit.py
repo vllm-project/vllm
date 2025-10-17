@@ -38,7 +38,7 @@ def run_intern_vit_test(
         config.norm_type = "rms_norm"
 
     hf_model = AutoModel.from_pretrained(
-        model, torch_dtype=torch_dtype, trust_remote_code=True
+        model, dtype=torch_dtype, trust_remote_code=True
     ).to("cuda")
     hf_outputs_per_image = [
         hf_model(pixel_value.to("cuda")).last_hidden_state

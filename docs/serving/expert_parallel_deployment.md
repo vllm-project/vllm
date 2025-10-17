@@ -243,10 +243,10 @@ try:
                 "remote_engine_id": None,     # Will be populated by vLLM
                 "remote_block_ids": None,     # Will be populated by vLLM
                 "remote_host": None,          # Will be populated by vLLM
-                "remote_port": None           # Will be populated by vLLM
+                "remote_port": None,          # Will be populated by vLLM
             }
         },
-        extra_headers={"X-Request-Id": request_id}
+        extra_headers={"X-Request-Id": request_id},
     )
     
     print("-" * 50)
@@ -262,7 +262,7 @@ try:
         extra_body={
             "kv_transfer_params": prefill_response.kv_transfer_params  # Pass KV cache info
         },
-        extra_headers={"X-Request-Id": request_id}  # Same request ID
+        extra_headers={"X-Request-Id": request_id},  # Same request ID
     )
     
     print("-" * 50)

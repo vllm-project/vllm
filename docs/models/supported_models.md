@@ -278,8 +278,8 @@ https_proxy=http://your.proxy.server:port  vllm serve <model_name>
 ```python
 import os
 
-os.environ['http_proxy'] = 'http://your.proxy.server:port'
-os.environ['https_proxy'] = 'http://your.proxy.server:port'
+os.environ["http_proxy"] = "http://your.proxy.server:port"
+os.environ["https_proxy"] = "http://your.proxy.server:port"
 ```
 
 ### ModelScope

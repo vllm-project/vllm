@@ -7,7 +7,6 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 import torch
-import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs

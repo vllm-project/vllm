@@ -36,6 +36,7 @@ from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
 from vllm.utils import GiB_bytes, direct_register_custom_op
 
+FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
 
@@ -304,7 +305,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.kv_cache_dtype.startswith("fp8")
-            and self.attn_backend.supports_quant_query_input
+            and self.impl.supports_quant_query_input()
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
@@ -329,7 +330,6 @@ class Attention(nn.Module, AttentionLayerBase):
         """
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
-
         output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
@@ -338,7 +338,10 @@ class Attention(nn.Module, AttentionLayerBase):
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
-            query, _ = self.query_quant(query, self._q_scale)
+
+            # check if query quantization is supported
+            if self.impl.supports_quant_query_input():
+                query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
             output_shape = output_shape if output_shape is not None else query.shape
@@ -401,16 +404,7 @@ class Attention(nn.Module, AttentionLayerBase):
         return s
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading(act_dtype)
-
-        # FlashInfer requires attention sinks to be float32
-        if self.backend == _Backend.FLASHINFER and hasattr(self.impl, "sinks"):
-            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
-
-            assert isinstance(self.impl, FlashInferImpl)
-            if self.impl.sinks is not None and self.impl.sinks.dtype != torch.float32:
-                self.impl.sinks = self.impl.sinks.to(torch.float32)
+        self.impl.process_weights_after_loading(act_dtype)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -587,6 +581,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
+        **extra_impl_args,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -639,6 +634,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
+            **extra_impl_args,
         )
 
         self.use_direct_call = not current_platform.opaque_attention_op()

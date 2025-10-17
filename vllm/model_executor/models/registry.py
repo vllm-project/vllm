@@ -401,32 +401,44 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
-    "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+    "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
+    # Text generation models
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
-    "TransformersMoEForCausalLM": ("transformers_moe", "TransformersMoEForCausalLM"),  # noqa: E501
-    "TransformersMoEForMultimodalLM": (
-        "transformers_moe",
-        "TransformersMoEForMultimodalLM",
+    "TransformersMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    # Multimodal models
+    "TransformersMultiModalForCausalLM": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
     ),
-    "TransformersEmbeddingModel": (
-        "transformers_pooling",
-        "TransformersEmbeddingModel",
+    "TransformersMultiModalMoEForCausalLM": (
+        "transformers",
+        "TransformersMultiModalMoEForCausalLM",
     ),
+    # Embedding models
+    "TransformersEmbeddingModel": ("transformers", "TransformersEmbeddingModel"),
+    "TransformersMoEEmbeddingModel": ("transformers", "TransformersMoEEmbeddingModel"),
+    "TransformersMultiModalEmbeddingModel": (
+        "transformers",
+        "TransformersMultiModalEmbeddingModel",
+    ),
+    # Sequence classification models
     "TransformersForSequenceClassification": (
-        "transformers_pooling",
+        "transformers",
         "TransformersForSequenceClassification",
     ),
     "TransformersMoEForSequenceClassification": (
-        "transformers_pooling",
+        "transformers",
         "TransformersMoEForSequenceClassification",
     ),
-    "TransformersMoEEmbeddingModel": (
-        "transformers_pooling",
-        "TransformersMoEEmbeddingModel",
+    "TransformersMultiModalForSequenceClassification": (
+        "transformers",
+        "TransformersMultiModalForSequenceClassification",
     ),
 }
 
@@ -581,7 +593,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             # file not changed, use cached _ModelInfo properties
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
-            logger.exception(
+            logger.debug(
                 ("Cached model info for class %s.%s error. "),
                 self.module_name,
                 self.class_name,

@@ -105,15 +105,7 @@ class RobertaClassificationHead(nn.Module):
 
 @default_pooling_type("CLS")
 class RobertaEmbeddingModel(BertEmbeddingModel):
-    """A model that uses Roberta to provide embedding functionalities.
-
-    This class encapsulates the BertModel and provides an interface for
-    embedding operations and customized pooling functions.
-
-    Attributes:
-        model: An instance of BertModel used for forward operations.
-        _pooler: An instance of Pooler used for pooling operations.
-    """
+    """A model that uses Roberta to provide embedding functionalities."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -212,20 +204,14 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config=pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="classify"
                 ),
                 "score": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
                 ),
             }
         )

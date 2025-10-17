@@ -79,7 +79,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
+from vllm.utils.collections import is_list_of
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1776,6 +1776,6 @@ class Qwen3VLForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="model.visual.merger",
-            tower_model="model.visual.",
+            connector="visual.merger",
+            tower_model="visual.",
         )

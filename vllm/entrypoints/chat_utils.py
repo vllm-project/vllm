@@ -50,7 +50,8 @@ from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid, supports_kw
+from vllm.utils import random_uuid
+from vllm.utils.functools import supports_kw
 
 logger = init_logger(__name__)
 

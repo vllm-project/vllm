@@ -330,6 +330,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "guard": "meta-llama/Llama-Guard-3-1B",
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "tiny": "hmellor/tiny-random-LlamaForCausalLM",
         },
     ),
     "LLaMAForCausalLM": _HfExamplesInfo(
@@ -911,11 +912,11 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
         "allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"
     ),
-    "TransformersMoEForMultimodalLM": _HfExamplesInfo(
+    "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="4.57.0.dev0"
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
@@ -923,6 +924,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
         "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+    ),
+    "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(
+        "google/gemma-3-4b-it"
     ),
 }
 

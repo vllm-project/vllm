@@ -84,7 +84,7 @@ directly to load models:
 from vllm import LLM
 llm = LLM(
     "s3://my-bucket/vllm/facebook/opt-125m/v1", 
-    load_format="tensorizer"
+    load_format="tensorizer",
 )
 ```
 

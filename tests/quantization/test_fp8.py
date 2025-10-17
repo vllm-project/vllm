@@ -18,7 +18,6 @@ from vllm.platforms import current_platform
 
 MODELS = [
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
-    "nm-testing/Phi-3-mini-128k-instruct-FP8",
     "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
 ]
 
@@ -49,8 +48,6 @@ def test_model_load_and_run(
 
 
 KV_CACHE_MODELS = [
-    # Deprecated AutoFP8 format using .kv_scale
-    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
     # AutoFP8 format using separate .k_scale and .v_scale
     "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
 ]

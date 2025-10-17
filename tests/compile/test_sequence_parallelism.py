@@ -285,6 +285,14 @@ def sequence_parallelism_pass_on_test_model(
 
     noop_pass = NoOpEliminationPass(vllm_config)
     sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
+    assert (
+        sequence_parallelism_pass.compilation_config.splitting_ops
+        == vllm_config.compilation_config.splitting_ops
+    )
+    assert (
+        sequence_parallelism_pass.compilation_config.use_inductor_graph_partition
+        == vllm_config.compilation_config.use_inductor_graph_partition
+    )
     func_pass = FixFunctionalizationPass(vllm_config)
     cleanup_pass = PostCleanupPass(vllm_config)
 
