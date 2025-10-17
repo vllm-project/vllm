@@ -13,7 +13,7 @@ import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import ConnectorVllmConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -331,7 +331,8 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
-        connector_vllm_config = ConnectorVllmConfig(self.vllm_config, kv_cache_config)
+        connector_vllm_config = copy.deepcopy(self.vllm_config)
+        connector_vllm_config.kv_cache_config = kv_cache_config
         ensure_kv_transfer_initialized(connector_vllm_config)
 
         if self.vllm_config.model_config.enable_sleep_mode:

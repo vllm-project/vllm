@@ -35,7 +35,6 @@ from vllm.config.utils import (
     update_config,
 )
 from vllm.config.vllm import (
-    ConnectorVllmConfig,
     VllmConfig,
     get_cached_compilation_config,
     get_current_vllm_config,
@@ -93,7 +92,6 @@ __all__ = [
     "update_config",
     # From vllm.config.vllm
     "VllmConfig",
-    "ConnectorVllmConfig",
     "get_cached_compilation_config",
     "get_current_vllm_config",
     "set_current_vllm_config",

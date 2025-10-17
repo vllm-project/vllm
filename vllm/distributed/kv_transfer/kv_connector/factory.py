@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
-from vllm.config import ConnectorVllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
@@ -41,7 +41,7 @@ class KVConnectorFactory:
     @classmethod
     def create_connector(
         cls,
-        config: ConnectorVllmConfig,
+        config: VllmConfig,
         role: KVConnectorRole,
     ) -> KVConnectorBase:
         if not envs.VLLM_USE_V1:

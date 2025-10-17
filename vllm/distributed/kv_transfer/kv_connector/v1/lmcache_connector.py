@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
-from vllm.config import ConnectorVllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 
 class LMCacheConnectorV1(SupportsHMA, KVConnectorBase_V1):
-    def __init__(self, vllm_config: ConnectorVllmConfig, role: KVConnectorRole):
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
 
