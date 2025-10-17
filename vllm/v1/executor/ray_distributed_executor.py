@@ -8,12 +8,15 @@ from vllm.executor.ray_distributed_executor import (  # noqa
     RayDistributedExecutor as RayDistributedExecutorV0,
 )
 from vllm.logger import init_logger
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
+
+COMPLETED_NONE_FUTURE: Future[ModelRunnerOutput | None] = Future()
+COMPLETED_NONE_FUTURE.set_result(None)
 
 
 class FutureWrapper(Future):
@@ -52,6 +55,8 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
+        self.scheduler_output: SchedulerOutput | None = None
+
     @property
     def max_concurrent_batches(self) -> int:
         """Ray distributed executor supports pipeline parallelism,
@@ -61,9 +66,22 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
             return 2
         return self.parallel_config.pipeline_parallel_size
 
-    def execute_model(  # type:ignore
+    def execute_model(
         self,
         scheduler_output: SchedulerOutput,
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if self.scheduler_output is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
+        self.scheduler_output = scheduler_output
+        return COMPLETED_NONE_FUTURE if non_block else None
+
+    def sample_tokens(
+        self,
+        grammar_output: "GrammarOutput | None",
         non_block: bool = False,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         """Execute the model on the Ray workers.
@@ -75,11 +93,19 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         Returns:
             The model runner output.
         """
+        scheduler_output = self.scheduler_output
+        if scheduler_output is None:
+            raise RuntimeError(
+                "State error: execute_model() must be called "
+                "prior to calling sample_tokens()."
+            )
+        self.scheduler_output = None
+
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        refs = self.forward_dag.execute(scheduler_output)  # type: ignore
+        refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)

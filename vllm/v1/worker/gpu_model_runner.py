@@ -2421,6 +2421,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.execute_model_state is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():

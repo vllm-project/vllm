@@ -1082,6 +1082,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | None:
+        if self.scheduler_output is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
