@@ -1403,8 +1403,15 @@ class EngineArgs:
                 "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
             )
 
-            # Local DP size defaults to global DP size if not set.
-            data_parallel_size_local = self.data_parallel_size
+            if self.data_parallel_backend == "ray" and (
+                envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
+            ):
+                # Data parallel size defaults to 1 if DP ranks are spanning
+                # multiple nodes
+                data_parallel_size_local = 1
+            else:
+                # Otherwise local DP size defaults to global DP size if not set
+                data_parallel_size_local = self.data_parallel_size
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
