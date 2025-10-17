@@ -58,22 +58,6 @@ def fused_add_rms_norm(
     return x, residual
 
 
-def poly_norm(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    from vllm import _custom_ops as ops
-
-    out = torch.empty_like(x)
-    ops.poly_norm(
-        out,
-        x,
-        weight,
-        bias,
-        variance_epsilon,
-    )
-    return out
-
-
 def rocm_aiter_rms_norm_impl(
     x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
