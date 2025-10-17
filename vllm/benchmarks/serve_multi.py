@@ -8,6 +8,7 @@ import shlex
 import signal
 import subprocess
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -52,12 +53,12 @@ def _override_args(cmd: list[str], params: dict[str, object]):
     return cmd
 
 
-def _get_path_one_comb(output_dir: str, params: dict[str, object]):
-    return os.path.join(output_dir, "_".join(f"{k}={v}" for k, v in params.items()))
+def _get_path_one_comb(output_dir: Path, params: dict[str, object]):
+    return output_dir / "_".join(f"{k}={v}" for k, v in params.items())
 
 
-def _get_path_one_run(result_dir: str, run_number: int):
-    return os.path.join(result_dir, f"run={run_number}.json")
+def _get_path_one_run(result_dir: Path, run_number: int):
+    return result_dir / f"run={run_number}.json"
 
 
 def benchmark_one_run(
@@ -65,7 +66,7 @@ def benchmark_one_run(
     bench_cmd: list[str],
     serve_comb: dict[str, object],
     run_number: int,
-    result_dir: str,
+    result_dir: Path,
     dry_run: bool,
 ):
     result_path = _get_path_one_run(result_dir, run_number)
@@ -77,7 +78,7 @@ def benchmark_one_run(
         "--result-dir",
         result_dir,
         "--result-filename",
-        os.path.basename(result_path),
+        result_path.name,
     ]
 
     print("=" * 60)
@@ -102,7 +103,7 @@ def benchmark_one_run(
                 # Kill entire process group
                 os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
 
-    with open(result_path, "rb") as f:
+    with result_path.open("rb") as f:
         run_data = json.load(f)
 
     run_data["run_number"] = run_number
@@ -115,13 +116,13 @@ def benchmark_one_comb(
     serve_cmd: list[str],
     bench_cmd: list[str],
     serve_comb: dict[str, object],
-    output_dir: str,
+    output_dir: Path,
     num_runs: int,
     dry_run: bool,
 ):
     result_dir = _get_path_one_comb(output_dir, serve_comb)
     if not dry_run:
-        os.makedirs(result_dir, exist_ok=True)
+        result_dir.mkdir(parents=True, exist_ok=True)
 
     comb_data = [
         benchmark_one_run(
@@ -138,22 +139,22 @@ def benchmark_one_comb(
     if dry_run:
         return None
 
-    with open(os.path.join(result_dir, "summary.json"), "w") as f:
+    with (result_dir / "summary.json").open("w") as f:
         json.dump(comb_data, f)
 
-    return pd.DataFrame.from_records(comb_data)
+    return pd.DataFrame.from_records(comb_data)  # type: ignore[arg-type]
 
 
 def benchmark_all(
     serve_cmd: list[str],
     bench_cmd: list[str],
     serve_params: list[dict[str, object]],
-    output_dir: str,
+    output_dir: Path,
     num_runs: int,
     dry_run: bool,
 ):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(output_dir, timestamp)
+    output_dir = output_dir / timestamp
 
     result_dfs = [
         benchmark_one_comb(
@@ -171,7 +172,7 @@ def benchmark_all(
         return None
 
     combined_df = pd.concat(result_dfs)
-    combined_df.to_csv(os.path.join(output_dir, "summary.csv"))
+    combined_df.to_csv(output_dir / "summary.csv")
 
     return combined_df
 
@@ -234,7 +235,7 @@ def main():
         serve_cmd=serve_cmd,
         bench_cmd=bench_cmd,
         serve_params=serve_params,
-        output_dir=args.output_dir,
+        output_dir=Path(args.output_dir),
         num_runs=args.num_runs,
         dry_run=args.dry_run,
     )
