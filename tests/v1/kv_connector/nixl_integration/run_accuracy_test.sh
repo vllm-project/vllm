@@ -206,7 +206,7 @@ run_tests_for_model() {
   done
 
   # Build the command for the proxy server with all the hosts and ports
-  PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
+  PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 14123"
 
   # Add all prefill hosts and ports
   PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[@]}"

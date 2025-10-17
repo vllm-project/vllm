@@ -5,7 +5,7 @@ import os
 import lm_eval
 import openai
 
-BASE_URL = "http://localhost:8192/v1"
+BASE_URL = "http://localhost:14123/v1"
 NUM_CONCURRENT = 100
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
