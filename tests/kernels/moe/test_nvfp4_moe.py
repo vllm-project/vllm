@@ -23,7 +23,6 @@ if not current_platform.has_device_capability(100):
     )
 
 MNK_FACTORS = [
-    (2, 1024, 1024),
     (2, 1024, 1536),
     (2, 3072, 1024),
     (64, 1024, 1024),
