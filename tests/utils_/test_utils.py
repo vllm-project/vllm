@@ -40,7 +40,7 @@ from vllm.utils import (
     unique_filepath,
 )
 
-from ..utils import create_new_process_for_each_test
+from ..utils import create_new_process_for_each_test, flat_product
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -771,3 +771,25 @@ def test_unique_filepath():
         paths.add(path)
     assert len(paths) == 10
     assert len(list(Path(temp_dir).glob("*.txt"))) == 10
+
+
+def test_flat_product():
+    # Check regular itertools.product behavior
+    result1 = list(flat_product([1, 2, 3], ["a", "b"]))
+    assert result1 == [
+        (1, "a"),
+        (1, "b"),
+        (2, "a"),
+        (2, "b"),
+        (3, "a"),
+        (3, "b"),
+    ]
+
+    # check that the tuples get flattened
+    result2 = list(flat_product([(1, 2), (3, 4)], ["a", "b"], [(5, 6)]))
+    assert result2 == [
+        (1, 2, "a", 5, 6),
+        (1, 2, "b", 5, 6),
+        (3, 4, "a", 5, 6),
+        (3, 4, "b", 5, 6),
+    ]
