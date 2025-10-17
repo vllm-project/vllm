@@ -100,10 +100,17 @@ def default_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
-def use_aiter_triton_gemm(m, k):
-    if envs.VLLM_ROCM_USE_AITER == 0 or envs.VLLM_ROCM_USE_AITER_TRITON_GEMM == 0:
+def use_aiter_triton_gemm(n, m, k, dtype):
+    if (
+        envs.VLLM_ROCM_USE_AITER == 0
+        or envs.VLLM_ROCM_USE_AITER_TRITON_GEMM == 0
+        or dtype not in [torch.float16, torch.bfloat16]
+    ):
         return False
 
+    # use hipblaslt for the larger GEMMs
+    if n > 2048 and m > 512:
+        return False
     return (
         (m == 5120 and k == 2880)
         or (m == 2880 and k == 4096)
@@ -123,7 +130,7 @@ def rocm_unquantized_gemm_impl(
     m = weight.shape[0]
     k = weight.shape[1]
 
-    if use_aiter_triton_gemm(m, k):
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
@@ -138,9 +145,8 @@ def rocm_unquantized_gemm_impl(
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
 
-    cu_count = current_platform.get_cu_count()
-
     if m > 8 and 0 < n <= 4:
+        cu_count = current_platform.get_cu_count()
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
