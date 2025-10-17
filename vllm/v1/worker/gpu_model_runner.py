@@ -2034,7 +2034,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             padded_second_ubatch_slice, padded_second_ubatch_slice
         )
 
-    # TODO: TP device sync, this needs to be fixed in async scheduling.
     def histogram_logging(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if not envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
             return None, None
@@ -2052,21 +2051,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             or envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
         )
 
-        # Collect expert selection stats per rank.
         hist_shape = self.expert_usage_histogram.shape
+        if self.parallel_config.enable_expert_parallel:
+            # Collect expert selection stats per rank.
 
-        from vllm.distributed.parallel_state import get_ep_group
+            from vllm.distributed.parallel_state import get_ep_group
 
-        self.expert_usage_histogram = self.expert_usage_histogram.reshape(
-            [hist_shape[0], get_ep_group().world_size, -1]
-        )
-        histogram_sum = torch.sum(self.expert_usage_histogram, dim=-1)
-
-        if should_all_reduce:
-            torch.distributed.all_reduce(
-                histogram_sum, group=get_tp_group().device_group
+            self.expert_usage_histogram = self.expert_usage_histogram.reshape(
+                [hist_shape[0], get_ep_group().world_size, -1]
             )
-        per_ep_rank_tokens_histogram_cpu = histogram_sum.cpu()
+            histogram_sum = torch.sum(self.expert_usage_histogram, dim=-1)
+
+            if should_all_reduce:
+                torch.distributed.all_reduce(
+                    histogram_sum, group=get_tp_group().device_group
+                )
+            per_ep_rank_tokens_histogram_cpu = histogram_sum.cpu()
         self.expert_usage_histogram = self.expert_usage_histogram.reshape(hist_shape)
 
         if self.parallel_config.enable_eplb:
@@ -2084,7 +2084,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logical_expert_usage_histogram = torch.zeros(
                 [
                     self.model_config.get_total_num_moe_layers(),
-                    self.model_config.get_total_num_experts(),
+                    self.model_config.get_num_experts(),
                 ],
                 dtype=self.expert_usage_histogram.dtype,
                 device=self.expert_usage_histogram.device,
@@ -2106,8 +2106,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.expert_histogram_iter >= envs.VLLM_EXPERT_USAGE_HISTOGRAM_SAVE_INTERVAL:
             self.expert_histogram_iter = 0
             self.expert_usage_histogram.zero_()
-
-        return expert_usage_histogram_cpu, per_ep_rank_tokens_histogram_cpu
 
         return expert_usage_histogram_cpu, per_ep_rank_tokens_histogram_cpu
 
