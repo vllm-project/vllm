@@ -828,3 +828,99 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
     assert response.status == "completed"
     assert len(response.input_messages) > 0
     assert len(response.output_messages) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_field_aliases(client: OpenAI, model_name: str):
+    """Test that streaming responses use field aliases correctly.
+
+    This test ensures that when streaming responses with JSON schema,
+    the serialized events use the correct field aliases (e.g., 'schema')
+    instead of internal field names (e.g., 'schema_').
+
+    Related issue: https://github.com/vllm-project/vllm/issues/26288
+    """
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "location": {"type": "string"},
+        },
+        "required": ["name", "location"],
+        "additionalProperties": False,
+    }
+
+    response = await client.responses.create(
+        model=model_name,
+        input="Extract: Alice lives in Paris",
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "schema_test",
+                "schema": json_schema,
+                "strict": True,
+            }
+        },
+        stream=True,
+    )
+
+    # Collect all events and verify field names
+    events = []
+    async for event in response:
+        events.append(event)
+
+        # Check response.created event
+        if event.type == "response.created":
+            resp_data = event.response
+            # Verify that 'text' field exists
+            assert hasattr(resp_data, "text"), "Response should have 'text' attribute"
+            if resp_data.text is not None:
+                assert hasattr(resp_data.text, "format"), (
+                    "text should have 'format' attribute"
+                )
+                if resp_data.text.format is not None:
+                    # Ensure 'schema' key is used, not 'schema_'
+                    # This is a duck-typing check - if the SDK can parse it,
+                    # the alias is correct
+                    format_dict = (
+                        resp_data.text.format.model_dump()
+                        if hasattr(resp_data.text.format, "model_dump")
+                        else resp_data.text.format
+                    )
+                    if isinstance(format_dict, dict):
+                        # Verify 'schema' exists and 'schema_' does not
+                        assert "schema" in format_dict, (
+                            "'schema' field should be present in format"
+                        )
+                        assert "schema_" not in format_dict, (
+                            "'schema_' field should NOT be present (should use alias 'schema')"  # noqa: E501
+                        )
+
+        # Check response.completed event
+        if event.type == "response.completed":
+            resp_data = event.response
+            assert hasattr(resp_data, "text"), "Response should have 'text' attribute"
+            if resp_data.text is not None:
+                assert hasattr(resp_data.text, "format"), (
+                    "text should have 'format' attribute"
+                )
+                if resp_data.text.format is not None:
+                    format_dict = (
+                        resp_data.text.format.model_dump()
+                        if hasattr(resp_data.text.format, "model_dump")
+                        else resp_data.text.format
+                    )
+                    if isinstance(format_dict, dict):
+                        assert "schema" in format_dict, (
+                            "'schema' field should be present in format"
+                        )
+                        assert "schema_" not in format_dict, (
+                            "'schema_' field should NOT be present (should use alias 'schema')"  # noqa: E501
+                        )  # noqa: E501
+
+    assert len(events) > 0, "Should have received events"
+    # Verify we received a completed event
+    assert any(e.type == "response.completed" for e in events), (
+        "Should receive response.completed event"
+    )
