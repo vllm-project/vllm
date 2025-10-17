@@ -108,7 +108,7 @@ class _SequenceParallelPatternHelper(_RMSNormAndQuantOpHelper):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: torch.Device,
+        device: torch.types.Device,
         quant_op: torch._ops.OpOverload | None = None,
         **kwargs,
     ):
@@ -260,7 +260,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: torch.Device,
+        device: torch.types.Device,
         op: torch._ops.OpOverload,
     ):
         super().__init__(epsilon, dtype, device, quant_op=op)
@@ -320,7 +320,7 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: torch.Device,
+        device: torch.types.Device,
         op: torch._ops.OpOverload,
     ):
         super().__init__(epsilon, dtype, device, quant_op=op)
@@ -384,7 +384,7 @@ class LastAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: torch.Device,
+        device: torch.types.Device,
         op: torch._ops.OpOverload,
     ):
         super().__init__(epsilon, dtype, device, quant_op=op)
