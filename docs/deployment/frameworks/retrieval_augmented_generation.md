@@ -36,7 +36,7 @@ pip install -U vllm \
     vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
     ```
 
-1. Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_langchain.py>
+1. Use the script: [examples/online_serving/retrieval_augmented_generation_with_langchain.py](../../../examples/online_serving/retrieval_augmented_generation_with_langchain.py)
 
 1. Run the script
 
@@ -74,7 +74,7 @@ pip install vllm \
     vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
     ```
 
-1. Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_llamaindex.py>
+1. Use the script: [examples/online_serving/retrieval_augmented_generation_with_llamaindex.py](../../../examples/online_serving/retrieval_augmented_generation_with_llamaindex.py)
 
 1. Run the script:
 

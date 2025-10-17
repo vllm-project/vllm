@@ -37,7 +37,7 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
     memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 !!! note
-    Optional dependencies are not included in order to avoid licensing issues (e.g. <gh-issue:8030>).
+    Optional dependencies are not included in order to avoid licensing issues (e.g. <https://github.com/vllm-project/vllm/issues/8030>).
 
     If you need to use those dependencies (having accepted the license terms),
     create a custom Dockerfile on top of the base image with an extra layer that installs them:
@@ -66,7 +66,7 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
 
 ## Building vLLM's Docker Image from Source
 
-You can build and run vLLM from source via the provided <gh-file:docker/Dockerfile>. To build vLLM:
+You can build and run vLLM from source via the provided [docker/Dockerfile](../../docker/Dockerfile). To build vLLM:
 
 ```bash
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2

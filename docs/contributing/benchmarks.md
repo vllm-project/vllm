@@ -822,7 +822,7 @@ you should set `--endpoint /v1/embeddings` to use the Embeddings API. The backen
 - CLIP: `--backend openai-embeddings-clip`
 - VLM2Vec: `--backend openai-embeddings-vlm2vec`
 
-For other models, please add your own implementation inside <gh-file:vllm/benchmarks/lib/endpoint_request_func.py> to match the expected instruction format.
+For other models, please add your own implementation inside [vllm/benchmarks/lib/endpoint_request_func.py](../../vllm/benchmarks/lib/endpoint_request_func.py) to match the expected instruction format.
 
 You can use any text or multi-modal dataset to benchmark the model, as long as the model supports it.
 For example, you can use ShareGPT and VisionArena to benchmark vision-language embeddings.
@@ -962,7 +962,7 @@ For more results visualization, check the [visualizing the results](https://gith
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
 
 ### Continuous Benchmarking
 
@@ -996,4 +996,4 @@ These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lm
 
 The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
 
-More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).
+More information on the nightly benchmarks and their parameters can be found [here](../../.buildkite/nightly-benchmarks/nightly-descriptions.md).
