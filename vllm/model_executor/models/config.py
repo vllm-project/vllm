@@ -480,7 +480,7 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 
-# For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
+        # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
         if cache_config.cache_dtype.startswith("fp8"):
             cache_config.cache_dtype = "fp8_ds_mla"
