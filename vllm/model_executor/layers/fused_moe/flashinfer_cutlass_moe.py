@@ -68,6 +68,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.out_dtype = out_dtype
+        # Enables DeepSeek-style FP8 block-scale path:
+        # - pass per-block weight scales to the kernel
+        # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
 
     @property
@@ -146,10 +149,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "Only activation silu is supported in FlashInferExperts"
         )
 
+        # Select quantization metadata based on FP8 format/path
         if (
             self.quant_dtype == torch.float8_e4m3fn
             and not self.use_deepseek_fp8_block_scale
         ):
+            # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             quant_scales = [
                 self.g1_alphas,
                 self.a2_gscale,
@@ -179,6 +184,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
         elif self.use_deepseek_fp8_block_scale:
+            # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [
                 self.w1_scale,
                 self.w2_scale,
@@ -206,6 +212,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
             output=output,
+            # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
         )
 

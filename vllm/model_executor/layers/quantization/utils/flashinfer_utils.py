@@ -190,6 +190,8 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
+    # Propagate block-scale flag so prepare/finalize can skip act quantization
+    # and inform the kernel to consume per-block weight scales.
     return create_flashinfer_prepare_finalize(
         use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
     )
@@ -238,6 +240,7 @@ def flashinfer_cutlass_moe_fp8(
     quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
     assert quant_config is not None
 
+    # Construct modular kernel with block-scale support when requested.
     fused_experts = mk.FusedMoEModularKernel(
         build_flashinfer_fp8_cutlass_moe_prepare_finalize(
             moe=moe, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
@@ -266,6 +269,7 @@ def flashinfer_cutlass_moe_fp8(
 
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
     flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
+    # Prefer CUTLASS on SM90 to cover both SM90/SM100 generations
     if flashinfer_moe_backend == "throughput" or current_platform.is_device_capability(
         90
     ):

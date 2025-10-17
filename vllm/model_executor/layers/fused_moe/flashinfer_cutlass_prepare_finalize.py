@@ -34,6 +34,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.num_dispatchers_ = num_dispatchers
         self.use_dp = use_dp
         self.local_tokens = None
+        # Toggle for DeepSeek-style FP8 block-scale path where activations are
+        # not quantized here and weight block scales are consumed by the kernel.
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
 
     @property
@@ -100,7 +102,7 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         )
 
         if not self.use_dp:
-            # Non-DP case: standard quantization
+            # Non-DP case: quantize activations unless using block-scale path
             if not self.use_deepseek_fp8_block_scale:
                 a1q, a1q_scale = moe_kernel_quantize_input(
                     a1,
@@ -186,6 +188,7 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
                 is_fp4_scale_swizzled=not self.use_dp,
             )
         else:
+            # Block-scale path: pass activations through, omit per-token scales
             a1q = a1
             a1q_scale = None
 
@@ -317,7 +320,7 @@ def create_flashinfer_prepare_finalize(
             return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
         else:
             return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)
-    # Fp8 only supports AllGather
+    # FP8 path currently supported via AllGather; optionally enable block-scale
     return FlashInferAllGatherMoEPrepareAndFinalize(
         use_dp=use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
     )
