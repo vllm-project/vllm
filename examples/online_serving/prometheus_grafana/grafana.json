@@ -1495,7 +1495,7 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(model_name)",
+        "definition": "label_values({__name__=~\"vllm:.*\"},model_name)",
         "hide": 0,
         "includeAll": false,
         "label": "model_name",
@@ -1503,7 +1503,7 @@
         "name": "model_name",
         "options": [],
         "query": {
-          "query": "label_values(model_name)",
+          "query": "label_values({__name__=~\"vllm:.*\"},model_name)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
