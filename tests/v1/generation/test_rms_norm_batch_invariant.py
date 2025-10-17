@@ -14,13 +14,13 @@ from vllm.model_executor.layers.batch_invariant import rms_norm as triton_rms_no
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
-hopper_only = pytest.mark.skipif(
+skip_unsupported = pytest.mark.skipif(
     not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="Requires CUDA and Hopper (SM90)",
+    reason="Requires CUDA and >= Hopper (SM90)",
 )
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("batch_size", [1, 4, 16, 64])
 @pytest.mark.parametrize("hidden_size", [512, 2048, 4096, 8192])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -69,7 +69,7 @@ def test_rms_norm_batch_invariant_vs_standard(
     )
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("batch_size", [1, 16, 128])
 @pytest.mark.parametrize("seq_len", [1, 32, 512])
 @pytest.mark.parametrize("hidden_size", [2048, 4096])
@@ -111,7 +111,7 @@ def test_rms_norm_3d_input(batch_size: int, seq_len: int, hidden_size: int):
     )
 
 
-@hopper_only
+@skip_unsupported
 def test_rms_norm_numerical_stability():
     """
     Test RMS norm numerical stability with extreme values.
@@ -171,7 +171,7 @@ def test_rms_norm_numerical_stability():
         )
 
 
-@hopper_only
+@skip_unsupported
 def test_rms_norm_formula():
     """
     Test that RMS norm follows the correct mathematical formula.
@@ -204,7 +204,7 @@ def test_rms_norm_formula():
     )
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("hidden_size", [128, 1024, 4096, 16384])
 def test_rms_norm_different_hidden_sizes(hidden_size: int):
     """
@@ -242,7 +242,7 @@ def test_rms_norm_different_hidden_sizes(hidden_size: int):
     )
 
 
-@hopper_only
+@skip_unsupported
 def test_rms_norm_determinism():
     """
     Test that batch-invariant RMS norm produces deterministic results.

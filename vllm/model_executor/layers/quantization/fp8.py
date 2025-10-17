@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -94,9 +95,11 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
+    fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
+    should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.flashinfer import has_flashinfer_moe
 
@@ -539,8 +542,37 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # If batch invariant mode is enabled, dequantize and use BF16 compute
+        # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
+        # we will use BF16 dequant when DeepGEMM is not supported.
         if vllm_is_batch_invariant():
+            if self.block_quant and should_use_deepgemm_for_fp8_linear(
+                torch.bfloat16, layer.weight, None
+            ):
+                # quantize input to FP8 using the same op as runtime path
+                input_2d = x.view(-1, x.shape[-1])
+                # use group quant consistent with block size across K
+                assert self.act_q_group_shape is not None
+                q_input, input_scale = QuantFP8(
+                    False,
+                    self.act_q_group_shape,
+                    column_major_scales=True,
+                )(input_2d)
+
+                output_2d = torch.empty(
+                    (q_input.shape[0], layer.weight.shape[0]),
+                    dtype=torch.bfloat16,
+                    device=q_input.device,
+                )
+                fp8_gemm_nt(
+                    (q_input, input_scale),
+                    (layer.weight, layer.weight_scale),
+                    output_2d,
+                )
+                output = output_2d.view(*x.shape[:-1], layer.weight.shape[0])
+                if bias is not None:
+                    output = output + bias
+                return output
+
             # Dequantize FP8 weights to BF16
             weight_fp8 = layer.weight.to(torch.bfloat16)
             weight_scale = layer.weight_scale.to(torch.bfloat16)
@@ -568,8 +600,17 @@ class Fp8LinearMethod(LinearMethodBase):
 
                 scale_rows, scale_cols = weight_scale.shape
                 if (scale_rows, scale_cols) == (num_blocks_k, num_blocks_n):
-                    # stored transposed, bring to [num_blocks_n, num_blocks_k]
-                    weight_scale = weight_scale.t()
+                    if num_blocks_n == num_blocks_k:
+                        # ambiguous square case, warn and skip transpose
+                        logger.warning(
+                            "Batch-invariant FP8: square block-scale %dx%d; "
+                            "skipping transpose to avoid misorientation.",
+                            scale_rows,
+                            scale_cols,
+                        )
+                    else:
+                        # clear KN -> transpose to NK
+                        weight_scale = weight_scale.t()
 
                 # Expand scale to match weight dimensions
                 # scale_expanded should have shape [N, K]
