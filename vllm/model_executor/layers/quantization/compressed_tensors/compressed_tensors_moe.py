@@ -2256,7 +2256,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             use_grouped_topk=use_grouped_topk,
             top_k=top_k,
             renormalize=renormalize,
-            layer_index=layer_index,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
