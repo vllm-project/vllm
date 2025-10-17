@@ -727,6 +727,7 @@ class EngineCoreProc(EngineCore):
                 # Start a thread to monitor the execution of run_busy_loop,
                 # and perform fault tolerance.
                 engine_core_ids = addresses.engine_core_identitys
+                assert engine_core_ids is not None
                 fault_receive_identitys = engine_core_ids['fault_receive_identitys']
                 client_cmd_identitys = engine_core_ids['client_cmd_identitys']
                 assert fault_receive_identitys is not None
