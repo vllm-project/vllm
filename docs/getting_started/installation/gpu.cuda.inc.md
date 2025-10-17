@@ -44,8 +44,6 @@ export CUDA_VERSION=118 # or 126
 uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
 ```
 
-[](){ #install-the-latest-code }
-
 #### Install the latest code
 
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on an x86 platform with CUDA 12 for every commit since `v0.5.3`.
@@ -128,11 +126,11 @@ export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vll
 uv pip install --editable .
 ```
 
-You can find more information about vLLM's wheels in [install-the-latest-code][install-the-latest-code].
+You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
 
 !!! note
     There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
-    It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [install-the-latest-code][install-the-latest-code] for instructions on how to install a specified wheel.
+    It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [Install the latest code](#install-the-latest-code) for instructions on how to install a specified wheel.
 
 #### Full build (with compilation)
 
