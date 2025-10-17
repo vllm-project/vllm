@@ -396,6 +396,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.fused_experts is not None
+
         # Is getattr needed?
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
