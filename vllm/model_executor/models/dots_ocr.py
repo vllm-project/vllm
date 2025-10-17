@@ -290,12 +290,11 @@ class DotsVisionAttention(nn.Module):
         self.attn_backend = get_vit_attn_backend(
             self.hidden_size_per_attention_head, torch.get_default_dtype()
         )
-        self.use_upstream_fa = False
 
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
+                try_switch_to_fa=True,
             )
         )
         if self.attn_backend not in {

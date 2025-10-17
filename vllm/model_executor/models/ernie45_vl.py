@@ -198,12 +198,10 @@ class Ernie4_5_VisionAttention(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        self.use_upstream_fa = False
-
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
+                try_switch_to_fa=True,
             )
         )
 
