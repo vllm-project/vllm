@@ -24,7 +24,8 @@ from vllm.compilation.partition_rules import (
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
+from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .caching import VllmSerializableFunction
 from .compiler_interface import (
@@ -56,7 +57,7 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             return InductorAdaptor()
     else:
         assert compilation_config.backend == "eager", (
-            "Custom backends not supported with CompilationLevel.PIECEWISE"
+            "Custom backends not supported with CompilationMode.VLLM_COMPILE"
         )
 
         logger.debug("Using EagerAdaptor")
@@ -481,7 +482,7 @@ def set_model_tag(tag: str):
 
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation level of `CompilationLevel.PIECEWISE`,
+    It is used for compilation mode of `CompilationMode.VLLM_COMPILE`,
     where we customize the compilation.
 
     The major work of this backend is to split the graph into
