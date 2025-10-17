@@ -510,7 +510,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> CompletionResponse:
+    ) -> CompletionResponse | ErrorResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
