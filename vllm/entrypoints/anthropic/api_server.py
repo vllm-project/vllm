@@ -8,7 +8,6 @@ import signal
 import tempfile
 from argparse import Namespace
 from http import HTTPStatus
-from typing import Optional
 
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -17,49 +16,56 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import State
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.anthropic.protocol import AnthropicErrorResponse, \
-    AnthropicMessagesRequest, \
-    AnthropicMessagesResponse
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicErrorResponse,
+    AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+)
 from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
-from vllm.entrypoints.chat_utils import (load_chat_template,
-                                         resolve_hf_chat_template,
-                                         resolve_mistral_chat_template)
+from vllm.entrypoints.chat_utils import (
+    load_chat_template,
+    resolve_hf_chat_template,
+    resolve_mistral_chat_template,
+)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.api_server import validate_api_server_args, \
-    create_server_socket, load_log_config, \
-    lifespan, build_async_engine_client, validate_json_request
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
-                                              validate_parsed_serve_args)
+from vllm.entrypoints.openai.api_server import (
+    build_async_engine_client,
+    create_server_socket,
+    lifespan,
+    load_log_config,
+    validate_api_server_args,
+    validate_json_request,
+)
+from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.protocol import ErrorResponse
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels, \
-    BaseModelPath, LoRAModulePath
+from vllm.entrypoints.openai.serving_models import (
+    BaseModelPath,
+    LoRAModulePath,
+    OpenAIServingModels,
+)
+
 #
 # yapf: enable
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    with_cancellation)
+from vllm.entrypoints.utils import cli_env_setup, load_aware_call, with_cancellation
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import MistralTokenizer
-from vllm.utils import (FlexibleArgumentParser,
-                        is_valid_ipv6_address,
-                        set_ulimit)
+from vllm.utils import FlexibleArgumentParser, is_valid_ipv6_address, set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
-logger = init_logger('vllm.entrypoints.anthropic.api_server')
+logger = init_logger("vllm.entrypoints.anthropic.api_server")
 
 _running_tasks: set[asyncio.Task] = set()
 
 router = APIRouter()
 
 
-def messages(request: Request) -> Optional[AnthropicServingMessages]:
+def messages(request: Request) -> AnthropicServingMessages:
     return request.app.state.anthropic_serving_messages
 
 
@@ -81,32 +87,24 @@ async def ping(raw_request: Request) -> Response:
     return await health(raw_request)
 
 
-@router.post("/v1/messages",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.OK.value: {
-                     "content": {
-                         "text/event-stream": {}
-                     }
-                 },
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": AnthropicErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": AnthropicErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": AnthropicErrorResponse
-                 }
-             })
+@router.post(
+    "/v1/messages",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
-async def create_messages(request: AnthropicMessagesRequest,
-                          raw_request: Request):
+async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
     handler = messages(raw_request)
     if handler is None:
         return messages(raw_request).create_error_response(
-            message="The model does not support Messages API")
+            message="The model does not support Messages API"
+        )
 
     generator = await handler.create_messages(request, raw_request)
 
@@ -114,18 +112,21 @@ async def create_messages(request: AnthropicMessagesRequest,
         return JSONResponse(content=generator.model_dump())
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        logger.debug(f"Anthropic Messages Response: {generator.model_dump(exclude_none=True)}")
+        logger.debug(
+            "Anthropic Messages Response: %s", generator.model_dump(exclude_none=True)
+        )
         return JSONResponse(content=generator.model_dump(exclude_none=True))
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 async def init_app_state(
-        engine_client: EngineClient,
-        vllm_config: VllmConfig,
-        state: State,
-        args: Namespace,
+    engine_client: EngineClient,
+    state: State,
+    args: Namespace,
 ) -> None:
+    vllm_config = engine_client.vllm_config
+
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
@@ -137,8 +138,7 @@ async def init_app_state(
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model)
-        for name in served_model_names
+        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
     ]
 
     state.engine_client = engine_client
@@ -146,15 +146,19 @@ async def init_app_state(
     state.vllm_config = vllm_config
     model_config = vllm_config.model_config
 
-    default_mm_loras = (vllm_config.lora_config.default_mm_loras
-                        if vllm_config.lora_config is not None else {})
+    default_mm_loras = (
+        vllm_config.lora_config.default_mm_loras
+        if vllm_config.lora_config is not None
+        else {}
+    )
     lora_modules = args.lora_modules
     if default_mm_loras:
         default_mm_lora_paths = [
             LoRAModulePath(
                 name=modality,
                 path=lora_path,
-            ) for modality, lora_path in default_mm_loras.items()
+            )
+            for modality, lora_path in default_mm_loras.items()
         ]
         if args.lora_modules is None:
             lora_modules = default_mm_lora_paths
@@ -169,7 +173,8 @@ async def init_app_state(
         if isinstance(tokenizer, MistralTokenizer):
             # The warning is logged in resolve_mistral_chat_template.
             resolved_chat_template = resolve_mistral_chat_template(
-                chat_template=resolved_chat_template)
+                chat_template=resolved_chat_template
+            )
         else:
             hf_chat_template = resolve_hf_chat_template(
                 tokenizer=tokenizer,
@@ -183,11 +188,12 @@ async def init_app_state(
                     "Using supplied chat template: %s\n"
                     "It is different from official chat template '%s'. "
                     "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template, args.model)
+                    resolved_chat_template,
+                    args.model,
+                )
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
-        model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
     )
@@ -238,8 +244,7 @@ def setup_server(args):
 
     addr, port = sock_addr
     is_ssl = args.ssl_keyfile and args.ssl_certfile
-    host_part = f"[{addr}]" if is_valid_ipv6_address(
-        addr) else addr or "0.0.0.0"
+    host_part = f"[{addr}]" if is_valid_ipv6_address(addr) else addr or "0.0.0.0"
     listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
 
     return listen_address, sock
@@ -267,11 +272,9 @@ def build_app(args: Namespace) -> FastAPI:
     return app
 
 
-async def run_server_worker(listen_address,
-                            sock,
-                            args,
-                            client_config=None,
-                            **uvicorn_kwargs) -> None:
+async def run_server_worker(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
     """Run a single API server worker."""
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -282,19 +285,17 @@ async def run_server_worker(listen_address,
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
-        uvicorn_kwargs['log_config'] = log_config
+        uvicorn_kwargs["log_config"] = log_config
 
     async with build_async_engine_client(
-            args,
-            client_config=client_config,
+        args,
+        client_config=client_config,
     ) as engine_client:
         app = build_app(args)
 
-        vllm_config = await engine_client.get_vllm_config()
-        await init_app_state(engine_client, vllm_config, app.state, args)
+        await init_app_state(engine_client, app.state, args)
 
-        logger.info("Starting vLLM API server %d on %s", server_index,
-                    listen_address)
+        logger.info("Starting vLLM API server %d on %s", server_index, listen_address)
         shutdown_task = await serve_http(
             app,
             sock=sock,
@@ -326,7 +327,8 @@ if __name__ == "__main__":
     # entrypoints.
     cli_env_setup()
     parser = FlexibleArgumentParser(
-        description="vLLM Anthropic-Compatible RESTful API server.")
+        description="vLLM Anthropic-Compatible RESTful API server."
+    )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
     validate_parsed_serve_args(args)

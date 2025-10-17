@@ -1,59 +1,63 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from
-# https://github.com/sgl-project/sglang/blob/220962e46b087b5829137a67eab0205b4d51720b/python/sglang/srt/entrypoints/anthropic/protocol.py
 """Pydantic models for Anthropic API protocol"""
 
 import time
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, field_validator
 
 
 class AnthropicError(BaseModel):
     """Error structure for Anthropic API"""
+
     type: str
     message: str
 
 
 class AnthropicErrorResponse(BaseModel):
     """Error response structure for Anthropic API"""
+
     type: Literal["error"] = "error"
     error: AnthropicError
 
 
 class AnthropicUsage(BaseModel):
     """Token usage information"""
+
     input_tokens: int
     output_tokens: int
-    cache_creation_input_tokens: Optional[int] = None
-    cache_read_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
 
 
 class AnthropicContentBlock(BaseModel):
     """Content block in message"""
+
     type: Literal["text", "image", "tool_use", "tool_result"]
-    text: Optional[str] = None
+    text: str | None = None
     # For image content
-    source: Optional[dict[str, Any]] = None
+    source: dict[str, Any] | None = None
     # For tool use/result
-    id: Optional[str] = None
-    name: Optional[str] = None
-    input: Optional[dict[str, Any]] = None
-    content: Optional[Union[str, list[dict[str, Any]]]] = None
-    is_error: Optional[bool] = None
+    id: str | None = None
+    name: str | None = None
+    input: dict[str, Any] | None = None
+    content: str | list[dict[str, Any]] | None = None
+    is_error: bool | None = None
 
 
 class AnthropicMessage(BaseModel):
     """Message structure"""
+
     role: Literal["user", "assistant"]
-    content: Union[str, list[AnthropicContentBlock]]
+    content: str | list[AnthropicContentBlock]
 
 
 class AnthropicTool(BaseModel):
     """Tool definition"""
+
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     input_schema: dict[str, Any]
 
     @field_validator("input_schema")
@@ -68,24 +72,26 @@ class AnthropicTool(BaseModel):
 
 class AnthropicToolChoice(BaseModel):
     """Tool Choice definition"""
+
     type: Literal["auto", "any", "tool"]
-    name: Optional[str] = None
+    name: str | None = None
 
 
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
+
     model: str
     messages: list[AnthropicMessage]
     max_tokens: int
-    metadata: Optional[dict[str, Any]] = None
-    stop_sequences: Optional[list[str]] = None
-    stream: Optional[bool] = False
-    system: Optional[Union[str, list[AnthropicContentBlock]]] = None
-    temperature: Optional[float] = None
-    tool_choice: Optional[AnthropicToolChoice] = None
-    tools: Optional[list[AnthropicTool]] = None
-    top_k: Optional[int] = None
-    top_p: Optional[float] = None
+    metadata: dict[str, Any] | None = None
+    stop_sequences: list[str] | None = None
+    stream: bool | None = False
+    system: str | list[AnthropicContentBlock] | None = None
+    temperature: float | None = None
+    tool_choice: AnthropicToolChoice | None = None
+    tools: list[AnthropicTool] | None = None
+    top_k: int | None = None
+    top_p: float | None = None
 
     @field_validator("model")
     @classmethod
@@ -104,48 +110,53 @@ class AnthropicMessagesRequest(BaseModel):
 
 class AnthropicDelta(BaseModel):
     """Delta for streaming responses"""
-    type: Literal["text_delta", "input_json_delta"] = None
-    text: Optional[str] = None
-    partial_json: Optional[str] = None
+
+    type: Literal["text_delta", "input_json_delta"] | None = None
+    text: str | None = None
+    partial_json: str | None = None
 
     # Message delta
-    stop_reason: Optional[
-        Literal["end_turn", "max_tokens", "stop_sequence",
-                "tool_use", "pause_turn", "refusal"]] = None
-    stop_sequence: Optional[str] = None
+    stop_reason: (
+        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
+    ) = None
+    stop_sequence: str | None = None
 
 
 class AnthropicStreamEvent(BaseModel):
     """Streaming event"""
+
     type: Literal[
-        "message_start", "message_delta", "message_stop",
-        "content_block_start", "content_block_delta", "content_block_stop",
-        "ping", "error"
+        "message_start",
+        "message_delta",
+        "message_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "ping",
+        "error",
     ]
     message: Optional["AnthropicMessagesResponse"] = None
-    delta: Optional[AnthropicDelta] = None
-    content_block: Optional[AnthropicContentBlock] = None
-    index: Optional[int] = None
-    error: Optional[AnthropicError] = None
-    usage: AnthropicUsage = None
+    delta: AnthropicDelta | None = None
+    content_block: AnthropicContentBlock | None = None
+    index: int | None = None
+    error: AnthropicError | None = None
+    usage: AnthropicUsage | None = None
 
 
 class AnthropicMessagesResponse(BaseModel):
     """Anthropic Messages API response"""
+
     id: str
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
     content: list[AnthropicContentBlock]
     model: str
-    stop_reason: Optional[Literal["end_turn", "max_tokens",
-                                  "stop_sequence", "tool_use"]] = None
-    stop_sequence: Optional[str] = None
-    usage: AnthropicUsage = None
+    stop_reason: (
+        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
+    ) = None
+    stop_sequence: str | None = None
+    usage: AnthropicUsage | None = None
 
     def model_post_init(self, __context):
         if not self.id:
             self.id = f"msg_{int(time.time() * 1000)}"
-
-
-# Forward reference resolution
-AnthropicStreamEvent.model_rebuild()

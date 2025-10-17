@@ -296,40 +296,41 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
 
 class RemoteAnthropicServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's Anthropic server does not need API key
-    def __init__(self,
-                 model: str,
-                 vllm_serve_args: list[str],
-                 *,
-                 env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = 0,
-                 auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
+
+    def __init__(
+        self,
+        model: str,
+        vllm_serve_args: list[str],
+        *,
+        env_dict: dict[str, str] | None = None,
+        seed: int | None = 0,
+        auto_port: bool = True,
+        max_wait_seconds: float | None = None,
+    ) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
-                raise ValueError("You have manually specified the port "
-                                 "when `auto_port=True`.")
+                raise ValueError(
+                    "You have manually specified the port when `auto_port=True`."
+                )
 
             # Don't mutate the input args
-            vllm_serve_args = vllm_serve_args + [
-                "--port", str(get_open_port())
-            ]
+            vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
         if seed is not None:
             if "--seed" in vllm_serve_args:
-                raise ValueError("You have manually specified the seed "
-                                 f"when `seed={seed}`.")
+                raise ValueError(
+                    f"You have manually specified the seed when `seed={seed}`."
+                )
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
-        parser = FlexibleArgumentParser(
-            description="vLLM's remote Anthropic server.")
+        parser = FlexibleArgumentParser(description="vLLM's remote Anthropic server.")
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
-        self.host = str(args.host or 'localhost')
+        self.host = str(args.host or "localhost")
         self.port = int(args.port)
 
-        self.show_hidden_metrics = \
-            args.show_hidden_metrics_for_version is not None
+        self.show_hidden_metrics = args.show_hidden_metrics_for_version is not None
 
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
@@ -344,18 +345,22 @@ class RemoteAnthropicServer:
         env = os.environ.copy()
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
         self.proc = subprocess.Popen(
-            ["python -m", "vllm.entrypoints.anthropic.api_server", model, *vllm_serve_args],
+            [
+                "python -m",
+                "vllm.entrypoints.anthropic.api_server",
+                model,
+                *vllm_serve_args,
+            ],
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
         max_wait_seconds = max_wait_seconds or 240
-        self._wait_for_server(url=self.url_for("health"),
-                              timeout=max_wait_seconds)
+        self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -386,8 +391,7 @@ class RemoteAnthropicServer:
 
                 time.sleep(0.5)
                 if time.time() - start > timeout:
-                    raise RuntimeError(
-                        "Server failed to start in time.") from None
+                    raise RuntimeError("Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
@@ -410,12 +414,8 @@ class RemoteAnthropicServer:
         if "timeout" not in kwargs:
             kwargs["timeout"] = 600
         return anthropic.AsyncAnthropic(
-            base_url=self.url_for(),
-            api_key=self.DUMMY_API_KEY,
-            max_retries=0,
-            **kwargs
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
         )
-
 
 
 def _test_completion(
