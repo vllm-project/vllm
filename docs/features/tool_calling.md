@@ -27,27 +27,29 @@ Next, make a request that triggers the model to use the available tools:
         return f"Getting the weather for {location} in {unit}..."
     tool_functions = {"get_weather": get_weather}
 
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location", "unit"],
                 },
-                "required": ["location", "unit"]
-            }
-        }
-    }]
+            },
+        },
+    ]
 
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
         tools=tools,
-        tool_choice="auto"
+        tool_choice="auto",
     )
 
     tool_call = response.choices[0].message.tool_calls[0].function
@@ -71,7 +73,7 @@ This example demonstrates:
 * Making a request with `tool_choice="auto"`
 * Handling the structured response and executing the corresponding function
 
-You can also specify a particular function using named function calling by setting `tool_choice={"type": "function", "function": {"name": "get_weather"}}`. Note that this will use the guided decoding backend - so the first time this is used, there will be several seconds of latency (or more) as the FSM is compiled for the first time before it is cached for subsequent requests.
+You can also specify a particular function using named function calling by setting `tool_choice={"type": "function", "function": {"name": "get_weather"}}`. Note that this will use the structured outputs backend - so the first time this is used, there will be several seconds of latency (or more) as the FSM is compiled for the first time before it is cached for subsequent requests.
 
 Remember that it's the caller's responsibility to:
 
@@ -83,19 +85,18 @@ For more advanced usage, including parallel tool calls and different model-speci
 
 ## Named Function Calling
 
-vLLM supports named function calling in the chat completion API by default. It does so using Outlines through guided decoding, so this is
-enabled by default and will work with any supported model. You are guaranteed a validly-parsable function call - not a
+vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
 high-quality one.
 
-vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
-For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the guided decoding backend.
+vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the structured outputs backend.
 
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
 ## Required Function Calling
 
-vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model. The guided decoding features for `tool_choice='required'` (such as JSON schema with `anyOf`) are currently only supported in the V0 engine with the guided decoding backend `outlines`. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
+vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
 
 When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
 
@@ -146,7 +147,7 @@ Supported models:
 Known issues:
 
 1. Mistral 7B struggles to generate parallel tool calls correctly.
-2. Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is
+2. **For Transformers tokenization backend only**: Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is
    much shorter than what vLLM generates. Since an exception is thrown when this condition
    is not met, the following additional chat templates are provided:
 
@@ -155,7 +156,14 @@ Known issues:
     * <gh-file:examples/tool_chat_template_mistral_parallel.jinja> - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+Recommended flags:
+
+1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
+
+    `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
+
+2. To use the default Transformers tokenization backend:
+    `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -169,7 +177,7 @@ All Llama 3.1, 3.2 and 4 models should be supported.
 
 The tool calling that is supported is the [JSON-based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) introduced by the Llama-3.2 models, see the `pythonic` tool parser below. As for Llama 4 models, it is recommended to use the `llama4_pythonic` tool parser.
 
-Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
+Other tool calling formats like the built-in python tool calling or custom tool calling are not supported.
 
 Known issues:
 
@@ -192,9 +200,13 @@ VLLM also provides a pythonic and JSON-based chat template for Llama 4, but pyth
 
 For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examples/tool_chat_template_llama4_pythonic.jinja`.
 
-#### IBM Granite
+### IBM Granite
 
 Supported models:
+
+* `ibm-granite/granite-4.0-h-small` and other Granite 4.0 models
+
+    Recommended flags: `--tool-call-parser hermes`
 
 * `ibm-granite/granite-3.0-8b-instruct`
 
@@ -311,6 +323,45 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
 
+### LongCat-Flash-Chat Models (`longcat`)
+
+Supported models:
+
+* `meituan-longcat/LongCat-Flash-Chat`
+* `meituan-longcat/LongCat-Flash-Chat-FP8`
+
+Flags: `--tool-call-parser longcat`
+
+### GLM-4.5 Models (`glm45`)
+
+Supported models:
+
+* `zai-org/GLM-4.5`
+* `zai-org/GLM-4.5-Air`
+* `zai-org/GLM-4.6`
+* `zai-org/GLM-4.6-Air`
+
+Flags: `--tool-call-parser glm45`
+
+### Qwen3-Coder Models (`qwen3_xml`)
+
+Supported models:
+
+* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-30B-A3B-Instruct`
+
+Flags: `--tool-call-parser qwen3_xml`
+
+### Olmo 3 Models (`olmo3`)
+
+Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).
+
+Supported models:
+
+* TODO (will be updated after Olmo 3 release)
+
+Flags: `--tool-call-parser olmo3`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
@@ -363,8 +414,7 @@ Here is a summary of a plugin file:
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
-        def adjust_request(
-                self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
             return request
 
         # implement the tool call parse for stream call
@@ -377,7 +427,7 @@ Here is a summary of a plugin file:
             current_token_ids: Sequence[int],
             delta_token_ids: Sequence[int],
             request: ChatCompletionRequest,
-        ) -> Union[DeltaMessage, None]:
+        ) -> DeltaMessage | None:
             return delta
 
         # implement the tool parse for non-stream call

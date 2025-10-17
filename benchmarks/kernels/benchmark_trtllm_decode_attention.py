@@ -4,7 +4,6 @@
 import csv
 import os
 from datetime import datetime
-from typing import Optional
 
 import flashinfer
 import torch
@@ -28,9 +27,7 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 @torch.no_grad()
 def benchmark_decode(
     dtype: torch.dtype,
-    quant_dtypes: tuple[
-        Optional[torch.dtype], Optional[torch.dtype], Optional[torch.dtype]
-    ],
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
     max_seq_len: int,
     num_heads: tuple[int, int] = (64, 8),
@@ -259,6 +256,7 @@ if __name__ == "__main__":
         # (q_quant_dtype, kv_quant_dtype, o_quant_dtype)
         (None, None, None),
         (None, FP8_DTYPE, None),
+        (FP8_DTYPE, FP8_DTYPE, None),
         (FP8_DTYPE, FP8_DTYPE, FP8_DTYPE),
         (FP8_DTYPE, FP8_DTYPE, FP4_DTYPE),
     ]

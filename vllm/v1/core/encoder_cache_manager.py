@@ -33,12 +33,12 @@ class EncoderCacheManager:
     within requests, allowing for fine-grained memory management and enabling
     chunked processing of multimodal inputs.
 
-    Cache is enabled to share embeddings of same multimodal data 
-    item (identified by their hash value) between different requests, 
-    and eviction takes place at allocation time when there's no free 
+    Cache is enabled to share embeddings of same multimodal data
+    item (identified by their hash value) between different requests,
+    and eviction takes place at allocation time when there's no free
     space for new embeddings.
     Oldest cached embeddings with no request referenced will be first evicted.
-    
+
     Args:
         cache_size: Limit the size of the cache, measured by the number of
                     tokens from the input sequence.
@@ -86,7 +86,7 @@ class EncoderCacheManager:
         Returns:
             True if the encoder output for this input is already cached
         """
-        mm_hash = request.mm_hashes[input_id]
+        mm_hash = request.mm_features[input_id].identifier
         # Not cached at all
         if mm_hash not in self.cached:
             return False
@@ -99,27 +99,31 @@ class EncoderCacheManager:
         self.cached[mm_hash].add(request.request_id)
         return True
 
-    def can_allocate(self, request: Request, input_id: int,
-                     encoder_compute_budget: int,
-                     num_tokens_to_schedule: int) -> bool:
-        """Check if there's sufficient cache space for a multimodal input. 
+    def can_allocate(
+        self,
+        request: Request,
+        input_id: int,
+        encoder_compute_budget: int,
+        num_tokens_to_schedule: int,
+    ) -> bool:
+        """Check if there's sufficient cache space for a multimodal input.
         If there is, return True and update EncoderCacheManager state.
 
         If there is not enough free space in `num_free_slots` but there is
         enough reclaimable space in `num_freeable_slots`, entries will be
         evicted from `freeable` (their mm_hash appended to `freed`) until
-        enough space is available, and then this method returns True. 
+        enough space is available, and then this method returns True.
         Older entries are evicted first.
-        
-        Returns False only if the requested number of tokens exceeds both 
+
+        Returns False only if the requested number of tokens exceeds both
         the free and reclaimable capacities combined.
 
         Args:
             request: The request containing the multimodal input.
             input_id: Index of the multimodal input within the request.
-            encoder_compute_budget: Number of encoder tokens allowed to be 
+            encoder_compute_budget: Number of encoder tokens allowed to be
                 computed when this method is invoked.
-            num_tokens_to_schedule: Number of tokens already scheduled to be 
+            num_tokens_to_schedule: Number of tokens already scheduled to be
                 allocated with cache space when this method is invoked.
 
         Returns:
@@ -127,7 +131,7 @@ class EncoderCacheManager:
             input (possibly after reclaiming `freeable` entries); otherwise
             False.
 
-        Note: This method does not allocate physical memory for the encoder 
+        Note: This method does not allocate physical memory for the encoder
         output but only the state of EncoderCacheManager.
         """
         num_tokens = request.get_num_encoder_tokens(input_id)
@@ -167,7 +171,7 @@ class EncoderCacheManager:
             This method assumes can_allocate() returned True for the same input.
         """
 
-        mm_hash = request.mm_hashes[input_id]
+        mm_hash = request.mm_features[input_id].identifier
         request_id = request.request_id
         if mm_hash not in self.cached:
             self.cached[mm_hash] = set()
@@ -193,8 +197,8 @@ class EncoderCacheManager:
         """
         return {
             input_id
-            for input_id in range(len(request.mm_hashes))
-            if request.mm_hashes[input_id] in self.cached
+            for input_id in range(len(request.mm_features))
+            if request.mm_features[input_id].identifier in self.cached
         }
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
@@ -202,13 +206,13 @@ class EncoderCacheManager:
 
         When the reference set for the corresponding `mm_hash` becomes empty,
         the entry is appended to `freeable` and `num_freeable_slots` is
-        increased by the number of encoder tokens for that input. 
+        increased by the number of encoder tokens for that input.
 
         The entry is NOT physically freed until capacity is needed (e.g., by
         `can_allocate`).
         """
         req_id = request.request_id
-        mm_hash = request.mm_hashes[input_id]
+        mm_hash = request.mm_features[input_id].identifier
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
@@ -221,8 +225,8 @@ class EncoderCacheManager:
     def free(self, request: Request) -> None:
         """Free all encoder input cache reference held by *request*.
 
-        For each cached input ID, `free_encoder_input` is invoked.  
-        The data stays in memory until eviction is triggered by a future 
+        For each cached input ID, `free_encoder_input` is invoked.
+        The data stays in memory until eviction is triggered by a future
         attempt allocation called by 'can_allocate'.
 
         Typically called when a request is finished, cancelled, or aborted.
@@ -236,9 +240,9 @@ class EncoderCacheManager:
 
         Returns:
             List of mm_hash strings that were actually evicted since the last
-            call to be used by the scheduler to notify workers about which 
-            encoder outputs can be removed from their caches. The internal 
-            list is cleared after this call. 
+            call to be used by the scheduler to notify workers about which
+            encoder outputs can be removed from their caches. The internal
+            list is cleared after this call.
         """
         freed = self.freed
         self.freed = []
@@ -250,7 +254,7 @@ def compute_encoder_budget(
     scheduler_config: "SchedulerConfig",
     mm_registry: MultiModalRegistry,
 ) -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler 
+    """Compute the encoder cache budget based on the model and scheduler
     configurations.
 
     Returns:
@@ -260,8 +264,9 @@ def compute_encoder_budget(
             from the input sequence.
     """
     if mm_registry.supports_multimodal_inputs(model_config):
-        max_tokens_by_modality = mm_registry \
-            .get_max_tokens_per_item_by_nonzero_modality(model_config)
+        max_tokens_by_modality = (
+            mm_registry.get_max_tokens_per_item_by_nonzero_modality(model_config)
+        )
 
         return compute_mm_encoder_budget(
             scheduler_config,
@@ -271,18 +276,17 @@ def compute_encoder_budget(
     return compute_text_encoder_budget(scheduler_config)
 
 
-def compute_text_encoder_budget(
-        scheduler_config: "SchedulerConfig") -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler 
+def compute_text_encoder_budget(scheduler_config: "SchedulerConfig") -> tuple[int, int]:
+    """Compute the encoder cache budget based on the model and scheduler
     configurations for a text-only model.
 
     Args:
         scheduler_config: Scheduler configuration.
 
     Returns:
-        - Compute budget for encoder execution, in unit of number of tokens 
+        - Compute budget for encoder execution, in unit of number of tokens
             in the input sequence.
-        - Space budget for encoder cache size, in unit of number of tokens 
+        - Space budget for encoder cache size, in unit of number of tokens
             in the input sequence.
     """
     # Currently text-only encoder-decoder models are not supported
@@ -293,7 +297,7 @@ def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     max_tokens_by_modality: Mapping[str, int],
 ) -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler 
+    """Compute the encoder cache budget based on the model and scheduler
     configurations for a multimodal model.
 
     Args:
@@ -312,22 +316,28 @@ def compute_mm_encoder_budget(
         logger.warning(
             "All non-text modalities supported by the model have been "
             "explicitly disabled via limit_mm_per_prompt. Encoder cache will "
-            "not be initialized.")
+            "not be initialized."
+        )
         return 0, 0
 
     max_tokens_per_mm_item = max(max_tokens_by_modality.values())
 
-    if (scheduler_config.disable_chunked_mm_input and max_tokens_per_mm_item
-            > scheduler_config.max_num_batched_tokens):
+    if (
+        scheduler_config.disable_chunked_mm_input
+        and max_tokens_per_mm_item > scheduler_config.max_num_batched_tokens
+    ):
         raise ValueError(
             "Chunked MM input disabled but max_tokens_per_mm_item "
             f"({max_tokens_per_mm_item}) is larger than max_num_batched_tokens"
             f" ({scheduler_config.max_num_batched_tokens}). Please increase "
-            "max_num_batched_tokens.")
+            "max_num_batched_tokens."
+        )
 
-    encoder_compute_budget = max(scheduler_config.max_num_encoder_input_tokens,
-                                 max_tokens_per_mm_item)
-    encoder_cache_size = max(scheduler_config.encoder_cache_size,
-                             max_tokens_per_mm_item)
+    encoder_compute_budget = max(
+        scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
+    )
+    encoder_cache_size = max(
+        scheduler_config.encoder_cache_size, max_tokens_per_mm_item
+    )
 
     return encoder_compute_budget, encoder_cache_size

@@ -10,17 +10,20 @@ Before using EP, you need to install the necessary dependencies. We are actively
 
 1. **Install DeepEP and pplx-kernels**: Set up host environment following vLLM's guide for EP kernels [here](gh-file:tools/ep_kernels).
 2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. **For disaggregated serving**: Install UCX and NIXL following the [script](gh-file:tools/install_nixl.sh).
+3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](gh-file:tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
 ### Backend Selection Guide
 
-vLLM provides three communication backends for EP:
+vLLM provides multiple communication backends for EP. Use `--all2all-backend` to select one:
 
 | Backend | Use Case | Features | Best For |
 |---------|----------|----------|----------|
-| `pplx` | Single node | Chunked prefill support | Development, best for intra-node deployments |
-| `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout | High-throughput scenarios, prefill-dominated workloads |
-| `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout | Low-latency scenarios, decode-dominated workloads |
+| `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
+| `pplx` | Single node | Chunked prefill support, efficient intra-node communication | Single-node deployments, development |
+| `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
+| `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
+| `flashinfer_all2allv` | MNNVL systems | FlashInfer alltoallv kernels for multi-node NVLink | Systems with NVLink across nodes |
+| `naive` | Testing/debugging | Simple broadcast-based implementation | Debugging, not recommended for production |
 
 ## Single Node Deployment
 
@@ -47,11 +50,11 @@ The following command serves a `DeepSeek-V3-0324` model with 1-way tensor parall
 
 ```bash
 # Single node EP deployment with pplx backend
-VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 \
-    vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --tensor-parallel-size 1 \      # Tensor parallelism across 1 GPU
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --tensor-parallel-size 1 \       # Tensor parallelism across 1 GPU
     --data-parallel-size 8 \         # Data parallelism across 8 processes
-    --enable-expert-parallel         # Enable expert parallelism
+    --enable-expert-parallel \       # Enable expert parallelism
+    --all2all-backend pplx           # Use pplx communication backend
 ```
 
 ## Multi-Node Deployment
@@ -70,8 +73,8 @@ The following example deploys `DeepSeek-V3-0324` across 2 nodes using `deepep_lo
 
 ```bash
 # Node 1 (Primary - handles incoming requests)
-VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 \
-    vllm serve deepseek-ai/DeepSeek-V3-0324 \
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --all2all-backend deepep_low_latency \
     --tensor-parallel-size 1 \               # TP size per node
     --enable-expert-parallel \               # Enable EP
     --data-parallel-size 16 \                # Total DP size across all nodes
@@ -81,8 +84,8 @@ VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 \
     --api-server-count=8                     # Number of API servers for load handling (scaling this out to total ranks are recommended)
 
 # Node 2 (Secondary - headless mode, no API server)
-VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 \
-    vllm serve deepseek-ai/DeepSeek-V3-0324 \
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --all2all-backend deepep_low_latency \
     --tensor-parallel-size 1 \               # TP size per node
     --enable-expert-parallel \               # Enable EP
     --data-parallel-size 16 \                # Total DP size across all nodes
@@ -123,17 +126,45 @@ When enabled, vLLM collects load statistics with every forward pass and periodic
 
 ### EPLB Parameters
 
+Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `--eplb-window-size` | Number of engine steps to track for rebalancing decisions | - |
-| `--eplb-step-interval` | Frequency of rebalancing (every N engine steps) | - |
-| `--eplb-log-balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `--num-redundant-experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `window_size`| Number of engine steps to track for rebalancing decisions | 1000 |
+| `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
+| `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
+| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+
+For example:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --enable-eplb \
+  --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
+```
+
+??? tip "Prefer individual arguments instead of JSON?"
+
+    ```bash
+    vllm serve Qwen/Qwen3-30B-A3B \
+            --enable-eplb \
+            --eplb-config.window_size 1000 \
+            --eplb-config.step_interval 3000 \
+            --eplb-config.num_redundant_experts 2 \
+            --eplb-config.log_balancedness true
+    ```
 
 ### Expert Distribution Formula
 
 - **Default**: Each EP rank has `NUM_TOTAL_EXPERTS ÷ NUM_EP_RANKS` experts
 - **With redundancy**: Each EP rank has `(NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS` experts
+
+### Memory Footprint Overhead
+
+EPLB uses redundant experts that need to fit in GPU memory. This means that EPLB may not be a good fit for memory constrained environments or when KV cache space is at a premium.
+
+This overhead equals `NUM_MOE_LAYERS * BYTES_PER_EXPERT * (NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS`.
+For DeepSeekV3, this is approximately `2.4 GB` for one redundant expert per EP rank.
 
 ### Example Command
 
@@ -141,17 +172,16 @@ Single node deployment with EPLB enabled:
 
 ```bash
 # Single node with EPLB load balancing
-VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --tensor-parallel-size 1 \     # Tensor parallelism
-    --data-parallel-size 8 \        # Data parallelism  
-    --enable-expert-parallel \      # Enable EP
-    --enable-eplb \                 # Enable load balancer
-    --eplb-log-balancedness \       # Log balancing metrics
-    --eplb-window-size 1000 \       # Track last 1000 engine steps
-    --eplb-step-interval 3000       # Rebalance every 3000 steps
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --tensor-parallel-size 1 \       # Tensor parallelism
+    --data-parallel-size 8 \         # Data parallelism
+    --enable-expert-parallel \       # Enable EP
+    --all2all-backend pplx \         # Use pplx communication backend
+    --enable-eplb \                  # Enable load balancer
+    --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
 
-For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--num-redundant-experts` to 32 in large scale use cases so the most popular experts are always available.
+For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--eplb-config '{"num_redundant_experts":32}'` to 32 in large scale use cases so the most popular experts are always available.
 
 ## Disaggregated Serving (Prefill/Decode Split)
 
@@ -165,9 +195,9 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 
 ### Setup Steps
 
-1. **Install KV Connector**: Install NIXL using the [installation script](gh-file:tools/install_nixl.sh)
+1. **Install gdrcopy/ucx/nixl**: For maximum performance, run the [install_gdrcopy.sh](gh-file:tools/install_gdrcopy.sh) script to install `gdrcopy` (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/). If `gdrcopy` is not installed, things will still work with a plain `pip install nixl`, just with lower performance. `nixl` and `ucx` are installed as dependencies via pip. For non-cuda platform to install nixl with non-cuda UCX build, run the [install_nixl_from_source_ubuntu.py](gh-file:tools/install_nixl_from_source_ubuntu.py) script.
 
-2. **Configure Both Instances**: Add this flag to both prefill and decode instances `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}`
+2. **Configure Both Instances**: Add this flag to both prefill and decode instances `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}`. Noted, you may also specify one or multiple NIXL_Backend. Such as: `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both", "kv_connector_extra_config":{"backends":["UCX", "GDS"]}}'`
 
 3. **Client Orchestration**: Use the client-side script below to coordinate prefill/decode operations. We are actively working on routing solutions.
 
@@ -213,10 +243,10 @@ try:
                 "remote_engine_id": None,     # Will be populated by vLLM
                 "remote_block_ids": None,     # Will be populated by vLLM
                 "remote_host": None,          # Will be populated by vLLM
-                "remote_port": None           # Will be populated by vLLM
+                "remote_port": None,          # Will be populated by vLLM
             }
         },
-        extra_headers={"X-Request-Id": request_id}
+        extra_headers={"X-Request-Id": request_id},
     )
     
     print("-" * 50)
@@ -232,7 +262,7 @@ try:
         extra_body={
             "kv_transfer_params": prefill_response.kv_transfer_params  # Pass KV cache info
         },
-        extra_headers={"X-Request-Id": request_id}  # Same request ID
+        extra_headers={"X-Request-Id": request_id},  # Same request ID
     )
     
     print("-" * 50)

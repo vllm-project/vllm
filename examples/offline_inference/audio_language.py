@@ -10,7 +10,7 @@ on HuggingFace model repository.
 
 import os
 from dataclasses import asdict
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -30,11 +30,11 @@ question_per_audio_count = {
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    prompt_token_ids: Optional[dict[str, list[int]]] = None
-    multi_modal_data: Optional[dict[str, Any]] = None
-    stop_token_ids: Optional[list[int]] = None
-    lora_requests: Optional[list[LoRARequest]] = None
+    prompt: str | None = None
+    prompt_token_ids: dict[str, list[int]] | None = None
+    multi_modal_data: dict[str, Any] | None = None
+    stop_token_ids: list[int] | None = None
+    lora_requests: list[LoRARequest] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -45,10 +45,12 @@ class ModelRequestData(NamedTuple):
 # Voxtral
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.audio import Audio
-    from mistral_common.protocol.instruct.messages import (
+    from mistral_common.protocol.instruct.chunk import (
         AudioChunk,
         RawAudio,
         TextChunk,
+    )
+    from mistral_common.protocol.instruct.messages import (
         UserMessage,
     )
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -117,7 +119,7 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
 
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
-    # NOTE - the setting in this example are somehat different than what is
+    # NOTE - the setting in this example are somewhat different from what is
     # optimal for granite speech, and it is generally recommended to use beam
     # search. Check the model README for suggested settings.
     # https://huggingface.co/ibm-granite/granite-speech-3.3-8b
@@ -143,6 +145,36 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompts,
         lora_requests=[LoRARequest("speech", 1, speech_lora_path)],
+    )
+
+
+# MiDashengLM
+def run_midashenglm(question: str, audio_count: int):
+    model_name = "mispeech/midashenglm-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    audio_in_prompt = "".join(
+        ["<|audio_bos|><|AUDIO|><|audio_eos|>" for idx in range(audio_count)]
+    )
+
+    default_system = "You are a helpful language and speech assistant."
+
+    prompt = (
+        f"<|im_start|>system\n{default_system}<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_in_prompt}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
     )
 
 
@@ -352,6 +384,7 @@ model_example_map = {
     "voxtral": run_voxtral,
     "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,
+    "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "phi4_multimodal": run_phi4_multimodal,

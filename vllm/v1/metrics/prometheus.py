@@ -3,7 +3,6 @@
 
 import os
 import tempfile
-from typing import Optional
 
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 
@@ -12,13 +11,11 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # Global temporary directory for prometheus multiprocessing
-_prometheus_multiproc_dir: Optional[tempfile.TemporaryDirectory] = None
+_prometheus_multiproc_dir: tempfile.TemporaryDirectory | None = None
 
 
 def setup_multiprocess_prometheus():
-    """Set up prometheus multiprocessing directory if not already configured.
-    
-    """
+    """Set up prometheus multiprocessing directory if not already configured."""
     global _prometheus_multiproc_dir
 
     if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
@@ -27,19 +24,22 @@ def setup_multiprocess_prometheus():
         # cleaned up upon exit.
         _prometheus_multiproc_dir = tempfile.TemporaryDirectory()
         os.environ["PROMETHEUS_MULTIPROC_DIR"] = _prometheus_multiproc_dir.name
-        logger.debug("Created PROMETHEUS_MULTIPROC_DIR at %s",
-                     _prometheus_multiproc_dir.name)
+        logger.debug(
+            "Created PROMETHEUS_MULTIPROC_DIR at %s", _prometheus_multiproc_dir.name
+        )
     else:
-        logger.warning("Found PROMETHEUS_MULTIPROC_DIR was set by user. "
-                       "This directory must be wiped between vLLM runs or "
-                       "you will find inaccurate metrics. Unset the variable "
-                       "and vLLM will properly handle cleanup.")
+        logger.warning(
+            "Found PROMETHEUS_MULTIPROC_DIR was set by user. "
+            "This directory must be wiped between vLLM runs or "
+            "you will find inaccurate metrics. Unset the variable "
+            "and vLLM will properly handle cleanup."
+        )
 
 
 def get_prometheus_registry() -> CollectorRegistry:
-    """Get the appropriate prometheus registry based on multiprocessing 
+    """Get the appropriate prometheus registry based on multiprocessing
     configuration.
-    
+
     Returns:
         Registry: A prometheus registry
     """
@@ -54,11 +54,11 @@ def get_prometheus_registry() -> CollectorRegistry:
 
 def unregister_vllm_metrics():
     """Unregister any existing vLLM collectors from the prometheus registry.
-    
+
     This is useful for testing and CI/CD where metrics may be registered
     multiple times across test runs.
-    
-    Also, in case of multiprocess, we need to unregister the metrics from the 
+
+    Also, in case of multiprocess, we need to unregister the metrics from the
     global registry.
     """
     registry = REGISTRY

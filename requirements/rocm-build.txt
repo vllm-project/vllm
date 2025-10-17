@@ -14,3 +14,4 @@ setuptools-scm>=8
 wheel
 jinja2>=3.1.6
 amdsmi==6.2.4
+timm>=1.0.17

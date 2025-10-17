@@ -6,11 +6,12 @@ import copy
 import json
 import pickle
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -79,9 +80,9 @@ def make_rand_lora_weight_tensor(
 
 
 def make_rand_tensors(
-    a_shape: tuple[int],
-    b_shape: tuple[int],
-    c_shape: tuple[int],
+    a_shape: tuple[int, ...],
+    b_shape: tuple[int, ...],
+    c_shape: tuple[int, ...],
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
@@ -158,7 +159,7 @@ def ref_group_gemm(
     seq_lens_cpu: torch.Tensor,
     prompt_lora_mapping_cpu: torch.Tensor,
     scaling: float,
-    add_inputs: Optional[bool],
+    add_inputs: bool | None,
 ):
     """
     Torch group gemm reference implementation to test correctness of
@@ -243,7 +244,7 @@ class OpType(Enum):
         lora_rank: int,
         num_loras: int,
         num_slices: int,
-    ) -> tuple[tuple[int], tuple[int], tuple[int]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Given num_slices, return the shapes of the A, B, and C matrices
         in A x B = C, for the op_type
@@ -316,8 +317,8 @@ class BenchmarkContext:
     lora_rank: int
     sort_by_lora_id: bool
     dtype: torch.dtype
-    seq_length: Optional[int] = None
-    num_slices: Optional[int] = None  # num_slices for slice based ops
+    seq_length: int | None = None
+    num_slices: int | None = None  # num_slices for slice based ops
 
     def with_seq_length(self, seq_length: int) -> "BenchmarkContext":
         ctx = copy.copy(self)
@@ -464,7 +465,11 @@ class BenchmarkTensors:
         for field_name in LoRAKernelMeta.__dataclass_fields__:
             field = getattr(self.lora_kernel_meta, field_name)
             assert isinstance(field, torch.Tensor)
-            setattr(self.lora_kernel_meta, field_name, to_device(field))
+            setattr(
+                self.lora_kernel_meta,
+                field_name,
+                to_device(field) if field_name != "no_lora_flag_cpu" else field,
+            )
 
     def metadata(self) -> tuple[int, int, int]:
         """
@@ -512,6 +517,7 @@ class BenchmarkTensors:
             "lora_token_start_loc": self.lora_kernel_meta.lora_token_start_loc,
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "scaling": 1.0,
+            "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
     def as_lora_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
@@ -552,10 +558,11 @@ class BenchmarkTensors:
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "offset_start": 0,
             "add_inputs": add_inputs,
+            "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
     def bench_fn_kwargs(
-        self, op_type: OpType, add_inputs: Optional[bool] = None
+        self, op_type: OpType, add_inputs: bool | None = None
     ) -> dict[str, Any]:
         if op_type.is_shrink_fn():
             assert add_inputs is None
@@ -569,7 +576,7 @@ class BenchmarkTensors:
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(
-        self, op_type: OpType, expand_fn_add_inputs: Optional[bool]
+        self, op_type: OpType, expand_fn_add_inputs: bool | None
     ) -> bool:
         """
         Test correctness of op_type implementation against a grouped gemm
@@ -605,8 +612,8 @@ def bench_optype(
     ctx: BenchmarkContext,
     arg_pool_size: int,
     op_type: OpType,
-    cuda_graph_nops: Optional[int] = None,
-    expand_fn_add_inputs: Optional[bool] = None,
+    cuda_graph_nops: int | None = None,
+    expand_fn_add_inputs: bool | None = None,
     test_correctness: bool = False,
 ) -> TMeasurement:
     assert arg_pool_size >= 1
@@ -637,7 +644,7 @@ def bench_optype(
     # Clear LoRA optimization hash-maps.
     _LORA_A_PTR_DICT.clear()
     _LORA_B_PTR_DICT.clear()
-    # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are setup
+    # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are set up
     for kwargs in kwargs_list:
         op_type.bench_fn()(**kwargs)
     torch.cuda.synchronize()
@@ -673,7 +680,7 @@ def bench_torch_mm(
     ctx: BenchmarkContext,
     arg_pool_size: int,
     op_type: OpType,
-    cuda_graph_nops: Optional[int] = None,
+    cuda_graph_nops: int | None = None,
 ) -> TMeasurement:
     """
     Benchmark basic torch.mm as a roofline.
@@ -738,7 +745,7 @@ def use_cuda_graph_recommendation() -> str:
             """
 
 
-def print_timers(timers: list[TMeasurement], args: Optional[argparse.Namespace] = None):
+def print_timers(timers: list[TMeasurement], args: argparse.Namespace | None = None):
     compare = TBenchmark.Compare(timers)
     compare.print()
 

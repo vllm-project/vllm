@@ -33,20 +33,20 @@ def test_ngram_max_len(num_speculative_tokens: int):
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
-@pytest.mark.parametrize("attn_backend",
-                         get_attn_backend_list_based_on_platform())
-def test_eagle_max_len(monkeypatch: pytest.MonkeyPatch,
-                       num_speculative_tokens: int, attn_backend: str):
+@pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
+def test_eagle_max_len(
+    monkeypatch: pytest.MonkeyPatch, num_speculative_tokens: int, attn_backend: str
+):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-        if (attn_backend == "TRITON_ATTN_VLLM_V1"
-                and not current_platform.is_rocm()):
-            pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
-                        "multi-token eagle spec decode on current platform")
+        if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
+            pytest.skip(
+                "TRITON_ATTN does not support "
+                "multi-token eagle spec decode on current platform"
+            )
 
-        if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         llm = LLM(

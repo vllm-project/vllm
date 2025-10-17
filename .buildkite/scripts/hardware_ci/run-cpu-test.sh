@@ -58,15 +58,11 @@ function cpu_tests() {
     # pytest -x -v -s tests/kernels/attention/test_cache.py -m cpu_model
     # pytest -x -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
 
-    # Note: disable Bart until supports V1
-    pytest -x -v -s tests/models/language/generation -m cpu_model \
-                --ignore=tests/models/language/generation/test_bart.py
-    VLLM_CPU_SGL_KERNEL=1 pytest -x -v -s tests/models/language/generation -m cpu_model \
-                --ignore=tests/models/language/generation/test_bart.py
+    pytest -x -v -s tests/models/language/generation -m cpu_model
+    VLLM_CPU_SGL_KERNEL=1 pytest -x -v -s tests/models/language/generation -m cpu_model
 
     pytest -x -v -s tests/models/language/pooling -m cpu_model
     pytest -x -v -s tests/models/multimodal/generation \
-                --ignore=tests/models/multimodal/generation/test_mllama.py \
                 --ignore=tests/models/multimodal/generation/test_pixtral.py \
                 -m cpu_model"
 

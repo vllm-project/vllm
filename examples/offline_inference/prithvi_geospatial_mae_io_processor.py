@@ -18,7 +18,7 @@ from vllm.pooling_params import PoolingParams
 
 def main():
     torch.set_default_dtype(torch.float16)
-    image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/India_900498_S2Hand.tif"  # noqa: E501
+    image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff"  # noqa: E501
 
     img_prompt = dict(
         data=image_url,
@@ -36,10 +36,11 @@ def main():
         # to avoid the model going OOM.
         # The maximum number depends on the available GPU memory
         max_num_seqs=32,
-        io_processor_plugin="prithvi_to_tiff_india",
+        io_processor_plugin="prithvi_to_tiff",
+        model_impl="terratorch",
     )
 
-    pooling_params = PoolingParams(task="encode", softmax=False)
+    pooling_params = PoolingParams(task="token_classify", activation=False)
     pooler_output = llm.encode(
         img_prompt,
         pooling_params=pooling_params,
