@@ -37,7 +37,12 @@ class EvaluationConfig:
 
 
 TEST_CONFIGS = {
+    # Mixed-precision (AMP) model
+    # - Demonstrates end-to-end pipeline functionality
     "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {"arc_challenge": 0.52, "mmlu": 0.72},
+    # Non-mixed-precision (PTQ) model
+    # - Reference for pipeline compatibility verification -> No conflicts or breakings
+    "amd/Llama-3.2-1B-Instruct-FP8-KV": {"arc_challenge": 0.35, "mmlu": 0.45},
 }
 
 
