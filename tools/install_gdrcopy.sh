@@ -7,7 +7,6 @@ set -euo pipefail
 # Requires: curl, apt-get, root privileges
 if [[ $(id -u) -ne 0 ]]; then
   echo "Must be run as root" >&2
-
   exit 1
 fi
 if [[ $# -ne 3 ]]; then
