@@ -131,7 +131,6 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
     def determine_available_memory(self) -> list[int]:  # in bytes
-        # same as determine_num_available_blocks in v0,
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
         from vllm.distributed.parallel_state import get_world_group

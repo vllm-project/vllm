@@ -7,9 +7,6 @@ from functools import cached_property
 from multiprocessing import Lock
 from typing import Any
 
-import torch
-import torch.distributed as dist
-
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
@@ -22,8 +19,6 @@ logger = init_logger(__name__)
 
 
 class UniProcExecutor(ExecutorBase):
-    uses_ray: bool = False
-
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
@@ -107,9 +102,6 @@ class UniProcExecutor(ExecutorBase):
             worker.shutdown()
 
 
-UniProcExecutorAsync = UniProcExecutor
-
-
 class ExecutorWithExternalLauncher(UniProcExecutor):
     """An executor that uses external launchers to launch engines,
     specially designed for torchrun-compatible launchers, for
@@ -126,8 +118,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     deterministic, all the engines will generate the same outputs,
     and they don't need to synchronize the states with each other.
     """
-
-    uses_ray: bool = False
 
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
@@ -150,23 +140,3 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         return distributed_init_method, rank, local_rank
-
-    def determine_num_available_blocks(self) -> tuple[int, int]:
-        """
-        Determine the number of available KV blocks.
-        Add an additional all_reduce to get the min across all ranks.
-        Note that even if we have the same `gpu_memory_utilization` and
-        `swap_space`, the available memory in every rank might still
-        differ because NCCL can take different amounts of memory in
-        different ranks. Therefore, it is necessary to test if all ranks
-        agree on the same KV cache configuration.
-        """
-        a, b = super().determine_num_available_blocks()
-        from vllm.distributed.parallel_state import get_world_group
-
-        cpu_group = get_world_group().cpu_group
-        a_tensor = torch.tensor([a], device="cpu", dtype=torch.int64)
-        b_tensor = torch.tensor([b], device="cpu", dtype=torch.int64)
-        dist.all_reduce(a_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
-        dist.all_reduce(b_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
-        return a_tensor.item(), b_tensor.item()
