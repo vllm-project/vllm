@@ -839,6 +839,4 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.pass_config.enable_noop is False
     # Other fields should still use defaults
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-    assert (
-        config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
-    )
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
