@@ -94,8 +94,8 @@ class EngineCoreGuard(threading.Thread):  # changed
         worker_cmd_addr,
         fault_signal_q,
         cmd_q,
-        fault_receive_inentity,
-        client_cmd_inentity,
+        fault_receive_identity,
+        client_cmd_identity,
     ):
         super().__init__(daemon=True, name=f"EngineCoreGuard_{engine_index}")
         self.engine_index = engine_index
@@ -112,11 +112,11 @@ class EngineCoreGuard(threading.Thread):  # changed
             fault_report_addr,
             zmq.DEALER,
             bind=False,
-            identity=fault_receive_inentity,
+            identity=fault_receive_identity,
         )
 
         self.client_cmd_socket = make_zmq_socket(
-            ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=client_cmd_inentity
+            ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=client_cmd_identity
         )
         # EngineCoreGuard <-> WorkerGuard sockets
         self.worker_cmd_socket = make_zmq_socket(
@@ -129,6 +129,62 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def stop_engine_core_loop(self):
         pass
+
+    def _send_msg(
+        self, src_socket: zmq.Socket, msg: Any, serialize: bool = True
+    ) -> tuple[bool, None | str]:
+        """
+        Send message to the corresponding ROUTER via the specified DEALER socket
+
+        Parameters:
+            src_socket: DEALER socket for sending messages
+            (e.g., fault_report_socket or client_cmd_socket)
+            msg: Content of the message to be sent (any type)
+            serialize: Whether to JSON-serialize the message (True by default)
+
+        Returns:
+            Tuple (success, error_msg)
+            - success: Boolean indicating if the send was successful
+            - error_msg: Error message, None if successful
+        """
+        try:
+            # Process message content (serialize or convert directly)
+            if serialize:
+                try:
+                    # JSON-serialize messages of any type
+                    msg_bytes = str(msg).encode("utf-8")
+                except TypeError as e:
+                    error = f"Message serialization failed: {str(e)}"
+                    logger.error(error)
+                    return (False, error)
+            else:
+                # For non-serialized messages, ensure they can be converted to bytes
+                if isinstance(msg, str):
+                    msg_bytes = msg.encode("utf-8")
+                elif isinstance(msg, bytes):
+                    msg_bytes = msg
+                else:
+                    error = "Non-serialized messages must be str or bytes"
+                    logger.error(error)
+                    return (False, error)
+
+            # Send message in DEALER protocol format: [empty frame, message content]
+            src_socket.send_multipart([b"", msg_bytes])
+            logger.debug("Message sent via socket %s", src_socket)
+            return (True, None)
+
+        except zmq.ZMQError as e:
+            error = f"ZMQ error: {str(e)}"
+            logger.error(error)
+            return (False, error)
+        except UnicodeEncodeError:
+            error = "Message encoding failed: cannot encode to UTF-8"
+            logger.error(error)
+            return (False, error)
+        except Exception as e:
+            error = f"Unexpected error while sending message: {str(e)}"
+            logger.exception(error)
+            return (False, error)
 
     def _recv_cmd(self, poll_timeout: int = 1000) -> tuple[bool, None | str]:
         try:
