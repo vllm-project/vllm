@@ -132,6 +132,9 @@ class FixFunctionalizationPass(VllmInductorPass):
                         "input_global_scale",
                     ),
                 )
+            # # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
+            # elif at_target == torch.ops._C.fused_qk_norm_rope.default:
+            #     self.defunctionalize(graph, node, mutated_args={})
             else:
                 continue  # skip the count
 
