@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import os
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable, Union
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.utils import import_from_path, is_list_of
+from vllm.utils.collections import is_list_of
+from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.protocol import (
@@ -78,7 +77,7 @@ class ReasoningParser:
     def extract_reasoning_content(
         self,
         model_output: str,
-        request: Union[ChatCompletionRequest, ResponsesRequest],
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -107,7 +106,7 @@ class ReasoningParser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Instance method that should be implemented for extracting reasoning
         from an incomplete response; for use when handling reasoning calls and
@@ -136,7 +135,7 @@ class ReasoningParserManager:
     def _register_module(
         cls,
         module: type,
-        module_name: Union[str, list[str]] | None = None,
+        module_name: str | list[str] | None = None,
         force: bool = True,
     ) -> None:
         if not issubclass(module, ReasoningParser):
@@ -158,10 +157,10 @@ class ReasoningParserManager:
     @classmethod
     def register_module(
         cls,
-        name: Union[str, list[str]] | None = None,
+        name: str | list[str] | None = None,
         force: bool = True,
-        module: Union[type, None] = None,
-    ) -> Union[type, Callable]:
+        module: type | None = None,
+    ) -> type | Callable:
         """
         Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not

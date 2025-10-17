@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any, Optional
 
 import gguf
 import torch
@@ -35,7 +36,7 @@ logger = init_logger(__name__)
 class GGUFConfig(QuantizationConfig):
     """Config class for GGUF."""
 
-    def __init__(self, unquantized_modules: Optional[list[str]] = None) -> None:
+    def __init__(self, unquantized_modules: list[str] | None = None) -> None:
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
 
@@ -307,7 +308,7 @@ def _apply_gguf_embedding(
     qweight: torch.Tensor,
     qweight_type: int,
     hidden_size: int,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if qweight_type in UNQUANTIZED_TYPES:
         return torch.embedding(qweight, x)
@@ -330,7 +331,7 @@ def _apply_gguf_embedding_fake(
     qweight: torch.Tensor,
     qweight_type: int,
     hidden_size: int,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], hidden_size, dtype=dtype, device=x.device)
 
@@ -452,7 +453,7 @@ class GGUFLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         shard_id = layer.qweight.shard_id
 
@@ -558,7 +559,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
@@ -569,22 +570,22 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
         eplb_record_metrics: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.fused_experts is None
 
         if enable_eplb:

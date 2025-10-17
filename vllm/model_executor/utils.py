@@ -3,9 +3,11 @@
 """Utils for model executor."""
 
 import copy
-from typing import Any, Optional
+from typing import Any
 
 import torch
+
+from vllm.utils import is_torch_equal_or_newer
 
 
 def set_random_seed(seed: int) -> None:
@@ -16,7 +18,7 @@ def set_random_seed(seed: int) -> None:
 
 def set_weight_attrs(
     weight: torch.Tensor,
-    weight_attrs: Optional[dict[str, Any]],
+    weight_attrs: dict[str, Any] | None,
 ):
     """Set attributes on a weight tensor.
 
@@ -83,3 +85,10 @@ def get_moe_expert_mapping(
             if child_map is not None:
                 return child_map()
         return []
+
+
+def maybe_disable_graph_partition(current_backend: str) -> dict[str, bool]:
+    if current_backend == "inductor" and is_torch_equal_or_newer("2.9.0.dev"):
+        return {"graph_partition": False}
+    else:
+        return {}

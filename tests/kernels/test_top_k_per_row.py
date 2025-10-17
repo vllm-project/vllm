@@ -125,7 +125,6 @@ def test_top_k_per_row(
         indices,
         values,
         num_rows,
-        top_k,
         logits.stride(0),
         logits.stride(1),
     )

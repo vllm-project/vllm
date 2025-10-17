@@ -11,6 +11,8 @@ pull_request_rules:
     label:
       add:
         - documentation
+    comment:
+      message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
 - name: label-ci-build
   description: Automatically apply ci/build label
