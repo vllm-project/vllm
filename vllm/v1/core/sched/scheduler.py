@@ -75,7 +75,9 @@ class Scheduler(SchedulerInterface):
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
-        self.prefill_max_num_scheduled_tokens = self.scheduler_config.prefill_max_num_batched_tokens
+        self.prefill_max_num_scheduled_tokens = (
+            self.scheduler_config.prefill_max_num_batched_tokens
+        )
         self.max_model_len = self.scheduler_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -179,8 +181,9 @@ class Scheduler(SchedulerInterface):
 
     def _has_decode_requests(self) -> bool:
         """Check if there are any requests in the decode phase in the running queue.
-        
-        Criteria: The request has completed prompt computation and is generating output tokens
+
+        Criteria:
+        The request has completed prompt computation and is generating output tokens
         i.e., num_computed_tokens >= num_prompt_tokens
         """
         for request in self.running:
@@ -210,7 +213,10 @@ class Scheduler(SchedulerInterface):
 
         # Check if there are any requests in the decode phase in the running queue.
         has_decode_requests = self._has_decode_requests()
-        if self.scheduler_config.enable_hybrid_chunked_prefill and not has_decode_requests:
+        if (
+            self.scheduler_config.enable_hybrid_chunked_prefill
+            and not has_decode_requests
+        ):
             token_budget = self.prefill_max_num_scheduled_tokens
         else:
             token_budget = self.max_num_scheduled_tokens
@@ -604,7 +610,10 @@ class Scheduler(SchedulerInterface):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        if self.scheduler_config.enable_hybrid_chunked_prefill and not has_decode_requests:
+        if (
+            self.scheduler_config.enable_hybrid_chunked_prefill
+            and not has_decode_requests
+        ):
             assert total_num_scheduled_tokens <= self.prefill_max_num_scheduled_tokens
         else:
             assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
