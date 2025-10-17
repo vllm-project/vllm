@@ -523,19 +523,16 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
         long_min = int(os.getenv("VLLM_MIN_PROMPT", "768"))
         long_max = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
         prompts: list[str] = []
-        for i in range(32):
-            if i % 4 == 0:
-                # very long
-                prompts.append(_random_prompt(max(long_min, 1536), max(long_max, 3072)))
-            elif i % 4 == 1:
-                # long
-                prompts.append(_random_prompt(max(1024, long_min), max(2048, long_max)))
-            elif i % 4 == 2:
-                # mid
-                prompts.append(_random_prompt(256, 512))
-            else:
-                # short
-                prompts.append(_random_prompt(10, 20))
+        options = [
+            (max(long_min, 1536), max(long_max, 3072)),  # very long
+            (max(1024, long_min), max(2048, long_max)),  # long
+            (256, 512),  # mid
+            (10, 20),  # short
+        ]
+
+        for _ in range(32):
+            lo, hi = random.choice(options)
+            prompts.append(_random_prompt(lo, hi))
 
         sp = SamplingParams(
             temperature=0.6,
