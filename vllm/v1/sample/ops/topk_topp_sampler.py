@@ -16,8 +16,18 @@ logger = init_logger(__name__)
 try:
     import flashinfer.sampling
 
+    if envs.VLLM_USE_FLASHINFER_SAMPLER and hasattr(
+        flashinfer.sampling, "get_sampling_module"
+    ):
+        flashinfer.sampling.get_sampling_module()
     is_flashinfer_available = True
-except ImportError:
+except (ImportError, RuntimeError) as e:
+    if "Ninja build failed." in str(e):
+        logger.warning_once(
+            "FlashInfer is installed but failed to build properly. "
+            "please install `flashinfer-cubin` and `flashinfer-jit-cache`"
+            "to use pre-compiled kernels."
+        )
     is_flashinfer_available = False
 
 
