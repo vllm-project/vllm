@@ -287,7 +287,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[RequestOutput] | list[PoolingRequestOutput]:
+    def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -318,14 +318,7 @@ class LLMEngine:
             )
             self.do_log_stats_with_interval()
 
-        ro = processed_outputs.request_outputs
-        if not ro:
-            return []
-        first = ro[0]
-        if isinstance(first, RequestOutput):
-            return [x for x in ro if isinstance(x, RequestOutput)]
-        else:
-            return [x for x in ro if isinstance(x, PoolingRequestOutput)]
+        return processed_outputs.request_outputs
 
     def start_profile(self):
         self.engine_core.profile(True)
