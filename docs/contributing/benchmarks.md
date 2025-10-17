@@ -336,13 +336,13 @@ These parameters work together to create realistic load patterns with carefully 
 The `--burstiness` parameter mathematically controls request arrival patterns using a Gamma distribution where:
 
 - **Shape parameter**: `burstiness` value
-- **Coefficient of Variation (CV)**: `1/√burstiness`
+- **Coefficient of Variation (CV)**: $\frac{1}{\sqrt{burstiness}}$
 - **Traffic characteristics**:
     - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
     - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
     - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
 
-![Load Pattern Examples](../assets/load_pattern_examples.png)
+![Load Pattern Examples](../assets/contributing/load-pattern-examples.png)
 
 *Figure: Load pattern examples for each use case. Top row: Request arrival timelines showing cumulative requests over time. Bottom row: Inter-arrival time distributions showing traffic variability patterns. Each column represents a different use case with its specific parameter settings and resulting traffic characteristics.*
 
@@ -350,16 +350,17 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 | Use Case               | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
 | ---                    | ---          | ---             | ---             | ---                                                       |
-| **Maximum Throughput** | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
-| **Realistic Testing**  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
-| **Stress Testing**     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
-| **Latency Profiling**  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
-| **Capacity Planning**  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
-| **SLA Validation**     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+| Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
+| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
+| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
+| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
+| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
+| SLA Validation**     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
 
 These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
 
 **Important Note on Production Architecture:**
+
 The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
 
 - Users send requests as fast as they can (infinite rate)
