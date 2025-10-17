@@ -124,10 +124,6 @@ class FlashMLASparseMetadata:
     fp8_extra_metadata: FP8KernelMetadata | None = None
 
 
-# Note: The Triton kernel has been replaced with a CUDA implementation
-# for better control over predicated atomic operations
-
-
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
