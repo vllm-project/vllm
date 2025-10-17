@@ -355,7 +355,7 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 | Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
 | Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
 | Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
-| SLA Validation**     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
 
 These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
 
