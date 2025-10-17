@@ -373,7 +373,9 @@ class EngineCore:
             )
             assert isinstance(exec_future, Future)
 
-            if scheduler_output.needs_structured_output_tokens:
+            if scheduler_output.pending_structured_output_tokens:
+                # We need to defer sampling until we have processed the model output
+                # from the prior step.
                 deferred_scheduler_output = scheduler_output
                 grammar_output = None
             else:
@@ -383,20 +385,18 @@ class EngineCore:
             # Block-wait for execute to return (continues running async on the GPU).
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
             with self.log_error_detail(scheduler_output):
-                model_output = exec_future.result()
+                model_output_or_none = exec_future.result()
 
-            if deferred_scheduler_output:
-                assert model_output is None
-            else:
-                if model_output is not None:
-                    # No sampling required (e.g. all requests finished).
-                    future = cast(Future[ModelRunnerOutput], exec_future)
-                else:
-                    # No pending output tokens needed, sample immediately.
+            if not deferred_scheduler_output:
+                if model_output_or_none is None:
+                    # No pending output tokens needed here, sample immediately.
                     sample_future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
                     future = cast(Future[ModelRunnerOutput], sample_future)
+                else:
+                    # No sampling required (e.g. all requests finished).
+                    future = cast(Future[ModelRunnerOutput], exec_future)
                 batch_queue.appendleft((future, scheduler_output))
                 if (
                     model_executed
@@ -406,6 +406,8 @@ class EngineCore:
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
                     return None, True
+            else:
+                assert model_output_or_none is None
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
@@ -417,13 +419,12 @@ class EngineCore:
         future, scheduler_output = batch_queue.pop()
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
-        assert model_output is not None
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
 
         # TODO TBD return outputs here first?
-
         if deferred_scheduler_output:
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and dispatch sample request.

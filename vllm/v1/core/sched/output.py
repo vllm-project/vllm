@@ -167,7 +167,7 @@ class SchedulerOutput:
 
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
-    needs_structured_output_tokens: bool = False
+    pending_structured_output_tokens: bool = False
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
