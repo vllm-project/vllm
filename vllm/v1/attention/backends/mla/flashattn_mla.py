@@ -154,7 +154,6 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         max_query_len = query_lens_cpu.max().item()
         max_seq_len = seq_lens_device.max().item()
 
-
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0
         if self.use_full_cuda_graph and num_decode_tokens <= self.max_cudagraph_size:
