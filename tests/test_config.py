@@ -15,6 +15,7 @@ from vllm.config import (
     VllmConfig,
     update_config,
 )
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field, resolve_config_value
 from vllm.config.vllm import OptimizationLevel, build_defaults
@@ -740,3 +741,104 @@ def test_vllm_config_callable_defaults():
     )
     assert resolve_config_value(enable_if_sequential, config_moe) is False
     assert resolve_config_value(enable_if_sequential, config_quantized) is True
+
+
+def test_vllm_config_explicit_overrides():
+    """Test that explicit property overrides work correctly with callable defaults.
+
+    When users explicitly set configuration properties, those values
+    take precedence over callable defaults, across different models and
+    optimization levels.
+    """
+    from vllm.config.compilation import PassConfig
+
+    quantized_model = ModelConfig("jerryzh168/Qwen3-8B-INT4")
+    moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
+    regular_model = ModelConfig("Qwen/Qwen1.5-7B")
+
+    # Explicit compilation mode override on O0 (where default is NONE)
+    compilation_config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    config = VllmConfig(
+        optimization_level=OptimizationLevel.O0,
+        compilation_config=compilation_config,
+    )
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+    # Explicit pass config flags to override defaults
+    pass_config = PassConfig(enable_noop=True, enable_attn_fusion=True)
+    compilation_config = CompilationConfig(pass_config=pass_config)
+    config = VllmConfig(
+        optimization_level=OptimizationLevel.O0,
+        compilation_config=compilation_config,
+    )
+    assert config.compilation_config.pass_config.enable_noop is True
+    assert config.compilation_config.pass_config.enable_attn_fusion is True
+
+    # Explicit cudagraph mode override on quantized model at O2
+    pass_config = PassConfig(enable_async_tp=True)
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.NONE, pass_config=pass_config
+    )
+    config = VllmConfig(
+        model_config=quantized_model,
+        optimization_level=OptimizationLevel.O2,
+        compilation_config=compilation_config,
+    )
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert config.compilation_config.pass_config.enable_async_tp is True
+    # Mode should still use default for O2
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+
+    # Different optimization levels with same model
+    config_o0 = VllmConfig(
+        model_config=regular_model, optimization_level=OptimizationLevel.O0
+    )
+    config_o2 = VllmConfig(
+        model_config=regular_model, optimization_level=OptimizationLevel.O2
+    )
+    assert config_o0.compilation_config.mode == CompilationMode.NONE
+    assert config_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config_o0.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert (
+        config_o2.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+
+    # Same optimization level across different model types
+    config_moe_o2 = VllmConfig(
+        model_config=moe_model, optimization_level=OptimizationLevel.O2
+    )
+    config_regular_o2 = VllmConfig(
+        model_config=regular_model, optimization_level=OptimizationLevel.O2
+    )
+    config_quantized_o2 = VllmConfig(
+        model_config=quantized_model, optimization_level=OptimizationLevel.O2
+    )
+    # All should have same base compilation settings at O2
+    assert config_moe_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config_regular_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config_quantized_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert (
+        config_moe_o2.compilation_config.cudagraph_mode
+        == CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    assert (
+        config_regular_o2.compilation_config.cudagraph_mode
+        == CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+
+    # Override one field but not others
+    pass_config = PassConfig(enable_noop=False)
+    compilation_config = CompilationConfig(pass_config=pass_config)
+    config = VllmConfig(
+        model_config=regular_model,
+        optimization_level=OptimizationLevel.O2,
+        compilation_config=compilation_config,
+    )
+    # Explicit override should be respected
+    assert config.compilation_config.pass_config.enable_noop is False
+    # Other fields should still use defaults
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert (
+        config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    )

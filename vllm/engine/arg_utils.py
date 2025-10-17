@@ -67,8 +67,8 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
-from vllm.config.optimization import OptimizationLevel
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.vllm import OptimizationLevel
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
