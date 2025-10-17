@@ -16,7 +16,6 @@ import os
 import random
 from pathlib import Path
 
-import numpy as np
 import torch
 from transformers import AutoTokenizer
 
@@ -233,42 +232,112 @@ def print_stats(stats, label="Stats"):
         print(f"... ({len(logical_to_physical) - 10} more)")
 
 
-def compare_stats(before, after):
-    """Compare before and after stats."""
+def compare_stats(before, after, tp_size):
+    """Compare before and after stats, showing expert movements between GPUs."""
     if not before or not after:
         print("\nCannot compare: missing stats")
         return
 
     print(f"\n{'=' * 80}")
-    print("Comparison: BEFORE vs AFTER Rearrangement")
+    print(
+        f"Expert Movements: Step {before['current_step']} → Step {after['current_step']}"
+    )
     print(f"{'=' * 80}")
 
-    print(f"\n{'Layer':<8} {'Before Bal':<15} {'After Bal':<15} {'Improvement':<15}")
-    print("-" * 80)
+    # Show movements for each layer
+    for layer_idx in range(len(before["physical_to_logical_map"])):
+        before_map = before["physical_to_logical_map"][layer_idx]
+        after_map = after["physical_to_logical_map"][layer_idx]
 
-    improvements = []
-    for i in range(len(before["per_layer_stats"])):
-        before_bal = before["per_layer_stats"][i]["balancedness"]
-        after_bal = after["per_layer_stats"][i]["balancedness"]
-        improvement = (
-            (after_bal - before_bal) / before_bal * 100 if before_bal > 0 else 0
-        )
-        improvements.append(improvement)
+        num_physical = len(before_map)
+        experts_per_gpu = num_physical // tp_size
 
-        print(f"{i:<8} {before_bal:<15.3f} {after_bal:<15.3f} {improvement:>+6.1f}%")
+        # Track which logical expert is on which GPU before and after
+        # logical_expert_id -> (before_gpu, after_gpu)
+        logical_gpu_map = {}
 
-    print("-" * 80)
-    avg_improvement = np.mean(improvements)
-    print(f"{'Average':<8} {'':<15} {'':<15} {avg_improvement:>+6.1f}%")
+        for phys_idx in range(num_physical):
+            gpu_id = phys_idx // experts_per_gpu
+            before_logical = before_map[phys_idx]
+            after_logical = after_map[phys_idx]
 
-    # Check mapping changes
-    before_map = before["physical_to_logical_map"][0]
-    after_map = after["physical_to_logical_map"][0]
+            # Track where this logical expert was before
+            if before_logical not in logical_gpu_map:
+                logical_gpu_map[before_logical] = {"before": set(), "after": set()}
+            logical_gpu_map[before_logical]["before"].add(gpu_id)
 
-    changes = sum(1 for b, a in zip(before_map, after_map) if b != a)
-    print(
-        f"\nMapping changes in first layer: {changes}/{len(before_map)} experts remapped"
-    )
+            # Track where this logical expert is after
+            if after_logical not in logical_gpu_map:
+                logical_gpu_map[after_logical] = {"before": set(), "after": set()}
+            logical_gpu_map[after_logical]["after"].add(gpu_id)
+
+        # Count movements between GPUs
+        # A logical expert "moved" if it exists on different GPUs before vs after
+        movements_summary = {}  # (from_gpu, to_gpu) -> count
+        moved_experts = []
+
+        for logical_id, locations in logical_gpu_map.items():
+            before_gpus = locations.get("before", set())
+            after_gpus = locations.get("after", set())
+
+            # Check for cross-GPU movements
+            new_gpus = after_gpus - before_gpus  # GPUs where expert appeared
+            removed_gpus = before_gpus - after_gpus  # GPUs where expert disappeared
+
+            if new_gpus or removed_gpus:
+                moved_experts.append(
+                    {
+                        "logical_id": logical_id,
+                        "before_gpus": sorted(before_gpus),
+                        "after_gpus": sorted(after_gpus),
+                        "added_to": sorted(new_gpus),
+                        "removed_from": sorted(removed_gpus),
+                    }
+                )
+
+                # Track GPU-to-GPU movements
+                for from_gpu in removed_gpus:
+                    for to_gpu in new_gpus:
+                        key = (from_gpu, to_gpu)
+                        movements_summary[key] = movements_summary.get(key, 0) + 1
+
+        if moved_experts:
+            print(
+                f"\nLayer {layer_idx}: {len(moved_experts)} logical expert(s) changed GPU placement"
+            )
+
+            # Show GPU-to-GPU movement summary
+            if movements_summary:
+                print("\n  Cross-GPU movements:")
+                for (from_gpu, to_gpu), count in sorted(movements_summary.items()):
+                    print(f"    GPU {from_gpu} → GPU {to_gpu}: {count} expert(s)")
+
+            # Show detailed movements (first 10)
+            print("\n  Detailed expert movements:")
+            print(
+                f"  {'Logical ID':<12} {'Before GPUs':<20} {'After GPUs':<20} {'Change'}"
+            )
+            print("  " + "-" * 75)
+
+            for move in moved_experts[:10]:
+                before_str = str(move["before_gpus"])
+                after_str = str(move["after_gpus"])
+
+                change_parts = []
+                if move["added_to"]:
+                    change_parts.append(f"+{move['added_to']}")
+                if move["removed_from"]:
+                    change_parts.append(f"-{move['removed_from']}")
+                change_str = " ".join(change_parts)
+
+                print(
+                    f"  {move['logical_id']:<12} {before_str:<20} {after_str:<20} {change_str}"
+                )
+
+            if len(moved_experts) > 10:
+                print(f"  ... ({len(moved_experts) - 10} more)")
+        else:
+            print(f"\nLayer {layer_idx}: No expert movements")
 
 
 def main(args):
@@ -331,26 +400,23 @@ def main(args):
 
     # Get initial stats
     logger.info("\nGetting initial EPLB stats...")
-    stats_before = get_eplb_stats(llm)
+    initial_stats = get_eplb_stats(llm)
 
-    if not stats_before:
+    if not initial_stats:
         logger.error("EPLB is not enabled or stats unavailable!")
         return
 
-    print_stats(stats_before, "BEFORE First Rearrangement")
+    print_stats(initial_stats, "Initial State")
 
-    # Calculate how many prompts to process before rearrangement
-    steps_until_rearrange = stats_before["steps_until_rearrange"]
-    logger.info(
-        f"\nProcessing prompts until rearrangement ({steps_until_rearrange} steps)..."
-    )
+    # Track all snapshots
+    snapshots = [initial_stats]
+    previous_step = initial_stats["current_step"]
+
+    logger.info("\nProcessing prompts and tracking rearrangements...")
 
     # Process prompts in small batches to track progress
     batch_size = args.batch_size
     num_batches = (len(prompts) + batch_size - 1) // batch_size
-
-    stats_after_rearrange = None
-    rearrangement_happened = False
 
     for batch_idx in range(num_batches):
         start_idx = batch_idx * batch_size
@@ -368,28 +434,35 @@ def main(args):
                 f"Batch {batch_idx + 1}/{num_batches}: Step {current_step}/{current_stats['step_interval']}"
             )
 
-            # Check if rearrangement just happened (step reset to 0 or very small)
-            if (
-                not rearrangement_happened
-                and current_step < stats_before["current_step"]
-            ):
-                logger.info("\n🔄 Rearrangement detected!")
-                stats_after_rearrange = current_stats
-                rearrangement_happened = True
+            # Check if rearrangement just happened
+            # Step counter wraps to 0 after reaching step_interval
+            if current_step == 0 and previous_step > 0:
+                logger.info(f"\n🔄 Rearrangement #{len(snapshots)} detected!")
+                snapshots.append(current_stats)
+                print_stats(current_stats, f"After Rearrangement #{len(snapshots) - 1}")
+
+                # Compare with previous snapshot
+                if len(snapshots) >= 2:
+                    compare_stats(snapshots[-2], snapshots[-1], args.tp)
+
+            previous_step = current_step
 
     logger.info(f"\nGenerated {len(prompts)} outputs")
 
-    # Get final stats
-    logger.info("\nGetting final EPLB stats...")
-    stats_final = get_eplb_stats(llm)
-
-    if rearrangement_happened and stats_after_rearrange:
-        print_stats(stats_after_rearrange, "AFTER Rearrangement")
-        compare_stats(stats_before, stats_after_rearrange)
+    # Summary
+    num_rearrangements = len(snapshots) - 1
+    if num_rearrangements > 0:
+        print(f"\n{'=' * 80}")
+        print(f"SUMMARY: {num_rearrangements} rearrangement(s) occurred")
+        print(f"{'=' * 80}")
+        for i in range(num_rearrangements):
+            print(
+                f"Rearrangement #{i + 1}: Step {snapshots[i]['current_step']} → Step {snapshots[i + 1]['current_step']}"
+            )
     else:
-        logger.info("\nRearrangement did not occur during this run.")
+        logger.info("\nNo rearrangements occurred during this run.")
         logger.info(
-            f"Current step: {stats_final['current_step']}/{stats_final['step_interval']}"
+            f"Current step: {snapshots[-1]['current_step']}/{snapshots[-1]['step_interval']}"
         )
         logger.info("Try running with more prompts or lower step_interval")
 
@@ -399,10 +472,8 @@ def main(args):
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         results = {
-            "before": stats_before,
-            "after": stats_after_rearrange if rearrangement_happened else None,
-            "final": stats_final,
-            "rearrangement_occurred": rearrangement_happened,
+            "snapshots": snapshots,
+            "num_rearrangements": num_rearrangements,
         }
 
         with open(output_path, "w") as f:
