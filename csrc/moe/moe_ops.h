@@ -19,7 +19,9 @@ void moe_lora_align_block_size(torch::Tensor topk_ids,
                                int64_t max_loras,
                                torch::Tensor sorted_token_ids,
                                torch::Tensor expert_ids,
-                               torch::Tensor num_tokens_post_pad);
+                               torch::Tensor num_tokens_post_pad,
+                               torch::Tensor num_tokens_per_lora,
+                               torch::Tensor adapter_enabled);
 #ifndef USE_ROCM
 torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              torch::Tensor b_qweight, torch::Tensor b_scales,

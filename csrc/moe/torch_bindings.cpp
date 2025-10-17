@@ -31,7 +31,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     int block_size, int max_loras, "
       "                     Tensor !sorted_token_ids,"
       "                     Tensor !experts_ids,"
-      "                     Tensor !num_tokens_post_pad) -> () ");
+      "                     Tensor !num_tokens_post_pad,"
+      "                     Tensor !num_tokens_per_lora,"
+      "                     Tensor !adapter_enabled) -> () ");
   m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 
 #ifndef USE_ROCM

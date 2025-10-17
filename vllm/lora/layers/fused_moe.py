@@ -111,6 +111,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 )
 
                 config = get_config_func(M)
+
+                (_, _, num_tokens_per_lora, _, _, _) = self.punica_wrapper.token_mapping_meta.meta_args(hidden_states.size(0))
+
                 (
                     sorted_token_ids_lora,
                     expert_ids_lora,
@@ -121,6 +124,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     config["BLOCK_SIZE_M"],
                     global_num_experts,
                     max_loras,
+                    num_tokens_per_lora,
+                    self.adapter_enabled,
                     expert_map,
                 )
 
@@ -148,6 +153,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     max_lora_rank,
                     top_k,
                     config,
+                    self.adapter_enabled,
                 )
 
                 result = func(*args, **kwargs)
@@ -207,6 +213,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     max_lora_rank,
                     top_k,
                     config,
+                    self.adapter_enabled,
                     True,
                 )
 
@@ -241,6 +248,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert not self.base_layer.use_ep, (
             "EP support for Fused MoE LoRA is not implemented yet."
         )
+        self.adapter_enabled = torch.tensor([0] * (max_loras+1), dtype=torch.int, device=self.device)
 
         self.w1_lora_a_stacked = torch.zeros(
             (
@@ -305,6 +313,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             device=self.device,
         )
 
+        # flags to track which LoRAs have MoE adapters
+        self.base_layer.adapter_enabled = self.adapter_enabled
+
         self.base_layer.w1_lora_a_stacked = self.w1_lora_a_stacked
         self.base_layer.w1_lora_b_stacked = self.w1_lora_b_stacked
         self.base_layer.w2_lora_a_stacked = self.w2_lora_a_stacked
@@ -334,6 +345,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.w3_lora_b_stacked[index] = 0
         self.w2_lora_a_stacked[index] = 0
         self.w2_lora_b_stacked[index] = 0
+        self.adapter_enabled[index] = 0
 
     def set_lora(
         self,
@@ -344,6 +356,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         bias: torch.Tensor | None = None,
     ):
         """Overwrites lora tensors at index."""
+        self.adapter_enabled[index] = 1
         for eid in range(len(lora_a) // 3):
             w1_lora_a = lora_a[eid * 3]
             w2_lora_a = lora_a[eid * 3 + 1]
