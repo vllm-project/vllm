@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import InitVar, field
 from typing import Any, Literal
 
-from pydantic import SkipValidation, model_validator
+from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -52,7 +52,7 @@ class SchedulerConfig:
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
 
-    max_waiting_queue_length: int | None = None
+    max_waiting_queue_length: int | None = Field(default=None, ge=1)
     """The maximum number of requests allowed in the waiting queue.
     If None, there is no limit on the waiting queue length."""
 
@@ -319,12 +319,5 @@ class SchedulerConfig:
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills})."
             )
-        if (
-            self.max_waiting_queue_length is not None
-            and self.max_waiting_queue_length < 1
-        ):
-            raise ValueError(
-                f"max_waiting_queue_length ({self.max_waiting_queue_length}) "
-                "must be greater than or equal to 1 if specified."
-            )
+
         return self
