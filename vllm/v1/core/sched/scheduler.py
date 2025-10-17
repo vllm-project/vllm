@@ -1044,15 +1044,15 @@ class Scheduler(SchedulerInterface):
                 pooling_outputs = request.pooling_outputs
 
                 if len(pooling_outputs) == 1:
-                    pooling_output = pooling_outputs[1]
+                    pooling_output = pooling_outputs[0]
+                elif (
+                    len(pooling_outputs) > 0
+                    and all(isinstance(x, torch.Tensor) for x in pooling_outputs)
+                    and len(set([x.shape[-1] for x in pooling_outputs])) == 1
+                ):
+                    pooling_output = torch.concat(pooling_outputs, dim=0)
                 else:
-                    if (
-                        all(isinstance(x, torch.Tensor) for x in pooling_outputs)
-                        and len(set([x.shape[-1] for x in pooling_outputs])) == 1
-                    ):
-                        pooling_output = torch.concat(pooling_outputs, dim=0)
-                    else:
-                        pooling_output = pooling_outputs
+                    pooling_output = pooling_outputs
 
                 # Add EngineCoreOutput for this pooling Request.
                 outputs[request.client_index].append(
