@@ -19,11 +19,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.pooler import (
     ClassifierPooler,
+    CLSPool,
     DispatchPooler,
     Pooler,
-    PoolingMethod,
     PoolingParamsUpdate,
-    PoolingType,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -81,37 +80,19 @@ class BertEmbedding(nn.Module):
         return embeddings
 
 
-class BertPooler(Pooler):
+class BertPooler(nn.Module):
     def __init__(self, config: BertConfig):
         super().__init__()
 
-        self.pooling = PoolingMethod.from_pooling_type(PoolingType.CLS)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
-
-    def _head(self, pooled_output: torch.Tensor):
-        pooled_output = self.dense(pooled_output)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
-
     def forward(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
-        pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
-        pooled_output = self.pooling(hidden_states, pooling_metadata)
-
-        if isinstance(pooled_output, list):
-            pooled_output = [self._head(output) for output in pooled_output]
-        else:
-            pooled_output = self._head(pooled_output)
-
+        pooled_output: torch.Tensor,
+    ) -> torch.Tensor:
+        pooled_output = self.dense(pooled_output)
+        pooled_output = self.activation(pooled_output)
         return pooled_output
 
 
@@ -805,6 +786,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         config = vllm_config.model_config.hf_config
 
         self.num_labels = config.num_labels
+        self.head_dtype = vllm_config.model_config.head_dtype
         self.bert = BertPoolingModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
@@ -813,8 +795,9 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         self.classifier = nn.Linear(
             config.hidden_size,
             config.num_labels,
-            dtype=vllm_config.model_config.head_dtype,
+            dtype=self.head_dtype,
         )
+        self.bert.pooler = self.bert.pooler.to(self.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -825,15 +808,22 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
                     pooler_config, classifier=self.classifier
                 ),
                 "classify": ClassifierPooler(
-                    pooling=self.bert.pooler,
-                    classifier=self.classifier,
+                    pooling=CLSPool(),
+                    classifier=self.score,
                     act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.bert.pooler, classifier=self.classifier, act_fn="score"
+                    pooling=CLSPool(), classifier=self.score, act_fn="score"
                 ),
             }
         )
+
+    def score(
+        self,
+        pooled_output: torch.Tensor,
+    ):
+        pooled_output = self.bert.pooler(pooled_output)
+        return self.classifier(pooled_output)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.bert.get_input_embeddings(input_ids)

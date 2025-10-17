@@ -37,7 +37,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from ..layers.pooler import ClassifierPooler, DispatchPooler, Pooler
+from ..layers.pooler import ClassifierPooler, CLSPool, DispatchPooler, Pooler
 from .bert import BertPooler
 from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import default_pooling_type
@@ -677,6 +677,7 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
+        self.head_dtype = vllm_config.model_config.head_dtype
         self.new = GteNewModel(
             vllm_config=vllm_config, prefix=prefix, add_pooling_layer=True
         )
@@ -689,6 +690,7 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
             prefix=maybe_prefix(prefix, "classifier"),
             return_bias=False,
         )
+        self.new.pooler = self.new.pooler.to(self.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -699,15 +701,22 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
                     pooler_config, classifier=self.classifier
                 ),
                 "classify": ClassifierPooler(
-                    pooling=self.new.pooler,
+                    pooling=CLSPool(),
                     classifier=self.classifier,
                     act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.new.pooler, classifier=self.classifier, act_fn="score"
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
                 ),
             }
         )
+
+    def score(
+        self,
+        pooled_output: torch.Tensor,
+    ):
+        pooled_output = self.new.pooler(pooled_output)
+        return self.classifier(pooled_output)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
