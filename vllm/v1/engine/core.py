@@ -290,14 +290,11 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
-    def execute_model_with_error_logging(
-        self,
-        model_fn: Callable[[SchedulerOutput], ModelRunnerOutput | None],
-        scheduler_output: SchedulerOutput,
-    ) -> ModelRunnerOutput | None:
+    @contextmanager
+    def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
         try:
-            return model_fn(scheduler_output)
+            yield
         except Exception as err:
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
@@ -322,11 +319,10 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        assert isinstance(future, Future)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        model_output = self.execute_model_with_error_logging(
-            lambda _: cast(Future[ModelRunnerOutput | None], future).result(),
-            scheduler_output,
-        )
+        with self.log_error_detail(scheduler_output):
+            model_output = future.result()
         if model_output is None:
             model_output = self.model_executor.sample_tokens(grammar_output)  # type: ignore[assignment]
 
@@ -375,6 +371,7 @@ class EngineCore:
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
+            assert isinstance(exec_future, Future)
 
             if scheduler_output.needs_structured_output_tokens:
                 deferred_scheduler_output = scheduler_output
@@ -385,10 +382,8 @@ class EngineCore:
 
             # Block-wait for execute to return (continues running async on the GPU).
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
-            model_output = self.execute_model_with_error_logging(
-                lambda _: cast(Future[ModelRunnerOutput | None], exec_future).result(),
-                scheduler_output,
-            )
+            with self.log_error_detail(scheduler_output):
+                model_output = exec_future.result()
 
             if deferred_scheduler_output:
                 assert model_output is None
@@ -420,9 +415,8 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output = batch_queue.pop()
-        model_output = self.execute_model_with_error_logging(
-            lambda _: future.result(), scheduler_output
-        )
+        with self.log_error_detail(scheduler_output):
+            model_output = future.result()
         assert model_output is not None
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
