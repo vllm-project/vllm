@@ -99,6 +99,11 @@ def benchmark_one_run(
     print(f"Benchmark command: {benchmark_cmd}")
     print(f"Output file: {result_path}")
 
+    if result_path.exists():
+        print("Skipping previous run.")
+        with result_path.open("rb") as f:
+            return json.load(f)
+
     if dry_run:
         return None
 
@@ -119,6 +124,9 @@ def benchmark_one_run(
 
     run_data["run_number"] = run_number
     run_data.update(serve_overrides)
+
+    with result_path.open("w") as f:
+        json.dump(run_data, f)
 
     return run_data
 
@@ -170,8 +178,9 @@ def benchmark_all(
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
+    resume: str | None,
 ):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = resume or datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = output_dir / timestamp
 
     result_dfs = [
@@ -243,7 +252,15 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="If set, only prints the commands to run.",
+        help="If set, prints the commands to run and then exits without running them.",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Set this to a directory under `output_dir` to resume a previous "
+        "execution of this script, i.e., only run parameter combinations for which "
+        "there are still no output files.",
     )
 
     args = parser.parse_args()
@@ -273,6 +290,7 @@ def main():
         output_dir=Path(args.output_dir),
         num_runs=args.num_runs,
         dry_run=args.dry_run,
+        resume=args.resume,
     )
 
 
