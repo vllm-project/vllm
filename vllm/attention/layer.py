@@ -174,7 +174,7 @@ class Attention(nn.Module, AttentionLayerBase):
             calculate_kv_scales = False
         self.block_size = block_size
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
-            kv_cache_dtype, vllm_config.model_config.dtype
+            kv_cache_dtype, vllm_config.model_config
         )
         if num_kv_heads is None:
             num_kv_heads = num_heads

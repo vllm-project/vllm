@@ -235,7 +235,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
-            cache_config.cache_dtype, self.dtype
+            cache_config.cache_dtype, self.model_config
         )
 
         self.is_pooling_model = model_config.runner_type == "pooling"
