@@ -6,12 +6,12 @@ import ast
 import inspect
 import textwrap
 from collections.abc import Iterable
-from dataclasses import MISSING, fields, is_dataclass, replace
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import regex as re
-from pydantic.fields import Field, FieldInfo
+from pydantic.fields import FieldInfo
 from typing_extensions import runtime_checkable
 
 if TYPE_CHECKING:
@@ -47,17 +47,17 @@ def get_field(cls: ConfigType, name: str) -> Field:
     cls_fields = {f.name: f for f in fields(cls)}
     if name not in cls_fields:
         raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field = cls_fields[name]
+    named_field: Field = cls_fields[name]
     if (default_factory := named_field.default_factory) is not MISSING:
-        return Field(default_factory=default_factory)
+        return field(default_factory=default_factory)
     if (default := named_field.default) is not MISSING:
         if isinstance(default, FieldInfo):
             # Handle pydantic.Field defaults
             if default.default_factory is not None:
-                return Field(default_factory=default.default_factory)
+                return field(default_factory=default.default_factory)
             else:
                 default = default.default
-        return Field(default=default)
+        return field(default=default)
 
     raise ValueError(
         f"{cls.__name__}.{name} must have a default value or default factory."
