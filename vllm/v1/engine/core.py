@@ -94,8 +94,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         worker_cmd_addr,
         fault_signal_q,
         cmd_q,
-        fault_receive_identity,
-        client_cmd_identity,
+        guard_identity,
     ):
         super().__init__(daemon=True, name=f"EngineCoreGuard_{engine_index}")
         self.engine_index = engine_index
@@ -112,11 +111,11 @@ class EngineCoreGuard(threading.Thread):  # changed
             fault_report_addr,
             zmq.DEALER,
             bind=False,
-            identity=fault_receive_identity,
+            identity=guard_identity,
         )
 
         self.client_cmd_socket = make_zmq_socket(
-            ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=client_cmd_identity
+            ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=guard_identity
         )
         # EngineCoreGuard <-> WorkerGuard sockets
         self.worker_cmd_socket = make_zmq_socket(
@@ -780,12 +779,8 @@ class EngineCoreProc(EngineCore):
             if vllm_config.fault_tolerance_config.enable_fault_tolerance:
                 # Start a thread to monitor the execution of run_busy_loop,
                 # and perform fault tolerance.
-                engine_core_ids = addresses.engine_core_identitys
-                assert engine_core_ids is not None
-                fault_receive_identitys = engine_core_ids["fault_receive_identitys"]
-                client_cmd_identitys = engine_core_ids["client_cmd_identitys"]
-                assert fault_receive_identitys is not None
-                assert client_cmd_identitys is not None
+                engine_core_guard_ids = addresses.engine_core_guard_identities
+                assert engine_core_guard_ids is not None
                 guard_thread = EngineCoreGuard(
                     engine_index=engine_index,
                     fault_report_addr=addresses.fault_report_addr,
@@ -793,8 +788,7 @@ class EngineCoreProc(EngineCore):
                     worker_cmd_addr=addresses.engine_core_cmd_addr,
                     fault_signal_q=self.fault_signal_q,
                     cmd_q=self.cmd_q,
-                    fault_receive_inentity=fault_receive_identitys[self.engine_index],
-                    client_cmd_inentity=client_cmd_identitys[self.engine_index],
+                    guard_identity=engine_core_guard_ids[self.engine_index],
                 )
                 guard_thread.start()
 

@@ -608,18 +608,12 @@ class MPClient(EngineCoreClient):
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
             self.engine_registry = {}
-            engine_indexs = [i for i in range(dp_size)]
-            fault_receive_identitys = generate_identity_group(
-                peer1="client", peer2="engine_core_guard", use="receive", n=dp_size
+            engine_ids = [i for i in range(dp_size)]
+            engine_core_identities = generate_identity_group(
+                peer1="client", peer2="engine_core_guard", use="report|cmd", n=dp_size
             )
-            client_cmd_identitys = generate_identity_group(
-                peer1="client", peer2="engine_core_guard", use="cmd", n=dp_size
-            )
-            fault_receive_registry = dict(zip(engine_indexs, fault_receive_identitys))
-            client_cmd_registry = dict(zip(engine_indexs, client_cmd_identitys))
-            self.engine_registry["fault_receive_identitys"] = fault_receive_registry
-            self.engine_registry["client_cmd_identitys"] = client_cmd_registry
-            addresses.engine_core_identitys = self.engine_registry
+            self.engine_registry = dict(zip(engine_ids, engine_core_identities))
+            addresses.engine_core_guard_identities = self.engine_registry
             # todo 拉起ClientGuard
             success = True
         finally:

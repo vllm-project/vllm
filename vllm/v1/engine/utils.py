@@ -73,7 +73,7 @@ class EngineZmqAddresses:
     engine_core_cmd_addr: str | None = None
     fault_report_addr: str | None = None
     client_cmd_addr: str | None = None
-    engine_core_identitys: dict | None = None
+    engine_core_guard_identities: dict | None = None
 
 
 @dataclass
