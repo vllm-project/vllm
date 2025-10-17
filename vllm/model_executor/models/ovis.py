@@ -166,7 +166,7 @@ class VisualTokenizer(torch.nn.Module):
         # e.g., for hidden_stride=2, this leads to a token length reduction:
         # 1024 -> 256 for aimv2
         if self.config.hidden_stride > 1:
-            # this `d` maybe different from the above `d``
+            # this `d` maybe different from the above `d`
             n, L, d = features.shape
             sqrt_l = int(L**0.5)
             assert sqrt_l**2 == L, (

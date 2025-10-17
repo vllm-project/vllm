@@ -27,7 +27,7 @@ __all__ = [
 
 
 def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return ``True`` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
+    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
     return (
         envs.VLLM_USE_FLASHINFER_MOE_FP4
         and has_flashinfer_cutlass_fused_moe()

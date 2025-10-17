@@ -182,8 +182,8 @@ class TPUWorker:
             if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
 
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
+                # Use an empty tensor instead of `None` to force Dynamo to pass
+                # it by reference, rather by specializing on the value `None`.
                 tpu_kv_cache = torch.tensor([], dtype=dtype).to(self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:

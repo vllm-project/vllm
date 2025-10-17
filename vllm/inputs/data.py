@@ -327,7 +327,7 @@ def zip_enc_dec_prompts(
     [`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt]
     instances.
 
-    ``mm_processor_kwargs`` may also be provided; if a dict is passed, the same
+    `mm_processor_kwargs` may also be provided; if a dict is passed, the same
     dictionary will be used for every encoder/decoder prompt. If an iterable is
     provided, it will be zipped with the encoder/decoder prompts.
     """

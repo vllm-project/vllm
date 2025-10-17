@@ -162,7 +162,7 @@ def check_logprobs_close(
 
             # Test prompt logprobs closeness
             if prompt_logprobs_0 is not None and prompt_logprobs_1 is not None:
-                # Both sequences' prompt logprobs lists are not `None``
+                # Both sequences' prompt logprobs lists are not `None`
                 # (although individual list elements may be `None`);
                 # for each token's logprobs:
                 for idx, (logprobs_elem_0, logprobs_elem_1) in enumerate(

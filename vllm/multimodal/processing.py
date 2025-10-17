@@ -332,8 +332,8 @@ class PromptInsertion(PromptUpdate):
 
     Example:
 
-    For each image, insert a number of ``<image>`` feature placeholders
-    equal to the feature size of the vision encoder after the ``<s>`` token:
+    For each image, insert a number of `<image>` feature placeholders
+    equal to the feature size of the vision encoder after the `<s>` token:
 
     ```python
     PromptInsertion(
@@ -353,7 +353,7 @@ class PromptInsertion(PromptUpdate):
     )
     ```
 
-    Insert these tokens after a prefix ``Images:``:
+    Insert these tokens after a prefix `Images:`:
 
     ```python
     PromptInsertion(
@@ -401,8 +401,8 @@ class PromptReplacement(PromptUpdate):
 
     Example:
 
-    For each image, replace one ``<image>`` input placeholder in the prompt
-    with a number of ``<image>`` feature placeholders
+    For each image, replace one `<image>` input placeholder in the prompt
+    with a number of `<image>` feature placeholders
     equal to the feature size of the vision encoder:
 
     ```python
@@ -413,8 +413,8 @@ class PromptReplacement(PromptUpdate):
     )
     ```
 
-    As above, but further pad the feature placeholders with ``<image_bos>``
-    and `<image_eos>``, which are not supposed to be passed to the vision
+    As above, but further pad the feature placeholders with `<image_bos>`
+    and `<image_eos>`, which are not supposed to be passed to the vision
     encoder:
 
     ```python

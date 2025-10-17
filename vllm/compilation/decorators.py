@@ -138,8 +138,8 @@ def support_torch_compile(
     """
 
     def cls_decorator_helper(cls: _T) -> _T:
-        # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
-        # to avoid too much indentation for `_support_torch_compile``
+        # helper to pass `dynamic_arg_dims` to `_support_torch_compile`
+        # to avoid too much indentation for `_support_torch_compile`
         if not hasattr(cls, "forward"):
             raise TypeError("decorated class should have a forward method.")
         sig = inspect.signature(cls.forward)
