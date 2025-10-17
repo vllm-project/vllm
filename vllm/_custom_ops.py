@@ -1850,9 +1850,10 @@ def topk_softmax(
     topk_ids: torch.Tensor,
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
+    renormalize: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
-        topk_weights, topk_ids, token_expert_indices, gating_output
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
 
