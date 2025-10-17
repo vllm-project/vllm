@@ -1,14 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import base64
+import pickle
 from typing import Any
 
 import pytest
 import requests
+import torch
+from torch.multiprocessing.reductions import reduce_tensor
 
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+
+def _encode(obj: Any) -> str:
+    return base64.b64encode(pickle.dumps(obj)).decode('utf-8')
+
+def _decode(obj: str) -> Any:
+    return pickle.loads(base64.b64decode(obj.encode('utf-8')))
 
 
 class TestWorkerExtension:
@@ -23,6 +33,14 @@ class TestWorkerExtension:
             kwargs=kwargs,
             total_items=len(args) + len(kwargs),
         )
+    
+    def get_tensor_meta(self, marshal_obj: str) -> str:
+        ipc_handle = _decode(marshal_obj)
+        func, args = ipc_handle
+        args = list(args)
+        args[6] = 0 # set device to 0
+        tensor: torch.Tensor = func(*args)
+        return _encode((tensor.shape, tensor.dtype))
 
     def return_none(self, *args, **kwargs) -> None:
         """Test method that does not return anything"""
@@ -82,3 +100,20 @@ def test_echo_args_kwargs(server):
     assert result["args"] == args
     assert result["kwargs"] == kwargs
     assert result["total_items"] == len(args) + len(kwargs)
+
+
+def test_get_tensor_meta(server):
+    """Test args, kwargs, and dict response"""
+    tensor = torch.randn(10, 10, device='cuda')
+    handle = reduce_tensor(tensor)
+    base64_ipc_handle = _encode(handle)
+    args = [base64_ipc_handle]
+    response = requests.post(server.url_for("collective_rpc"),
+                             json={
+                                 "method": "get_tensor_meta",
+                                 "args": args,
+                             })
+    assert response.status_code == 200
+    results = response.json()
+    result = results["results"][0]
+    assert _decode(result) == (tensor.shape, tensor.dtype)
