@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, Set
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
@@ -22,7 +22,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import (
-    generate_identity,
     get_mp_context,
     get_open_zmq_ipc_path,
     make_zmq_socket,
@@ -121,10 +120,7 @@ class CoreEngineProcManager:
             zmq_ctx = zmq.Context()
             num_identity = 1
             identity = generate_identity_group(
-                "core_engine_proc_manager",
-                "clinet_guard",
-                "report",
-                num_identity
+                "core_engine_proc_manager", "clinet_guard", "report", num_identity
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
@@ -1046,7 +1042,7 @@ def generate_unique_uuids(n: int):
     Returns:
         A set containing 'n' unique UUID objects
     """
-    uuids: Set[uuid.UUID] = set()
+    uuids: set[uuid.UUID] = set()
     while len(uuids) < n:
         # Generate a random UUID (version 4) and add to the set
         uuids.add(uuid.uuid4())
