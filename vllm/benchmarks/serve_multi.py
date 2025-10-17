@@ -86,7 +86,7 @@ def benchmark_one_run(
         *_override_args(bench_cmd, bench_overrides),
         "--save-result",
         "--result-dir",
-        result_dir,
+        str(result_dir),
         "--result-filename",
         result_path.name,
     ]
