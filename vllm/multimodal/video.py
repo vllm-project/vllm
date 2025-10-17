@@ -99,6 +99,58 @@ class OpenCVVideoBackend(VideoLoader):
         return api_pref
 
     @classmethod
+    def _get_frame_indices_to_sample(
+        cls,
+        total_frames_num: int,
+        max_num_frames_to_sample: int,
+        **kwargs,
+    ) -> list[int]:
+        full_read = (
+            max_num_frames_to_sample == -1
+            or total_frames_num < max_num_frames_to_sample
+        )
+        if full_read:
+            frame_idx = list(range(0, total_frames_num))
+        else:
+            uniform_sampled_frames = np.linspace(
+                0, total_frames_num - 1, max_num_frames_to_sample, dtype=int
+            )
+            frame_idx = uniform_sampled_frames.tolist()
+        return frame_idx
+
+    @classmethod
+    def _sample_frames_from_video(
+        cls,
+        cap,
+        frame_indices: list[int],
+        allow_missing_frames: bool = False,
+    ) -> npt.NDArray:
+        import cv2
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(frame_indices), height, width, 3), dtype=np.uint8)
+
+        i = 0
+        for idx in range(max(frame_indices) + 1):
+            ok = cap.grab()
+            if not ok:
+                break
+            if idx in frame_indices:
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    i += 1
+
+        if not allow_missing_frames and i != len(frame_indices):
+            raise ValueError(
+                f"Expected reading {len(frame_indices)} frames, "
+                f"but only loaded {i} frames from video."
+            )
+
+        return frames
+
+    @classmethod
     def load_bytes(
         cls,
         data: bytes,
@@ -117,35 +169,9 @@ class OpenCVVideoBackend(VideoLoader):
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
         # resample video to target num_frames
-        full_read = num_frames == -1 or total_frames_num < num_frames
-        if full_read:
-            num_frames = total_frames_num
-            frame_idx = list(range(0, num_frames))
-        else:
-            uniform_sampled_frames = np.linspace(
-                0, total_frames_num - 1, num_frames, dtype=int
-            )
-            frame_idx = uniform_sampled_frames.tolist()
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.empty((len(frame_idx), height, width, 3), dtype=np.uint8)
-
-        i = 0
-        for idx in range(total_frames_num):
-            ok = cap.grab()
-            if not ok:
-                break
-            if idx in frame_idx:
-                ret, frame = cap.retrieve()
-                if ret:
-                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    i += 1
-
-        assert i == num_frames, (
-            f"Expected reading {num_frames} frames, "
-            f"but only loaded {i} frames from video."
-        )
+        frame_indices = cls._get_frame_indices_to_sample(total_frames_num, num_frames)
+        num_frames = len(frame_indices)
+        frames = cls._sample_frames_from_video(cap, frame_indices)
 
         # Use transformers transformers.video_utils.VideoMetadata format
         # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
@@ -155,7 +181,7 @@ class OpenCVVideoBackend(VideoLoader):
             "fps": num_frames / duration,
             "duration": duration,
             "video_backend": "opencv",
-            "frames_indices": list(range(num_frames)),
+            "frames_indices": frame_indices,
             # extra field used to control hf processor's video
             # sampling behavior
             "do_sample_frames": num_frames == total_frames_num,
@@ -171,8 +197,112 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         cls,
         data: bytes,
         num_frames: int = -1,
-        fps: int = -1,
+        fps: int = 2,
         max_duration: int = 300,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream")
+
+        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames_num / original_fps if original_fps > 0 else 0
+
+        # resample video to target num_frames
+        max_frame_idx = total_frames_num - 1
+        duration = duration or round(max_frame_idx / original_fps) + 1
+
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
+        frame_indices: range | list[int]
+        if duration <= max_duration:
+            n = int(math.floor(duration * fps))
+            frame_indices = sorted(
+                {
+                    min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
+                    for i in range(n)
+                }
+            )
+        else:
+            num_samples = int(max_duration * fps)
+            if num_samples >= total_frames_num:
+                frame_indices = range(total_frames_num)
+            else:
+                target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
+                frame_indices = sorted(
+                    {
+                        min(max_frame_idx, int(math.ceil(t * original_fps)))
+                        for t in target_seconds
+                    }
+                )
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(frame_indices), height, width, 3), dtype=np.uint8)
+
+        i = 0
+        for idx in range(total_frames_num):
+            ok = cap.grab()
+            if not ok:
+                break
+            if idx in frame_indices:
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    i += 1
+
+        assert i == len(frame_indices), (
+            f"Expected reading {len(frame_indices)} frames, "
+            f"but only loaded {i} frames from video."
+        )
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        metadata = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv_dynamic",
+            "frames_indices": list(frame_indices),
+            "do_sample_frames": False,
+        }
+
+        return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv_nemotron_vl_v2")
+class OpenCVNemotronVideoBackend(OpenCVVideoBackend):
+    @classmethod
+    def _get_frame_indices_to_sample(
+        cls,
+        total_frames_num: int,
+        max_num_frames_to_sample: int,
+        fps: int,
+        duration_seconds: float,
+        **kwargs,
+    ) -> list[int]:
+        # Determine target number of samples:
+        max_samples = total_frames_num
+        if max_num_frames_to_sample > 0:  # Hard upper bound
+            max_samples = min(max_num_frames_to_sample, max_samples)
+        if fps > 0:  # If fps is provided, use it to limit the number of samples
+            max_samples = min(max_samples, math.floor(duration_seconds * fps))
+        max_samples = max(1, max_samples)  # to make sure we have at least one sample
+
+        # Uniform coverage of the entire timeline within the cap
+        # Use linspace over [0, total_frames-1]
+        raw = np.linspace(0, total_frames_num - 1, max_samples, endpoint=True)
+        return np.unique(raw.round().astype(int)).tolist()
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
@@ -206,18 +336,9 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
         duration = total_frames_num / original_fps
 
-        # Determine target number of samples:
-        max_samples = total_frames_num
-        if num_frames > 0:  # Hard upper bound
-            max_samples = min(num_frames, max_samples)
-        if fps > 0:  # If fps is provided, use it to limit the number of samples
-            max_samples = min(max_samples, math.floor(duration * fps))
-        max_samples = max(1, max_samples)  # to make sure we have at least one sample
-
-        # Uniform coverage of the entire timeline within the cap
-        # Use linspace over [0, total_frames-1]
-        raw = np.linspace(0, total_frames_num - 1, max_samples, endpoint=True)
-        frame_indices = np.unique(raw.round().astype(int)).tolist()
+        frame_indices = cls._get_frame_indices_to_sample(
+            total_frames_num, num_frames, fps, duration
+        )
 
         effective_fps = len(frame_indices) / duration
         print(
@@ -227,24 +348,8 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             f"at {effective_fps:.2f}fps."
         )
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.empty((len(frame_indices), height, width, 3), dtype=np.uint8)
-
-        i = 0
-        for idx in range(total_frames_num):
-            ok = cap.grab()
-            if not ok:
-                break
-            if idx in frame_indices:
-                ret, frame = cap.retrieve()
-                if ret:
-                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    i += 1
-
-        assert i == len(frame_indices), (
-            f"Expected reading {len(frame_indices)} frames, "
-            f"but only loaded {i} frames from video."
+        frames = cls._sample_frames_from_video(
+            cap, frame_indices, allow_missing_frames=True
         )
 
         # Use transformers transformers.video_utils.VideoMetadata format
@@ -252,8 +357,8 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
-            "video_backend": "opencv_dynamic",
-            "frames_indices": list(frame_indices),
+            "video_backend": "opencv_nemotron_vl_v2",
+            "frames_indices": frame_indices,
             "do_sample_frames": False,
         }
 
