@@ -726,6 +726,11 @@ class EngineCoreProc(EngineCore):
             if vllm_config.fault_tolerance_config.enable_fault_tolerance:
                 # Start a thread to monitor the execution of run_busy_loop,
                 # and perform fault tolerance.
+                engine_core_ids = addresses.engine_core_identitys
+                fault_receive_identitys = engine_core_ids['fault_receive_identitys']
+                client_cmd_identitys = engine_core_ids['client_cmd_identitys']
+                assert fault_receive_identitys is not None
+                assert client_cmd_identitys is not None
                 guard_thread = EngineCoreGuard(
                     engine_index=engine_index,
                     fault_report_addr=addresses.fault_report_addr,
@@ -733,9 +738,8 @@ class EngineCoreProc(EngineCore):
                     worker_cmd_addr=addresses.engine_core_cmd_addr,
                     fault_signal_q=self.fault_signal_q,
                     cmd_q=self.cmd_q,
-                    fault_receive_inentity=addresses.engine_core_identitys['fault_receive_identitys'][
-                        self.engine_index],
-                    client_cmd_inentity=addresses.engine_core_identitys['client_cmd_identitys'][self.engine_index]
+                    fault_receive_inentity=fault_receive_identitys[self.engine_index],
+                    client_cmd_inentity=client_cmd_identitys[self.engine_index]
                 )
                 guard_thread.start()
 
