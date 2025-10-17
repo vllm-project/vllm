@@ -942,7 +942,9 @@ class OpenAIServingResponses(OpenAIServing):
                     # Handle both OpenAIHarmonyMessage objects and dictionary inputs
                     if isinstance(message, OpenAIHarmonyMessage):
                         message_role = message.author.role
-                        # Don't use the previous system or developer messages
+                        # To match OpenAI, instructions, reasoning and tools are
+                        # always taken from the most recent Responses API request
+                        # not carried over from previous requests
                         if (
                             message_role == OpenAIHarmonyRole.SYSTEM
                             or message_role == OpenAIHarmonyRole.DEVELOPER
@@ -953,7 +955,9 @@ class OpenAIServingResponses(OpenAIServing):
                         harmony_messages = parse_input_to_harmony_message(message)
                         for harmony_msg in harmony_messages:
                             message_role = harmony_msg.author.role
-                            # Don't use the previous system or developer messages
+                            # To match OpenAI, instructions, reasoning and tools are
+                            # always taken from the most recent Responses API request
+                            # not carried over from previous requests
                             if (
                                 message_role == OpenAIHarmonyRole.SYSTEM
                                 or message_role == OpenAIHarmonyRole.DEVELOPER
