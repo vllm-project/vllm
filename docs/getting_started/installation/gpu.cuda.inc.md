@@ -15,7 +15,7 @@ vLLM contains pre-compiled C++ and CUDA (12.8) binaries.
 
 In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
 
-Therefore, it is recommended to install vLLM with a **fresh new** environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See [below][build-from-source] for more details.
+Therefore, it is recommended to install vLLM with a **fresh new** environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See [below](#build-wheel-from-source) for more details.
 
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
@@ -250,7 +250,7 @@ uv pip install -e .
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-See [deployment-docker-pre-built-image][deployment-docker-pre-built-image] for instructions on using the official Docker image.
+See [Using Docker](../../deployment/docker.md) for instructions on using the official Docker image.
 
 Another way to access the latest code is to use the docker images:
 
@@ -266,11 +266,11 @@ The latest code can contain bugs and may not be stable. Please use it with cauti
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
-See [deployment-docker-build-image-from-source][deployment-docker-build-image-from-source] for instructions on building the Docker image.
+See [Building vLLM's Docker Image from Source](../../deployment/docker.md#building-vllms-docker-image-from-source) for instructions on building the Docker image.
 
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]
 
-See [feature-x-hardware][feature-x-hardware] compatibility matrix for feature support information.
+See [Feature x Hardware](../../features/README.md#feature-x-hardware) compatibility matrix for feature support information.
 
 # --8<-- [end:supported-features]

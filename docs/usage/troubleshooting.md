@@ -80,8 +80,6 @@ You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` 
 If vLLM crashes and the error trace captures it somewhere around `self.graph.replay()` in `vllm/worker/model_runner.py`, it is a CUDA error inside CUDAGraph.
 To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the [LLM][vllm.LLM] class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
 
-[](){ #troubleshooting-incorrect-hardware-driver }
-
 ## Incorrect hardware/driver
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
@@ -177,8 +175,6 @@ If the test script hangs or crashes, usually it means the hardware/drivers are b
     - In the second node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 1 --master_addr $MASTER_ADDR test.py`.
 
     Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup, being sure to execute different commands (with different `--node-rank`) on different nodes.
-
-[](){ #troubleshooting-python-multiprocessing }
 
 ## Python multiprocessing
 
