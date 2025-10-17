@@ -227,6 +227,7 @@ def main():
         with open(args.serve_params, "rb") as f:
             serve_params = json.load(f)
     else:
+        # i.e.: run serve_cmd without any modification
         serve_params = [{}]
 
     benchmark_all(
