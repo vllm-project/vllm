@@ -45,6 +45,11 @@ meets_multi_gpu_requirements = pytest.mark.skipif(
     reason="Requires deep_ep or deep_gemm or pplx or flashinfer packages",
 )
 
+hopper_only = pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="Requires CUDA and Hopper (SM90)",
+)
+
 
 def format_result(verbose, msg, ex=None):
     if ex is not None:
@@ -276,6 +281,7 @@ def test_modular_kernel_combinations_multigpu(
     run(config, verbosity > 0)
 
 
+@hopper_only
 @pytest.mark.parametrize(
     "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,chunk_size,world_size",
     generate_valid_test_cases(
@@ -307,16 +313,6 @@ def test_modular_kernel_combinations_singlegpu(
         fused_moe_chunk_size=chunk_size,
         world_size=world_size,
     )
-
-    if (
-        (dtype == torch.float8_e4m3fn)
-        or (
-            quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
-        )
-    ) and not current_platform.has_device_capability(89):
-        pytest.skip(
-            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
-        )
 
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
