@@ -149,7 +149,11 @@ class Mamba1AttentionMetadataBuilder(
                     num_reqs - num_prefills : num_reqs
                 ]
 
-        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs and self.compilation_config.full_cuda_graph:
+        elif (
+            num_decodes > 0
+            and num_decodes <= self.decode_cudagraph_max_bs
+            and self.compilation_config.full_cuda_graph
+        ):
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
             )

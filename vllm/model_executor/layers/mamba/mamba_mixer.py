@@ -363,7 +363,7 @@ class MambaMixer(MambaBase, CustomOp):
                 # Pass block indices for direct writing to ssm_states
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
-                initial_state_idx=block_idx_last_computed_token_p
+                initial_state_idx=block_idx_last_computed_token_p,
             )
 
             ssm_outputs.append(scan_out_p)
