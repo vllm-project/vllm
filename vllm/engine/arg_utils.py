@@ -426,7 +426,7 @@ class EngineArgs:
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
-    quantization: QuantizationMethods | None = ModelConfig.quantization
+    quantization: str | QuantizationMethods | None = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
