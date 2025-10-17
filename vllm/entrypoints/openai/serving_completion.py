@@ -517,10 +517,6 @@ class OpenAIServingCompletion(OpenAIServing):
         kv_transfer_params = None
         last_final_res = None
         for final_res in final_res_batch:
-            # check for error finish reason and return error
-            error = self._handle_error_finish_reason(final_res.outputs, request_id)
-            if error:
-                return error
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -531,6 +527,10 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                # check for error finish reason and return error
+                error = self._handle_error_finish_reason(output, request_id)
+                if error:
+                    return error
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
