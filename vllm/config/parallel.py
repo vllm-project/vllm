@@ -62,9 +62,9 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
-    eplb_save_dir: Optional[Path] = None
+    eplb_save_dir: Path | None = None
     """Directory to save expert load balance metrics."""
-    eplb_load_path: Optional[Path] = None
+    eplb_load_path: Path | None = None
     """Path to load expert load balance metrics."""
 
     @property

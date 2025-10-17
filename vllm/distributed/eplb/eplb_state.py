@@ -151,11 +151,11 @@ class EplbState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
-    eplb_load_path: Optional[Path] = None
+    eplb_load_path: Path | None = None
     """
     Path for loading eplb initial state.
     """
-    eplb_save_dir: Optional[Path] = None
+    eplb_save_dir: Path | None = None
     """
     Path where eplb states will be saved.
     """
