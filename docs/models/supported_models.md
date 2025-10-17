@@ -9,7 +9,7 @@ Alongside each architecture, we include some popular models that use it.
 
 ### vLLM
 
-If vLLM natively supports a model, its implementation can be found in <gh-file:vllm/model_executor/models>.
+If vLLM natively supports a model, its implementation can be found in [vllm/model_executor/models](../../vllm/model_executor/models).
 
 These models are what we list in [supported-text-models][supported-text-models] and [supported-mm-models][supported-mm-models].
 
@@ -116,7 +116,7 @@ Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
 2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
-3. `MyModel` is loaded into one of the Transformers backend classes in <gh-file:vllm/model_executor/models/transformers.py> which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
+3. `MyModel` is loaded into one of the Transformers backend classes in [vllm/model_executor/models/transformers.py](../../vllm/model_executor/models/transformers.py) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
 That's it!
 
@@ -278,8 +278,8 @@ https_proxy=http://your.proxy.server:port  vllm serve <model_name>
 ```python
 import os
 
-os.environ['http_proxy'] = 'http://your.proxy.server:port'
-os.environ['https_proxy'] = 'http://your.proxy.server:port'
+os.environ["http_proxy"] = "http://your.proxy.server:port"
+os.environ["https_proxy"] = "http://your.proxy.server:port"
 ```
 
 ### ModelScope
@@ -543,7 +543,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
     ```
 
 !!! note
-    Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: <gh-file:examples/offline_inference/pooling/qwen3_reranker.py>.
+    Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: [examples/offline_inference/pooling/qwen3_reranker.py](../../examples/offline_inference/pooling/qwen3_reranker.py).
 
     ```bash
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
@@ -581,7 +581,7 @@ These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode)
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` |  |  |
 
 !!! note
-    Named Entity Recognition (NER) usage, please refer to <gh-file:examples/offline_inference/pooling/ner.py>, <gh-file:examples/online_serving/pooling/ner_client.py>.
+    Named Entity Recognition (NER) usage, please refer to [examples/offline_inference/pooling/ner.py](../../examples/offline_inference/pooling/ner.py), [examples/online_serving/pooling/ner_client.py](../../examples/online_serving/pooling/ner_client.py).
 
 [](){ #supported-mm-models }
 
@@ -776,7 +776,7 @@ Some models are supported only via the [Transformers backend](#transformers). Th
 
 !!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
-    For more details, please see: <gh-pr:4087#issuecomment-2250397630>
+    For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 
 !!! warning
     Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
@@ -856,5 +856,5 @@ We have the following levels of testing for models:
 
 1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to [models tests](https://github.com/vllm-project/vllm/blob/main/tests/models) for the models that have passed this test.
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
-3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](gh-dir:tests) and [examples](gh-dir:examples) for the models that have passed this test.
+3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](../../tests) and [examples](../../examples) for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
