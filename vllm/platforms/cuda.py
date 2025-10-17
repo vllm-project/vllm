@@ -206,6 +206,13 @@ class CudaPlatformBase(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        if (
+            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            logger.info("Prefill Context Parallel: disabling cudagraphs since PCP.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
     @classmethod
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None

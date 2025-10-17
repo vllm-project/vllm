@@ -18,6 +18,7 @@ from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    get_prefill_context_model_parallel_world_size,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -1061,6 +1062,7 @@ class FusedMoE(CustomOp):
         tp_size: int | None = None,
         ep_size: int | None = None,
         dp_size: int | None = None,
+        pcp_size: int | None = None,
         prefix: str = "",
         custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
@@ -1098,6 +1100,11 @@ class FusedMoE(CustomOp):
             tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
         )
         dp_size_ = dp_size if dp_size is not None else get_dp_group().world_size
+        pcp_size_ = (
+            pcp_size
+            if pcp_size is not None
+            else get_prefill_context_model_parallel_world_size()
+        )
 
         self.is_sequence_parallel = is_sequence_parallel
         self.sp_size = tp_size_ if is_sequence_parallel else 1
@@ -1105,6 +1112,7 @@ class FusedMoE(CustomOp):
         self.moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
             tp_size_=tp_size_,
             dp_size_=dp_size_,
+            pcp_size_=pcp_size_,
             vllm_parallel_config=vllm_config.parallel_config,
         )
 
