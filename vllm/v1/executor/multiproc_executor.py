@@ -33,6 +33,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.utils import (
     _maybe_force_spawn,
@@ -458,6 +459,10 @@ class WorkerProc:
         if not is_new_worker:
             self.worker.init_device()
             self.worker.load_model()
+
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     @staticmethod
     def make_worker_process(

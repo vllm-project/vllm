@@ -34,7 +34,8 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import as_list, merge_async_iterators
+from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.collections import as_list
 
 logger = init_logger(__name__)
 

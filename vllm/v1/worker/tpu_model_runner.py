@@ -1963,12 +1963,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.grammar_bitmask_cpu.zero_()
         self.require_structured_out_cpu.zero_()
 
-        sorted_struct_requests = sorted(
-            scheduler_output.structured_output_request_ids.items(),
-            key=lambda item: item[1],
-        )
         cumulative_mask_idx = 0
-        for req_id, _ in sorted_struct_requests:
+        for req_id in scheduler_output.structured_output_request_ids:
             if req_id not in self.input_batch.req_id_to_index:
                 continue
             batch_index = self.input_batch.req_id_to_index[req_id]

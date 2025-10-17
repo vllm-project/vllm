@@ -481,7 +481,6 @@ class StatelessProcessGroup:
 
 
 def init_gloo_process_group(
-    backend: Backend,
     prefix_store: PrefixStore,
     group_rank: int,
     group_size: int,
@@ -498,7 +497,7 @@ def init_gloo_process_group(
             group_size,
         )
     else:
-        options = ProcessGroup.Options(backend=backend)
+        options = ProcessGroup.Options(backend="gloo")
         pg = ProcessGroup(
             prefix_store,
             group_rank,
@@ -571,6 +570,8 @@ def stateless_init_torch_distributed_process_group(
     # Use a PrefixStore to avoid accidental overrides of keys used by
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
+    try:
+        from vllm.platforms import current_platform
 
     if backend == "gloo":
         pg = init_gloo_process_group(backend=backend,
