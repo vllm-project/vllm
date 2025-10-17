@@ -120,7 +120,12 @@ class CoreEngineProcManager:
         if fault_report_address:
             zmq_ctx = zmq.Context()
             num_identity = 1
-            identity = generate_identity_group("core_engine_proc_manager", "clinet_guard", "report", num_identity)[0]
+            identity = generate_identity_group(
+                "core_engine_proc_manager",
+                "clinet_guard",
+                "report",
+                num_identity
+            )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
                 path=fault_report_address,
@@ -1057,7 +1062,7 @@ def generate_identity_group(peer1, peer2, use, n):
     """
     identitys = list()
     uuids = generate_unique_uuids(n)
-    for uuid in uuids:
-        identity_str = f"{peer1}_{peer2}_{use}_{uuid}".encode()
+    for id in uuids:
+        identity_str = f"{peer1}_{peer2}_{use}_{id}".encode()
         identitys.append(identity_str)
     return identitys
