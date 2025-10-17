@@ -54,7 +54,7 @@ def response_compression_pooling_output(
     order = ">" if endianness == "big-endian" else "<"
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-        zip_file.writestr("metadata", metadata_bytes)
+        zip_file.writestr("metadata.json", metadata_bytes)
         for meta, tenser in zip(metadata["data"], tensers):
             filename = meta["filename"]
             tenser_bytes = (
