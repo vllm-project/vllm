@@ -246,10 +246,14 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
 @pytest.mark.parametrize(
     ("model_id", "expected_is_moe_model"),
     [
-        ("Qwen/Qwen1.5-7B", False),
-        ("deepseek-ai/DeepSeek-V2-Lite", True),
+        ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
         ("RedHatAI/Llama-3.2-1B-FP8", False),
         ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", False),
+        ("RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4", True),
+        ("RedHatAI/gpt-oss-20b", True),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", True),
+        ("RedHatAI/Llama-4-Scout-17B-16E-Instruct", True),
+        ("RedHatAI/Mixtral-8x7B-Instruct-v0.1", True),
     ],
 )
 def test_moe_model_detection(model_id, expected_is_moe_model):
@@ -261,10 +265,14 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
 @pytest.mark.parametrize(
     ("model_id", "quantized"),
     [
-        ("RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4", True),
-        ("deepseek-ai/DeepSeek-V2-Lite", False),
+        ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
         ("RedHatAI/Llama-3.2-1B-FP8", True),
         ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", True),
+        ("RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4", True),
+        ("RedHatAI/gpt-oss-20b", True),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", True),
+        ("RedHatAI/Llama-3.2-1B-FP8", True),
+        ("RedHatAI/Mixtral-8x7B-Instruct-v0.1", False),
     ],
 )
 def test_is_quantized(model_id, quantized):
@@ -635,7 +643,7 @@ def test_vllm_config_defaults_are_none():
     [
         (
             None,
-            CompilationConfig(backend="eager", custom_ops=["+fused_layernorm"]),
+            CompilationConfig(backend="eager", custom_ops=["+quant_fp8"]),
             OptimizationLevel.O0,
         ),
         (None, CompilationConfig(), OptimizationLevel.O0),
@@ -643,18 +651,34 @@ def test_vllm_config_defaults_are_none():
         (None, CompilationConfig(), OptimizationLevel.O2),
         (None, CompilationConfig(), OptimizationLevel.O3),
         (
-            "Qwen/Qwen1.5-7B",
-            CompilationConfig(backend="inductor", custom_ops=["+fused_layernorm"]),
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(backend="inductor", custom_ops=["+quant_fp8"]),
             OptimizationLevel.O2,
         ),
-        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O0),
-        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O1),
-        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O2),
-        ("Qwen/Qwen1.5-7B", CompilationConfig(), OptimizationLevel.O3),
-        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O0),
-        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O1),
-        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O2),
-        ("deepseek-ai/DeepSeek-V2-Lite", CompilationConfig(), OptimizationLevel.O3),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O0,
+        ),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O1,
+        ),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O2,
+        ),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O3,
+        ),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O0),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O1),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O2),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
 def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
