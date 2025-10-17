@@ -7,6 +7,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -1074,7 +1076,9 @@ class Scheduler(SchedulerInterface):
             finished_req_ids.clear()
 
         if (
-            stats := self.make_stats(spec_decoding_stats, kv_connector_stats)
+            stats := self.make_stats(spec_decoding_stats, kv_connector_stats,
+                                     model_runner_output.expert_usage_histogram_cpu,
+                model_runner_output.per_ep_rank_tokens_histogram_cpu)
         ) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
@@ -1241,6 +1245,8 @@ class Scheduler(SchedulerInterface):
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
+        expert_usage_histogram_cpu: torch.Tensor | None = None,
+        per_ep_rank_tokens_histogram_cpu: torch.Tensor | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -1254,6 +1260,8 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats=spec_decoding_stats,
             num_corrupted_reqs=sum(req.is_output_corrupted for req in self.running),
             kv_connector_stats=kv_connector_stats.data if kv_connector_stats else None,
+            expert_usage_histogram_cpu=expert_usage_histogram_cpu,
+            per_ep_rank_tokens_histogram_cpu=per_ep_rank_tokens_histogram_cpu,
         )
 
     def make_spec_decoding_stats(

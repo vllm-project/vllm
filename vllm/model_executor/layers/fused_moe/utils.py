@@ -28,6 +28,64 @@ from vllm.utils.flashinfer import flashinfer_fp4_quantize
 
 
 @triton.jit
+def _collect_expert_usage_histogram(
+    topk_experts_ptr,  # [M, K]
+    histogram_ptr,  # [E]
+    M: int,
+    K: tl.constexpr,
+    stride_m: int,
+    stride_k: int,
+    E: tl.constexpr,
+    stride_e: int,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    topk_experts_load_offsets = topk_experts_ptr + pid * stride_m + tl.arange(
+        0, K) * stride_k
+
+    expert_indices = tl.load(topk_experts_load_offsets).cast(dtype=tl.int32)
+
+    expert_usage_histogram_layer = expert_indices.histogram(BLOCK_SIZE)
+
+    histogram_store_offsets = histogram_ptr + tl.arange(0,
+                                                        BLOCK_SIZE) * stride_e
+
+    tl.atomic_add(histogram_store_offsets,
+                  expert_usage_histogram_layer,
+                  mask=tl.arange(0, BLOCK_SIZE) < E)
+
+
+def collect_expert_usage_histogram(
+        topk_experts: torch.Tensor,
+        expert_usage_histogram_layer: torch.Tensor) -> None:
+    """
+    Computes histogram of expert usage from top-k expert indices for each token.
+    """
+    assert len(topk_experts.shape) == 2
+    M = topk_experts.shape[0]
+    K = topk_experts.shape[1]
+
+    E = expert_usage_histogram_layer.shape[0]
+
+    block_size = triton.next_power_of_2(E)
+
+    assert block_size >= K
+    assert block_size >= E
+
+    _collect_expert_usage_histogram[(M, )](
+        topk_experts,
+        expert_usage_histogram_layer,
+        M=M,
+        K=K,
+        stride_m=topk_experts.stride(0),
+        stride_k=topk_experts.stride(1),
+        E=E,
+        stride_e=expert_usage_histogram_layer.stride(0),
+        BLOCK_SIZE=block_size,
+    )
+
+@triton.jit
 def _count_expert_num_tokens(
     topk_ids_ptr,
     expert_num_tokens_ptr,

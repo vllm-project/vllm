@@ -7,8 +7,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TypeAlias
 
+import numpy as np
 from prometheus_client import Counter, Gauge, Histogram
 
+import vllm.envs as envs
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
 from vllm.logger import init_logger
@@ -804,6 +806,45 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 ],
             )
 
+        if envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
+            layer_count = vllm_config.model_config.get_total_num_moe_layers()
+            expert_count = vllm_config.model_config.get_num_experts()
+
+            moe_expert_selection = self._counter_cls(
+                name="vllm:moe_expert_selection_counter",
+                documentation=
+                "Histogram (actually Counter) of MoE expert selection.",
+                labelnames=labelnames + ['layer', 'expert'])
+
+            # No need to distingush between DP engines for this EP metric.
+            labelvalues = [
+                vllm_config.model_config.served_model_name,
+                str(engine_indexes[0]),
+            ]
+
+            self.counter_moe_expert_selection_array = [[
+                moe_expert_selection.labels(
+                    *(labelvalues +
+                      [str(layer_index), str(expert_index)]))
+                for expert_index in range(expert_count)
+            ] for layer_index in range(layer_count)]
+            if vllm_config.parallel_config.enable_expert_parallel:
+                rank_count = (vllm_config.parallel_config.data_parallel_size *
+                              vllm_config.parallel_config.tensor_parallel_size)
+
+                moe_per_rank_expert_selection = self._counter_cls(
+                    name="vllm:moe_per_rank_expert_selection_counter",
+                    documentation="Histogram (actually Counter) of"
+                    " MoE expert selection per rank.",
+                    labelnames=labelnames + ['layer', 'rank'])
+
+                self.counter_moe_per_rank_expert_selection_array = [[
+                    moe_per_rank_expert_selection.labels(
+                        *(labelvalues +
+                          [str(layer_index), str(rank_index)]))
+                    for rank_index in range(rank_count)
+                ] for layer_index in range(layer_count)]
+
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = ""
@@ -932,6 +973,21 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
+
+        if scheduler_stats is not None and \
+            scheduler_stats.expert_usage_histogram_cpu is not None:
+            histogram = scheduler_stats.expert_usage_histogram_cpu
+
+            for (i, j), value in np.ndenumerate(histogram.numpy()):
+                self.counter_moe_expert_selection_array[i][j].inc(value.item())
+
+            if scheduler_stats.per_ep_rank_tokens_histogram_cpu is not None:
+                histogram_per_rank = (
+                    scheduler_stats.per_ep_rank_tokens_histogram_cpu)
+                for (i,
+                     j), value in np.ndenumerate(histogram_per_rank.numpy()):
+                    self.counter_moe_per_rank_expert_selection_array[i][j].inc(
+                        value.item())
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = ",".join(

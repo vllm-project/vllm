@@ -44,6 +44,8 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_fusion_shared_expert_enabled,
     is_rocm_aiter_moe_enabled,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    collect_expert_usage_histogram)
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -298,6 +300,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         router_logits: torch.Tensor,
         top_k: int,
         renormalize: bool,
+        layer_index: int,
         use_grouped_topk: bool = False,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -534,6 +537,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         router_logits: torch.Tensor,
         top_k: int,
         renormalize: bool,
+        layer_index: int,
         use_grouped_topk: bool = False,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -598,6 +602,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
+        layer_index: int,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         global_num_experts: int = -1,
@@ -709,6 +714,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
+        layer_index: int,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         global_num_experts: int = -1,
@@ -758,6 +764,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
+        layer_index: int,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         global_num_experts: int = -1,
@@ -799,6 +806,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
+        layer_index: int,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         global_num_experts: int = -1,
@@ -1131,6 +1139,11 @@ class FusedMoE(CustomOp):
         self.expert_load_view: torch.Tensor | None = None
         self.logical_to_physical_map: torch.Tensor | None = None
         self.logical_replica_count: torch.Tensor | None = None
+
+        from vllm.model_executor.models.utils import extract_layer_index
+        self.layer_index = extract_layer_index(
+            prefix) - vllm_config.model_config.get_total_num_dense_moe_layers(
+            )
 
         # ROCm aiter shared experts fusion
         self.num_fused_shared_experts = (
@@ -1936,6 +1949,7 @@ class FusedMoE(CustomOp):
         top_k: int,
         use_grouped_topk: bool,
         renormalize: bool,
+        layer_index: int,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         custom_routing_function: Callable | None = None,
@@ -2067,6 +2081,13 @@ class FusedMoE(CustomOp):
             )
         else:
             zero_expert_result = None
+
+        expert_usage_histogram = get_forward_context().expert_usage_histogram
+
+        if expert_usage_histogram is not None:
+            collect_expert_usage_histogram(topk_ids,
+                                           expert_usage_histogram[layer_index])
+
         return topk_weights, topk_ids, zero_expert_result
 
     def must_reduce_shared_expert_outputs(self) -> bool:
@@ -2115,11 +2136,13 @@ class FusedMoE(CustomOp):
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
-                fused_output = self.forward_impl(hidden_states, router_logits)
+                fused_output = self.forward_impl(hidden_states, router_logits,
+                                                 self.layer_index)
                 assert not isinstance(fused_output, tuple)
             else:
                 fused_output = torch.ops.vllm.moe_forward(
-                    hidden_states, router_logits, self.layer_name
+                    hidden_states, router_logits, self.layer_name,
+                    self.layer_index
                 )
             return fused_output[..., :og_hidden_states]
         else:
@@ -2127,11 +2150,11 @@ class FusedMoE(CustomOp):
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
                 shared_output, fused_output = self.forward_impl(
-                    hidden_states, router_logits
+                    hidden_states, router_logits, self.layer_index
                 )
             else:
                 shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                    hidden_states, router_logits, self.layer_name
+                    hidden_states, router_logits, self.layer_name, self.layer_index
                 )
             return (
                 shared_output[..., :og_hidden_states],
@@ -2212,6 +2235,7 @@ class FusedMoE(CustomOp):
                 router_logits=staged_router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
+                layer_index=self.layer_index,
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
                 expert_map=self.expert_map
@@ -2297,6 +2321,7 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        layer_index: int,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
@@ -2339,6 +2364,7 @@ class FusedMoE(CustomOp):
                 router_logits=router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
+                layer_index=layer_index,
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
                 expert_map=self.expert_map
@@ -2459,17 +2485,19 @@ def moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
+    layer_index: int,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.shared_experts is None
-    return self.forward_impl(hidden_states, router_logits)
+    return self.forward_impl(hidden_states, router_logits, layer_index)
 
 
 def moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
+    layer_index: int,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -2487,17 +2515,19 @@ def moe_forward_shared(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
+    layer_index: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.shared_experts is not None
-    return self.forward_impl(hidden_states, router_logits)
+    return self.forward_impl(hidden_states, router_logits, layer_index)
 
 
 def moe_forward_shared_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
+    layer_index: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     shared_out = torch.empty_like(hidden_states)
     fused_out = torch.empty_like(hidden_states)

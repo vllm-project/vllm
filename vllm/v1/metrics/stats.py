@@ -6,6 +6,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import torch
+
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -154,6 +156,9 @@ class SchedulerStats:
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
+
+    expert_usage_histogram_cpu: torch.Tensor | None = None
+    per_ep_rank_tokens_histogram_cpu: torch.Tensor | None = None
 
     num_corrupted_reqs: int = 0
 
