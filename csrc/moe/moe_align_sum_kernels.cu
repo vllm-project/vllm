@@ -8,7 +8,7 @@
 
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
-#include "core/math.hpp"
+#include "../core/math.hpp"
 
 #define CEILDIV(x, y) (((x) + (y) - 1) / (y))
 
