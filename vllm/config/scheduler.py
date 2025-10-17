@@ -69,6 +69,18 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
+    # ===== SELF-SPEC SPARSE ATTENTION PARAMETERS =====
+    sink_size: int = 32
+    """Number of initial tokens to always keep in sparse attention.
+    Used for self-speculative decoding with selective KV caching.
+    These 'sink' tokens are always attended to, regardless of position."""
+
+    recent_size: int = 128
+    """Number of most recent tokens to keep in sparse attention.
+    Used for self-speculative decoding with selective KV caching.
+    Combined with sink tokens, this creates a sparse attention pattern."""
+    # ===== END SELF-SPEC PARAMETERS =====
+
     cuda_graph_sizes: list[int] = field(default_factory=list)
     """Cuda graph capture sizes
     1. if none provided, then default set to [min(max_num_seqs * 2, 512)]
