@@ -484,12 +484,18 @@ class CompilationConfig:
 
     __str__ = __repr__
 
+    @field_validator("compile_sizes", mode="before")
+    @classmethod
+    def _validate_compile_sizes(cls, value: Any) -> Any:
+        """Deduplicate compile sizes."""
+        if isinstance(value, list):
+            return list(set(value))
+        return value
+
     @field_validator("cudagraph_mode", mode="before")
     @classmethod
     def validate_cudagraph_mode_before(cls, value: Any) -> Any:
-        """
-        enable parse the `cudagraph_mode` enum type from string
-        """
+        """Enable parsing the `cudagraph_mode` enum type from string."""
         if isinstance(value, str):
             return CUDAGraphMode[value.upper()]
         return value
@@ -698,12 +704,6 @@ class CompilationConfig:
                 else:
                     self.bs_to_padded_graph_size[bs] = end
         self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
-
-    @field_validator("compile_sizes")
-    @classmethod
-    def _validate_compile_sizes(cls, value: list[int]) -> list[int]:
-        """Deduplicate compile sizes."""
-        return list(set(value))
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when mode is
