@@ -247,6 +247,130 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         return frames, metadata
 
 
+@VIDEO_LOADER_REGISTRY.register("opencv_nemotron_vl_v2")
+class OpenCVNemotronVideoBackend(OpenCVVideoBackend):
+    @classmethod
+    def _get_frame_indices_to_sample(
+        cls,
+        total_frames_num: int,
+        max_num_frames_to_sample: int,
+        fps: int,
+        duration_seconds: float,
+        **kwargs,
+    ) -> list[int]:
+        # Determine target number of samples:
+        max_samples = total_frames_num
+        if max_num_frames_to_sample > 0:  # Hard upper bound
+            max_samples = min(max_num_frames_to_sample, max_samples)
+        if fps > 0:  # If fps is provided, use it to limit the number of samples
+            max_samples = min(max_samples, math.floor(duration_seconds * fps))
+        max_samples = max(1, max_samples)  # to make sure we have at least one sample
+
+        # Uniform coverage of the entire timeline within the cap
+        # Use linspace over [0, total_frames-1]
+        raw = np.linspace(0, total_frames_num - 1, max_samples, endpoint=True)
+        return np.unique(raw.round().astype(int)).tolist()
+
+    @classmethod
+    def _sample_frames_from_video(
+        cls,
+        cap,
+        frame_indices: list[int],
+        allow_missing_frames: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        import cv2
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.full((len(frame_indices), height, width, 3), dtype=np.uint8)
+
+        i = 0
+        for idx in range(max(frame_indices) + 1):
+            ok = cap.grab()
+            if not ok:
+                break
+            if idx in frame_indices:
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    i += 1
+
+        if not allow_missing_frames and i != len(frame_indices):
+            raise ValueError(
+                f"Expected reading {len(frame_indices)} frames, "
+                f"but only loaded {i} frames from video."
+            )
+
+        return frames[:i], frame_indices[:i]
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        """
+        Args:
+            num_frames (int): Maximum number of frames to load.
+            A total sampled number of frames will never be larger
+            than this value. Set it -1 to remove the upper limit.
+
+            fps (int): Desired video sampling rate. A real samping
+            rate may be lower if we encounter long video and
+            num_frames upper limit is set to positive value.
+        """
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream")
+
+        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames_num == 0:
+            raise ValueError("CAP_PROP_FRAME_COUNT returned 0")
+
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        if not (original_fps > 0):
+            print(
+                f"WARNING: CAP_PROP_FPS returned {original_fps}. "
+                f"We will use 30 FPS as default fallback."
+            )
+            original_fps = 30
+
+        duration = total_frames_num / original_fps
+
+        frame_indices = cls._get_frame_indices_to_sample(
+            total_frames_num, num_frames, fps, duration
+        )
+
+        effective_fps = len(frame_indices) / duration
+        print(
+            f"Video [{total_frames_num} fames]({duration:.2f}sec "
+            f"at {original_fps:.2f}fps) sampled "
+            f"into frame [{len(frame_indices)}] indexes {frame_indices} "
+            f"at {effective_fps:.2f}fps."
+        )
+
+        frames, frame_indices = cls._sample_frames_from_video(
+            cap, frame_indices, allow_missing_frames=True
+        )
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        metadata = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv_nemotron_vl_v2",
+            "frames_indices": frame_indices,
+            "do_sample_frames": False,
+        }
+
+        return frames, metadata
+
+
 class VideoMediaIO(MediaIO[npt.NDArray]):
     def __init__(
         self,
