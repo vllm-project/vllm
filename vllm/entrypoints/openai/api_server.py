@@ -532,7 +532,6 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, ResponsesResponse):
-        print(generator)
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(

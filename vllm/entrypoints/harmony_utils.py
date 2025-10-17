@@ -228,7 +228,7 @@ def parse_response_input(
     return msg
 
 
-def parse_chat_input(chat_msg) -> list[Message]:
+def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     if not isinstance(chat_msg, dict):
         # Handle Pydantic models
         chat_msg = chat_msg.model_dump(exclude_none=True)

@@ -69,6 +69,7 @@ from vllm.entrypoints.harmony_utils import (
     get_system_message,
     get_user_message,
     has_custom_tools,
+    parse_input_to_harmony_message,
     parse_output_message,
     parse_remaining_state,
     parse_response_input,
@@ -912,33 +913,7 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: ResponsesResponse | None,
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
-        if prev_response is None and request.previous_input_messages:
-            import fbvscode
-
-            fbvscode.set_trace()
-            for message in request.previous_input_messages:
-                # Handle both OpenAIHarmonyMessage objects and dictionary inputs
-                if isinstance(message, OpenAIHarmonyMessage):
-                    message_role = message.author.role
-                    # Don't use the previous system or developer messages
-                    if (
-                        message_role == OpenAIHarmonyRole.SYSTEM
-                        or message_role == OpenAIHarmonyRole.DEVELOPER
-                    ):
-                        continue
-                    messages.append(message)
-                else:
-                    # Convert dictionary to harmony message using parse_chat_input
-                    from vllm.entrypoints.harmony_utils import parse_chat_input
-
-                    harmony_messages = parse_chat_input(message)
-                    for harmony_msg in harmony_messages:
-                        message_role = harmony_msg.author.role
-                        # Don't use the previous system or developer messages
-                        # if message_role == OpenAIHarmonyRole.SYSTEM or message_role == OpenAIHarmonyRole.DEVELOPER:
-                        #     continue
-                        messages.append(harmony_msg)
-        elif prev_response is None:
+        if prev_response is None:
             # New conversation.
             tool_types = [tool.type for tool in request.tools]
             # Allow the MCP Tool type to enable built in tools if the
@@ -962,6 +937,32 @@ class OpenAIServingResponses(OpenAIServing):
                     instructions=request.instructions, tools=request.tools
                 )
                 messages.append(dev_msg)
+            if request.previous_input_messages:
+                import fbvscode
+
+                fbvscode.set_trace()
+                for message in request.previous_input_messages:
+                    # Handle both OpenAIHarmonyMessage objects and dictionary inputs
+                    if isinstance(message, OpenAIHarmonyMessage):
+                        message_role = message.author.role
+                        # Don't use the previous system or developer messages
+                        if (
+                            message_role == OpenAIHarmonyRole.SYSTEM
+                            or message_role == OpenAIHarmonyRole.DEVELOPER
+                        ):
+                            continue
+                        messages.append(message)
+                    else:
+                        harmony_messages = parse_input_to_harmony_message(message)
+                        for harmony_msg in harmony_messages:
+                            message_role = harmony_msg.author.role
+                            # Don't use the previous system or developer messages
+                            if (
+                                message_role == OpenAIHarmonyRole.SYSTEM
+                                or message_role == OpenAIHarmonyRole.DEVELOPER
+                            ):
+                                continue
+                            messages.append(harmony_msg)
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
