@@ -325,10 +325,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3MoeForCausalLM, self).__init__()
-
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
-
         self.model = Qwen3MoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
