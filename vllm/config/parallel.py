@@ -30,9 +30,7 @@ else:
 logger = init_logger(__name__)
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
-DistributedExecutorBackend = Literal[
-    "ray", "mp", "mp_distributed", "uni", "external_launcher"
-]
+DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 
 
@@ -495,7 +493,7 @@ class ParallelConfig:
             if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
             elif current_platform.is_cuda() and self.distributed_node_size > 1:
-                backend = "mp_distributed"
+                backend = "mp"
             elif (
                 current_platform.is_cuda()
                 and cuda_device_count_stateless() < self.world_size
@@ -570,6 +568,11 @@ class ParallelConfig:
             logger.debug(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
+            )
+        if self.distributed_node_size > 1:
+            self.disable_custom_all_reduce = True
+            logger.debug(
+                "Disabled the custom all-reduce since we are running on multi-node."
             )
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(

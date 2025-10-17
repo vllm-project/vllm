@@ -10,7 +10,7 @@ import time
 import traceback
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import cached_property, partial
 from multiprocessing.connection import Connection
@@ -31,6 +31,7 @@ from vllm.distributed.parallel_state import (
     get_ep_group,
     get_pp_group,
     get_tp_group,
+    get_world_group,
 )
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -53,6 +54,9 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
+EMPTY_LIST: list[Optional[MessageQueue]] = field(default_factory=list)
+
+
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
 
@@ -63,18 +67,27 @@ class MultiprocExecutor(Executor):
         self.workers = WorkerProc.wait_for_ready(unready_workers)
 
     def init_response_mqs(self) -> None:
-        reponse_mqs = []
-        for w in self.workers:
-            assert w.worker_response_mq is not None
-            reponse_mqs.append(w.worker_response_mq)
-        self.response_mqs = reponse_mqs
+        if self.parallel_config.distributed_node_size > 1:
+            self.response_mqs = [
+                mq for mq in self.workers[0].rpc_response_mqs if mq is not None
+            ]
+        else:
+            self.response_mqs = [w.worker_response_mq for w in self.workers]
 
     def init_request_rpc_mq(self) -> None:
-        max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
-        self.rpc_broadcast_mq = MessageQueue(
-            self.world_size, self.world_size, max_chunk_bytes=max_chunk_bytes
-        )
-        self.scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+        if self.parallel_config.distributed_node_rank == 0:
+            max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            self.rpc_broadcast_mq = MessageQueue(
+                self.world_size,
+                self.local_world_size,
+                max_chunk_bytes=max_chunk_bytes,
+                connect_ip=self.parallel_config.distributed_master_ip,
+            )
+            self.scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+        else:
+            # retrieve through remote sync from remote driver
+            self.rpc_broadcast_mq = None
+            self.scheduler_output_handle = None
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -253,14 +266,17 @@ class MultiprocExecutor(Executor):
     def get_message_queues(
         self, unique_reply_rank: Optional[int] = None
     ) -> list[MessageQueue]:
-        if unique_reply_rank is not None:
-            mq = self.workers[unique_reply_rank].worker_response_mq
-            assert mq is not None
-            return [mq]
         message_queues = []
         for rank in range(self.world_size):
-            assert self.workers[rank].worker_response_mq is not None
-            message_queues.append(self.workers[rank].worker_response_mq)
+            if rank < self.local_world_size:
+                local_message_queue = self.workers[rank].worker_response_mq
+                message_queues.append(local_message_queue)
+            else:
+                remote_message_queue = self.workers[0].rpc_response_mqs[rank]
+                assert remote_message_queue is not None
+                message_queues.append(remote_message_queue)
+        if unique_reply_rank is not None:
+            message_queues = [message_queues[unique_reply_rank]]
         return message_queues
 
     def collective_rpc(
@@ -422,8 +438,11 @@ class WorkerProcHandle:
     proc: BaseProcess
     rank: int
     worker_response_mq: Optional[MessageQueue] = (
-        None  # The worker process writes to this MQ
+        (
+            None  # The worker process writes to this MQ
+        ),
     )
+    rpc_response_mqs: list[Optional[MessageQueue]] = EMPTY_LIST
     death_writer: Optional[Connection] = None
 
     @classmethod
@@ -431,12 +450,14 @@ class WorkerProcHandle:
         cls,
         unready_handle: UnreadyWorkerProcHandle,
         worker_response_mq: Optional[MessageQueue],
+        rpc_response_mqs: list[Optional[MessageQueue]] = EMPTY_LIST,
         **kwargs,
     ) -> "WorkerProcHandle":
         return cls(
             proc=unready_handle.proc,
             rank=unready_handle.rank,
             worker_response_mq=worker_response_mq,
+            rpc_response_mqs=rpc_response_mqs,
             death_writer=unready_handle.death_writer,
         )
 
@@ -449,13 +470,28 @@ class WorkerProc:
     def init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
-        # Initialize MessageQueue for receiving SchedulerOutput
-        self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-            input_shm_handle, self.worker.rank
-        )
+        node_size = vllm_config.parallel_config.distributed_node_size
+        if node_size == 1:
+            # Initialize MessageQueue for receiving SchedulerOutput
+            self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+                input_shm_handle, self.worker.rank
+            )
 
-        # Initializes a message queue for sending the model output
-        self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
+            # Initializes a message queue for sending the model output
+            self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
+            self.rpc_broadcast_mq = []
+        else:
+            # multi node
+            # generate mq broadcaster from world group
+            # for cross-node communication
+            self.rpc_broadcast_mq = get_world_group().create_mq_broadcaster(
+                extra_writer_handler=input_shm_handle,
+                # we will wait until ready later
+                blocking=False,
+            )
+            self.worker_response_mq, self.rpc_response_handles = (
+                get_world_group().create_single_reader_mq_broadcasters(reader_rank=0)
+            )
 
     def __init__(
         self,
@@ -558,8 +594,20 @@ class WorkerProc:
     def wait_for_response_handle_ready(
         cls, handles: dict[str, Any], proc_handle: UnreadyWorkerProcHandle
     ) -> WorkerProcHandle:
-        worker_response_mq = MessageQueue.create_from_handle(handles["handle"], 0)
-        return WorkerProcHandle.from_unready_handle(proc_handle, worker_response_mq)
+        response_handle = handles["handle"]
+        worker_response_mq: Optional[MessageQueue] = None
+        if len(response_handle.local_reader_ranks) > 0:
+            worker_response_mq = MessageQueue.create_from_handle(response_handle, 0)
+        remote_response_handles = handles["rpc_response_handles"]
+        remote_response_mqs = [
+            MessageQueue.create_from_handle(response, -1)
+            if response.remote_subscribe_addr is not None
+            else None
+            for response in remote_response_handles
+        ]
+        return WorkerProcHandle.from_unready_handle(
+            proc_handle, worker_response_mq, rpc_response_mqs=remote_response_mqs
+        )
 
     @classmethod
     def wait_for_ready(
@@ -612,6 +660,7 @@ class WorkerProc:
         return {
             "status": WorkerProc.READY_STR,
             "handle": worker.worker_response_mq.export_handle(),
+            "rpc_response_handles": worker.rpc_response_handles,
         }
 
     @classmethod
