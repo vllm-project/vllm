@@ -273,7 +273,8 @@ WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
-ARG GDRCOPY_CUDA_VERSION=12.9
+# TODO (huydhn): There is no prebuilt gdrcopy package on 12.9 at the moment
+ARG GDRCOPY_CUDA_VERSION=12.8
 # Keep in line with FINAL_BASE_IMAGE
 ARG GDRCOPY_OS_VERSION=Ubuntu22_04
 
@@ -394,6 +395,12 @@ COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"}
 
+# Install EP kernels(pplx-kernels and DeepEP)
+COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
+ENV CUDA_HOME=/usr/local/cuda
+RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
+    && bash install_python_libraries.sh
+
 COPY tools/install_gdrcopy.sh install_gdrcopy.sh
 RUN set -eux; \
     case "${TARGETPLATFORM}" in \
@@ -403,12 +410,6 @@ RUN set -eux; \
     esac; \
     ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
     rm ./install_gdrcopy.sh
-
-# Install EP kernels(pplx-kernels and DeepEP)
-COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
-ENV CUDA_HOME=/usr/local/cuda
-RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
-    && bash install_python_libraries.sh
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
