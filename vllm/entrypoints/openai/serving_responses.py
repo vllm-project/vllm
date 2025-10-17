@@ -938,9 +938,6 @@ class OpenAIServingResponses(OpenAIServing):
                 )
                 messages.append(dev_msg)
             if request.previous_input_messages:
-                import fbvscode
-
-                fbvscode.set_trace()
                 for message in request.previous_input_messages:
                     # Handle both OpenAIHarmonyMessage objects and dictionary inputs
                     if isinstance(message, OpenAIHarmonyMessage):
