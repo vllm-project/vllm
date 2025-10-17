@@ -297,10 +297,6 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     assert int(log_matches[1]) == matches.allreduce_fusion
 
 
-# TODO luka resolve
-CUSTOM_OPS_RMS_NORM = ["+rms_norm"]
-
-
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
