@@ -144,7 +144,7 @@ class XPUPlatform(Platform):
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
-        from vllm.config import CompilationLevel, CUDAGraphMode
+        from vllm.config import CompilationMode, CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
@@ -155,7 +155,7 @@ class XPUPlatform(Platform):
         )
 
         if vllm_config.lora_config is not None:
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.mode = CompilationMode.NONE
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -236,8 +236,8 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             device_name = cls.get_device_name().lower()
             # client gpu a770
             if device_name.count("a770") > 0:
