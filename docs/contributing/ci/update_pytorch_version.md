@@ -100,26 +100,12 @@ to warm it up so that future builds are faster.
 
 ## Update dependencies
 
-Several vLLM dependencies, such as FlashInfer, also depend on PyTorch and need
+Several vLLM dependencies like xFormers depend on PyTorch and need
 to be updated accordingly. Rather than waiting for all of them to publish new
 releases (which would take too much time), they can be built from
 source to unblock the update process.
 
-### FlashInfer
-
-After #25782, the pre-compiled FlashInfer wheel can be built using tools/flashinfer-build.sh
-script. The new wheel can then be uploaded to [PyTorch test index](https://download.pytorch.org/whl/test/cu128/flashinfer_python-0.3.1-cp39-abi3-linux_x86_64.whl) and used during the update.
-
-During PyTorch 2.9 update, using the old FlashInfer wheel built for
-2.8 led to a crash with the following error:
-
-```bash
-terminate called after throwing an instance of 'std::bad_array_new_length'
-```
-
 ### xFormers
-
-Similar to FlashInfer, here is how to build and install xFormers from source:
 
 ```bash
 export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
