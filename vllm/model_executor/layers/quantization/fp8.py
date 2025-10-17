@@ -555,9 +555,21 @@ class Fp8LinearMethod(LinearMethodBase):
 
                 N, K = weight_fp8.shape
 
-                # Scale is stored transposed: [num_blocks_k, num_blocks_n]
-                # We need to transpose it to [num_blocks_n, num_blocks_k] first
-                weight_scale = weight_scale.t()
+                # determine expected number of blocks along N and K
+                num_blocks_n = (N + block_n - 1) // block_n
+                num_blocks_k = (K + block_k - 1) // block_k
+
+                # scale layout may be [num_blocks_n, num_blocks_k]
+                # or [num_blocks_k, num_blocks_n] depending on backend
+                if weight_scale.dim() != 2:
+                    raise RuntimeError(
+                        f"FP8 block scale must be 2D, got {tuple(weight_scale.shape)}"
+                    )
+
+                scale_rows, scale_cols = weight_scale.shape
+                if (scale_rows, scale_cols) == (num_blocks_k, num_blocks_n):
+                    # stored transposed, bring to [num_blocks_n, num_blocks_k]
+                    weight_scale = weight_scale.t()
 
                 # Expand scale to match weight dimensions
                 # scale_expanded should have shape [N, K]

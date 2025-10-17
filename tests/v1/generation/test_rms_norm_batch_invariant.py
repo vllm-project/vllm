@@ -15,7 +15,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
 hopper_only = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
     reason="Requires CUDA and Hopper (SM90)",
 )
 
