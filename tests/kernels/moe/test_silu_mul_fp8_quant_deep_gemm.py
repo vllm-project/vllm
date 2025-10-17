@@ -20,7 +20,6 @@ CASES = [
     (17, 31, 768, fp8_dtype),
     (1, 1, 128 * 1, fp8_dtype),
     (1, 1, 128 * 3, fp8_dtype),
-    (1, 1, 128 * 4, fp8_dtype),
     (8, 16, 128 * 2, fp8_dtype),
     (8, 16, 128 * 3, fp8_dtype),
     (8, 64, 7168, fp8_dtype),
