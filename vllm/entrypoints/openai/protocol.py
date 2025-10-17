@@ -1643,15 +1643,11 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     )
     binary_response: bool = Field(
         default=False,
-        description=(
-            "Whether to use binary response."
-        ),
+        description="Whether to use binary response."
     )
     endianness: Literal["big-endian", "little-endian"] = Field(
         default="big-endian",
-        description=(
-            "Binary response endianness. Use big-endian by default."
-        ),
+        description="Binary response endianness. Use big-endian by default."
     )
     # --8<-- [end:chat-embedding-extra-params]
 
