@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Union
 
 from openai.types.responses.tool import Mcp
+from openai.types.responses.tool import Tool as OAITool
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
@@ -153,7 +154,7 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
         tool_server: ToolServer | None,
         request_id: str,
-        tools: list[Tool],
+        tools: list[OAITool],
     ):
         self._messages = messages
         self.finish_reason: str | None = None
