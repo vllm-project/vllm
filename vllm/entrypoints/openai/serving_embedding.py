@@ -6,6 +6,7 @@ from typing import Any, Final, cast
 
 import torch
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 from typing_extensions import override
 
 from vllm.engine.protocol import EngineClient
@@ -28,7 +29,10 @@ from vllm.entrypoints.openai.serving_engine import (
     TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.utils import encoding_pooling_output
+from vllm.entrypoints.openai.utils import (
+    encoding_pooling_output,
+    response_compression_pooling_output,
+)
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
@@ -121,36 +125,78 @@ class EmbeddingMixin(OpenAIServing):
     def _build_response(
         self,
         ctx: ServeContext,
-    ) -> EmbeddingResponse | ErrorResponse:
-        items: list[EmbeddingResponseData] = []
-        num_prompt_tokens = 0
-
+    ) -> EmbeddingResponse | StreamingResponse | ErrorResponse:
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
-        for idx, final_res in enumerate(final_res_batch_checked):
-            item = EmbeddingResponseData(
-                index=idx,
-                embedding=encoding_pooling_output(
-                    final_res, ctx.request.encoding_format, ctx.request.embed_dtype
-                ),
+        if not ctx.request.binary_response:
+            items: list[EmbeddingResponseData] = []
+            num_prompt_tokens = 0
+
+            for idx, final_res in enumerate(final_res_batch_checked):
+                item = EmbeddingResponseData(
+                    index=idx,
+                    embedding=encoding_pooling_output(
+                        final_res, ctx.request.encoding_format, ctx.request.embed_dtype
+                    ),
+                )
+                prompt_token_ids = final_res.prompt_token_ids
+
+                items.append(item)
+                num_prompt_tokens += len(prompt_token_ids)
+
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                total_tokens=num_prompt_tokens,
             )
-            prompt_token_ids = final_res.prompt_token_ids
 
-            items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
+            return EmbeddingResponse(
+                id=ctx.request_id,
+                created=ctx.created_time,
+                model=ctx.model_name,
+                data=items,
+                usage=usage,
+            )
+        else:
+            num_prompt_tokens = 0
+            items: list[dict[str, Any]] = []
+            tensers = []
+            for idx, final_res in enumerate(final_res_batch_checked):
+                item = {
+                    "index": idx,
+                    "embed_dtype": ctx.request.embed_dtype,
+                    "endianness": ctx.request.endianness,
+                    "filename": f"embedding-{idx}.tenser",
+                }
 
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
+                prompt_token_ids = final_res.prompt_token_ids
 
-        return EmbeddingResponse(
-            id=ctx.request_id,
-            created=ctx.created_time,
-            model=ctx.model_name,
-            data=items,
-            usage=usage,
-        )
+                items.append(item)
+                tensers.append(final_res.outputs.data)
+                num_prompt_tokens += len(prompt_token_ids)
+
+            usage = {
+                "prompt_tokens": num_prompt_tokens,
+                "total_tokens": num_prompt_tokens,
+            }
+
+            metadata = {
+                "id": ctx.request_id,
+                "created": ctx.created_time,
+                "model": ctx.model_name,
+                "data": items,
+                "usage": usage,
+            }
+
+            streaming_response = response_compression_pooling_output(
+                metadata=metadata,
+                tensers=tensers,
+                embed_dtype=ctx.request.embed_dtype,
+                endianness=ctx.request.endianness,
+            )
+
+            return StreamingResponse(
+                streaming_response, media_type="application/octet-stream"
+            )
 
     def _get_max_position_embeddings(self) -> int:
         """Get the model's effective maximum sequence length for chunking."""

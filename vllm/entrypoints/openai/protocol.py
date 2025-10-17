@@ -1555,6 +1555,13 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "float32 for base64 encoding to match the OpenAI python client behavior."
         ),
     )
+    binary_response: bool = Field(
+        default=False, description="Whether to use binary response."
+    )
+    endianness: Literal["big-endian", "little-endian"] = Field(
+        default="big-endian",
+        description="Binary response endianness. Use big-endian by default.",
+    )
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
@@ -1642,12 +1649,11 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         ),
     )
     binary_response: bool = Field(
-        default=False,
-        description="Whether to use binary response."
+        default=False, description="Whether to use binary response."
     )
     endianness: Literal["big-endian", "little-endian"] = Field(
         default="big-endian",
-        description="Binary response endianness. Use big-endian by default."
+        description="Binary response endianness. Use big-endian by default.",
     )
     # --8<-- [end:chat-embedding-extra-params]
 
