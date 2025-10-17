@@ -41,24 +41,26 @@ def _collect_expert_usage_histogram(
 ):
     pid = tl.program_id(0)
 
-    topk_experts_load_offsets = topk_experts_ptr + pid * stride_m + tl.arange(
-        0, K) * stride_k
+    topk_experts_load_offsets = (
+        topk_experts_ptr + pid * stride_m + tl.arange(0, K) * stride_k
+    )
 
     expert_indices = tl.load(topk_experts_load_offsets).cast(dtype=tl.int32)
 
     expert_usage_histogram_layer = expert_indices.histogram(BLOCK_SIZE)
 
-    histogram_store_offsets = histogram_ptr + tl.arange(0,
-                                                        BLOCK_SIZE) * stride_e
+    histogram_store_offsets = histogram_ptr + tl.arange(0, BLOCK_SIZE) * stride_e
 
-    tl.atomic_add(histogram_store_offsets,
-                  expert_usage_histogram_layer,
-                  mask=tl.arange(0, BLOCK_SIZE) < E)
+    tl.atomic_add(
+        histogram_store_offsets,
+        expert_usage_histogram_layer,
+        mask=tl.arange(0, BLOCK_SIZE) < E,
+    )
 
 
 def collect_expert_usage_histogram(
-        topk_experts: torch.Tensor,
-        expert_usage_histogram_layer: torch.Tensor) -> None:
+    topk_experts: torch.Tensor, expert_usage_histogram_layer: torch.Tensor
+) -> None:
     """
     Computes histogram of expert usage from top-k expert indices for each token.
     """
@@ -73,7 +75,7 @@ def collect_expert_usage_histogram(
     assert block_size >= K
     assert block_size >= E
 
-    _collect_expert_usage_histogram[(M, )](
+    _collect_expert_usage_histogram[(M,)](
         topk_experts,
         expert_usage_histogram_layer,
         M=M,
@@ -84,6 +86,7 @@ def collect_expert_usage_histogram(
         stride_e=expert_usage_histogram_layer.stride(0),
         BLOCK_SIZE=block_size,
     )
+
 
 @triton.jit
 def _count_expert_num_tokens(

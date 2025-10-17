@@ -1076,9 +1076,12 @@ class Scheduler(SchedulerInterface):
             finished_req_ids.clear()
 
         if (
-            stats := self.make_stats(spec_decoding_stats, kv_connector_stats,
-                                     model_runner_output.expert_usage_histogram_cpu,
-                model_runner_output.per_ep_rank_tokens_histogram_cpu)
+            stats := self.make_stats(
+                spec_decoding_stats,
+                kv_connector_stats,
+                model_runner_output.expert_usage_histogram_cpu,
+                model_runner_output.per_ep_rank_tokens_histogram_cpu,
+            )
         ) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:

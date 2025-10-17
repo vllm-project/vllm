@@ -44,9 +44,8 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_fusion_shared_expert_enabled,
     is_rocm_aiter_moe_enabled,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    collect_expert_usage_histogram)
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
+from vllm.model_executor.layers.fused_moe.utils import collect_expert_usage_histogram
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -1141,9 +1140,11 @@ class FusedMoE(CustomOp):
         self.logical_replica_count: torch.Tensor | None = None
 
         from vllm.model_executor.models.utils import extract_layer_index
-        self.layer_index = extract_layer_index(
-            prefix) - vllm_config.model_config.get_total_num_dense_moe_layers(
-            )
+
+        self.layer_index = (
+            extract_layer_index(prefix)
+            - vllm_config.model_config.get_total_num_dense_moe_layers()
+        )
 
         # ROCm aiter shared experts fusion
         self.num_fused_shared_experts = (
@@ -2085,8 +2086,9 @@ class FusedMoE(CustomOp):
         expert_usage_histogram = get_forward_context().expert_usage_histogram
 
         if expert_usage_histogram is not None:
-            collect_expert_usage_histogram(topk_ids,
-                                           expert_usage_histogram[layer_index])
+            collect_expert_usage_histogram(
+                topk_ids, expert_usage_histogram[layer_index]
+            )
 
         return topk_weights, topk_ids, zero_expert_result
 
@@ -2136,13 +2138,13 @@ class FusedMoE(CustomOp):
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
-                fused_output = self.forward_impl(hidden_states, router_logits,
-                                                 self.layer_index)
+                fused_output = self.forward_impl(
+                    hidden_states, router_logits, self.layer_index
+                )
                 assert not isinstance(fused_output, tuple)
             else:
                 fused_output = torch.ops.vllm.moe_forward(
-                    hidden_states, router_logits, self.layer_name,
-                    self.layer_index
+                    hidden_states, router_logits, self.layer_name, self.layer_index
                 )
             return fused_output[..., :og_hidden_states]
         else:

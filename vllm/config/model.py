@@ -1392,8 +1392,9 @@ class ModelConfig:
         return getattr(self.hf_text_config, "first_k_dense_replace", 0)
 
     def get_total_num_moe_layers(self) -> int:
-        return self.get_total_num_hidden_layers(
-        ) - self.get_total_num_dense_moe_layers()
+        return (
+            self.get_total_num_hidden_layers() - self.get_total_num_dense_moe_layers()
+        )
 
     def get_total_num_hidden_layers(self) -> int:
         if (
@@ -1420,6 +1421,7 @@ class ModelConfig:
         self, parallel_config: ParallelConfig
     ) -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
+
         total_num_hidden_layers = self.get_total_num_hidden_layers()
 
         # the layout order is: DP x PP x TP
