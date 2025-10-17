@@ -733,20 +733,19 @@ class OpenAIServing:
         return None
 
     def _handle_error_finish_reason(
-        self, outputs: list[CompletionOutput], request_id: str
+        self, output: CompletionOutput, request_id: str
     ) -> ErrorResponse | None:
         """handle error finish reason by logging and returning 503 if found"""
-        for output in outputs:
-            if output.finish_reason == "rejected":
-                logger.error(
-                    "Request %s was rejected by the vLLM model's safety system",
-                    request_id,
-                )
-                return self.create_error_response(
-                    "Service Unavailable",
-                    err_type="SERVICE_UNAVAILABLE",
-                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
-                )
+        if output.finish_reason == "rejected":
+            logger.error(
+                "Request %s was rejected by the vLLM model's safety system",
+                request_id,
+            )
+            return self.create_error_response(
+                "Service Unavailable",
+                err_type="SERVICE_UNAVAILABLE",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
         return None
 
     def create_streaming_error_response(
@@ -1346,9 +1345,6 @@ class OpenAIServing:
         if not model_name:
             return True
         return self.models.is_base_model(model_name)
-
-    def _check_rejected(self, request: CompletionOutput) -> bool:
-        return request.finish_reason == "rejected"
 
 
 def clamp_prompt_logprobs(

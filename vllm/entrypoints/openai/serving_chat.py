@@ -1277,9 +1277,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert final_res is not None
-        # Check for error finish reason and return error
-        if error := self._handle_error_finish_reason(final_res.outputs, request_id):
-            return error
+
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
@@ -1288,6 +1286,9 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            # Check for error finish reason and return error
+            if error := self._handle_error_finish_reason(output, request_id):
+                return error
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
