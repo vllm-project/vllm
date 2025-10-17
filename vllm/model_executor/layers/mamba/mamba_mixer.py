@@ -240,6 +240,8 @@ class MambaMixer(MambaBase, CustomOp):
 
         forward_context: ForwardContext = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+
+        assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         prefix_caching_enabled = self.cache_config.enable_prefix_caching
 
