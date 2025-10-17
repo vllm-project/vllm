@@ -307,7 +307,7 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by ``model_config``.
+        The model is identified by `model_config`.
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
@@ -340,7 +340,7 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by ``model_config``.
+        The model is identified by `model_config`.
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
