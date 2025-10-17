@@ -348,8 +348,8 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 **Load Pattern Recommendations by Use Case:**
 
-| Use Case               | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
-| ---                    | ---          | ---             | ---             | ---                                                       |
+| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
+| ---                | ---          | ---             | ---             | ---                                                       |
 | Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
 | Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
 | Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
