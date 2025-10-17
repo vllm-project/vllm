@@ -1272,11 +1272,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
-            assert (not renormalize and custom_routing_function is not None)
-            assert activation == 'silu', (
+            assert not renormalize and custom_routing_function is not None
+            assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
-            assert scoring_func == 'sigmoid', (
+            assert scoring_func == "sigmoid", (
                 f"Expected 'sigmoid' scoring func but got {scoring_func}"
             )
             if self.fused_experts is not None:

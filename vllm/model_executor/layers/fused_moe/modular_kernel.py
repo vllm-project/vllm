@@ -190,7 +190,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return False
 
-    def have_expert_num_tokens(self) -> bool: 
+    def have_expert_num_tokens(self) -> bool:
         return False
 
     def prepare_async(
@@ -942,27 +942,32 @@ class FusedMoEModularKernel(torch.nn.Module):
             ) = receiver()
         
         # In EPLB, update expert load from expert_num_tokens.
-        if (expert_tokens_meta is not None and expert_load_view is not None
+        if (
+            expert_tokens_meta is not None 
+            and expert_load_view is not None
             and expert_tokens_meta.expert_num_tokens is not None
-            and expert_map is not None):
+            and expert_map is not None
+        ):
             # Initialize the mapping of the local physical experts
             # to global physical experts, after which it will not change.
             # expert_load_view: (num_physical_experts,)
             # expert_num_tokens: (local_num_physical_experts,)
             if self.expert_map is None:
                 self.expert_map = expert_map.clone()
-                self.local_to_global_physical_experts = \
-                    torch.nonzero(expert_map != -1, as_tuple=False).squeeze()
+                self.local_to_global_physical_experts = torch.nonzero(
+                    expert_map != -1, as_tuple=False
+                ).squeeze()
             else:
                 if not torch.equal(self.expert_map, expert_map):
                     self.expert_map = expert_map.clone()
-                    self.local_to_global_physical_experts = \
-                        torch.nonzero(expert_map != -1,
-                                      as_tuple=False).squeeze()
+                    self.local_to_global_physical_experts = torch.nonzero(
+                        expert_map != -1,as_tuple=False
+                    ).squeeze()
             expert_load_view.scatter_add_(
                 dim=0,
                 index=self.local_to_global_physical_experts,
-                src=expert_tokens_meta.expert_num_tokens)
+                src=expert_tokens_meta.expert_num_tokens,
+            )
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids

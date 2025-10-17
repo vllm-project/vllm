@@ -1302,7 +1302,7 @@ def eplb_map_to_physical_and_record(
         and fused_experts_method.have_expert_num_tokens()
     )
     
-    if not skip_expert_load_scatter_add: 
+    if not skip_expert_load_scatter_add:
         logger.debug("expert_load_view update from topk_ids.")
         topk_ids_flatten = topk_ids.flatten()
         expert_load_view.scatter_add_(
