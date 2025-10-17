@@ -2673,7 +2673,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config,
                                                   self.device)
-            if hasattr(self, "drafter"):
+            if hasattr(self, "drafter") and self.drafter is not None:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
             if self.use_aux_hidden_state_outputs:
