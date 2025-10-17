@@ -16,7 +16,6 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -30,7 +29,10 @@ from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, as_list, cancel_task_threadsafe, cdiv, deprecate_kwargs
+from vllm.utils import Device, cdiv
+from vllm.utils.asyncio import cancel_task_threadsafe
+from vllm.utils.collections import as_list
+from vllm.utils.functools import deprecate_kwargs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -57,6 +59,7 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
         stat_loggers: list[StatLoggerFactory] | None = None,
+        aggregate_engine_logging: bool = False,
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -144,6 +147,7 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=stat_loggers,
                 enable_default_loggers=log_stats,
                 client_count=client_count,
+                aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
 
@@ -187,6 +191,7 @@ class AsyncLLM(EngineClient):
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         enable_log_requests: bool = False,
+        aggregate_engine_logging: bool = False,
         disable_log_stats: bool = False,
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
@@ -209,6 +214,7 @@ class AsyncLLM(EngineClient):
             stat_loggers=stat_loggers,
             log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
+            aggregate_engine_logging=aggregate_engine_logging,
             usage_context=usage_context,
             client_addresses=client_addresses,
             client_count=client_count,
@@ -479,12 +485,12 @@ class AsyncLLM(EngineClient):
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
-                    if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
+                    if num_outputs <= envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                         slices = (outputs.outputs,)
                     else:
                         slices = np.array_split(
                             outputs.outputs,
-                            cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
+                            cdiv(num_outputs, envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
                         )
 
                     for i, outputs_slice in enumerate(slices):

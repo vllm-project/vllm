@@ -19,6 +19,8 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed.parallel_state import is_global_first_rank
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -30,10 +32,10 @@ from vllm.utils import (
     decorate_logs,
     get_hash_fn_by_name,
     make_zmq_socket,
-    resolve_obj_by_qualname,
     set_process_title,
 )
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -91,11 +93,12 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        logger.info(
-            "Initializing a V1 LLM engine (v%s) with config: %s",
-            VLLM_VERSION,
-            vllm_config,
-        )
+        if is_global_first_rank():
+            logger.info(
+                "Initializing a V1 LLM engine (v%s) with config: %s",
+                VLLM_VERSION,
+                vllm_config,
+            )
 
         self.log_stats = log_stats
 
@@ -598,6 +601,10 @@ class EngineCoreProc(EngineCore):
 
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
+
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     @contextmanager
     def _perform_handshakes(

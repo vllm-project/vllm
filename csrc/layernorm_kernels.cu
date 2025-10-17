@@ -2,6 +2,7 @@
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "core/batch_invariant.hpp"
+#include "quantization/vectorization_utils.cuh"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -18,11 +19,22 @@ __global__ void rms_norm_kernel(
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
+  const scalar_t* input_row = input + blockIdx.x * input_stride;
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    const float x = (float)input[blockIdx.x * input_stride + idx];
+  constexpr int VEC_SIZE = 8;
+  auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      float x = static_cast<float>(vec.val[i]);
+      variance += x * x;
+    }
+  };
+  auto scalar_op = [&variance](const scalar_t& val) {
+    float x = static_cast<float>(val);
     variance += x * x;
-  }
+  };
+  vllm::vectorize_read_with_alignment<VEC_SIZE>(
+      input_row, hidden_size, threadIdx.x, blockDim.x, vec_op, scalar_op);
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
@@ -414,7 +426,7 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                           wt_ptr % req_alignment_bytes == 0;
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
-  bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
       !batch_invariant_launch) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
@@ -462,7 +474,7 @@ void poly_norm(torch::Tensor& out,     // [..., hidden_size]
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
   auto out_ptr = reinterpret_cast<std::uintptr_t>(out.data_ptr());
   bool ptrs_are_aligned = inp_ptr % 16 == 0 && out_ptr % 16 == 0;
-  bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && hidden_size % 8 == 0 && !batch_invariant_launch) {
     LAUNCH_FUSED_POLY_NORM(8);
   } else {

@@ -431,8 +431,15 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
-    def is_applicable_for_shape(self, shape: int | None) -> bool:
-        # only do replace for specific shapes
+    def is_applicable(self, shape: int | None) -> bool:
+        # This pass is applied on top of the sequence parallelism pass.
+        # It inherits the same applicability condition as `SequenceParallelismPass`.
+        # See `SequenceParallelismPass.is_applicable` for more details.
+        if (
+            not self.compilation_config.splitting_ops
+            or self.compilation_config.use_inductor_graph_partition
+        ):
+            return True
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
