@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for vLLM `vllm/v1/engine/processor.Processor_validate_model_input()`
+Tests for vLLM `vllm/v1/engine/processor.Processor._validate_model_input()`
 handling of maximum context length for decoder models.
 
 This test ensures:
