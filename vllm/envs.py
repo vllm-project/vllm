@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -138,7 +139,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
-    VLLM_RAY_DP_PACK_STRATEGY: str = "strict"
+    VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
@@ -914,6 +915,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
         in ("true", "1")
     ),
+    # Whether to use aiter fusion shared experts ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
+        in ("true", "1")
+    ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")
@@ -1032,6 +1039,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #   for non-master nodes, allocate as many DP ranks as can fit;
     # - "strict":
     #   allocate exactly data-parallel-size-local DP ranks to each picked node;
+    # - "span":
+    #   Should be used only when a single DP rank requires multiple nodes.
+    #   allocate one DP rank over as many nodes as required for set world_size;
     # This environment variable is ignored if data-parallel-backend is not Ray.
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
