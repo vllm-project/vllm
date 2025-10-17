@@ -49,7 +49,7 @@ cbor2 # Required for cross-language serialization of hashable objects
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
 # opentelemetry to work with --otlp-traces-endpoint
-opentelemetry-sdk>=1.26.0,<1.27.0
-opentelemetry-api>=1.26.0,<1.27.0
-opentelemetry-exporter-otlp>=1.26.0,<1.27.0
-opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0
+opentelemetry-sdk>=1.26.0
+opentelemetry-api>=1.26.0
+opentelemetry-exporter-otlp>=1.26.0
+opentelemetry-semantic-conventions-ai>=0.4.1
