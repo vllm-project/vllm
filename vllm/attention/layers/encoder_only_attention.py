@@ -101,6 +101,6 @@ class EncoderOnlyAttention(Attention):
             **kwargs,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> Optional[KVCacheSpec]:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Does not need KV cache
         return None

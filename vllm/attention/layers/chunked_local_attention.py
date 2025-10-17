@@ -103,7 +103,7 @@ class ChunkedLocalAttention(Attention):
             attn_backend=attn_backend,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> Optional[KVCacheSpec]:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         assert self.attention_chunk_size
         return ChunkedLocalAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
