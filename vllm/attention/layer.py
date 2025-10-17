@@ -172,7 +172,6 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
-        self.block_size = block_size
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
@@ -409,6 +408,8 @@ class Attention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # Block size may get updated after model loading, refresh it
+        block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
         if self.sliding_window is not None:
@@ -416,7 +417,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 "MLA is not supported for slidingwindow"
             )
             return SlidingWindowSpec(
-                block_size=self.block_size,
+                block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
@@ -424,7 +425,7 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             return FullAttentionSpec(
-                block_size=self.block_size,
+                block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
@@ -624,7 +625,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             block_size = 16
             calculate_kv_scales = False
         self.kv_cache_dtype = kv_cache_dtype
-        self.block_size = block_size
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
@@ -791,7 +791,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype, vllm_config.model_config.dtype
         )
         return MLAAttentionSpec(
-            block_size=self.block_size,
+            block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
