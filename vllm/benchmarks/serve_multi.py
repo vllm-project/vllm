@@ -87,20 +87,28 @@ def benchmark_one_run(
     print(f"Benchmark command: {benchmark_cmd}")
     print(f"Output file: {result_path}")
 
-    if not dry_run:
-        # Create new process group for clean termination
-        server_process = subprocess.Popen(server_cmd, start_new_session=True)
+    if dry_run:
+        return None
 
-        try:
-            subprocess.run(benchmark_cmd, check=True)
-        finally:
-            if server_process.poll() is None:
-                # Process might already be terminated
-                with contextlib.suppress(ProcessLookupError):
-                    # Kill entire process group
-                    os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
+    # Create new process group for clean termination
+    server_process = subprocess.Popen(server_cmd, start_new_session=True)
 
-    return result_path
+    try:
+        subprocess.run(benchmark_cmd, check=True)
+    finally:
+        if server_process.poll() is None:
+            # Process might already be terminated
+            with contextlib.suppress(ProcessLookupError):
+                # Kill entire process group
+                os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
+
+    with open(result_path, "rb") as f:
+        run_data = json.load(f)
+
+    run_data["run_number"] = run_number
+    run_data.update(serve_comb)
+
+    return run_data
 
 
 def benchmark_one_comb(
@@ -115,9 +123,8 @@ def benchmark_one_comb(
     if not dry_run:
         os.makedirs(result_dir, exist_ok=True)
 
-    result_data = list[dict[str, object]]()
-    for run_number in range(num_runs):
-        result_path = benchmark_one_run(
+    comb_data = [
+        benchmark_one_run(
             serve_cmd=serve_cmd,
             bench_cmd=bench_cmd,
             serve_comb=serve_comb,
@@ -125,23 +132,16 @@ def benchmark_one_comb(
             result_dir=result_dir,
             dry_run=dry_run,
         )
-
-        if not dry_run:
-            with open(result_path, "rb") as f:
-                run_data = json.load(f)
-
-            run_data["run_number"] = run_number
-            run_data.update(serve_comb)
-
-            result_data.append(run_data)
+        for run_number in range(num_runs)
+    ]
 
     if dry_run:
         return None
 
     with open(os.path.join(result_dir, "summary.json"), "w") as f:
-        json.dump(result_data, f)
+        json.dump(comb_data, f)
 
-    return pd.DataFrame.from_records(result_data)
+    return pd.DataFrame.from_records(comb_data)
 
 
 def benchmark_all(
