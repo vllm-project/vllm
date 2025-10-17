@@ -1492,7 +1492,7 @@ class EngineArgs:
         if self.async_scheduling and (
                 parallel_config.distributed_executor_backend not in ("mp", "uni")):
             raise ValueError(
-                "Currently, async scheduling is only support `mp` or `uni` "
+                "Currently, async scheduling only supports `mp` or `uni` "
                 "distributed executor backend, but you choose "
                 f"`{parallel_config.distributed_executor_backend}`.")
 
