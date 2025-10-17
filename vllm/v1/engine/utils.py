@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Set
 from unittest.mock import patch
 
 import msgspec
@@ -1046,7 +1046,7 @@ def generate_unique_uuids(n: int):
     Returns:
         A set containing 'n' unique UUID objects
     """
-    uuids = set()
+    uuids: Set[uuid.UUID] = set()
     while len(uuids) < n:
         # Generate a random UUID (version 4) and add to the set
         uuids.add(uuid.uuid4())
