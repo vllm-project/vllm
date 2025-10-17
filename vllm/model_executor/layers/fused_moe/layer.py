@@ -2045,7 +2045,7 @@ class FusedMoE(CustomOp):
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
                 indices_type=indices_type,
-                fused_experts_method=fused_experts_method
+                fused_experts_method=fused_experts_method,
             )
 
         assert topk_ids.dtype == indices_type or indices_type is None

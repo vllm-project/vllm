@@ -1231,7 +1231,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            fused_experts_method=self.fused_experts)
+            fused_experts_method=self.fused_experts,
+        )
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1267,14 +1268,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+            )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
             assert activation == 'silu', (
-                f"Expected 'silu' activation but got {activation}")
+                f"Expected 'silu' activation but got {activation}"
+            )
             assert scoring_func == 'sigmoid', (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}")
+                f"Expected 'sigmoid' scoring func but got {scoring_func}"
+            )
             if self.fused_experts is not None:
                 return self.fused_experts(
                     x,

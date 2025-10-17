@@ -31,9 +31,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     deep_gemm_moe_fp8,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import ( 
-    FusedMoEModularKernel 
-)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -1302,7 +1300,7 @@ def eplb_map_to_physical_and_record(
         (fused_experts_method is not None)
         and isinstance(fused_experts_method, FusedMoEModularKernel)
         and fused_experts_method.have_expert_num_tokens()
-        )
+    )
     
     if not skip_expert_load_scatter_add: 
         logger.debug("expert_load_view update from topk_ids.")

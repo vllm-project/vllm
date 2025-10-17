@@ -191,7 +191,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         return False
 
     def have_expert_num_tokens(self) -> bool: 
-        return True
+        return False
 
     def prepare_async(
         self,
@@ -698,8 +698,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
-        # for EPLB 
-        self.local_to_global_physical_experts = None 
+        # for EPLB
+        self.local_to_global_physical_experts = None
         self.expert_map = None
         assert (
             prepare_finalize.activation_format == fused_experts.activation_formats[0]
@@ -941,14 +941,14 @@ class FusedMoEModularKernel(torch.nn.Module):
                 _expert_topk_weights,
             ) = receiver()
         
-        # In EPLB, update expert load from expert_num_tokens. 
-        if (expert_tokens_meta is not None and expert_load_view is not None 
-            and expert_tokens_meta.expert_num_tokens is not None 
-            and expert_map is not None): 
-            # Initialize the mapping of the local physical experts 
-            # to global physical experts, after which it will not change. 
-            # expert_load_view: (num_physical_experts,) 
-            # expert_num_tokens: (local_num_physical_experts,) 
+        # In EPLB, update expert load from expert_num_tokens.
+        if (expert_tokens_meta is not None and expert_load_view is not None
+            and expert_tokens_meta.expert_num_tokens is not None
+            and expert_map is not None):
+            # Initialize the mapping of the local physical experts
+            # to global physical experts, after which it will not change.
+            # expert_load_view: (num_physical_experts,)
+            # expert_num_tokens: (local_num_physical_experts,)
             if self.expert_map is None:
                 self.expert_map = expert_map.clone()
                 self.local_to_global_physical_experts = \
@@ -959,9 +959,9 @@ class FusedMoEModularKernel(torch.nn.Module):
                     self.local_to_global_physical_experts = \
                         torch.nonzero(expert_map != -1,
                                       as_tuple=False).squeeze()
-            expert_load_view.scatter_add_( 
-                dim=0, 
-                index=self.local_to_global_physical_experts, 
+            expert_load_view.scatter_add_(
+                dim=0,
+                index=self.local_to_global_physical_experts,
                 src=expert_tokens_meta.expert_num_tokens)
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
@@ -1170,9 +1170,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
-        - expert_load_view (Optional[torch.Tensor]): Optional tensor for 
-          tracking expert load statistics. If provided, the kernel will 
-          update it using ExpertTokensMetadata.expert_num_tokens for 
+        - expert_load_view (Optional[torch.Tensor]): Optional tensor for
+          tracking expert load statistics. If provided, the kernel will
+          update it using ExpertTokensMetadata.expert_num_tokens for
           better performance.
 
         Returns:
@@ -1195,7 +1195,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts,
             expert_map,
             apply_router_weight_on_input,
-            expert_load_view=expert_load_view
+            expert_load_view=expert_load_view,
         )
 
         fused_out = self._fused_experts(
