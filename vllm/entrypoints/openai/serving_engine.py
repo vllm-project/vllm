@@ -719,6 +719,15 @@ class OpenAIServing:
             error=ErrorInfo(message=message, type=err_type, code=status_code.value)
         )
 
+    def create_rejected_response(
+        self,
+    ) -> ErrorResponse:
+        return self.create_error_response(
+            message="Request rejected due to high load. Please try again later.",
+            err_type="SERVICE_UNAVAILABLE",
+            status_code=503,
+        )
+
     def create_streaming_error_response(
         self,
         message: str,
@@ -1316,6 +1325,9 @@ class OpenAIServing:
         if not model_name:
             return True
         return self.models.is_base_model(model_name)
+
+    def _check_rejected(self, request: CompletionOutput) -> bool:
+        return request.finish_reason == "rejected"
 
 
 def clamp_prompt_logprobs(

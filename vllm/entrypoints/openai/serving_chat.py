@@ -1279,6 +1279,8 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            if self._check_rejected(output):
+                return self.create_rejected_response()
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
