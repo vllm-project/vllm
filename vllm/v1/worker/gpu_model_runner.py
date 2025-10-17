@@ -1926,6 +1926,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
+        if (
+            self.scheduler_config.chunked_prefill_enabled
+            and "encode" in supported_tasks
+        ):
+            supported_tasks.remove("encode")
+
+            logger.debug_once(
+                "Chunked prefill is not supported with "
+                "encode task which using ALL pooling. "
+                "Please turn off chunked prefill by "
+                "`--no-enable-chunked-prefill` before using it."
+            )
+
         if "score" in supported_tasks:
             num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
             if num_labels != 1:
@@ -2020,17 +2033,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         pooling_metadata.build_pooling_cursor(
             num_scheduled_tokens_np.tolist(), device=hidden_states.device
         )
+        seq_lens_cpu = self.seq_lens.cpu[: self.input_batch.num_reqs]
 
         model = cast(VllmModelForPooling, self.model)
         raw_pooler_output: PoolerOutput = model.pooler(
             hidden_states=hidden_states,
             pooling_metadata=pooling_metadata,
         )
-        pooler_output = json_map_leaves(
+        raw_pooler_output = json_map_leaves(
             lambda x: x.to("cpu", non_blocking=True),
             raw_pooler_output,
         )
         self._sync_device()
+
+        pooler_output: list[torch.Tensor | None] = []
+        for raw_output, seq_len, prompt_len in zip(
+            raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens
+        ):
+            output = raw_output if seq_len == prompt_len else None
+            pooler_output.append(output)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -3600,12 +3621,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         supported_pooling_tasks = self.get_supported_pooling_tasks()
 
         if not supported_pooling_tasks:
-            raise RuntimeError(
-                f"Model {self.model_config.model} does not support "
-                "any pooling tasks. See "
-                "https://docs.vllm.ai/en/latest/models/pooling_models.html "
-                "to learn more."
-            )
+            if self.scheduler_config.chunked_prefill_enabled:
+                raise RuntimeError(
+                    f"Model {self.model_config.model} does not support "
+                    "any pooling tasks with chunked prefill enabled. "
+                    "Please add --no-enable-chunked-prefill to your "
+                    "config or CLI args. See "
+                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                    "to learn more."
+                )
+            else:
+                raise RuntimeError(
+                    f"Model {self.model_config.model} does not support "
+                    "any pooling tasks. See "
+                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                    "to learn more."
+                )
 
         output_size = dict[PoolingTask, float]()
         for task in supported_pooling_tasks:
