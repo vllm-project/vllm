@@ -360,6 +360,11 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     custom rms_norm and fused_rms_norm_add custom ops which did not complain about
     mismatched shapes during replacement. So this approach has the same assumption that
     correctness is only maintained if all rms_norm operations are split across ranks.
+
+    Correctness-wise, this is approach strictly better than before - before,
+    the graph was incorrect semantically and shape-wise during the pass.
+    With this approach there's only semantic incorrectness during the pass.
+    Both approaches restore a correct graph once all patterns are matched.
     """
 
     @enable_fake_mode
