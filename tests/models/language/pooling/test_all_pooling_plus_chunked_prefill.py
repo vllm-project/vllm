@@ -5,7 +5,7 @@ import torch
 from transformers import AutoModel
 
 from tests.models.utils import check_embeddings_close
-from vllm import PoolingParams, TokensPrompt
+from vllm import TokensPrompt
 
 
 @pytest.mark.parametrize(
@@ -17,7 +17,7 @@ from vllm import PoolingParams, TokensPrompt
 def test_embed_models(hf_runner, vllm_runner, model: str, dtype: str):
     chunk_size = 10
     n_prompt_tokens = 55
-    token_prompts = [[1024+i for i in range(n_prompt_tokens)]]
+    token_prompts = [[1024 + i for i in range(n_prompt_tokens)]]
 
     with vllm_runner(
         model,
@@ -28,11 +28,8 @@ def test_embed_models(hf_runner, vllm_runner, model: str, dtype: str):
         enable_chunked_prefill=True,
         max_num_batched_tokens=chunk_size,
     ) as vllm_model:
-        vllm_outputs = vllm_model.encode(
+        vllm_outputs = vllm_model.token_embed(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
-            pooling_params=PoolingParams(
-                softmax=False,
-            ),
         )
 
     with hf_runner(

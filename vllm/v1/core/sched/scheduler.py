@@ -1046,8 +1046,13 @@ class Scheduler(SchedulerInterface):
                 if len(pooling_outputs) == 1:
                     pooling_output = pooling_outputs[1]
                 else:
-                    assert len(set([x.shape[-1] for x in pooling_outputs])) == 1
-                    pooling_output = torch.concat(pooling_outputs, dim=0)
+                    if (
+                        all(isinstance(x, torch.Tensor) for x in pooling_outputs)
+                        and len(set([x.shape[-1] for x in pooling_outputs])) == 1
+                    ):
+                        pooling_output = torch.concat(pooling_outputs, dim=0)
+                    else:
+                        pooling_output = pooling_outputs
 
                 # Add EngineCoreOutput for this pooling Request.
                 outputs[request.client_index].append(
