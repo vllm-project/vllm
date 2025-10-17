@@ -52,9 +52,9 @@ from vllm.logger import init_logger
 from vllm.utils import (
     direct_register_custom_op,
     get_distributed_init_method,
-    resolve_obj_by_qualname,
     supports_custom_op,
 )
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 
 @dataclass
