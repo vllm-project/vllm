@@ -47,6 +47,14 @@ class SchedulerStats:
 
     num_corrupted_reqs: int = 0
 
+    # ===== SELF-SPEC METRICS =====
+    num_cached_reqs_in_accumulating: int = 0
+    """Number of requests currently in ACCUMULATING state"""
+
+    num_cached_reqs_in_verifying: int = 0
+    """Number of requests currently in VERIFYING state"""
+    # ===== END SELF-SPEC METRICS =====
+
 
 @dataclass
 class LoRAStats:

@@ -1169,8 +1169,20 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set)
             finished_req_ids.clear()
 
+        # Calculate self-spec state counts
+        num_cached_reqs_in_accumulating = 0
+        num_cached_reqs_in_verifying = 0
+        if self.use_self_specs:
+            for req in self.running:
+                if req.self_spec_state == SelfSpecState.ACCUMULATING:
+                    num_cached_reqs_in_accumulating += 1
+                elif req.self_spec_state == SelfSpecState.VERIFYING:
+                    num_cached_reqs_in_verifying += 1
+
         if (stats := self.make_stats(spec_decoding_stats,
-                                     kv_connector_stats)) is not None:
+                                     kv_connector_stats,
+                                     num_cached_reqs_in_accumulating,
+                                     num_cached_reqs_in_verifying)) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
@@ -1383,6 +1395,9 @@ class Scheduler(SchedulerInterface):
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
         kv_connector_stats: Optional[KVConnectorStats] = None,
+        # ===== SELF-SPEC ADDITIONS =====
+        num_cached_reqs_in_accumulating: int = 0,
+        num_cached_reqs_in_verifying: int = 0,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
@@ -1396,7 +1411,10 @@ class Scheduler(SchedulerInterface):
                               num_corrupted_reqs=sum(req.is_output_corrupted
                                                      for req in self.running),
                               kv_connector_stats=kv_connector_stats.data
-                              if kv_connector_stats else None)
+                              if kv_connector_stats else None,
+                              # ===== SELF-SPEC ADDITIONS =====
+                              num_cached_reqs_in_accumulating=num_cached_reqs_in_accumulating,
+                              num_cached_reqs_in_verifying=num_cached_reqs_in_verifying)
 
     def make_spec_decoding_stats(
         self,
