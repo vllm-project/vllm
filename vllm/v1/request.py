@@ -23,6 +23,13 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
+class SelfSpecState(enum.Enum):
+    """State for self-speculative decoding"""
+    NORMAL = "normal"  # Regular token generation
+    ACCUMULATING = "accumulating"  # Collecting tokens for verification
+    VERIFYING = "verifying"  # Verifying accumulated tokens
+
+
 class Request:
 
     def __init__(
@@ -91,6 +98,9 @@ class Request:
         ) if self.prompt_token_ids is not None else [0
                                                      ] * self.num_prompt_tokens
         self.num_output_placeholders = 0  # Used in async scheduling.
+        # Self-speculative decoding state and buffers
+        self.self_spec_state = SelfSpecState.NORMAL
+        self._pending_output_tokens: list[int] = []  # Tokens waiting for verification
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
@@ -167,11 +177,20 @@ class Request:
 
     @property
     def num_tokens(self) -> int:
-        return len(self._all_token_ids)
+        """Total tokens including pending (for scheduling)"""
+        return len(self._all_token_ids) + len(self._pending_output_tokens)
 
     @property
     def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self.spec_token_ids)
+        """Include both spec tokens and pending tokens"""
+        if self.self_spec_state == SelfSpecState.VERIFYING:
+            # During verification, spec_token_ids contains the tokens being verified
+            return len(self._all_token_ids) + len(self.spec_token_ids)
+        else:
+            # Normal/accumulating case: include regular spec tokens and pending self-spec tokens
+            return (len(self._all_token_ids) +
+                    len(self.spec_token_ids) +
+                    len(self._pending_output_tokens))
 
     @property
     def num_output_tokens(self) -> int:
@@ -200,6 +219,33 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    # Self-speculative decoding methods
+    def add_pending_token(self, token_id: int) -> None:
+        """Add a token to the pending verification buffer"""
+        assert self.self_spec_state == SelfSpecState.ACCUMULATING, \
+            f"Can only add pending tokens in ACCUMULATING state, got {self.self_spec_state}"
+        self._pending_output_tokens.append(token_id)
+
+    def start_self_spec_verification(self) -> list[int]:
+        """Start verification and return tokens to verify"""
+        assert self.self_spec_state == SelfSpecState.ACCUMULATING, \
+            f"Can only start verification from ACCUMULATING state, got {self.self_spec_state}"
+        self.self_spec_state = SelfSpecState.VERIFYING
+        # Move pending tokens to spec_token_ids for verification
+        self.spec_token_ids = self._pending_output_tokens.copy()
+        # Clear pending tokens
+        self._pending_output_tokens.clear()
+        return self.spec_token_ids
+
+    def get_pending_tokens(self) -> list[int]:
+        """Get current pending tokens (for data transfer to workers)"""
+        return self._pending_output_tokens.copy()
+
+    @property
+    def is_in_self_spec_mode(self) -> bool:
+        """Check if request is in any self-spec state (not NORMAL)"""
+        return self.self_spec_state != SelfSpecState.NORMAL
 
 
 class RequestStatus(enum.IntEnum):
