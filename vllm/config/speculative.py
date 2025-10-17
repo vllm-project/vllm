@@ -565,6 +565,9 @@ class SpeculativeConfig:
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
 
+    def use_self_specs(self) -> bool:
+        return self.method == "self_specs"
+
     def __repr__(self) -> str:
         method = self.method
         if method == "ngram" or method == "self_specs":
