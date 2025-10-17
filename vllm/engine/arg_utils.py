@@ -1114,16 +1114,13 @@ class EngineArgs:
 
             self.mm_encoder_tp_mode = "data"
 
-        kwargs = dict[str, Any]()
-        if self.tokenizer is not None:
-            kwargs["tokenizer"] = self.tokenizer
-
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
             task=self.task,
+            tokenizer=self.tokenizer,  # type: ignore[arg-type]
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
@@ -1168,7 +1165,6 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
-            **kwargs,
         )
 
     def validate_tensorizer_args(self):

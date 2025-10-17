@@ -10,7 +10,7 @@ from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
-from pydantic import ConfigDict, Field, SkipValidation, field_validator, model_validator
+from pydantic import ConfigDict, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
@@ -120,7 +120,7 @@ class ModelConfig:
 
     Note that the model may support other tasks using the same model runner.
     """
-    tokenizer: str = Field(default=None)
+    tokenizer: str = None
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
@@ -171,7 +171,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None)
+    max_model_len: int = None
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -182,7 +182,7 @@ class ModelConfig:
     - 25.6k -> 25,600"""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
-    quantization: SkipValidation[QuantizationMethods | None] = None
+    quantization: str | QuantizationMethods | None = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
@@ -301,6 +301,13 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+
+    @field_validator("tokenizer", "max_model_len", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
 
     def compute_hash(self) -> str:
         """
