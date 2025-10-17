@@ -29,6 +29,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
+from vllm.v1.core.kv_cache_utils import UniformTypeKVCacheSpecs
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -330,11 +331,16 @@ class Worker(WorkerBase):
             page_size_bytes_set = set(
                 layer_spec.page_size_bytes for layer_spec in kv_cache_specs.values()
             )
-            assert len(page_size_bytes_set) == 1, "Only support one page size for now"
+            if len(page_size_bytes_set) == 1:
+                page_size_bytes = page_size_bytes_set.pop()
+            elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_specs):
+                page_size_bytes = uniform_spec.page_size_bytes
+            else:
+                raise ValueError("Cannot determine page size from kv cache specs")
             num_layers = len(kv_cache_specs)
 
             estimated_max_kv_tokens = (
-                available_memory // page_size_bytes_set.pop() // num_layers
+                available_memory // page_size_bytes // num_layers
             ) * self.cache_config.block_size
             available_memory = workspace_manager.adjust_available_kv_cache_memory(
                 available_memory,
