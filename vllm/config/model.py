@@ -1769,9 +1769,7 @@ class ModelConfig:
             True if model is quantized.
             False otherwise.
         """
-        assert hasattr(self, "hf_config")
         return getattr(self.hf_config, "quantization_config", None) is not None
-
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
     """
