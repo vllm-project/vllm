@@ -127,7 +127,7 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    # prefer FlashInfer backends when available and enabled on supported GPUs
+    # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
     if (
         current_platform.is_cuda()
         and (
@@ -142,6 +142,7 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
             logger.info_once("Using FlashInfer FP8 MoE TRTLLM backend for SM100")
             return Fp8MoeBackend.FLASHINFER_TRTLLM
         else:
+            # CUTLASS path covers both SM90 and SM100
             logger.info_once("Using FlashInfer FP8 MoE CUTLASS backend for SM90/SM100")
             return Fp8MoeBackend.FLASHINFER_CUTLASS
 
@@ -716,6 +717,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
             if self.block_quant:
+                # For block-quantized weights, enable the CUTLASS block-scale path
                 self.flashinfer_moe_fn = partial(
                     flashinfer_cutlass_moe_fp8,
                     moe=self.moe,
@@ -1107,6 +1109,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # Wire block-scale flag through prepare/finalize when using CUTLASS
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
                 self.moe,
                 use_deepseek_fp8_block_scale=self.block_quant is not None,
@@ -1153,6 +1156,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # Select GEMM experts with block-scale when weights are block-quantized
             experts = select_cutlass_fp8_gemm_impl(
                 self.moe,
                 self.moe_quant_config,
@@ -1353,6 +1357,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 f"Expected 'sigmoid' scoring func but got {scoring_func}"
             )
 
+            # Delegate to CUTLASS FlashInfer path; function already bound with
+            # use_deepseek_fp8_block_scale for block-quant when applicable
             result = self.flashinfer_moe_fn(
                 x,
                 layer,
