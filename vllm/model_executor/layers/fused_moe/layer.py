@@ -332,7 +332,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         fused_experts: FusedMoEModularKernel,
     ):
         super().__init__(old_moe_method.moe)
-        # Find better way to copy attributes
+        # Find better way to copy attributes?
         # self.__dict__.update(old_moe_method.__dict__)
 
         self.moe_quant_config = old_moe_method.moe_quant_config
