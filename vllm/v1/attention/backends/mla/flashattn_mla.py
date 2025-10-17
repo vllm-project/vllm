@@ -113,7 +113,14 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             self.max_num_splits = 1
 
     def _schedule_decode(
-        self, num_reqs, cu_query_lens, max_query_len, seqlens, max_seq_len, causal, max_num_splits
+        self,
+        num_reqs,
+        cu_query_lens,
+        max_query_len,
+        seqlens,
+        max_seq_len,
+        causal,
+        max_num_splits,
     ):
         if self.fa_aot_schedule:
             return get_scheduler_metadata(
@@ -150,8 +157,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0
-        if self.use_full_cuda_graph and \
-                num_decode_tokens <= self.max_cudagraph_size:
+        if self.use_full_cuda_graph and num_decode_tokens <= self.max_cudagraph_size:
             # NOTE(woosuk): Setting num_splits > 1 may increase the memory
             # usage, because the intermediate buffers of size [num_splits,
             # num_heads, num_tokens, head_size] are allocated. Therefore,
