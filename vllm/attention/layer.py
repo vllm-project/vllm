@@ -34,14 +34,11 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
-from vllm.utils import GiB_bytes, direct_register_custom_op
+from vllm.utils import direct_register_custom_op
 
+FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
-try:
-    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe,)
-except AttributeError:
-    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
 def check_xformers_availability():
@@ -284,31 +281,16 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         ]
 
-        try:
-            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-        except torch.cuda.OutOfMemoryError as e:
-            logger.error("Failed to initialize attention q/k/v range constants: %s", e)
-            if torch.cuda.is_available():
-                logger.debug("CUDA device: %s", torch.cuda.current_device())
-                logger.debug(
-                    "Allocated: %.2f GiB", torch.cuda.memory_allocated() / GiB_bytes
-                )
-                logger.debug(
-                    "Reserved: %.2f GiB", torch.cuda.memory_reserved() / GiB_bytes
-                )
-            raise RuntimeError(
-                "Failed to initialize q/k/v range constants. "
-                "This may be caused by insufficient memory to allocate "
-                "kv cache."
-            ) from e
+        # Initialize q/k/v range constants.
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
             self.kv_cache_dtype.startswith("fp8")
-            and self.attn_backend.supports_quant_query_input
+            and self.impl.supports_quant_query_input()
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
@@ -333,7 +315,6 @@ class Attention(nn.Module, AttentionLayerBase):
         """
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
-
         output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
@@ -342,11 +323,14 @@ class Attention(nn.Module, AttentionLayerBase):
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
-            query, _ = self.query_quant(query, self._q_scale)
+
+            # check if query quantization is supported
+            if self.impl.supports_quant_query_input():
+                query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
             output_shape = output_shape if output_shape is not None else query.shape
-            output = torch.zeros(output_shape, dtype=output_dtype, device=query.device)
+            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
             hidden_size = output_shape[-1]
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
@@ -405,16 +389,7 @@ class Attention(nn.Module, AttentionLayerBase):
         return s
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading(act_dtype)
-
-        # FlashInfer requires attention sinks to be float32
-        if self.backend == _Backend.FLASHINFER and hasattr(self.impl, "sinks"):
-            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
-
-            assert isinstance(self.impl, FlashInferImpl)
-            if self.impl.sinks is not None and self.impl.sinks.dtype != torch.float32:
-                self.impl.sinks = self.impl.sinks.to(torch.float32)
+        self.impl.process_weights_after_loading(act_dtype)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -591,6 +566,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
+        **extra_impl_args,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -643,6 +619,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
+            **extra_impl_args,
         )
 
         self.use_direct_call = not current_platform.opaque_attention_op()
@@ -676,13 +653,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         # Initialize q/k/v range constants.
-        try:
-            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-        except torch.cuda.OutOfMemoryError:
-            # Keep defaults if allocation fails; not critical for init.
-            pass
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
     def forward(
         self,
@@ -705,7 +678,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
-                output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
+                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.impl.forward(
                     self,
                     q,
@@ -722,7 +695,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             if self.attn_backend.accept_output_buffer:
-                output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
+                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
                     kv_c_normed,
@@ -879,7 +852,6 @@ direct_register_custom_op(
     op_name="unified_attention",
     op_func=unified_attention,
     fake_impl=unified_attention_fake,
-    tags=tag_cudagraph_unsafe,
 )
 
 
@@ -931,7 +903,6 @@ direct_register_custom_op(
     op_func=unified_attention_with_output,
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
-    tags=tag_cudagraph_unsafe,
 )
 
 

@@ -8,7 +8,7 @@ from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
@@ -419,7 +419,7 @@ class Fp8LinearOp:
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
             pad_output = (
-                config.level < CompilationLevel.PIECEWISE
+                config.mode < CompilationMode.VLLM_COMPILE
                 and self.preferred_backend == "torch"
             )
 
@@ -464,8 +464,16 @@ class Fp8LinearOp:
         else:
             qinput, x_scale = input_2d, input_scale
 
-        per_tensor_weights = weight_scale.numel() == 1
-        per_tensor_activations = x_scale.numel() == 1
+        # Must have dim() conditions
+        # In per-token quant scenario, when the number of token is 1,
+        # the scale will only have 1 elements.
+        # Without checking the dim(),
+        # we cannot distingushes between per-tensor and per-token quant.
+        # Example:
+        # When the number of token is 1, per-token scale is [[1]]
+        # When per-tensor scale is [1] or ().
+        per_tensor_weights = (weight_scale.numel() == 1) and weight_scale.dim() < 2
+        per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(

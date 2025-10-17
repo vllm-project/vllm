@@ -162,6 +162,31 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
     return {"type": option_type, kwarg: sorted(options)}
 
 
+def collection_to_kwargs(type_hints: set[TypeHint], type: TypeHint) -> dict[str, Any]:
+    type_hint = get_type(type_hints, type)
+    types = get_args(type_hint)
+    elem_type = types[0]
+
+    # Handle Ellipsis
+    assert all(t is elem_type for t in types if t is not Ellipsis), (
+        f"All non-Ellipsis elements must be of the same type. Got {types}."
+    )
+
+    # Handle Union types
+    if get_origin(elem_type) in {Union, UnionType}:
+        # Union for Union[X, Y] and UnionType for X | Y
+        assert str in get_args(elem_type), (
+            "If element can have multiple types, one must be 'str' "
+            f"(i.e. 'list[int | str]'). Got {elem_type}."
+        )
+        elem_type = str
+
+    return {
+        "type": elem_type,
+        "nargs": "+" if type is not tuple or Ellipsis in types else len(types),
+    }
+
+
 def is_not_builtin(type_hint: TypeHint) -> bool:
     """Check if the class is not a built-in type."""
     return type_hint.__module__ != "builtins"
@@ -251,26 +276,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, Literal):
             kwargs[name].update(literal_to_kwargs(type_hints))
         elif contains_type(type_hints, tuple):
-            type_hint = get_type(type_hints, tuple)
-            types = get_args(type_hint)
-            tuple_type = types[0]
-            assert all(t is tuple_type for t in types if t is not Ellipsis), (
-                "All non-Ellipsis tuple elements must be of the same "
-                f"type. Got {types}."
-            )
-            kwargs[name]["type"] = tuple_type
-            kwargs[name]["nargs"] = "+" if Ellipsis in types else len(types)
+            kwargs[name].update(collection_to_kwargs(type_hints, tuple))
         elif contains_type(type_hints, list):
-            type_hint = get_type(type_hints, list)
-            types = get_args(type_hint)
-            list_type = types[0]
-            if get_origin(list_type) in {Union, UnionType}:
-                # Union for Union[X, Y] and UnionType for X | Y
-                msg = "List type must contain str if it is a Union."
-                assert str in get_args(list_type), msg
-                list_type = str
-            kwargs[name]["type"] = list_type
-            kwargs[name]["nargs"] = "+"
+            kwargs[name].update(collection_to_kwargs(type_hints, list))
+        elif contains_type(type_hints, set):
+            kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
@@ -371,6 +381,7 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    all2all_backend: str | None = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
@@ -410,6 +421,7 @@ class EngineArgs:
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
+    aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
     rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
@@ -762,6 +774,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
         )
+        parallel_group.add_argument(
+            "--all2all-backend", **parallel_kwargs["all2all_backend"]
+        )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -1043,6 +1058,12 @@ class EngineArgs:
             help="Disable logging statistics.",
         )
 
+        parser.add_argument(
+            "--aggregate-engine-logging",
+            action="store_true",
+            help="Log aggregate rather than per-engine statistics "
+            "when using data parallelism.",
+        )
         return parser
 
     @classmethod
@@ -1382,8 +1403,15 @@ class EngineArgs:
                 "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
             )
 
-            # Local DP size defaults to global DP size if not set.
-            data_parallel_size_local = self.data_parallel_size
+            if self.data_parallel_backend == "ray" and (
+                envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
+            ):
+                # Data parallel size defaults to 1 if DP ranks are spanning
+                # multiple nodes
+                data_parallel_size_local = 1
+            else:
+                # Otherwise local DP size defaults to global DP size if not set
+                data_parallel_size_local = self.data_parallel_size
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
@@ -1412,13 +1440,6 @@ class EngineArgs:
         )
 
         if self.async_scheduling:
-            # Async scheduling does not work with the uniprocess backend.
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "mp"
-                logger.info(
-                    "Defaulting to mp-based distributed executor "
-                    "backend for async scheduling."
-                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Async scheduling is not supported with pipeline-parallel-size > 1."
@@ -1454,6 +1475,7 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
+            all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
@@ -1473,6 +1495,15 @@ class EngineArgs:
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
+
+        if self.async_scheduling and (
+            parallel_config.distributed_executor_backend not in ("mp", "uni")
+        ):
+            raise ValueError(
+                "Currently, async scheduling only supports `mp` or `uni` "
+                "distributed executor backend, but you choose "
+                f"`{parallel_config.distributed_executor_backend}`."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1594,13 +1625,6 @@ class EngineArgs:
             )
             return False
 
-        # No Mamba or Encoder-Decoder so far.
-        if not model_config.is_v1_compatible:
-            _raise_or_fallback(
-                feature_name=model_config.architectures, recommend_to_remove=False
-            )
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (
             self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
@@ -1689,7 +1713,7 @@ class EngineArgs:
     ) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # V1 always uses chunked prefills and prefix caching
+        # V1 uses chunked prefills and prefix caching by default
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
@@ -1729,11 +1753,6 @@ class EngineArgs:
             if self.enable_prefix_caching is None:
                 self.enable_prefix_caching = incremental_prefill_supported
                 logger.info("(%s) prefix caching by default", action)
-
-        # V1 should use the new scheduler by default.
-        # Swap it only if this arg is set to the original V0 default
-        if self.scheduler_cls == EngineArgs.scheduler_cls:
-            self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
         # When no user override, set the default values based on the usage
         # context.
