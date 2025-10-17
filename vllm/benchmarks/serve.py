@@ -64,6 +64,7 @@ class TaskType(Enum):
 @dataclass
 class BenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     total_output: int
     request_throughput: float
@@ -97,6 +98,7 @@ class BenchmarkMetrics:
 @dataclass
 class EmbedBenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     request_throughput: float
     total_token_throughput: float
@@ -239,12 +241,15 @@ def calculate_metrics_for_embeddings(
     """
     total_input = 0
     completed = 0
+    failed = 0
     e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             e2els.append(outputs[i].latency)
             completed += 1
             total_input += outputs[i].prompt_len
+        else:
+            failed += 1
 
     if completed == 0:
         warnings.warn(
@@ -254,6 +259,7 @@ def calculate_metrics_for_embeddings(
         )
     metrics = EmbedBenchmarkMetrics(
         completed=completed,
+        failed=failed,
         total_input=total_input,
         request_throughput=completed / dur_s,
         total_token_throughput=total_input / dur_s,
@@ -366,6 +372,7 @@ def calculate_metrics(
 
     # Find the time range across all successful requests
     successful_outputs = [output for output in outputs if output.success]
+    failed_outputs = [output for output in outputs if not output.success]
     if successful_outputs:
         min_start_time = min(output.start_time for output in successful_outputs)
         max_end_time = max(
@@ -427,6 +434,7 @@ def calculate_metrics(
 
     metrics = BenchmarkMetrics(
         completed=completed,
+        failed=len(failed_outputs),
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
@@ -478,6 +486,7 @@ async def benchmark(
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
+    num_warmups: int,
     profile: bool,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
@@ -559,9 +568,36 @@ async def benchmark(
                 f"Error: {test_output.error}"
             )
         else:
-            print("Initial test run completed. Starting main benchmark run...")
+            print("Initial test run completed.")
     else:
         print("Skipping endpoint ready check.")
+
+    if num_warmups > 0:
+        print(f"Warming up with {num_warmups} requests...")
+        warmup_pbar = None if disable_tqdm else tqdm(total=num_warmups)
+        warmup_semaphore = (
+            asyncio.Semaphore(max_concurrency)
+            if max_concurrency
+            else contextlib.nullcontext()
+        )
+        warmup_tasks = []
+
+        async def warmup_limited_request_func():
+            async with warmup_semaphore:
+                return await request_func(
+                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                )
+
+        for _ in range(num_warmups):
+            request_task = asyncio.create_task(warmup_limited_request_func())
+            warmup_tasks.append(request_task)
+        _ = await asyncio.gather(*warmup_tasks)
+
+        if warmup_pbar is not None:
+            warmup_pbar.close()
+        print("Warmup run completed.")
+
+    print("Starting main benchmark run...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -706,6 +742,7 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    print("{:<40} {:<10}".format("Failed requests:", metrics.failed))
     if max_concurrency is not None:
         print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
     if request_rate != float("inf"):
@@ -751,6 +788,7 @@ async def benchmark(
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
+            "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
             "total_output_tokens": metrics.total_output,
             "request_throughput": metrics.request_throughput,
@@ -1028,6 +1066,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--disable-tqdm",
         action="store_true",
         help="Specify to disable tqdm progress bar.",
+    )
+    parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=0,
+        help="Number of warmup requests.",
     )
     parser.add_argument(
         "--profile",
@@ -1370,6 +1414,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         request_rate=args.request_rate,
         burstiness=args.burstiness,
         disable_tqdm=args.disable_tqdm,
+        num_warmups=args.num_warmups,
         profile=args.profile,
         selected_percentile_metrics=percentile_metrics.split(","),
         selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],

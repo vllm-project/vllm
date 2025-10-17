@@ -652,6 +652,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
         trust_remote_code=True,
     ),
+    "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
+        "lightonai/LightOnOCR-1B",
+        is_available_online=False,
+    ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         max_model_len=10240,
@@ -912,11 +916,11 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
         "allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"
     ),
-    "TransformersMoEForMultimodalLM": _HfExamplesInfo(
+    "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="4.57.0.dev0"
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
@@ -924,6 +928,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
         "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+    ),
+    "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(
+        "google/gemma-3-4b-it"
     ),
 }
 

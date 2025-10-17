@@ -16,7 +16,7 @@ For MoE models, when any requests are in progress in any rank, we must ensure th
 
 In all cases, it is beneficial to load-balance requests between DP ranks. For online deployments, this balancing can be optimized by taking into account the state of each DP engine - in particular its currently scheduled and waiting (queued) requests, and KV cache state. Each DP engine has an independent KV cache, and the benefit of prefix caching can be maximized by directing prompts intelligently.
 
-This document focuses on online deployments (with the API server). DP + EP is also supported for offline usage (via the LLM class), for an example see <gh-file:examples/offline_inference/data_parallel.py>.
+This document focuses on online deployments (with the API server). DP + EP is also supported for offline usage (via the LLM class), for an example see [examples/offline_inference/data_parallel.py](../../examples/offline_inference/data_parallel.py).
 
 There are two distinct modes supported for online deployments - self-contained with internal load balancing, or externally per-rank process deployment and load balancing.
 
