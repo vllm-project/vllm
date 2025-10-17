@@ -4,6 +4,7 @@
 
 from typing import Literal
 
+from pydantic import Field
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -19,7 +20,7 @@ class KVEventsConfig:
     Events can be published externally by zmq using the event publisher config.
     """
 
-    publisher: Literal["null", "zmq"] = "zmq"
+    publisher: Literal["null", "zmq"] = Field(default=None)
     """The publisher to use for publishing kv events. Can be "null", "zmq".
     """
 
@@ -49,3 +50,9 @@ class KVEventsConfig:
     """The topic to use for the event publisher. Consumers can subscribe to
     this topic to receive events.
     """
+
+    def __post_init__(self):
+        if self.publisher is None and self.enable_kv_cache_events:
+            self.publisher = "zmq"
+        else:
+            self.publisher = "null"
