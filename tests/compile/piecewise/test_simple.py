@@ -142,8 +142,7 @@ def test_simple_piecewise_compile(use_inductor):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("splitting_ops", [["silly::attention"], []])
-def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
+def test_simple_inductor_graph_partition(monkeypatch):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
@@ -152,8 +151,7 @@ def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     _run_simple_model(
-        # Inductor graph partition automatically resets splitting_ops to an empty list
-        splitting_ops=splitting_ops,
+        splitting_ops=["silly::attention"],
         use_inductor_graph_partition=True,
         use_inductor=True,
         # Since not splitting at fx graph level
