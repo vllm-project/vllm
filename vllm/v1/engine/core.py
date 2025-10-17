@@ -424,7 +424,9 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        # TODO TBD return outputs here first?
+        # NOTE(nick): We can either handle the deferred tasks here or save
+        # in a field and do it immediately once step_with_batch_queue is
+        # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
