@@ -88,6 +88,7 @@ def test_pooling_chunked_prefill(vllm_runner, monkeypatch):
             tensor_parallel_size=1,
             enforce_eager=True,
             enable_chunked_prefill=True,
+            gpu_memory_utilization=0.8
         ) as llm:
             llm.get_llm().llm_engine.collective_rpc(inject_pooler)
 

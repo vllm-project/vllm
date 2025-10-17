@@ -163,14 +163,14 @@ class PoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> (list[torch.Tensor] | torch.Tensor, torch.Tensor | None):
         raise NotImplementedError
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> (list[torch.Tensor] | torch.Tensor, torch.Tensor | None):
         pooling_cursor = pooling_metadata.pooling_cursor
         return self.forward_all(hidden_states, pooling_cursor)
 
@@ -183,12 +183,12 @@ class CLSPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> (list[torch.Tensor] | torch.Tensor, torch.Tensor | None):
         assert not pooling_cursor.is_partial_prefill(), (
             "partial prefill not supported with CLS pooling"
         )
 
-        return hidden_states[pooling_cursor.first_token_indices_gpu]
+        return hidden_states[pooling_cursor.first_token_indices_gpu], None
 
 
 class LastPool(PoolingMethod):
@@ -199,8 +199,9 @@ class LastPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
-        return hidden_states[pooling_cursor.last_token_indices_gpu]
+    ) -> (list[torch.Tensor] | torch.Tensor, torch.Tensor | None):
+        is_finished = pooling_cursor.is_finished()
+        return hidden_states[pooling_cursor.last_token_indices_gpu], is_finished
 
 
 class AllPool(PoolingMethod):
@@ -211,12 +212,12 @@ class AllPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> (list[torch.Tensor] | torch.Tensor, torch.Tensor | None):
 
         hidden_states_lst = list(
             hidden_states.split(pooling_cursor.num_scheduled_tokens_cpu.tolist())
         )
-        return [hidden_states_lst[i] for i in pooling_cursor.index]
+        return [hidden_states_lst[i] for i in pooling_cursor.index], None
 
 
 class MeanPool(PoolingMethod):
@@ -227,7 +228,7 @@ class MeanPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> (list[torch.Tensor] | torch.Tensor, torch.Tensor | None):
         assert not pooling_cursor.is_partial_prefill(), (
             "partial prefill not supported with MEAN pooling"
         )
@@ -244,7 +245,7 @@ class MeanPool(PoolingMethod):
         end_indices = pooling_cursor.last_token_indices_gpu
         return (
             cumsum[end_indices] - cumsum[start_indices] + hidden_states[start_indices]
-        ) / prompt_lens.unsqueeze(1)
+        ) / prompt_lens.unsqueeze(1), None
 
 
 _T = TypeVar("_T", torch.Tensor, list[torch.Tensor])
@@ -419,9 +420,10 @@ class PoolerHead(nn.Module):
     def forward(
         self,
         pooled_data: list[torch.Tensor] | torch.Tensor,
+        is_finished: torch.Tensor | None,
         pooling_metadata: PoolingMetadata,
     ):
-        return self.activation(pooled_data)
+        raise NotImplementedError
 
 
 class EmbeddingPoolerHead(PoolerHead):
@@ -434,12 +436,18 @@ class EmbeddingPoolerHead(PoolerHead):
             _load_st_projector(vllm_config.model_config) if vllm_config else None
         )
         self.head_dtype = vllm_config.model_config.head_dtype
+        self.embedding_dimension = vllm_config.model_config.embedding_size
 
     def forward(
         self,
         pooled_data: list[torch.Tensor] | torch.Tensor,
+        is_finished: torch.Tensor | None,
         pooling_metadata: PoolingMetadata,
     ):
+        embedding_dimension = self.embedding_dimension
+        if is_finished is not None:
+            pooled_data = pooled_data[is_finished]
+
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
@@ -453,6 +461,9 @@ class EmbeddingPoolerHead(PoolerHead):
 
         pooling_params = get_pooling_params(pooling_metadata)
 
+        if is_finished is not None:
+            pooling_params = [p for p, f in zip(pooling_params, is_finished) if f]
+
         # for matryoshka representation
         dimensions_list = [pooling_param.dimensions for pooling_param in pooling_params]
         if any(d is not None for d in dimensions_list):
@@ -460,8 +471,8 @@ class EmbeddingPoolerHead(PoolerHead):
             assert len(pooled_data) == len(dimensions_list)
             if len(set(dimensions_list)) == 1 and not isinstance(pooled_data, list):
                 # if all dimensions are the same
-                d = dimensions_list[0]
-                pooled_data = pooled_data[..., :d]
+                embedding_dimension = dimensions_list[0]
+                pooled_data = pooled_data[..., :embedding_dimension]
             else:
                 pooled_data = [
                     vecs if d is None else vecs[..., :d]
@@ -478,6 +489,23 @@ class EmbeddingPoolerHead(PoolerHead):
                 self.activation(vecs) if f else vecs
                 for vecs, f in zip(pooled_data, flags)
             ]
+
+        if is_finished is not None:
+            if isinstance(pooled_data, list):
+                i = 0
+                tmp = []
+                for flag in is_finished:
+                    if flag:
+                        tmp.append(pooled_data[i])
+                        i += 1
+                    else:
+                        tmp.append(None)
+                pooled_data = tmp
+            else:
+                batchsize = is_finished.shape[0]
+                tmp = torch.empty((batchsize, embedding_dimension), dtype=self.head_dtype, device=pooled_data.device)
+                tmp[is_finished] = pooled_data
+                pooled_data = tmp
 
         # pooled_data shape: [batchsize, embedding_dimension]
         return pooled_data
@@ -509,8 +537,8 @@ class SimplePooler(Pooler):
         hidden_states: torch.Tensor | list[torch.Tensor],
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
+        pooled_data, is_finished = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self.head(pooled_data, is_finished, pooling_metadata)
         return pooled_data
 
 
@@ -568,6 +596,9 @@ class ClassifierPooler(Pooler):
             vllm_config.model_config.pooler_config.logit_bias
         )
         self.head_dtype = vllm_config.model_config.head_dtype
+        self.num_labels = getattr(
+                vllm_config.model_config.hf_config, "num_labels", 0
+            )
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -577,7 +608,10 @@ class ClassifierPooler(Pooler):
         hidden_states: torch.Tensor | list[torch.Tensor],
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data, is_finished = self.pooling(hidden_states, pooling_metadata)
+        if is_finished is not None:
+            pooled_data = pooled_data[is_finished]
+
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
@@ -592,6 +626,9 @@ class ClassifierPooler(Pooler):
             pooled_data -= self.logit_bias
 
         pooling_params = get_pooling_params(pooling_metadata)
+        if is_finished is not None:
+            pooling_params = [p for p, f in zip(pooling_params, is_finished) if f]
+
         flags = [p.activation for p in pooling_params]
 
         if len(set(flags)) == 1:
@@ -600,6 +637,23 @@ class ClassifierPooler(Pooler):
             scores = [
                 self.act_fn(vecs) if f else vecs for vecs, f in zip(pooled_data, flags)
             ]
+
+        if is_finished is not None:
+            if isinstance(scores, list):
+                i = 0
+                tmp = []
+                for flag in is_finished:
+                    if flag:
+                        tmp.append(scores[i])
+                        i += 1
+                    else:
+                        tmp.append(None)
+                scores = tmp
+            else:
+                batchsize = is_finished.shape[0]
+                tmp = torch.empty((batchsize, self.num_labels), dtype=self.head_dtype, device=pooled_data.device)
+                tmp[is_finished] = scores
+                scores = tmp
 
         # scores shape: [batchsize, num_labels]
         return scores
@@ -688,7 +742,7 @@ class AllPooler(Pooler):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data, is_finished = self.pooling(hidden_states, pooling_metadata)
         pooling_params = get_pooling_params(pooling_metadata)
         assert len(pooled_data) == len(pooling_params)
 

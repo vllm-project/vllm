@@ -2025,7 +2025,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooling_metadata=pooling_metadata,
         )
         pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True),
+            lambda x: x.to("cpu", non_blocking=True)
+            if isinstance(x, torch.Tensor)
+            else x,
             raw_pooler_output,
         )
         self._sync_device()

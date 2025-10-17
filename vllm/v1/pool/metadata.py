@@ -28,7 +28,10 @@ class PoolingCursor:
         )
 
     def is_partial_prefill(self):
-        return not torch.all(self.prompt_lens_cpu == self.num_scheduled_tokens_cpu)
+        return not torch.all(self.is_finished())
+
+    def is_finished(self):
+        return self.prompt_lens_cpu == self.num_scheduled_tokens_cpu
 
 
 @dataclass
