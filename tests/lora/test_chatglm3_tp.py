@@ -53,9 +53,10 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
-        max_model_len=1024,
+        max_model_len=512,
         enable_lora=True,
         max_loras=4,
+        max_num_seqs=16,
         max_lora_rank=64,
         trust_remote_code=True,
     )
@@ -72,10 +73,11 @@ def test_chatglm3_lora(chatglm3_lora_files):
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
-        max_model_len=1024,
+        max_model_len=512,
         enable_lora=True,
         max_loras=4,
         max_lora_rank=64,
+        max_num_seqs=16,
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=False,
@@ -96,7 +98,7 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
     # more GPU memory causing vLLM to OOM
     llm = vllm.LLM(
         MODEL_PATH,
-        max_model_len=1024,
+        max_model_len=512,
         enable_lora=True,
         max_loras=4,
         max_lora_rank=64,
