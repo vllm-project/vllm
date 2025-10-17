@@ -22,6 +22,7 @@ from vllm.compilation.partition_rules import (
     resolve_defined_ops,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
@@ -603,12 +604,14 @@ class VllmBackend:
 
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
 
-        if disable_cache:
-            logger.info("vLLM's torch.compile cache is disabled.")
-        else:
-            logger.debug(
-                "Using cache directory: %s for vLLM's torch.compile", local_cache_dir
-            )
+        if is_global_first_rank():
+            if disable_cache:
+                logger.info_once("vLLM's torch.compile cache is disabled.")
+            else:
+                logger.info_once(
+                    "Using cache directory: %s for vLLM's torch.compile",
+                    local_cache_dir,
+                )
 
         self.compiler_manager.initialize_cache(
             local_cache_dir, disable_cache, self.prefix
