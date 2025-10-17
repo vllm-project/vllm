@@ -380,6 +380,7 @@ class VllmConfig:
                         current_platform.is_cuda()
                         and current_platform.is_device_capability(100)
                         and self.model_config.max_model_len > 131072
+                        and not self.model_config.use_mla
                     ):
                         # Refer to vllm/utils/flashinfer.py::use_trtllm_attention()
                         logger.warning_once(
