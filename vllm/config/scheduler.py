@@ -80,7 +80,7 @@ class SchedulerConfig:
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
-    enable_hybrid_chunked_prefill: bool | None = Field(default=None)  # type: ignore
+    enable_hybrid_chunked_prefill: bool | None = None
     """If True, prefill requests will only be chunked when there are decode 
     requests present, otherwise they will proceed with normal prefill 
     computation to increase throughput."""
