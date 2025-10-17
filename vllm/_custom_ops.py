@@ -1507,7 +1507,7 @@ def scaled_fp8_quant(
                 output, input, scale, scale_ub
             )
         else:
-            scale = torch.empty(1, device=input.device, dtype=torch.float32)
+            scale = torch.empty((1, 1), device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         assert scale.numel() == 1, f"{scale.shape}"
@@ -1850,9 +1850,10 @@ def topk_softmax(
     topk_ids: torch.Tensor,
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
+    renormalize: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
-        topk_weights, topk_ids, token_expert_indices, gating_output
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
 
