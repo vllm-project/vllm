@@ -60,11 +60,15 @@ def test_moe_lora_align_block_size(
         (max_loras * max_num_m_blocks,), num_experts, dtype=torch.int32, device="cuda"
     )
     num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32, device="cuda")
+    num_tokens_per_lora = torch.ones((max_loras,), dtype=torch.int32, device="cuda")
+    adapter_enabled = torch.ones((max_loras,), dtype=torch.int32, device="cuda")
 
     # call kernel
     ops.moe_lora_align_block_size(
         topk_ids,
         token_lora_mapping,
+        num_tokens_per_lora,
+        adapter_enabled,
         num_experts,
         block_size,
         max_loras,
@@ -84,6 +88,73 @@ def test_moe_lora_align_block_size(
             if indices.numel() > 0:
                 expert_id = expert_ids[lora_idx][token_idx]
                 assert torch.all(topk_ids.view(-1)[indices] == expert_id)
+
+@pytest.mark.parametrize("num_tokens", [4096])
+@pytest.mark.parametrize("topk_num", [6])
+@pytest.mark.parametrize("num_experts", [64])
+@pytest.mark.parametrize("max_loras", [2])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("adapter_enabled", [[0,1],[0,0]])
+def test_moe_lora_align_block_size_early_exit(
+    num_tokens, topk_num, num_experts, max_loras, block_size, adapter_enabled
+):
+
+    # sample data
+    random.seed(1)
+    topk_ids, token_lora_mapping = sample_data(
+        num_experts, max_loras, num_tokens, topk_num
+    )
+
+    # compute paddings
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
+
+    # init output tensors
+    sorted_token_ids = torch.full(
+        (max_loras * max_num_tokens_padded,),
+        topk_ids.numel(),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    expert_ids = torch.full(
+        (max_loras * max_num_m_blocks,), num_experts, dtype=torch.int32, device="cuda"
+    )
+    num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32, device="cuda")
+    
+    num_tokens_per_lora = torch.ones((max_loras,), dtype=torch.int32, device="cuda")
+    adapter_enabled = torch.tensor(adapter_enabled, dtype=torch.int32, device="cuda")
+
+    # call kernel
+    ops.moe_lora_align_block_size(
+        topk_ids,
+        token_lora_mapping,
+        num_tokens_per_lora,
+        adapter_enabled,
+        num_experts,
+        block_size,
+        max_loras,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_pad,
+    )
+
+    # verify values
+    expert_ids = expert_ids.view(max_loras, -1)
+    sorted_token_ids = sorted_token_ids.view(max_loras, -1, block_size)
+
+    for lora_idx in range(max_loras):
+
+        # assert not operation was performed
+        if adapter_enabled[lora_idx].item() == 0:
+            assert torch.all(sorted_token_ids[lora_idx] == topk_ids.numel())
+        else:
+            for token_idx in range(sorted_token_ids.size(1)):
+                block = sorted_token_ids[lora_idx][token_idx]
+                indices = block[block != topk_ids.numel()]
+                if indices.numel() > 0:
+                    expert_id = expert_ids[lora_idx][token_idx]
+                    assert torch.all(topk_ids.view(-1)[indices] == expert_id)
 
 
 if __name__ == "__main__":
