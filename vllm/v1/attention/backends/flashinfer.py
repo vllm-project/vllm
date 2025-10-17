@@ -34,6 +34,7 @@ from vllm.utils.flashinfer import (can_use_trtllm_attention,
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
+                                              concat_kv_indices_kernel,
                                               get_kv_cache_layout,
                                               get_per_layer_parameters,
                                               infer_global_hyperparameters,
@@ -669,6 +670,140 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
                     )
+        return attn_metadata
+
+    def build_with_selective_kv(self,
+                               common_prefix_len: int,
+                               common_attn_metadata: CommonAttentionMetadata,
+                               fast_build: bool = False) -> FlashInferMetadata:
+        """
+        Build FlashInferMetadata with selective KV caching support.
+
+        This method implements the selective KV concatenation logic:
+        For each request: [selective_kv_indices] + [new_kv_indices]
+
+        This is used during the ACCUMULATING phase of self-speculative decoding,
+        where we only attend to sink tokens + recent tokens to reduce computation.
+        """
+        # Extract dimensions from common_attn_metadata
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+
+        page_size = self.page_size
+        device = common_attn_metadata.query_start_loc.device
+        qo_indptr = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        block_table_tensor = common_attn_metadata.block_table_tensor[:num_reqs]
+        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
+
+        block_table_bounds = (seq_lens + page_size - 1) // page_size
+
+        # IMPORTANT: Cascade attention is incompatible with selective KV
+        # Cascade requires shared prefix, but selective KV has per-request selections
+        use_cascade = False
+        shared_qo_indptr_cpu = None
+        shared_kv_page_indptr_cpu = None
+        shared_kv_page_indices_cpu = None
+        shared_kv_last_page_len_cpu = None
+
+        # Get all KV indices using block table mask
+        mask = (torch.arange(block_table_tensor.size(1),
+                            dtype=block_table_tensor.dtype,
+                            device=block_table_tensor.device).unsqueeze(0)
+                < block_table_bounds.unsqueeze(1))
+        all_kv_indices = block_table_tensor[mask]
+
+        # Extract selective KV information from InputBatch
+        # These were populated by the scheduler in SchedulerOutput
+        len_selected_kv_indices = self.runner.input_batch.num_selective_kv_indices_cpu_tensor[:num_reqs]
+        len_selected_kv_indices_tensor = len_selected_kv_indices.to(
+            device=device, dtype=torch.int32, non_blocking=True)
+
+        selected_kv_indices = self.runner.input_batch.selective_kv_indices_cpu_tensor[:num_reqs]
+        selected_kv_indices_tensor = selected_kv_indices.to(
+            device=device, dtype=torch.int32, non_blocking=True)
+
+        full_kv_start_offset = self.runner.input_batch.full_kv_start_offset_cpu_tensor[:num_reqs]
+        full_kv_start_offset_tensor = full_kv_start_offset.to(
+            device=device, dtype=torch.int32, non_blocking=True)
+
+        # Calculate cumulative sum of full KV sequence lengths
+        full_kv_seq_len_cumsum = torch.cat([
+            torch.zeros(1,
+                        dtype=block_table_bounds.dtype,
+                        device=block_table_bounds.device),
+            block_table_bounds.cumsum(dim=0, dtype=torch.int32)
+        ])
+
+        # Calculate new indices per request (after the selective indices)
+        len_all_kv_indices = block_table_bounds - full_kv_start_offset_tensor
+
+        # Adjust offsets to be absolute in the flattened all_kv_indices
+        full_kv_start_offset_tensor = full_kv_start_offset_tensor + full_kv_seq_len_cumsum[:-1]
+
+        # Calculate paged_kv_indptr (cumulative sum of concatenated lengths)
+        paged_kv_indptr = torch.cat([
+            torch.zeros(1,
+                        dtype=block_table_bounds.dtype,
+                        device=block_table_bounds.device),
+            (len_all_kv_indices + len_selected_kv_indices_tensor).cumsum(dim=0, dtype=torch.int32)
+        ])
+
+        # Allocate output buffer for concatenated indices
+        total_output_size = paged_kv_indptr[-1].item()
+        paged_kv_indices = torch.zeros(total_output_size, dtype=torch.int32, device=device)
+
+        # Launch Triton kernel to concatenate selective + new indices
+        if concat_kv_indices_kernel is not None:
+            grid = (32,)  # Number of programs to launch
+            concat_kv_indices_kernel[grid](
+                selected_kv_indices_tensor,
+                selected_kv_indices_tensor.stride(0),
+                len_selected_kv_indices_tensor,
+                all_kv_indices,
+                full_kv_start_offset_tensor,
+                len_all_kv_indices,
+                paged_kv_indices,
+                paged_kv_indptr,
+                num_reqs,
+                BLOCK_SIZE=128,
+            )
+        else:
+            raise RuntimeError("concat_kv_indices_kernel not available, cannot use selective KV")
+
+        # Calculate last page lengths
+        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                             page_size, paged_kv_last_page_len)
+
+        # Create FlashInferMetadata with selective KV indices
+        attn_metadata = FlashInferMetadata(
+            num_actual_tokens=num_actual_tokens,
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,  # Concatenated selective + new indices
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=self.num_qo_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            page_size=page_size,
+            data_type=self.kv_cache_dtype,
+            q_data_type=self.q_data_type,
+            slot_mapping=slot_mapping,
+            num_decodes=0,  # Selective KV is only for decode-like operations
+            num_decode_tokens=num_actual_tokens,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            use_cascade=use_cascade,
+            shared_qo_indptr_cpu=shared_qo_indptr_cpu,
+            shared_kv_page_indptr_cpu=shared_kv_page_indptr_cpu,
+            shared_kv_page_indices_cpu=shared_kv_page_indices_cpu,
+            shared_kv_last_page_len_cpu=shared_kv_last_page_len_cpu,
+        )
+
+        # Plan FlashInfer wrappers
+        self._plan(attn_metadata)
+
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
