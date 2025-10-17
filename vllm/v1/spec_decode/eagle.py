@@ -1141,6 +1141,8 @@ def compute_probs_and_sample_next_token(
         next_token_ids = logits.argmax(dim=-1)
         return next_token_ids, probs
 
+    assert sampling_metadata.temperature is not None
+
     # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
     # consistent with sampler.py's _SAMPLING_EPS threshold
     temperature = sampling_metadata.temperature
