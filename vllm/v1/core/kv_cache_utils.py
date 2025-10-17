@@ -24,7 +24,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
-from vllm.v1.worker.workspace import current_workspace_manager
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from ``bytes`` helps
@@ -790,13 +789,6 @@ def get_num_blocks(
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
     """
-    # Account for per-KV-cache-token workspace memory (e.g., prefill_bf16_workspace)
-    # and reserve workspace memory by shrinking available_memory.
-    available_memory = current_workspace_manager().adjust_available_kv_cache_memory(
-        available_memory,
-        page_size,
-        num_layers,
-    )
 
     num_blocks = int(available_memory // page_size // num_layers)
 

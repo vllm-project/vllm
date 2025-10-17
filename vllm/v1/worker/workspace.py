@@ -132,28 +132,10 @@ class WorkspaceManager:
             self._current_workspaces[dbo_current_ubatch_id()]
         )
 
-    def adjust_available_kv_cache_memory(
+    def _estimate_required_workspace_memory(
         self,
-        available_memory: int,
-        page_size: int,
-        num_layers: int,
-    ) -> int:
-        """Reserve workspace memory by shrinking available KV cache memory.
-
-        Args:
-            available_memory: Memory available for KV cache in bytes.
-            page_size: Size of each KV cache page in bytes.
-            num_layers: Number of layers in the model.
-
-        Returns:
-            Remaining memory for KV cache after reserving workspace.
-        """
-        # Estimate max KV cache tokens for scaling PerKVCacheTokenWorkspace specs
-        block_size = self._cache_config.block_size
-        estimated_max_kv_tokens = (
-            available_memory // (page_size * num_layers) * block_size
-        )
-
+        estimated_max_kv_tokens: int | None = None,
+    ) -> int | None:
         # Calculate max workspace bytes across all groups
         # PerKVCacheTokenWorkspace specs are scaled by estimated_max_kv_tokens in-place
         # Regular WorkspaceSpec specs are included as-is (fixed overhead)
@@ -162,6 +144,11 @@ class WorkspaceManager:
             group_bytes = 0
             for spec in group:
                 if isinstance(spec, PerKVCacheTokenWorkspace):
+                    if estimated_max_kv_tokens is None:
+                        # Cannot estimate required workspace memory without
+                        # estimated_max_kv_tokens
+                        return None
+
                     # Scale by number of KV cache tokens, then align the total buffer
                     group_bytes += round_up(
                         spec.num_bytes() * estimated_max_kv_tokens, 256
@@ -171,9 +158,35 @@ class WorkspaceManager:
                     group_bytes += round_up(spec.num_bytes(), 256)
 
             max_workspace_bytes = max(max_workspace_bytes, group_bytes)
+        return max_workspace_bytes
+
+    def requires_memory_adjustment(self) -> bool:
+        """Check if workspace requires memory adjustment."""
+        return (
+            self._estimate_required_workspace_memory()
+            != self.current_allocated_size_bytes()
+        )
+
+    def adjust_available_kv_cache_memory(
+        self,
+        available_memory: int,
+        estimated_max_kv_tokens: int,
+    ) -> int:
+        """Reserve workspace memory by shrinking available KV cache memory.
+
+        Args:
+            available_memory: Memory available for KV cache in bytes.
+            estimated_max_kv_tokens: Estimated maximum number of KV cache tokens.
+
+        Returns:
+            Remaining memory for KV cache after reserving workspace.
+        """
 
         already_allocated = self.current_allocated_size_bytes()
-        reserved_workspace_size = max_workspace_bytes
+        required_workspace_size = self._estimate_required_workspace_memory(
+            estimated_max_kv_tokens
+        )
+        assert required_workspace_size is not None
 
         # If already allocated >= reserved, no need to reserve more memory.
         # This can happen if:
@@ -181,10 +194,10 @@ class WorkspaceManager:
         # 2. A .get() was called for a buffer not reserved during profiling,
         #    causing the workspace to resize larger than expected. This is fine
         #    since .get() acts as an implicit reserve in that case.
-        if already_allocated >= reserved_workspace_size:
+        if already_allocated >= required_workspace_size:
             return available_memory
 
-        workspace_to_reserve = reserved_workspace_size - already_allocated
+        workspace_to_reserve = required_workspace_size - already_allocated
         return max(available_memory - workspace_to_reserve, 0)
 
     def reserve(self, spec: "WorkspaceSpec") -> None:
