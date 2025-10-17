@@ -128,56 +128,6 @@ class FlashMLASparseMetadata:
 # for better control over predicated atomic operations
 
 
-def triton_convert_req_index_to_global_index(
-    req_id: torch.Tensor,  # int32 [num_tokens]
-    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    BLOCK_SIZE: int = 64,
-    NUM_TOPK_TOKENS: int = 2048,
-    BLOCK_N: int = 128,  # tile width along columns (unused, kept for compatibility)
-    prefill_token_mask: torch.Tensor | None = None,  # int32 [num_tokens]
-    prefill_seen: torch.Tensor
-    | None = None,  # int32 [num_kv_cache_tokens] (must be initialized to 0)
-    prefill_bf16_workspace: torch.Tensor | None = None,  # bf16 [num_slots, head_dim]
-    kv_cache: torch.Tensor | None = None,  # uint8 [num_blocks, block_size, 656]
-) -> torch.Tensor:
-    """Convert per-request indices into global cache slots and upconvert unique
-    prefill tokens.
-
-    This is a fused operation that:
-    1. Converts per-request token indices to global cache slot indices
-    2. For prefill tokens, identifies unique slots using atomicCAS
-    3. Cooperatively upconverts those unique slots from fp8 to bf16 inline
-
-    Args:
-        req_id: Request ID for each token
-        block_table: Block table mapping
-        token_indices: Per-request token indices to convert
-        BLOCK_SIZE: KV cache block size
-        NUM_TOPK_TOKENS: Number of top-k tokens (unused, for compatibility)
-        BLOCK_N: Tile width (unused, for compatibility)
-        prefill_token_mask: Mask indicating which tokens are prefill tokens
-        prefill_seen: Bitmap for tracking which slots have been upconverted
-        prefill_bf16_workspace: Workspace for upconverted bf16 data
-        kv_cache: FP8 KV cache to read from for upconversion
-
-    Returns:
-        Dense tensor of global slot ids (with -1 for invalid entries).
-        Unique prefill tokens are upconverted inline into prefill_bf16_workspace.
-    """
-    # Call the fused CUDA kernel via torch.ops
-    return torch.ops._C.convert_req_index_to_global_index(
-        req_id,
-        block_table,
-        token_indices,
-        BLOCK_SIZE,
-        prefill_token_mask,
-        prefill_seen,
-        prefill_bf16_workspace,
-        kv_cache,
-    )
-
-
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -268,7 +218,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold or 1
             )
         )
 
@@ -542,12 +492,11 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         # Fused kernel: converts indices and upconverts unique prefill tokens inline
         # MUST happen AFTER concat_and_cache_mla so the FP8 data exists in the cache
-        topk_indices_global = triton_convert_req_index_to_global_index(
+        topk_indices_global = ops.convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+            block_size=attn_metadata.block_size,
             prefill_token_mask=prefill_token_mask,
             prefill_seen=prefill_seen,
             prefill_bf16_workspace=prefill_bf16_workspace,
