@@ -36,6 +36,3 @@ schemathesis==3.39.15
 
 # required for mteb test
 mteb[bm25s]>=1.38.11, <2 
-
-# PrithviMAE test
-terratorch @ git+https://github.com/IBM/terratorch.git@1.1.rc3
