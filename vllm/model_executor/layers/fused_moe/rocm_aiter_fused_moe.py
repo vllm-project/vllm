@@ -47,6 +47,11 @@ def is_rocm_aiter_moe_enabled() -> bool:
 
 
 @cache
+def use_mxfp4_aiter_moe() -> bool:
+    return current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+
+@cache
 def is_rocm_aiter_fusion_shared_expert_enabled() -> bool:
     return (
         envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS and is_rocm_aiter_moe_enabled()
