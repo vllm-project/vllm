@@ -556,6 +556,7 @@ class MessageQueue:
         else:
             return self.dequeue()
 
+    @staticmethod
     def create_from_process_group_single_reader(
         pg: ProcessGroup,
         max_chunk_bytes,

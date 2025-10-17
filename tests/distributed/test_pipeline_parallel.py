@@ -62,7 +62,7 @@ class PPTestSettings:
                 ParallelSetup(tp_size=2 * tp_base, pp_size=pp_base, eager_mode=False),
                 ParallelSetup(tp_size=2 * tp_base, pp_size=pp_base, eager_mode=True),
             ],
-            distributed_backends=["mp", "mp", "ray", "ray", "mp_distributed"],
+            distributed_backends=["mp", "ray"],
             runner=runner,
             test_options=PPTestOptions(
                 multi_node_only=multi_node_only, load_format=load_format

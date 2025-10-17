@@ -129,20 +129,10 @@ def test_models(
         ("distilbert/distilgpt2", "mp", "", "L4", {}),
         ("distilbert/distilgpt2", "ray", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
         ("distilbert/distilgpt2", "mp", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
-        ("distilbert/distilgpt2", "mp_distributed", "", "L4", {}),
-        (
-            "distilbert/distilgpt2",
-            "mp_distributed",
-            "",
-            "L4",
-            {"VLLM_SLEEP_WHEN_IDLE": "1"},
-        ),
         ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
-        ("meta-llama/Llama-3.2-1B-Instruct", "mp_distributed", "", "L4", {}),
         ("distilbert/distilgpt2", "ray", "", "A100", {}),
         ("distilbert/distilgpt2", "mp", "", "A100", {}),
-        ("distilbert/distilgpt2", "mp_distributed", "", "A100", {}),
     ],
 )
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])

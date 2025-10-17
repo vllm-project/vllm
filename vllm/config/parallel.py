@@ -65,7 +65,8 @@ class ParallelConfig:
     """Configuration for the distributed execution."""
 
     distributed_master_ip: str = "127.0.0.1"
-    """distributed master ip for multi-node distributed inference."""
+    """distributed master ip for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
     distributed_master_port: int = 0
     """distributed master port """
     distributed_node_rank: int = 0

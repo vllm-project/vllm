@@ -36,7 +36,6 @@ ALLOWED_FILES = {
     "benchmarks/cutlass_benchmarks/w8a8_benchmarks.py",
     "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
     # cloudpickle
-    "vllm/executor/mp_distributed_executor.py",
     "vllm/executor/ray_distributed_executor.py",
     "vllm/entrypoints/llm.py",
     "tests/utils.py",
