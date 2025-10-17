@@ -3,7 +3,6 @@
 import argparse
 import datetime
 import os
-from typing import Union
 
 import albumentations
 import numpy as np
@@ -45,7 +44,11 @@ datamodule_config = {
 class PrithviMAE:
     def __init__(self, model):
         self.model = LLM(
-            model=model, skip_tokenizer_init=True, dtype="float16", enforce_eager=True
+            model=model,
+            skip_tokenizer_init=True,
+            dtype="float16",
+            enforce_eager=True,
+            model_impl="terratorch",
         )
 
     def run(self, input_data, location_coords):
@@ -156,7 +159,7 @@ def load_example(
     file_paths: list[str],
     mean: list[float] = None,
     std: list[float] = None,
-    indices: Union[list[int], None] = None,
+    indices: list[int] | None = None,
 ):
     """Build an input example by loading images in *file_paths*.
 

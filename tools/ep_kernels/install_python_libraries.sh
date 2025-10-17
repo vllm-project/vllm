@@ -10,8 +10,12 @@ if [ ! -d "$WORKSPACE" ]; then
     mkdir -p $WORKSPACE
 fi
 
+# configurable pip command (default: pip3)
+PIP_CMD=${PIP_CMD:-pip3}
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+
 # install dependencies if not installed
-pip3 install cmake torch ninja
+$PIP_CMD install cmake torch ninja
 
 # build nvshmem
 pushd $WORKSPACE
@@ -77,6 +81,7 @@ clone_repo() {
     local repo_url=$1
     local dir_name=$2
     local key_file=$3
+    local commit_hash=$4
 
     if [ -d "$dir_name" ]; then
         # Check if directory has uncommitted changes (dirty)
@@ -87,27 +92,35 @@ clone_repo() {
             echo "$dir_name directory exists but clone appears incomplete, cleaning up and re-cloning"
             rm -rf "$dir_name"
             git clone "$repo_url"
+            if [ -n "$commit_hash" ]; then
+                cd "$dir_name"
+                git checkout "$commit_hash"
+                cd ..
+            fi
         else
             echo "$dir_name directory exists and appears complete; manually update if needed"
         fi
     else
         git clone "$repo_url"
+        if [ -n "$commit_hash" ]; then
+            cd "$dir_name"
+            git checkout "$commit_hash"
+            cd ..
+        fi
     fi
 }
 
 # build and install pplx, require pytorch installed
 pushd $WORKSPACE
-clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py"
+clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py" "c336faf"
 cd pplx-kernels
-# see https://github.com/pypa/pip/issues/9955#issuecomment-838065925
-# PIP_NO_BUILD_ISOLATION=0 disables build isolation
-PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
+$PIP_CMD install --no-build-isolation -vvv -e .
 popd
 
 # build and install deepep, require pytorch installed
 pushd $WORKSPACE
-clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py"
+clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "e3908bf"
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
-PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
+$PIP_CMD install --no-build-isolation -vvv -e .
 popd

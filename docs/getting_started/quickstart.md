@@ -8,7 +8,7 @@ This guide will help you quickly get started with vLLM to perform:
 ## Prerequisites
 
 - OS: Linux
-- Python: 3.9 -- 3.12
+- Python: 3.10 -- 3.13
 
 ## Installation
 
@@ -46,7 +46,7 @@ uv pip install vllm --torch-backend=auto
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/basic/basic.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
 
 The first line of this example imports the classes [LLM][vllm.LLM] and [SamplingParams][vllm.SamplingParams]:
 
@@ -194,12 +194,14 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
         api_key=openai_api_key,
         base_url=openai_api_base,
     )
-    completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
-                                        prompt="San Francisco is a")
+    completion = client.completions.create(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        prompt="San Francisco is a",
+    )
     print("Completion result:", completion)
     ```
 
-A more detailed client example can be found here: <gh-file:examples/online_serving/openai_completion_client.py>
+A more detailed client example can be found here: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
 
 ### OpenAI Chat Completions API with vLLM
 
@@ -239,7 +241,7 @@ Alternatively, you can use the `openai` Python package:
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Tell me a joke."},
-        ]
+        ],
     )
     print("Chat response:", chat_response)
     ```
@@ -251,4 +253,4 @@ Currently, vLLM supports multiple backends for efficient Attention computation a
 If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
 
 !!! warning
-    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see <gh-file:docker/Dockerfile> for instructions on how to install it.
+    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.

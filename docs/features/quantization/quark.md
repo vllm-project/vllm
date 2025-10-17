@@ -20,7 +20,7 @@ for more installation details.
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm lm-eval==0.4.4
+pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
 ```
 
 ## Quantization Process
@@ -48,7 +48,9 @@ to fetch model and tokenizer.
     MAX_SEQ_LEN = 512
 
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, device_map="auto", torch_dtype="auto",
+        MODEL_ID,
+        device_map="auto",
+        dtype="auto",
     )
     model.eval()
 
@@ -75,10 +77,18 @@ to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calib
     dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
     text_data = dataset["text"][:NUM_CALIBRATION_DATA]
 
-    tokenized_outputs = tokenizer(text_data, return_tensors="pt",
-        padding=True, truncation=True, max_length=MAX_SEQ_LEN)
-    calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
-        batch_size=BATCH_SIZE, drop_last=True)
+    tokenized_outputs = tokenizer(
+        text_data,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_SEQ_LEN,
+    )
+    calib_dataloader = DataLoader(
+        tokenized_outputs['input_ids'],
+        batch_size=BATCH_SIZE,
+        drop_last=True,
+    )
     ```
 
 ### 3. Set the Quantization Configuration
@@ -103,26 +113,32 @@ kv-cache and the quantization algorithm is AutoSmoothQuant.
                                         load_quant_algo_config_from_file)
 
     # Define fp8/per-tensor/static spec.
-    FP8_PER_TENSOR_SPEC = FP8E4M3PerTensorSpec(observer_method="min_max",
-        is_dynamic=False).to_quantization_spec()
+    FP8_PER_TENSOR_SPEC = FP8E4M3PerTensorSpec(
+        observer_method="min_max",
+        is_dynamic=False,
+    ).to_quantization_spec()
 
     # Define global quantization config, input tensors and weight apply FP8_PER_TENSOR_SPEC.
-    global_quant_config = QuantizationConfig(input_tensors=FP8_PER_TENSOR_SPEC,
-        weight=FP8_PER_TENSOR_SPEC)
+    global_quant_config = QuantizationConfig(
+        input_tensors=FP8_PER_TENSOR_SPEC,
+        weight=FP8_PER_TENSOR_SPEC,
+    )
 
     # Define quantization config for kv-cache layers, output tensors apply FP8_PER_TENSOR_SPEC.
     KV_CACHE_SPEC = FP8_PER_TENSOR_SPEC
     kv_cache_layer_names_for_llama = ["*k_proj", "*v_proj"]
-    kv_cache_quant_config = {name :
-        QuantizationConfig(input_tensors=global_quant_config.input_tensors,
-                        weight=global_quant_config.weight,
-                        output_tensors=KV_CACHE_SPEC)
-        for name in kv_cache_layer_names_for_llama}
+    kv_cache_quant_config = {
+        name: QuantizationConfig(
+            input_tensors=global_quant_config.input_tensors,
+            weight=global_quant_config.weight,
+            output_tensors=KV_CACHE_SPEC,
+        )
+        for name in kv_cache_layer_names_for_llama
+    }
     layer_quant_config = kv_cache_quant_config.copy()
 
     # Define algorithm config by config file.
-    LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE =
-        'examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json'
+    LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE = "examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json"
     algo_config = load_quant_algo_config_from_file(LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE)
 
     EXCLUDE_LAYERS = ["lm_head"]
@@ -131,7 +147,8 @@ kv-cache and the quantization algorithm is AutoSmoothQuant.
         layer_quant_config=layer_quant_config,
         kv_cache_quant_config=kv_cache_quant_config,
         exclude=EXCLUDE_LAYERS,
-        algo_config=algo_config)
+        algo_config=algo_config,
+    )
     ```
 
 ### 4. Quantize the Model and Export
@@ -165,8 +182,11 @@ for more exporting format details.
     EXPORT_DIR = MODEL_ID.split("/")[1] + "-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant"
     exporter = ModelExporter(config=export_config, export_dir=EXPORT_DIR)
     with torch.no_grad():
-        exporter.export_safetensors_model(freezed_model,
-            quant_config=quant_config, tokenizer=tokenizer)
+        exporter.export_safetensors_model(
+            freezed_model,
+            quant_config=quant_config,
+            tokenizer=tokenizer,
+        )
     ```
 
 ### 5. Evaluation in vLLM
@@ -189,8 +209,11 @@ Now, you can load and run the Quark quantized model directly through the LLM ent
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM.
-    llm = LLM(model="Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant",
-            kv_cache_dtype='fp8',quantization='quark')
+    llm = LLM(
+        model="Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant",
+        kv_cache_dtype="fp8",
+        quantization="quark",
+    )
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)
@@ -231,9 +254,9 @@ python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --tasks gsm8k
 ```
 
-## Using MXFP4 models
+## Using OCP MX (MXFP4, MXFP6) models
 
-vLLM supports loading MXFP4 models quantized offline through AMD Quark, compliant with [Open Compute Project (OCP) specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
+vLLM supports loading MXFP4 and MXFP6 models quantized offline through AMD Quark, compliant with [Open Compute Project (OCP) specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
 
 The scheme currently only supports dynamic quantization for activations.
 
@@ -241,17 +264,21 @@ Example usage, after installing the latest AMD Quark release:
 
 ```bash
 vllm serve fxmarty/qwen_1.5-moe-a2.7b-mxfp4 --tensor-parallel-size 1
+# or, for a model using fp6 activations and fp4 weights:
+vllm serve fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3 --tensor-parallel-size 1
 ```
 
-A simulation of the matrix multiplication execution in MXFP4 can be run on devices that do not support MXFP4 operations natively (e.g. AMD Instinct MI325, MI300 and MI250), dequantizing weights from MXFP4 to half precision on the fly, using a fused kernel. This is useful e.g. to evaluate MXFP4 models using vLLM, or alternatively to benefit from the ~4x memory savings (compared to float16 and bfloat16).
+A simulation of the matrix multiplication execution in MXFP4/MXFP6 can be run on devices that do not support OCP MX operations natively (e.g. AMD Instinct MI325, MI300 and MI250), dequantizing weights from FP4/FP6 to half precision on the fly, using a fused kernel. This is useful e.g. to evaluate FP4/FP6 models using vLLM, or alternatively to benefit from the ~2.5-4x memory savings (compared to float16 and bfloat16).
 
 To generate offline models quantized using MXFP4 data type, the easiest approach is to use AMD Quark's [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html), as an example:
 
 ```bash
 python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
-    --quant_scheme w_mxfp4_a_mxfp4_sym \
+    --quant_scheme w_mxfp4_a_mxfp4 \
     --output_dir qwen_1.5-moe-a2.7b-mxfp4 \
     --skip_evaluation \
     --model_export hf_format \
     --group_size 32
 ```
+
+The current integration supports [all combination of FP4, FP6_E3M2, FP6_E2M3](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/ocp_mx_utils.py) used for either weights or activations. Eventually, some target hardware support mixed precision GEMM, as AMD Instinct MI350/MI355, for example using FP6 for activations and FP4 for weights.
