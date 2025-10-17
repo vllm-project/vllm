@@ -220,6 +220,12 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
+    # Fields used for prefix caching
+    pin_prefix: bool = False
+    """Whether to pin the prefix of this request in the cache, preventing it
+    from being evicted. Pinned prefixes will be prioritized and retained in
+    cache even when memory is under pressure."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -252,6 +258,7 @@ class SamplingParams(
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
+        pin_prefix: bool = False,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -303,6 +310,7 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            pin_prefix=pin_prefix,
         )
 
     def __post_init__(self) -> None:

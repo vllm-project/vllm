@@ -676,6 +676,9 @@ class AsyncLLM(EngineClient):
             raise ValueError("Not supported on CPU.")
         await self.engine_core.reset_prefix_cache_async()
 
+    async def unpin_all_pinned_prefixes(self) -> int:
+        return await self.engine_core.unpin_all_pinned_prefixes_async()
+
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)

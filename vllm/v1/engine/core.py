@@ -424,6 +424,9 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def unpin_all_pinned_prefixes(self) -> int:
+        return self.scheduler.unpin_all_pinned_prefixes()
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 

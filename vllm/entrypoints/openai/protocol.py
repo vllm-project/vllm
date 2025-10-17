@@ -528,6 +528,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
+    pin_prefix: bool = Field(
+        default=False,
+        description=(
+            "If true, the prefix of this request will be pinned in the cache, "
+            "preventing it from being evicted. Pinned prefixes are protected "
+            "from LRU eviction and will remain in cache even when memory is "
+            "under pressure."
+        ),
+    )
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -867,6 +876,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
+            pin_prefix=self.pin_prefix,
             extra_args=extra_args or None,
         )
 
