@@ -1303,15 +1303,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
 
+        input_scale_experts = (
+            global_num_experts if self.allow_flashinfer else num_experts
+        )
+
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(global_num_experts, 2, dtype=torch.float32),
-            weight_loader=weight_loader,
+            data=torch.empty(input_scale_experts, 2, dtype=torch.float32),
+            weight_loader=weight_loader
         )
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(global_num_experts, dtype=torch.float32),
-            weight_loader=weight_loader,
+            data=torch.empty(input_scale_experts, dtype=torch.float32),
+            weight_loader=weight_loader
         )
 
         layer.register_parameter("w2_input_scale", w2_input_scale)
@@ -1466,9 +1470,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
 
         # Common processing for input scales and alphas
-        w13_input_scale = (
-            layer.w13_input_scale.max().to(torch.float32).expand(layer.num_experts)
-        )
+        if self.allow_flashinfer:
+            # For backends provide by Flashinfer, the input global scales are
+            # shared across all experts. Same for w2_input_scale.
+            w13_input_scale = (
+                layer.w13_input_scale.max().to(torch.float32).expand(layer.num_experts)
+            )
+        else:
+            w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(torch.float32)
         layer.g1_alphas = Parameter(
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
             requires_grad=False,
@@ -1480,9 +1489,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         # GEMM 2 processing
-        w2_input_scale = (
-            layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
-        )
+        if self.allow_flashinfer:
+            w2_input_scale = (
+                layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
+            )
+        else:
+            w2_input_scale = layer.w2_input_scale
         layer.g2_alphas = Parameter(
             (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
             requires_grad=False,
