@@ -291,7 +291,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     vllm_config=self.vllm_config,
                     device=self.device)  # type: ignore
             elif self.speculative_config.method == "self_specs":
-                pass
+                # NOTE(brian1009): self_specs does not need drafter
+                self.drafter = None
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -2611,6 +2612,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
             )
+        elif self.speculative_config.method == "self_specs":
+            # Self-spec doesn't generate draft tokens upfront like other methods.
+            # Token generation happens in ACCUMULATING state and verification
+            # happens in VERIFYING state through the scheduler's FSM.
+            # Return empty draft tokens since drafting is handled by the FSM.
+            draft_token_ids = []
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
