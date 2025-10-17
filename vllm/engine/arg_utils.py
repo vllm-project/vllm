@@ -1490,11 +1490,13 @@ class EngineArgs:
         )
 
         if self.async_scheduling and (
-                parallel_config.distributed_executor_backend not in ("mp", "uni")):
+            parallel_config.distributed_executor_backend not in ("mp", "uni")
+        ):
             raise ValueError(
                 "Currently, async scheduling only supports `mp` or `uni` "
                 "distributed executor backend, but you choose "
-                f"`{parallel_config.distributed_executor_backend}`.")
+                f"`{parallel_config.distributed_executor_backend}`."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
