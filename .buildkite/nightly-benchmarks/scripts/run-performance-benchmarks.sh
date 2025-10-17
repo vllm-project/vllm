@@ -365,8 +365,7 @@ run_serving_tests() {
       continue
     fi
 
-    server_command="$server_envs python3 \
-      -m vllm.entrypoints.openai.api_server \
+    server_command="$server_envs vllm serve \
       $server_args"
 
     # run the server
@@ -454,11 +453,6 @@ main() {
      check_gpus
   fi
   check_hf_token
-
-  # Set to v1 to run v1 benchmark
-  if [[ "${ENGINE_VERSION:-v0}" == "v1" ]]; then
-    export VLLM_USE_V1=1
-  fi
 
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)

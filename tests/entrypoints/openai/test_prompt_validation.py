@@ -3,7 +3,7 @@
 
 import io
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import openai
 import pybase64
 import pytest
@@ -15,11 +15,6 @@ from vllm.entrypoints.renderer import BaseRenderer
 from ...utils import RemoteOpenAIServer
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1_only(monkeypatch):
-    monkeypatch.setenv('VLLM_USE_V1', '1')
-
-
 @pytest.mark.asyncio
 async def test_empty_prompt():
     model_name = "gpt2"
@@ -28,15 +23,16 @@ async def test_empty_prompt():
         client = remote_server.get_async_client()
 
         with pytest.raises(
-                openai.BadRequestError,
-                match=
-                "Either prompt or prompt_embeds must be provided and non-empty."
+            openai.BadRequestError,
+            match="Either prompt or prompt_embeds must be provided and non-empty.",
         ):
-            await client.completions.create(model=model_name,
-                                            prompt="",
-                                            max_tokens=5,
-                                            temperature=0.0,
-                                            extra_body={"prompt_embeds": []})
+            await client.completions.create(
+                model=model_name,
+                prompt="",
+                max_tokens=5,
+                temperature=0.0,
+                extra_body={"prompt_embeds": []},
+            )
 
 
 @pytest.mark.asyncio
@@ -46,23 +42,23 @@ async def test_out_of_vocab_token_ids():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match=re.compile('.*out of vocabulary.*').pattern):
-            await client.completions.create(model=model_name,
-                                            prompt=[999999],
-                                            max_tokens=5,
-                                            temperature=0.0)
+        with pytest.raises(
+            openai.BadRequestError, match=re.compile(".*out of vocabulary.*").pattern
+        ):
+            await client.completions.create(
+                model=model_name, prompt=[999999], max_tokens=5, temperature=0.0
+            )
 
 
-@pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "layout",
-    [torch.strided, torch.sparse_coo, torch.sparse_csc, torch.sparse_csr])
+    "layout", [torch.strided, torch.sparse_coo, torch.sparse_csc, torch.sparse_csr]
+)
 @pytest.mark.parametrize("seq_len", [2, 10])
 @pytest.mark.parametrize("hidden_size", [2, 10])
-def test_load_prompt_embeds(dtype: torch.dtype, layout: torch.layout,
-                            seq_len: int, hidden_size: int):
+def test_load_prompt_embeds(
+    dtype: torch.dtype, layout: torch.layout, seq_len: int, hidden_size: int
+):
     # construct arbitrary tensors of various dtypes, layouts, and sizes.
     # We need to check against different layouts to make sure that if a user
     # uses sparse tensors to reduce the transmission size of prompt embeddings,
@@ -92,6 +88,6 @@ def test_load_prompt_embeds(dtype: torch.dtype, layout: torch.layout,
     loaded_tensor = loaded_prompt_embeds[0]["prompt_embeds"]
     assert loaded_tensor.device.type == "cpu"
     assert loaded_tensor.layout == torch.strided
-    torch.testing.assert_close(loaded_tensor,
-                               tensor.to("cpu").to_dense(),
-                               equal_nan=True)
+    torch.testing.assert_close(
+        loaded_tensor, tensor.to("cpu").to_dense(), equal_nan=True
+    )

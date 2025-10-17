@@ -17,19 +17,21 @@ if not has_triton_kernels():
 import triton_kernels.swiglu
 from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
-from triton_kernels.numerics_details.mxfp import (downcast_to_mxfp,
-                                                  upcast_from_mxfp)
+from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
 from triton_kernels.tensor_details import layout
 from triton_kernels.testing import assert_close
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize)
+    BatchedPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    BatchedOAITritonExperts, triton_kernel_moe_forward)
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
+    BatchedOAITritonExperts,
+    triton_kernel_moe_forward,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.utils import round_up
 
@@ -45,13 +47,11 @@ def deshuffle(w: torch.Tensor):
 def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
     randbits = [torch.randperm(E) for _ in range(M)]
     x_list = [
-        (-1)**i *
-        ((16384 +
-          ((i * 512) % 4096) + bits).to(torch.int16).view(torch.bfloat16))
+        (-1) ** i
+        * ((16384 + ((i * 512) % 4096) + bits).to(torch.int16).view(torch.bfloat16))
         for i, bits in enumerate(randbits)
     ]
-    exp_data = torch.stack(x_list).to(
-        device="cuda")  # simulating gate_output (M, E)
+    exp_data = torch.stack(x_list).to(device="cuda")  # simulating gate_output (M, E)
 
     # create input tensor
     x = torch.randn((M, K), dtype=torch.bfloat16, device="cuda")
@@ -119,20 +119,21 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
             value=0,
         )
 
-        w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0),
-                            mode="constant",
-                            value=0)
-        w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0),
-                            mode="constant",
-                            value=0)
+        w1_bias_tri = F.pad(
+            w1_bias_tri, (0, w1_right_pad, 0, 0), mode="constant", value=0
+        )
+        w2_bias_tri = F.pad(
+            w2_bias_tri, (0, w2_right_pad, 0, 0), mode="constant", value=0
+        )
 
         x_tri = F.pad(x_tri, (0, x_pad, 0, 0), mode="constant", value=0)
 
-        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
-            mx_axis=1)
+        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
         w_scale_layout, w_scale_layout_opts = (
             layout.make_default_matmul_mxfp4_w_scale_layout(
-                mx_axis=1, num_warps=num_warps))
+                mx_axis=1, num_warps=num_warps
+            )
+        )
 
         w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
         w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
@@ -140,29 +141,33 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
         w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
         w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, torch.bfloat16, axis=1)
 
-        w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout,
-                                **w_layout_opts)
+        w1_tri = convert_layout(
+            wrap_torch_tensor(w1_tri, FP4), w_layout, **w_layout_opts
+        )
         w1_scale_tri = convert_layout(
             wrap_torch_tensor(w1_scale_tri),
             w_scale_layout,
             **w_scale_layout_opts,
         )
 
-        w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout,
-                                **w_layout_opts)
+        w2_tri = convert_layout(
+            wrap_torch_tensor(w2_tri, FP4), w_layout, **w_layout_opts
+        )
         w2_scale_tri = convert_layout(
             wrap_torch_tensor(w2_scale_tri),
             w_scale_layout,
             **w_scale_layout_opts,
         )
 
-        pc1 = PrecisionConfig(weight_scale=w1_scale_tri,
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
-        pc2 = PrecisionConfig(weight_scale=w2_scale_tri,
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
+        pc1 = PrecisionConfig(
+            weight_scale=w1_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+        )
+        pc2 = PrecisionConfig(
+            weight_scale=w2_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+        )
 
         # tucuate so the rest can run properly
-        w1 = w1[..., :K, :2 * N]
+        w1 = w1[..., :K, : 2 * N]
         w2 = w2[..., :N, :K]
 
         w1 = deshuffle(w1)
@@ -260,7 +265,8 @@ class Case:
 @pytest.mark.parametrize(
     ", ".join(f.name for f in fields(Case)),
     [
-        tuple(getattr(case, f.name) for f in fields(Case)) for case in [
+        tuple(getattr(case, f.name) for f in fields(Case))
+        for case in [
             # Case(a_dtype="bf16", w_dtype="bf16"),
             # Case(a_dtype="fp8_e4m3", w_dtype="fp8_e5m2"),
             Case(a_dtype="bf16", w_dtype="mx4")
@@ -293,6 +299,13 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         pc2,
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
+    quant_config = FusedMoEQuantConfig.make(
+        w1_bias=w1_bias_tri,
+        w2_bias=w2_bias_tri,
+        w1_precision=pc1,
+        w2_precision=pc2,
+    )
+
     out_triton_monolithic = triton_kernel_moe_forward(
         hidden_states=x_tri,
         w1=w1_tri,
@@ -300,10 +313,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         gating_output=exp_data_tri,
         topk=topk,
         renormalize=True,
-        w1_bias=w1_bias_tri,
-        w2_bias=w2_bias_tri,
-        w1_precision=pc1,
-        w2_precision=pc2,
+        quant_config=quant_config,
     )
     out_triton_monolithic = out_triton_monolithic[..., :K]
 
@@ -316,10 +326,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         gating_output=exp_data,
         topk=topk,
     )
-    assert_close(ref=out_ref,
-                 tri=out_triton_monolithic,
-                 maxtol=0.025,
-                 rmstol=0.005)
+    assert_close(ref=out_ref, tri=out_triton_monolithic, maxtol=0.025, rmstol=0.005)
 
 
 def batched_moe(
@@ -336,6 +343,13 @@ def batched_moe(
 ) -> torch.Tensor:
     max_num_tokens = round_up(a.shape[0], 64)
 
+    quant_config = FusedMoEQuantConfig.make(
+        w1_precision=w1_precision,
+        w2_precision=w2_precision,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
+    )
+
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(
             max_num_tokens,
@@ -344,18 +358,11 @@ def batched_moe(
             rank=0,
         ),
         BatchedOAITritonExperts(
-            None,
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
-            w1_precision=w1_precision,
-            w2_precision=w2_precision,
+            quant_config=quant_config,
         ),
     )
-
-    extra_expert_args = {
-        "w1_bias": w1_bias,
-        "w2_bias": w2_bias,
-    }
 
     topk_weight, topk_ids, _ = fused_topk(a, gating_output, topk, renormalize)
 
@@ -365,14 +372,14 @@ def batched_moe(
         w2,
         topk_weight,
         topk_ids,
-        extra_expert_args=extra_expert_args,
     )
 
 
 @pytest.mark.parametrize(
     ", ".join(f.name for f in fields(Case)),
     [
-        tuple(getattr(case, f.name) for f in fields(Case)) for case in [
+        tuple(getattr(case, f.name) for f in fields(Case))
+        for case in [
             # Case(a_dtype="bf16", w_dtype="bf16"),
             # Case(a_dtype="fp8_e4m3", w_dtype="fp8_e5m2"),
             Case(a_dtype="bf16", w_dtype="mx4")

@@ -20,10 +20,7 @@ class MambaBase(AttentionLayerBase):
 
     # Contains the KV cache (mamba state) for the layer
     # in the shape specified by `self.get_state_shape`.
-    # The outer list is for v0 PP virtual engine. Though this code path
-    # only runs for v1, we have to do this to unify with the interface
-    # of Attention + v0 PP.
-    kv_cache: list[Iterable[torch.Tensor]]
+    kv_cache: tuple[torch.Tensor, ...]
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
