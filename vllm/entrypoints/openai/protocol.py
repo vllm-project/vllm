@@ -81,7 +81,20 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.utils import random_uuid, resolve_obj_by_qualname
+from vllm.utils import random_uuid
+from vllm.utils.import_utils import resolve_obj_by_qualname
+
+EMBED_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    # I'm not sure if other platforms' CPUs support the fp8 data format.
+    # EMBED_DTYPE only uses the fp8 data representation,
+    # does not use fp8 computation, and only occurs on the CPU.
+    # Apologize for any possible break.
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+}
 
 logger = init_logger(__name__)
 
@@ -1185,6 +1198,10 @@ class CompletionRequest(OpenAIBaseModel):
             "Please pass `grammar` to `structured_outputs` instead."
         ),
     )
+    structural_tag: str | None = Field(
+        default=None,
+        description=("If specified, the output will follow the structural tag schema."),
+    )
     guided_decoding_backend: str | None = Field(
         default=None,
         description=(
@@ -1345,10 +1362,27 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        guided_json_object = None
+        if self.response_format is not None:
+            if self.response_format.type == "json_object":
+                guided_json_object = True
+            elif self.response_format.type == "json_schema":
+                json_schema = self.response_format.json_schema
+                assert json_schema is not None
+                self.guided_json = json_schema.json_schema
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat
+                )
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
+
         # Forward deprecated guided_* parameters to structured_outputs
         if self.structured_outputs is None:
             kwargs = dict[str, Any](
                 json=self.guided_json,
+                json_object=guided_json_object,
                 regex=self.guided_regex,
                 choice=self.guided_choice,
                 grammar=self.guided_grammar,
@@ -1357,13 +1391,6 @@ class CompletionRequest(OpenAIBaseModel):
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
             if len(kwargs) > 0:
                 self.structured_outputs = StructuredOutputsParams(**kwargs)
-
-        if (
-            self.structured_outputs is not None
-            and self.response_format is not None
-            and self.response_format.type == "json_object"
-        ):
-            self.structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1517,8 +1544,17 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: bool | None = None
-
+    normalize: bool | None = Field(
+        default=None,
+        description="Whether to normalize the embeddings outputs. Default is True.",
+    )
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "What dtype to use for base64 encoding. Default to using "
+            "float32 for base64 encoding to match the OpenAI python client behavior."
+        ),
+    )
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
@@ -1594,7 +1630,17 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: bool | None = None
+    normalize: bool | None = Field(
+        default=None,
+        description="Whether to normalize the embeddings outputs. Default is True.",
+    )
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "Which dtype to use for base64 encoding. Defaults to float32 "
+            "to match OpenAI API."
+        ),
+    )
     # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")
@@ -1637,10 +1683,18 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     When using plugins IOProcessor plugins, the actual input is processed
     by the plugin itself. Hence, we use a generic type for the request data
     """
-    softmax: bool = True
+    activation: bool = False
+
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "What dtype to use for base64 encoding. Default to using "
+            "float32 for base64 encoding to match the OpenAI python client behavior."
+        ),
+    )
 
     def to_pooling_params(self):
-        return PoolingParams(task="encode", softmax=self.softmax)
+        return PoolingParams(task="token_classify", activation=self.activation)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
@@ -2050,11 +2104,15 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    input_tokens_per_turn: list[int] = Field(default_factory=list)
+    cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
 
 class OutputTokensDetails(OpenAIBaseModel):
     reasoning_tokens: int = 0
     tool_output_tokens: int = 0
+    output_tokens_per_turn: list[int] = Field(default_factory=list)
+    tool_output_tokens_per_turn: list[int] = Field(default_factory=list)
 
 
 class ResponseUsage(OpenAIBaseModel):
@@ -2071,7 +2129,7 @@ def serialize_message(msg):
     """
     if isinstance(msg, dict):
         return msg
-    elif hasattr(msg, "__dict__"):
+    elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
         # fallback to pyandic dump

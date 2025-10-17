@@ -359,9 +359,10 @@ class CoreEngineActorManager:
         )
         device_str = current_platform.ray_device_key
 
+        all2all_backend = vllm_config.parallel_config.all2all_backend
         if envs.VLLM_RAY_DP_PACK_STRATEGY == "fill" and (
-            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
-            or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
+            all2all_backend == "deepep_high_throughput"
+            or all2all_backend == "deepep_low_latency"
         ):
             raise ValueError(
                 "DeepEP kernels require EP ranks [0,7] (same for [8,15], ...) "

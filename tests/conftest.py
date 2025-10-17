@@ -57,7 +57,8 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import is_list_of, set_default_torch_num_threads
+from vllm.utils import set_default_torch_num_threads
+from vllm.utils.collections import is_list_of
 
 logger = init_logger(__name__)
 
@@ -334,7 +335,7 @@ class HfRunner:
             trust_remote_code=trust_remote_code,
         )
         self.device = self.get_default_device()
-        self.dtype = torch_dtype = _get_and_verify_dtype(
+        self.dtype = dtype = _get_and_verify_dtype(
             self.model_name,
             self.config,
             dtype=dtype,
@@ -342,7 +343,7 @@ class HfRunner:
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
-        model_kwargs.setdefault("torch_dtype", torch_dtype)
+        model_kwargs.setdefault("dtype", dtype)
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
@@ -388,7 +389,7 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
-                torch_dtype=torch_dtype,
+                dtype=dtype,
                 trust_remote_code=trust_remote_code,
             )
 
@@ -398,7 +399,7 @@ class HfRunner:
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
@@ -1011,8 +1012,12 @@ class VllmRunner:
         req_outputs = self.llm.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
-    def encode(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.encode(prompts)
+    def token_embed(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.encode(prompts, pooling_task="token_embed")
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def token_classify(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
         return [req_output.outputs.data for req_output in req_outputs]
 
     def reward(self, prompts: list[str]) -> list[list[float]]:

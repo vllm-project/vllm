@@ -19,7 +19,7 @@ from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     ModelConfig,
     PassConfig,
     SchedulerConfig,
@@ -321,7 +321,7 @@ def test_attention_quant_pattern(
         ),
         scheduler_config=SchedulerConfig(max_num_seqs=1024),
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["+quant_fp8"],
             use_inductor_graph_partition=use_inductor_graph_partition,
         ),
@@ -421,7 +421,9 @@ def test_attention_quant_pattern(
     ]
     if any(attn_fusion_supported):
         # Check quantization ops in the graph before and after fusion
-        test_backend.check_before_ops([QUANT_OPS[quant_key]], fully_replaced=True)
+        # Note: fully_replaced=False because query quant ops remain in graph.
+        # Only output quant ops are fused into attention.
+        test_backend.check_before_ops([QUANT_OPS[quant_key]], fully_replaced=False)
 
     # access the underlying `AttnFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
