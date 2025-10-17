@@ -82,7 +82,7 @@ There are other miscellaneous places hard-coding the use of `spawn`:
 
 Related PRs:
 
-- <gh-pr:8823>
+- <https://github.com/vllm-project/vllm/pull/8823>
 
 ## Prior State in v1
 

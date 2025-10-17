@@ -2,7 +2,7 @@
 
 !!! announcement
 
-    We have started the process of deprecating V0. Please read [RFC #18571](gh-issue:18571) for more details.
+    We have started the process of deprecating V0. Please read [RFC #18571](https://github.com/vllm-project/vllm/issues/18571) for more details.
 
 V1 is now enabled by default for all supported use cases, and we will gradually enable it for every use case we plan to support. Please share any feedback on [GitHub](https://github.com/vllm-project/vllm) or in the [vLLM Slack](https://inviter.co/vllm-slack).
 
@@ -94,8 +94,8 @@ See below for the status of models that are not yet supported or have more featu
 
 The initial basic support is now functional.
 
-Later, we will consider using [hidden states processor](gh-issue:12249),
-which is based on [global logits processor](gh-pr:13360)
+Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249),
+which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360)
 to enable simultaneous generation and embedding using the same engine instance in V1.
 
 #### Mamba Models
@@ -124,13 +124,13 @@ encoder and decoder (e.g., `BartForConditionalGeneration`,
 | **Chunked Prefill**                         | <nobr>🚀 Optimized</nobr>                                                         |
 | **LoRA**                                    | <nobr>🚀 Optimized</nobr>                                                         |
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
-| **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices (<gh-pr:15191>)</nobr>|
+| **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices (<https://github.com/vllm-project/vllm/pull/15191>)</nobr>|
 | **Spec Decode**                             | <nobr>🚀 Optimized</nobr>                                                         |
-| **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](gh-issue:13414))</nobr>|
+| **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
 | **Structured Output Alternative Backends**  | <nobr>🟢 Functional</nobr>                                                        |
 | **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
-| **best_of**                                 | <nobr>🔴 Deprecated ([RFC #13361](gh-issue:13361))</nobr>|
-| **Per-Request Logits Processors**           | <nobr>🔴 Deprecated ([RFC #13360](gh-pr:13360))</nobr> |
+| **best_of**                                 | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
+| **Per-Request Logits Processors**           | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr> |
 | **GPU <> CPU KV Cache Swapping**            | <nobr>🔴 Deprecated</nobr>                                                        |
 
 !!! note
@@ -168,11 +168,11 @@ As part of the major architectural rework in vLLM V1, several legacy features ha
 
 ##### Sampling features
 
-- **best_of**: This feature has been deprecated due to limited usage. See details at [RFC #13361](gh-issue:13361).
+- **best_of**: This feature has been deprecated due to limited usage. See details at [RFC #13361](https://github.com/vllm-project/vllm/issues/13361).
 - **Per-Request Logits Processors**: In V0, users could pass custom
   processing functions to adjust logits on a per-request basis. In vLLM V1, this
   feature has been deprecated. Instead, the design is moving toward supporting **global logits
-  processors**, a feature the team is actively working on for future releases. See details at [RFC #13360](gh-pr:13360).
+  processors**, a feature the team is actively working on for future releases. See details at [RFC #13360](https://github.com/vllm-project/vllm/pull/13360).
 
 ##### KV Cache features
 

@@ -196,7 +196,7 @@ The reasoning content is also available when both tool calling and the reasoning
     print(f"Arguments: {tool_call.arguments}")
     ```
 
-For more examples, please refer to <gh-file:examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py>.
+For more examples, please refer to [examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py](../../examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py).
 
 ## Limitations
 
@@ -204,7 +204,7 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 
 ## How to support a new reasoning model
 
-You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
+You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reasoning_parser.py](../../vllm/reasoning/deepseek_r1_reasoning_parser.py).
 
 ??? code
 
@@ -264,7 +264,7 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
             """
     ```
 
-Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
+Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in [vllm/reasoning/deepseek_r1_reasoning_parser.py](../../vllm/reasoning/deepseek_r1_reasoning_parser.py).
 
 ??? code
 
