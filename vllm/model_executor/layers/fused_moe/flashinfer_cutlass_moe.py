@@ -149,7 +149,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "Only activation silu is supported in FlashInferExperts"
         )
 
-        if self.quant_dtype == torch.float8_e4m3fn and not self.use_deepseek_fp8_block_scale:
+        if (
+            self.quant_dtype == torch.float8_e4m3fn
+            and not self.use_deepseek_fp8_block_scale
+        ):
             quant_scales = [
                 self.g1_alphas,
                 self.a2_gscale,
