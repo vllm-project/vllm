@@ -72,7 +72,8 @@ logger = init_logger(__name__)
 
 class SupportsHMA:
     """
-    Mixin class for connectors that support hybrid memory allocator (HMA).
+    The class that indicates the corresponding connector supports hybrid memory
+    allocator (HMA).
     This is required to use the connector together with hybrid memory allocator.
     """
 
