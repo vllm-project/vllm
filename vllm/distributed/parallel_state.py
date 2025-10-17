@@ -51,8 +51,8 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (
     get_distributed_init_method,
-    resolve_obj_by_qualname,
 )
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
     supports_custom_op,

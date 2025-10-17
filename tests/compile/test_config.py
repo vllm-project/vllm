@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+
 import pytest
 
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.utils.torch_utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
@@ -23,6 +26,20 @@ def test_use_cudagraphs_dynamic():
     # engine decides when to capture based on runtime settings instead of a
     # blanket default.
     assert vllm_config.compilation_config.use_cudagraph
+
+
+def test_copy_pass():
+    vllm_config = VllmConfig()
+    inductor_pass = FixFunctionalizationPass(vllm_config)
+    copied_inductor_pass = copy.deepcopy(inductor_pass)
+    assert (
+        copied_inductor_pass.compilation_config.use_inductor_graph_partition
+        == vllm_config.compilation_config.use_inductor_graph_partition
+    )
+    assert (
+        copied_inductor_pass.compilation_config.splitting_ops
+        == vllm_config.compilation_config.splitting_ops
+    )
 
 
 def test_custom_op():

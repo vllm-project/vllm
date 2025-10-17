@@ -18,7 +18,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.transformers import replace_linear_class
+from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,

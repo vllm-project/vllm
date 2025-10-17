@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import (
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -864,7 +864,7 @@ def get_kernel_options(
     kernel_options: dict[str, int | bool] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
-    if vllm_kernel_override_batch_invariant():
+    if vllm_is_batch_invariant():
         kernel_options["BLOCK_M"] = 16
         kernel_options["BLOCK_N"] = 16
         kernel_options["IS_DIVISIBLE"] = False

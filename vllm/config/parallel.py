@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
 from vllm.utils import get_open_ports_list
@@ -566,7 +566,7 @@ class ParallelConfig:
         from vllm.executor.executor_base import ExecutorBase
 
         # Enable batch invariance settings if requested
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             self.disable_custom_all_reduce = True
 
         if (

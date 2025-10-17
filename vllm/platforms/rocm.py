@@ -59,9 +59,6 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
     "Qwen2ForCausalLM": _ROCM_SWA_REASON,
     "MistralForCausalLM": _ROCM_SWA_REASON,
     "MixtralForCausalLM": _ROCM_SWA_REASON,
-    "PaliGemmaForConditionalGeneration": (
-        "ROCm flash attention does not yet fully support 32-bit precision on PaliGemma"
-    ),
     "Phi3VForCausalLM": (
         "ROCm Triton flash attention may run into compilation errors due to "
         "excessive use of shared memory. If this happens, disable Triton FA "
