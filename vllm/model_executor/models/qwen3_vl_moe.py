@@ -329,10 +329,6 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
 
-        # Only perform the following mapping when Qwen3MoeMLP exists
-        if getattr(self.config, "mlp_only_layers", []):
-            self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
-
         self.model = Qwen3MoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
