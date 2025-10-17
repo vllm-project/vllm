@@ -52,6 +52,10 @@ class SchedulerConfig:
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
 
+    max_waiting_queue_length: int | None = None
+    """The maximum number of requests allowed in the waiting queue.
+    If None, there is no limit on the waiting queue length."""
+
     max_long_partial_prefills: int = 1
     """For chunked prefill, the maximum number of prompts longer than
     long_prefill_token_threshold that will be prefilled concurrently. Setting
@@ -315,5 +319,12 @@ class SchedulerConfig:
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills})."
             )
-
+        if (
+            self.max_waiting_queue_length is not None
+            and self.max_waiting_queue_length < 1
+        ):
+            raise ValueError(
+                f"max_waiting_queue_length ({self.max_waiting_queue_length}) "
+                "must be greater than or equal to 1 if specified."
+            )
         return self
