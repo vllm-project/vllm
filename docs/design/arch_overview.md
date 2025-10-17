@@ -47,7 +47,7 @@ Here is a sample of `LLM` class usage:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
 
-More API details can be found in the [Offline Inference](#offline-inference-api) section of the API docs.
+More API details can be found in the [Offline Inference](../api/README.md#offline-inference) section of the API docs.
 
 The code for the `LLM` class can be found in [vllm/entrypoints/llm.py](../../vllm/entrypoints/llm.py).
 

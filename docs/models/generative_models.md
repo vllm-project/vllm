@@ -140,5 +140,5 @@ outputs = llm.chat(conversation, chat_template=custom_template)
 
 Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
-- [Completions API][completions-api] is similar to `LLM.generate` but only accepts text.
-- [Chat API][chat-api]  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for models with a chat template.
+- [Completions API](../serving/openai_compatible_server.md#completions-api) is similar to `LLM.generate` but only accepts text.
+- [Chat API](../serving/openai_compatible_server.md#chat-api)  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for models with a chat template.

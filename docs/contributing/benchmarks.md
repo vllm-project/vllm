@@ -7,8 +7,8 @@ toc_depth: 4
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
 - **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Performance benchmarks][performance-benchmarks]**: Automated CI benchmarks for development
-- **[Nightly benchmarks][nightly-benchmarks]**: Comparative benchmarks against alternatives
+- **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
+- **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
 [Benchmark CLI]: #benchmark-cli
 
@@ -924,8 +924,6 @@ throughput numbers correctly is also adjusted.
 
 </details>
 
-[](){ #performance-benchmarks }
-
 ## Performance Benchmarks
 
 The performance benchmarks are used for development to confirm whether new changes improve performance under various workloads. They are triggered on every commit with both the `perf-benchmarks` and `ready` labels, and when a PR is merged into vLLM.
@@ -987,8 +985,6 @@ The benchmarking currently runs on a predefined set of models configured in the 
 #### Viewing Results
 
 All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
-
-[](){ #nightly-benchmarks }
 
 ## Nightly Benchmarks
 

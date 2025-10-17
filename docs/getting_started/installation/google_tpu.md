@@ -153,7 +153,7 @@ VLLM_TARGET_DEVICE="tpu" python -m pip install -e .
 
 ### Pre-built images
 
-See [deployment-docker-pre-built-image][deployment-docker-pre-built-image] for instructions on using the official Docker image, making sure to substitute the image name `vllm/vllm-openai` with `vllm/vllm-tpu`.
+See [Using Docker](../../deployment/docker.md) for instructions on using the official Docker image, making sure to substitute the image name `vllm/vllm-openai` with `vllm/vllm-tpu`.
 
 ### Build image from source
 

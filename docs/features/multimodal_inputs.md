@@ -1,6 +1,6 @@
 # Multimodal Inputs
 
-This page teaches you how to pass multi-modal inputs to [multi-modal models][supported-mm-models] in vLLM.
+This page teaches you how to pass multi-modal inputs to [multi-modal models](../models/supported_models.md#list-of-multimodal-language-models) in vLLM.
 
 !!! note
     We are actively iterating on multi-modal support. See [this RFC](https://github.com/vllm-project/vllm/issues/4194) for upcoming changes,

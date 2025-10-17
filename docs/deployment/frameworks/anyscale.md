@@ -1,7 +1,5 @@
 # Anyscale
 
-[](){ #deployment-anyscale }
-
 [Anyscale](https://www.anyscale.com) is a managed, multi-cloud platform developed by the creators of Ray.
 
 Anyscale automates the entire lifecycle of Ray clusters in your AWS, GCP, or Azure account, delivering the flexibility of open-source Ray
