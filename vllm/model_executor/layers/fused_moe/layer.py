@@ -286,10 +286,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
     @property
-    def using_modular_kernel(self) -> bool:
-        return False
-
-    @property
     def supports_eplb(self) -> bool:
         return False
 
@@ -340,10 +336,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         if isinstance(old_moe_method, torch.nn.Module):
             self.load_state_dict(old_moe_method.state_dict())
         logger.debug("Swapping out %s", self.old_method_name)
-
-    @property
-    def using_modular_kernel(self) -> bool:
-        return True
 
     @property
     def supports_eplb(self) -> bool:
@@ -1441,13 +1433,12 @@ class FusedMoE(CustomOp):
 
     # Note: init_prepare_finalize should only be called by
     # prepare_communication_buffer_for_model.
+    # This is called after all weight loading and post-processing, so it
+    # should be safe to swap out the quant_method.
     def init_prepare_finalize(self) -> None:
         mk = self.quant_method.init_prepare_finalize(self)
         if mk is not None:
-            new_quant_method = FusedMoEModularMethod(self.quant_method, mk)
-            if isinstance(self.quant_method, torch.nn.Module):
-                self.set_submodule(self.quant_method.name, new_quant_method)
-            self.quant_method = new_quant_method
+            self.quant_method = FusedMoEModularMethod(self.quant_method, mk)
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
@@ -2210,7 +2201,7 @@ class FusedMoE(CustomOp):
         """
         assert self.quant_method is not None
         return (
-            self.quant_method.fused_experts is not None
+            isinstance(self.quant_method, FusedMoEModularMethod)
             and self.quant_method.fused_experts.output_is_reduced()
         )
 
@@ -2324,7 +2315,7 @@ class FusedMoE(CustomOp):
             # If there are shared experts but we are not using a modular kernel,
             # the shared experts must be called here
             if (
-                not isinstance(self.quant_method.fused_experts, FusedMoEModularKernel)
+                not isinstance(self.quant_method, FusedMoEModularMethod)
                 and self.shared_experts is not None
             ):
                 shared_output = self.shared_experts(staged_hidden_states)
@@ -2431,14 +2422,14 @@ class FusedMoE(CustomOp):
         if self.use_dp_chunking:
             return self.forward_impl_chunked(hidden_states, router_logits)
 
-        do_naive_dispatch_combine: bool = (
-            self.dp_size > 1 and not self.quant_method.using_modular_kernel
+        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
+            self.quant_method, FusedMoEModularMethod
         )
 
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here
         if (
-            not isinstance(self.quant_method.fused_experts, FusedMoEModularKernel)
+            not isinstance(self.quant_method, FusedMoEModularMethod)
             and self.shared_experts is not None
         ):
             shared_output = self.shared_experts(hidden_states)
