@@ -282,7 +282,7 @@ class OpenCVNemotronVideoBackend(OpenCVVideoBackend):
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.full((len(frame_indices), height, width, 3), dtype=np.uint8)
+        frames = np.full((len(frame_indices), height, width, 3), 255, dtype=np.uint8)
 
         i = 0
         for idx in range(max(frame_indices) + 1):
