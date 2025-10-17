@@ -18,7 +18,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    mxfp4_w4a8_moe_quant_config,
+    mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
@@ -782,9 +782,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM,
             Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS,
         ]:
-            return mxfp4_w4a8_moe_quant_config(
-                quant_dtype="mxfp8",
-                weight_dtype="mxfp4",
+            return mxfp4_mxfp8_moe_quant_config(
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
                 w1_scale=layer.w13_weight_scale,
