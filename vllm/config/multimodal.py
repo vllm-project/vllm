@@ -8,6 +8,7 @@ from typing import Any, Literal, TypeAlias
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
+from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.config.utils import config
 
 
@@ -112,6 +113,10 @@ class MultiModalConfig:
         DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
+    mm_encoder_attn_backend: _Backend | None = None
+    """Optional override for the multi-modal encoder attention backend when
+    using vision transformers. Accepts any value from
+    `vllm.attention.backends.registry._Backend` (e.g. `FLASH_ATTN`)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -148,6 +153,22 @@ class MultiModalConfig:
                 value[k] = BaseDummyOptions(**v)
         return value
 
+    @field_validator("mm_encoder_attn_backend", mode="before")
+    @classmethod
+    def _validate_mm_encoder_attn_backend(cls, value: object) -> _Backend | None:
+        if value is None or isinstance(value, _Backend):
+            return value
+
+        if isinstance(value, str):
+            candidate = backend_name_to_enum(value.upper())
+            if candidate is not None:
+                return candidate
+
+        valid_backends = ", ".join(sorted(_Backend.__members__.keys()))
+        raise ValueError(
+            f"Invalid mm encoder attention backend. Expected one of: {valid_backends}."
+        )
+
     @model_validator(mode="after")
     def _validate_multimodal_config(self):
         if self.mm_processor_cache_type != "shm" and (
@@ -172,9 +193,11 @@ class MultiModalConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
+        factors: list[Any] = [
+            self.mm_encoder_attn_backend.name
+            if self.mm_encoder_attn_backend is not None
+            else None
+        ]
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
