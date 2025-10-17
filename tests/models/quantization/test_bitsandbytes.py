@@ -158,6 +158,7 @@ def test_4bit_bnb_moe_model(
         quantization="bitsandbytes",
         enforce_eager=False,
         default_torch_num_threads=1,
+        tokenizer_mode="hf",
     ) as llm:
         vllm_outputs = llm.generate_greedy_logprobs(
             example_prompts, max_tokens=32, num_logprobs=5
@@ -207,6 +208,7 @@ def test_4bit_bnb_embedding_model(
         gpu_memory_utilization=0.5,
         quantization="bitsandbytes",
         default_torch_num_threads=1,
+        tokenizer_mode="hf",
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
 
@@ -259,6 +261,7 @@ def validate_generated_texts(
         tensor_parallel_size=vllm_tp_size,
         enforce_eager=False,
         default_torch_num_threads=1,
+        tokenizer_mode="hf",
     ) as llm:
         vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")

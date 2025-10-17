@@ -369,6 +369,27 @@ def get_sparse_attention_config(
     return config
 
 
+def ls_files_from_hf_or_path(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+) -> list[str]:
+    """List files from Hugging Face Hub."""
+    assert len(allow_patterns) > 0
+    is_local = huggingface_hub.constants.HF_HUB_OFFLINE or os.path.isdir(
+        model_name_or_path
+    )
+    file_list = []
+    if not is_local:
+        fs = HfFileSystem()
+        all_files = fs.ls(model_name_or_path, detail=False, revision=revision)
+    else:
+        all_files = glob.glob(os.path.join(model_name_or_path, "*"))
+    for pattern in allow_patterns:
+        file_list.extend(fnmatch.filter(all_files, pattern))
+    return file_list
+
+
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,

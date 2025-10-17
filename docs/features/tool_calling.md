@@ -142,7 +142,7 @@ Flags: `--tool-call-parser hermes`
 Supported models:
 
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
-* Additional mistral function-calling models are compatible as well.
+* Additional Mistral function-calling models are compatible as well.
 
 Known issues:
 
@@ -160,10 +160,10 @@ Recommended flags:
 
 1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
 
-    `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
+    `--tool-call-parser mistral`
 
 2. To use the default Transformers tokenization backend:
-    `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+    `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 

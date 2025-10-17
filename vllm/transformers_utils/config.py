@@ -619,10 +619,14 @@ def get_config(
 
     if config_format == "auto":
         try:
-            if is_gguf or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
-                config_format = "hf"
-            elif file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            # First check for Mistral to avoid defaulting to
+            # Transformers implementation.
+            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
+            elif is_gguf or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                config_format = "hf"
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
