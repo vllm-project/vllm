@@ -241,8 +241,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         else:
             return None
 
-    # Note: init_prepare_finalize should only be called by
-    # prepare_communication_buffer_for_model.
     def init_prepare_finalize(
         self, layer: torch.nn.Module
     ) -> FusedMoEModularKernel | None:
@@ -270,8 +268,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 experts,
                 layer.shared_experts,
             )
-
-        return None
+        else:
+            return None
 
     def select_gemm_impl(
         self,
@@ -325,7 +323,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 @CustomOp.register("modular_fused_moe")
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def __init__(
-        self, old_moe_method: FusedMoEMethodBase, fused_experts: FusedMoEModularKernel
+        self,
+        old_moe_method: FusedMoEMethodBase,
+        fused_experts: FusedMoEModularKernel,
     ):
         super().__init__(old_moe_method.moe)
         # Find better way to copy attributes
@@ -378,6 +378,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.fused_experts is not None
+
         # Is getattr needed?
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -1435,6 +1437,8 @@ class FusedMoE(CustomOp):
                 logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
             )
 
+    # Note: init_prepare_finalize should only be called by
+    # prepare_communication_buffer_for_model.
     def init_prepare_finalize(self) -> None:
         mk = self.quant_method.init_prepare_finalize(self)
         if mk is not None:
