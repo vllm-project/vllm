@@ -382,7 +382,6 @@ class TestNixlHandshake:
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
-                virtual_engine=0,
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -450,7 +449,6 @@ class TestNixlHandshake:
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
-                virtual_engine=0,
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -506,7 +504,6 @@ class TestNixlHandshake:
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
-                virtual_engine=0,
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -666,7 +663,6 @@ def test_kv_connector_stats(dist_init):
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1241,7 +1237,6 @@ def test_aborted_request_removed_from_worker_in_batch(dist_init):
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1344,7 +1339,6 @@ def test_handshake_failure_returns_finished(dist_init):
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1393,7 +1387,6 @@ def test_transfer_setup_failure_returns_finished(dist_init):
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
     )
     connector.start_load_kv(dummy_ctx)
 

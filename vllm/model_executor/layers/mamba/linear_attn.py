@@ -328,7 +328,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
         if attn_metadata is not None:
-            kv_cache = self.kv_cache[forward_context.virtual_engine][0]
+            kv_cache = self.kv_cache[0]
             state_indices_tensor = attn_metadata.state_indices_tensor
 
             num_prefills = getattr(attn_metadata, "num_prefills", 0)

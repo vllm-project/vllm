@@ -272,14 +272,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         # use a placeholder kv cache tensor during init, which will be replaced
-        # by bind_kv_cache
-        # this variable will not be accessed if use_direct_call is True
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
-        ]
+        # by bind_kv_cache this variable will not be accessed if use_direct_call
+        # is True
+        self.kv_cache = torch.tensor([])
 
         try:
             self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
@@ -361,9 +356,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+
                 self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata, output=output
+                    self, query, key, value, self.kv_cache, attn_metadata, output=output
                 )
             else:
                 torch.ops.vllm.unified_attention_with_output(
@@ -376,9 +371,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+
                 return self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata
+                    self, query, key, value, self.kv_cache, attn_metadata
                 )
             else:
                 return torch.ops.vllm.unified_attention(
@@ -644,12 +639,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
-        ]
+        self.kv_cache = torch.tensor([])
 
         # Align with Attention's scale attributes for MLA backends.
 
@@ -688,7 +678,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
 
             # Mirror Attention.forward scale calculation path
             if self.calculate_kv_scales and getattr(
@@ -703,14 +692,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     q,
                     kv_c_normed,
                     k_pe,
-                    self_kv_cache,
+                    self.kv_cache,
                     attn_metadata,
                     output=output,
                 )
                 return output
             else:
                 return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    self, q, kv_c_normed, k_pe, self.kv_cache, attn_metadata
                 )
         else:
             if self.attn_backend.accept_output_buffer:
@@ -785,7 +774,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 def maybe_save_kv_layer_to_connector(
     layer_name: str,
-    kv_cache_layer: list[torch.Tensor],
+    kv_cache_layer: torch.Tensor,
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -851,10 +840,9 @@ def unified_attention(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
+    output = self.impl.forward(self, query, key, value, self.kv_cache, attn_metadata)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    maybe_save_kv_layer_to_connector(layer_name, self.kv_cache)
     return output
 
 
@@ -889,20 +877,19 @@ def unified_attention_with_output(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(
         self,
         query,
         key,
         value,
-        kv_cache,
+        self.kv_cache,
         attn_metadata,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
     )
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    maybe_save_kv_layer_to_connector(layer_name, self.kv_cache)
 
 
 def unified_attention_with_output_fake(
@@ -938,10 +925,9 @@ def unified_mla_attention(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = self.impl.forward(self, q, kv_c_normed, k_pe, self.kv_cache, attn_metadata)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    maybe_save_kv_layer_to_connector(layer_name, self.kv_cache)
     return output
 
 
@@ -978,20 +964,19 @@ def unified_mla_attention_with_output(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(
         self,
         q,
         kv_c_normed,
         k_pe,
-        kv_cache,
+        self.kv_cache,
         attn_metadata,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
     )
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    maybe_save_kv_layer_to_connector(layer_name, self.kv_cache)
 
 
 def unified_mla_attention_with_output_fake(

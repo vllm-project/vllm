@@ -37,7 +37,7 @@ class BatchDescriptor(NamedTuple):
     num_tokens: int
     uniform_decode: bool = False
     """
-    False can also be used for an uniform decode batch to dispatch to the 
+    False can also be used for an uniform decode batch to dispatch to the
     cudagraph supporting non-uniform batches.
     """
 
@@ -179,8 +179,8 @@ class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
     """
-    Type AttentionMetadata for v0, 
-    Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
+    Type AttentionMetadata for v0,
+    Type Dict[str, AttentionMetadata] for v1, map from layer_name of each
     attention layer to its attention metadata
     Type List[Dict[str, AttentionMetadata]] for DBO. List of size two, one
     for each microbatch.
@@ -191,8 +191,6 @@ class ForwardContext:
         dict[str, "AttentionMetadata"],
         list[dict[str, "AttentionMetadata"]],
     ]
-    # TODO: remove after making all virtual_engines share the same kv cache
-    virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
@@ -223,7 +221,6 @@ def get_forward_context() -> ForwardContext:
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
@@ -231,7 +228,6 @@ def create_forward_context(
 ):
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
-        virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -259,7 +255,6 @@ def override_forward_context(forward_context: ForwardContext | None):
 def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -305,7 +300,6 @@ def set_forward_context(
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
-        virtual_engine,
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,

@@ -471,7 +471,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         self, head_dim: int, dtype: torch.dtype, prefix: str, cache_config: CacheConfig
     ):
         super().__init__()
-        self.kv_cache = [torch.tensor([])]
+        self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.prefix = prefix
         self.cache_config = cache_config

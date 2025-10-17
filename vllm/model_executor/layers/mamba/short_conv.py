@@ -118,8 +118,7 @@ class ShortConv(MambaBase, CustomOp):
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-            conv_state = self_kv_cache[0].transpose(-1, -2)
+            conv_state = self.kv_cache[0].transpose(-1, -2)
             state_indices_tensor = attn_metadata.state_indices_tensor
             has_initial_states_p = attn_metadata.has_initial_states_p
 
