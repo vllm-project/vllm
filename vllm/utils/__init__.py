@@ -18,7 +18,6 @@ import json
 import multiprocessing
 import os
 import pickle
-import random
 import signal
 import socket
 import subprocess
@@ -1350,7 +1349,6 @@ def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     # https://github.com/pytorch/pytorch/blob/
     # c1cd946818442aca8c7f812b16d187ce1586c3bc/
     # torch/cuda/__init__.py#L831C1-L831C17
-    import torch.cuda
     import torch.version
 
     from vllm.platforms import current_platform
@@ -3427,62 +3425,3 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
         if not p.exists():
             return p
         i += 1
-
-
-def generate_identity():
-    """
-    Generate a unique identity for ZMQ ROUTER node
-
-    Format: IP address_PID_timestamp (in milliseconds)
-    Return: identity in byte type
-    """
-    # Get local IP address
-    try:
-        # Create a temporary socket to connect to external server for getting local exit IP
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))  # Connect to public DNS server
-            ip_address = s.getsockname()[0]
-    except Exception:
-        # Use local loopback address if failed
-        ip_address = "127.0.0.1"
-
-    # Get current process PID
-    pid = os.getpid()
-
-    # Get current timestamp (in milliseconds)
-    # to ensure uniqueness within the same second
-    timestamp = int(time.time() * 1000)
-
-    # Combine into string identifier
-    identity_str = f"{ip_address}_{pid}_{timestamp}"
-
-    # Convert to byte type and return
-    # (ZMQ requires identity to be in byte type)
-    return identity_str.encode("utf-8")
-
-
-def generate_unique_numbers(n):
-    numbers = set()
-    while len(numbers) < n:
-        # Timestamp (in milliseconds) + random number to ensure uniqueness
-        unique_num = int(time.time() * 1000) + random.randint(0, 10 * n)
-        # Avoid duplicates in extreme cases
-        while unique_num in numbers:
-            unique_num += 1
-        numbers.add(unique_num)
-    return numbers
-
-
-def generate_identity_group(peer1, peer2, use, n):
-    """
-    Generate n unique identities for ZMQ ROUTER nodes
-
-    Format: peer1_peer2_random number
-    Return: list with identities in byte type as elements
-    """
-    identitys = list()
-    numbers = generate_unique_numbers(n)
-    for num in numbers:
-        identity_str = f"{peer1}_{peer2}_{use}_{str(num)}".encode()
-        identitys.append(identity_str)
-    return identitys

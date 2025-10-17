@@ -29,7 +29,6 @@ from vllm.utils import (
     get_open_zmq_inproc_path,
     in_loop,
     make_zmq_socket,
-    generate_identity_group,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -45,7 +44,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
-    launch_core_engines,
+    launch_core_engines, generate_identity_group,
 )
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
@@ -423,9 +422,18 @@ class ClientGuard():
     def __init__(self, fault_receiver_addr, cmd_addr, engine_registry):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
-        self.fault_receiver_socket = make_zmq_socket(ctx=self.zmq_ctx, path=fault_receiver_addr, socket_type=zmq.ROUTER,
-                                                     bind=True)
-        self.cmd_socket = make_zmq_socket(ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True)
+        self.fault_receiver_socket = make_zmq_socket(
+            ctx=self.zmq_ctx,
+            path=fault_receiver_addr,
+            socket_type=zmq.ROUTER,
+            bind=True
+        )
+        self.cmd_socket = make_zmq_socket(
+            ctx=self.zmq_ctx,
+            path=cmd_addr,
+            socket_type=zmq.ROUTER,
+            bind=True
+        )
 
     def recv_fault_msg(self)-> tuple[None | str, None | str]:
         """
@@ -443,8 +451,8 @@ class ClientGuard():
 
             # Verify message format
             if len(parts) != 3:
-                logger.warning("Received message with invalid format, number of parts: %s",
-                               len(parts))
+                logger.warning("Received message with invalid format,"
+                               " number of parts: %s",len(parts))
                 return (None, None)
 
             identity_bytes, empty_frame, message_bytes = parts
@@ -601,10 +609,18 @@ class MPClient(EngineCoreClient):
             self.start_engine_core_monitor()
             self.engine_registry = {}
             engine_indexs = [i for i in range(dp_size)]
-            fault_receive_identitys = generate_identity_group(peer1="client", peer2="engine_core_guard", use='receive',
-                                                             n=dp_size)
-            client_cmd_identitys = generate_identity_group(peer1="client", peer2="engine_core_guard", use="cmd",
-                                                           n=dp_size)
+            fault_receive_identitys = generate_identity_group(
+                peer1="client",
+                peer2="engine_core_guard",
+                use='receive',
+                n=dp_size
+            )
+            client_cmd_identitys = generate_identity_group(
+                peer1="client",
+                peer2="engine_core_guard",
+                use="cmd",
+                n=dp_size
+            )
             fault_receive_registry = dict(zip(engine_indexs, fault_receive_identitys))
             client_cmd_registry = dict(zip(engine_indexs, client_cmd_identitys))
             self.engine_registry["fault_receive_identitys"] = fault_receive_registry
@@ -708,7 +724,7 @@ class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
     def __init__(
-            self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool
+        self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool
     ):
         super().__init__(
             asyncio_mode=False,

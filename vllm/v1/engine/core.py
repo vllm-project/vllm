@@ -123,7 +123,12 @@ class EngineCoreGuard(threading.Thread):  # changed
             identity=client_cmd_inentity
         )
         # EngineCoreGuard <-> WorkerGuard sockets
-        self.worker_cmd_socket = make_zmq_socket(ctx, worker_cmd_addr, zmq.ROUTER, bind=True)
+        self.worker_cmd_socket = make_zmq_socket(
+            ctx,
+            worker_cmd_addr,
+            zmq.ROUTER,
+            bind=True
+        )
         self.poller = zmq.Poller()
 
     def run(self):
@@ -139,14 +144,15 @@ class EngineCoreGuard(threading.Thread):  # changed
             socks = dict(self.poller.poll(poll_timeout))
 
             # Check if a message has arrived
-            if self.client_cmd_socket in socks and socks[self.client_cmd_socket] == zmq.POLLIN:
+            if (self.client_cmd_socket in socks
+                    and socks[self.client_cmd_socket] == zmq.POLLIN):
                 # DEALER message format: [empty frame, message content]
                 parts = self.client_cmd_socket.recv_multipart()
 
                 # Validate message format
                 if len(parts) != 2:
-                    logger.warning("Invalid message format, expected 2 parts, received %s parts",
-                                   len(parts))
+                    logger.warning("Invalid message format, expected 2 parts,"
+                                   " received %s ",len(parts))
                     return (False, None)
 
                 empty_frame, message_bytes = parts
@@ -1456,7 +1462,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
             )
 
     def _set_cuda_visible_devices(
-            self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
+        self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
     ):
         world_size = vllm_config.parallel_config.world_size
         # Set CUDA_VISIBLE_DEVICES or equivalent.

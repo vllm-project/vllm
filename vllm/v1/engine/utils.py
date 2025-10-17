@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+import uuid
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -118,7 +119,8 @@ class CoreEngineProcManager:
         }
         if fault_report_address:
             zmq_ctx = zmq.Context()
-            identity = generate_identity()
+            num_identity = 1
+            identity = generate_identity_group("core_engine_proc_manager", "clinet_guard", "report", num_identity)[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
                 path=fault_report_address,
@@ -1024,3 +1026,38 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
+
+
+def generate_unique_uuids(n: int):
+    """Generate a set of unique UUID v4 objects.
+
+    Generates a specified number of unique UUID (version 4) objects.
+    UUID v4 uses cryptographically strong random numbers, ensuring
+    an extremely low probability of collisions.
+
+    Args:
+        n: The number of unique UUIDs to generate
+
+    Returns:
+        A set containing 'n' unique UUID objects
+    """
+    uuids = set()
+    while len(uuids) < n:
+        # Generate a random UUID (version 4) and add to the set
+        uuids.add(uuid.uuid4())
+    return uuids
+
+
+def generate_identity_group(peer1, peer2, use, n):
+    """
+    Generate n unique identities for ZMQ ROUTER nodes
+
+    Format: peer1_peer2_use_random number
+    Return: list with identities in byte type as elements
+    """
+    identitys = list()
+    uuids = generate_unique_uuids(n)
+    for uuid in uuids:
+        identity_str = f"{peer1}_{peer2}_{use}_{uuid}".encode()
+        identitys.append(identity_str)
+    return identitys
