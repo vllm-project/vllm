@@ -94,7 +94,7 @@ IMG_END = "</img>"
 IMG_CONTEXT = "<image>"
 
 # Profiling
-MAX_FRAMES = 16
+# MAX_FRAMES = 16
 DEFAULT_NUM_TILES = 12
 
 
@@ -820,8 +820,6 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = (seq_len - max_image_tokens) // processor.num_image_token
         max_frames_per_video = max_total_frames // max(max_videos, 1)
-
-        max_frames_per_video = min(max_frames_per_video, MAX_FRAMES)
         return max(max_frames_per_video, 1)
 
     def get_hf_processor(self, **kwargs: object) -> NanoNemotronVLProcessor:
