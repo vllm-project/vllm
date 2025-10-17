@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining a TPU input batch
 
-from typing import Optional, cast
+from typing import cast
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingType
-from vllm.utils import length_from_prompt_token_ids_or_embeds, swap_dict_values
+from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.collections import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -27,6 +28,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        kernel_block_sizes: list[int],
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -35,7 +37,7 @@ class InputBatch:
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
-        self._req_ids: list[Optional[str]] = []
+        self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
@@ -68,6 +70,7 @@ class InputBatch:
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
+            kernel_block_sizes=kernel_block_sizes,
         )
 
         # Sampling-related.
@@ -153,17 +156,17 @@ class InputBatch:
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
-        self.logit_bias: list[Optional[dict[int, float]]] = [None] * max_num_reqs
+        self.logit_bias: list[dict[int, float] | None] = [None] * max_num_reqs
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
         # the value is False. Since we use masked_fill_ to set -inf.
-        self.allowed_token_ids_mask: Optional[torch.Tensor] = None
-        self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
+        self.allowed_token_ids_mask: torch.Tensor | None = None
+        self.allowed_token_ids_mask_cpu_tensor: torch.Tensor | None = None
 
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
-        self.req_output_token_ids: list[Optional[list[int]]] = []
+        self.req_output_token_ids: list[list[int] | None] = []
 
     @property
     def req_ids(self) -> list[str]:
@@ -174,7 +177,7 @@ class InputBatch:
     def add_request(
         self,
         request: "CachedRequestState",
-        req_index: Optional[int] = None,
+        req_index: int | None = None,
     ) -> None:
         if req_index is None:
             req_index = self.num_reqs
@@ -294,7 +297,7 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
-    def remove_request(self, req_id: str) -> Optional[int]:
+    def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense()."""
 
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -578,7 +581,7 @@ class InputBatch:
         )
 
     @property
-    def max_num_logprobs(self) -> Optional[int]:
+    def max_num_logprobs(self) -> int | None:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
 
     @property

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -13,7 +11,7 @@ import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -43,34 +41,13 @@ class XgrammarBackend(StructuredOutputBackend):
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
-            try:
-                if self.tokenizer.is_tekken:
-                    encoded_vocab = self.tokenizer._vocab
-                else:
-                    encoded_vocab = [
-                        token
-                        for token, _ in sorted(
-                            self.tokenizer.get_vocab().items(),
-                            key=lambda x: x[1],
-                        )
-                    ]
-                stop_token_ids = None
-                if (
-                    hasattr(
-                        self.tokenizer,
-                        "eos_token_id",
-                    )
-                    and self.tokenizer.eos_token_id is not None
-                ):
-                    stop_token_ids = [self.tokenizer.eos_token_id]
-            except AttributeError as e:
-                raise ValueError(
-                    f"Cannot get the vocabulary of the tokenizer "
-                    f"{type(self.tokenizer)}. The tokenizer should have a "
-                    "get_vocab method."
-                ) from e
+            stop_token_ids = [self.tokenizer.eos_token_id]
+
+            # not self.tokenizer.vocab_size as self.tokenizer.vocab
+            # collapses all decoded errors into a single token.
+            self.vocab_size = len(self.tokenizer.vocab)
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
-                encoded_vocab=encoded_vocab,
+                encoded_vocab=self.tokenizer.vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
                 vocab_type=xgr.VocabType.RAW
                 if self.tokenizer.is_tekken

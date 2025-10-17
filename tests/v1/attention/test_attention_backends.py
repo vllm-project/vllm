@@ -3,7 +3,6 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
-from typing import Optional, Union
 
 import pytest
 import torch
@@ -14,7 +13,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
-    get_attention_backend,
+    try_get_attention_backend,
 )
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ModelConfig
@@ -202,7 +201,7 @@ def run_attention_backend(
     key: torch.Tensor,
     value: torch.Tensor,
     kv_cache: torch.Tensor,
-    sliding_window: Optional[int] = None,
+    sliding_window: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -214,7 +213,7 @@ def run_attention_backend(
         actual_backend = _Backend.FLEX_ATTENTION
         use_direct_block_mask = False
 
-    builder_cls, impl_cls = get_attention_backend(actual_backend)
+    builder_cls, impl_cls = try_get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if actual_backend == _Backend.FLASHINFER:
@@ -289,7 +288,7 @@ def run_attention_backend(
 def _test_backend_correctness(
     batch_spec: BatchSpec,
     model: str,
-    backend_to_test: list[Union[_Backend, str]],
+    backend_to_test: list[_Backend | str],
     mask_mod,
     *,
     block_size: int = 16,

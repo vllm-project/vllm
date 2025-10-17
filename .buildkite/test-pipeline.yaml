@@ -296,6 +296,7 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
+    - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/sample
@@ -317,7 +318,7 @@ steps:
   no_gpu: true
   commands:
     # split the test to avoid interference
-    - pytest -v -s v1/core
+    - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
@@ -399,11 +400,10 @@ steps:
     - pytest -v -s compile/test_fusion_attn.py
     - pytest -v -s compile/test_functionalization.py
     - pytest -v -s compile/test_silu_mul_quant_fusion.py
-    - pytest -v -s compile/test_sequence_parallelism.py
-    - pytest -v -s compile/test_async_tp.py
     - pytest -v -s compile/test_fusion_all_reduce.py
     - pytest -v -s compile/test_decorator.py
     - pytest -v -s compile/test_noop_elimination.py
+    - pytest -v -s compile/test_aot_compile.py
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -432,8 +432,9 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
+  - tests/kernels/test_top_k_per_row.py
   commands:
-    - pytest -v -s kernels/core
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
@@ -526,8 +527,9 @@ steps:
   # since torchao nightly is only compatible with torch nightly currently
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
-  - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/
+  # TODO(jerryzh168): resolve the above comment
+  - uv pip install --system torchao==0.13.0
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: LM Eval Small Models # 53min
   timeout_in_minutes: 75
@@ -732,6 +734,16 @@ steps:
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
+- label: Multi-Modal Accuracy Eval (Small Models) # 50min
+  timeout_in_minutes: 70
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - vllm/multimodal/
+  - vllm/inputs/
+  - vllm/v1/core/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+
 - label: Multi-Modal Models Test (Extended) 1
   mirror_hardwares: [amdexperimental]
   optional: true
@@ -828,12 +840,14 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     # Fusion
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
+    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
 
 - label: Blackwell GPT-OSS Eval
   timeout_in_minutes: 60
@@ -867,7 +881,7 @@ steps:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
 - label: Blackwell LM Eval Small Models
-  timeout_in_minutes: 75
+  timeout_in_minutes: 120
   gpu: b200
   optional: true # run on nightlies
   source_file_dependencies:
@@ -1092,6 +1106,8 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
+    - pytest -v -s tests/compile/test_async_tp.py
+    - pytest -v -s tests/compile/test_sequence_parallelism.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
 
