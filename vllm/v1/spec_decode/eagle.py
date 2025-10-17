@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -1140,8 +1141,13 @@ def compute_probs_and_sample_next_token(
         next_token_ids = logits.argmax(dim=-1)
         return next_token_ids, probs
 
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
+    # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
+    # consistent with sampler.py's _SAMPLING_EPS threshold
+    temperature = sampling_metadata.temperature
+    # Avoid division by zero if there are greedy requests.
+    if not sampling_metadata.all_random:
+        is_greedy = temperature < _SAMPLING_EPS
+        temperature = torch.where(is_greedy, 1.0, temperature)
     logits.div_(temperature.view(-1, 1))
     probs = logits.softmax(dim=-1, dtype=torch.float32)
 
