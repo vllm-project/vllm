@@ -548,15 +548,13 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.block_quant and should_use_deepgemm_for_fp8_linear(
                 torch.bfloat16, layer.weight, None
             ):
-                # quantize input to FP8 using the same op as runtime path
-                input_2d = x.view(-1, x.shape[-1])
                 # use group quant consistent with block size across K
                 assert self.act_q_group_shape is not None
                 q_input, input_scale = QuantFP8(
                     False,
                     self.act_q_group_shape,
                     column_major_scales=True,
-                )(input_2d)
+                )(x)
 
                 output_2d = torch.empty(
                     (q_input.shape[0], layer.weight.shape[0]),
@@ -568,10 +566,9 @@ class Fp8LinearMethod(LinearMethodBase):
                     (layer.weight, layer.weight_scale),
                     output_2d,
                 )
-                output = output_2d.view(*x.shape[:-1], layer.weight.shape[0])
                 if bias is not None:
-                    output = output + bias
-                return output
+                    output_2d = output_2d + bias
+                return output_2d
 
             # Dequantize FP8 weights to BF16
             weight_fp8 = layer.weight.to(torch.bfloat16)
