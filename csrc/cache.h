@@ -74,7 +74,7 @@ void cp_gather_indexer_k_quant_cache(
     const torch::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::Tensor& cu_seq_lens);  // [batch_size + 1]
 
-torch::Tensor convert_req_index_to_global_index(
+torch::Tensor convert_req_index_to_global_index_and_upconvert_prefills(
     torch::Tensor req_id, torch::Tensor block_table,
     torch::Tensor token_indices, int64_t block_size,
     const std::optional<torch::Tensor>& prefill_mask,

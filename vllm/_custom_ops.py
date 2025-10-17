@@ -2147,7 +2147,7 @@ def convert_req_index_to_global_index(
         prefill_bf16_workspace: Workspace for upconverted bf16 data
         kv_cache: FP8 KV cache to read from for upconversion
     """
-    return torch.ops._C.convert_req_index_to_global_index(
+    return torch.ops._C.convert_req_index_to_global_index_and_upconvert_prefills(
         req_id,
         block_table,
         token_indices,

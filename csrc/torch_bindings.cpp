@@ -90,7 +90,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 
   ops.def(
-      "convert_req_index_to_global_index("
+      "convert_req_index_to_global_index_and_upconvert_prefills("
       "    Tensor req_id,"
       "    Tensor block_table,"
       "    Tensor token_indices,"
@@ -99,8 +99,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor? prefill_seen,"
       "    Tensor? prefill_bf16_workspace,"
       "    Tensor? kv_cache) -> Tensor");
-  ops.impl("convert_req_index_to_global_index", torch::kCUDA,
-           &convert_req_index_to_global_index);
+  ops.impl("convert_req_index_to_global_index_and_upconvert_prefills",
+           torch::kCUDA,
+           &convert_req_index_to_global_index_and_upconvert_prefills);
 
   ops.def(
       "convert_vertical_slash_indexes("
