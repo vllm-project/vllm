@@ -130,8 +130,8 @@ def benchmark_one_comb(
             with open(result_path, "rb") as f:
                 run_data = json.load(f)
 
-            run_data.update(serve_comb)
             run_data["run_number"] = run_number
+            run_data.update(serve_comb)
 
             result_data.append(run_data)
 
