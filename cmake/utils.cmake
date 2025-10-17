@@ -125,6 +125,22 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "-Werror=unused-variable"
       "-fno-gpu-rdc")
 
+    # Add -ffast-math flag for AMD devices by default, can be disabled via VLLM_DISABLE_AMD_FAST_MATH
+    # The -ffast-math flag enables aggressive mathematical optimizations that can significantly improve
+    # performance for mathematical operations commonly used in LLM inference, including:
+    # - SiLU (Swish) activation functions
+    # - Exponential operations
+    # - Trigonometric functions (sin, cos, tan)
+    # - Reciprocal and square root operations
+    # Note: This may slightly reduce numerical precision but provides substantial performance gains
+    # for AMD GPU kernels in vLLM
+    if (NOT DEFINED ENV{VLLM_DISABLE_AMD_FAST_MATH} OR NOT "$ENV{VLLM_DISABLE_AMD_FAST_MATH}" STREQUAL "1")
+      list(APPEND GPU_FLAGS "-ffast-math")
+      message(STATUS "AMD fast-math optimization enabled by default (set VLLM_DISABLE_AMD_FAST_MATH=1 to disable)")
+    else()
+      message(STATUS "AMD fast-math optimization disabled via VLLM_DISABLE_AMD_FAST_MATH=1 environment variable")
+    endif()
+
   endif()
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
 endfunction()
