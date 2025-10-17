@@ -1,0 +1,10 @@
+model_name: "Qwen/Qwen3-235B-A22B-Thinking-2507-FP8"
+tasks:
+  - name: "mmlu_pro"
+    metrics:
+    - name: "exact_match,custom-extract"
+      value: 0.77
+num_fewshot: 5
+limit: 250 # will run on 250 * 14 subjects = 3500 samples
+max_model_len: 8096
+gen_kwargs: "top_p=1,top_k=0,max_gen_toks=1536"
