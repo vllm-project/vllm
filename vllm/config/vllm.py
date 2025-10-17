@@ -381,6 +381,7 @@ class VllmConfig:
                         and current_platform.is_device_capability(100)
                         and self.model_config.max_model_len > 131072
                     ):
+                        # Refer to vllm/utils/flashinfer.py::use_trtllm_attention()
                         logger.warning_once(
                             "NVIDIA Blackwell TRTLLM attention cannot support "
                             "max_model_len >= 131072 (found "
