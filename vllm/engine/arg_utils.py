@@ -1440,13 +1440,6 @@ class EngineArgs:
         )
 
         if self.async_scheduling:
-            # Async scheduling does not work with the uniprocess backend.
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "mp"
-                logger.info(
-                    "Defaulting to mp-based distributed executor "
-                    "backend for async scheduling."
-                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Async scheduling is not supported with pipeline-parallel-size > 1."
@@ -1502,6 +1495,15 @@ class EngineArgs:
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
+
+        if self.async_scheduling and (
+            parallel_config.distributed_executor_backend not in ("mp", "uni")
+        ):
+            raise ValueError(
+                "Currently, async scheduling only supports `mp` or `uni` "
+                "distributed executor backend, but you choose "
+                f"`{parallel_config.distributed_executor_backend}`."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
