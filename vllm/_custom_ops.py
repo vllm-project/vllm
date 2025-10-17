@@ -2119,6 +2119,46 @@ def cp_gather_indexer_k_quant_cache(
     )
 
 
+def convert_req_index_to_global_index(
+    req_id: torch.Tensor,
+    block_table: torch.Tensor,
+    token_indices: torch.Tensor,
+    block_size: int,
+    prefill_token_mask: torch.Tensor | None = None,
+    prefill_seen: torch.Tensor | None = None,
+    prefill_bf16_workspace: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Convert per-request indices into global cache slots and upconvert unique
+    prefill tokens.
+
+    This is a fused operation that:
+    1. Converts per-request token indices to global cache slot indices
+    2. For prefill tokens (determined by prefill_token_mask), upcoverts them from
+       kv_cache (fp8) into prefill_bf16_workspace (bf16).
+
+    Args:
+        req_id: Request ID for each token
+        block_table: Block table mapping
+        token_indices: Per-request token indices to convert
+        block_size: KV cache block size
+        prefill_token_mask: Mask indicating which tokens are prefill tokens
+        prefill_seen: Bitmap for tracking which slots have been upconverted
+        prefill_bf16_workspace: Workspace for upconverted bf16 data
+        kv_cache: FP8 KV cache to read from for upconversion
+    """
+    return torch.ops._C.convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        token_indices,
+        block_size,
+        prefill_token_mask,
+        prefill_seen,
+        prefill_bf16_workspace,
+        kv_cache,
+    )
+
+
 def get_device_attribute(attribute: int, device: int) -> int:
     return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
 
