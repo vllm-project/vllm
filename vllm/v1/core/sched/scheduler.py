@@ -1174,7 +1174,7 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         if (
             self.scheduler_config.max_waiting_queue_length
-            and len(self.waiting) > self.scheduler_config.max_waiting_queue_length
+            and len(self.waiting) >= self.scheduler_config.max_waiting_queue_length
         ):
             request.status = RequestStatus.FINISHED_REJECTED
             self.rejected.append(request)
