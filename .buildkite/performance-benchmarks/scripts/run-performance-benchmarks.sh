@@ -147,7 +147,7 @@ kill_gpu_processes() {
       sleep 1
     done
   elif command -v hl-smi; then
-    while [ "$(hl-smi -q  | grep "Used" |  head -n 1 | awk -F ' ' '{print $3}')" -ge 1000 ]; do
+    while [ "$(hl-smi -q | grep "Used" | head -n 1 | awk '{print $3}')" -ge 1000 ]; do
       sleep 1
     done
   fi
