@@ -350,7 +350,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         return True
 
     @property
-    @abstractmethod
     def supports_eplb(self) -> bool:
         return self._supports_eplb
 
