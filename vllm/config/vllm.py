@@ -350,36 +350,26 @@ class VllmConfig:
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_AND_PIECEWISE
                     )
-
-                    # pooling models and encoder-decoder models
-                    # do not support full cudagraphs
-                    if self.model_config is not None and (
-                        self.model_config.pooler_config is not None
-                        or self.model_config.is_encoder_decoder
-                    ):
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
-                    # decode context parallel do not support full cudagraphs now.
-                    if self.parallel_config.decode_context_parallel_size > 1:
-                        logger.warning(
-                            "Decode context parallel (DCP) is enabled, which is "
-                            "incompatible with full CUDA graphs. Set "
-                            "cudagraph_mode to PIECEWISE."
-                        )
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-            # if cudagraph_mode has full cudagraphs, we need to check supported
+            # if cudagraph_mode has full cudagraphs, we need to check support
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                if self.model_config is not None:
+                # decode context parallel does not support full cudagraphs
+                if self.parallel_config.decode_context_parallel_size > 1:
+                    logger.warning_once(
+                        "Decode context parallel (DCP) is enabled, which is "
+                        "incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                elif self.model_config is not None:
                     if self.model_config.pooler_config is not None:
                         logger.warning_once(
                             "Pooling models do not support full cudagraphs. "
                             "Overriding cudagraph_mode to PIECEWISE."
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                    # encoder-decoder models do not support full cudagraphs
                     elif self.model_config.is_encoder_decoder:
                         logger.warning_once(
                             "Encoder-decoder models do not support full cudagraphs. "
@@ -399,14 +389,6 @@ class VllmConfig:
                             "Overriding cudagraph_mode to PIECEWISE."
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                # decode context parallel do not support full cudagraphs
-                if self.parallel_config.decode_context_parallel_size > 1:
-                    logger.warning_once(
-                        "Decode context parallel (DCP) is enabled, which is "
-                        "incompatible with full CUDA graphs. "
-                        "Overriding cudagraph_mode to PIECEWISE."
-                    )
-                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
