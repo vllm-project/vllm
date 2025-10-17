@@ -20,7 +20,7 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.utils import cuda_device_count_stateless, update_environment_variables
 
@@ -74,7 +74,7 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
         is_symmetric_memory_enabled,
     )
 
-    if vllm_kernel_override_batch_invariant():
+    if vllm_is_batch_invariant():
         return False
 
     if not is_symmetric_memory_enabled():
