@@ -575,7 +575,7 @@ class Processor:
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
         if (
-            prompt_len >= max_prompt_len
+            prompt_len == max_prompt_len
             and prompt_type == "decoder"
             and not model_config.is_multimodal_model
         ):
