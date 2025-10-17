@@ -98,9 +98,9 @@ def benchmark_one_run(
         subprocess.run(benchmark_cmd, check=True)
     finally:
         if server_process.poll() is None:
-            # Process might already be terminated
+            # In case some processes have been terminated
             with contextlib.suppress(ProcessLookupError):
-                # Kill entire process group
+                # We need to kill both API Server and Engine processes
                 os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
 
     with result_path.open("rb") as f:
