@@ -80,17 +80,12 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from .qwen2_5_omni_thinker import (
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalProcessor,
     Qwen2_5OmniThinkerProcessingInfo,
 )
-
-# yapf: enable
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
     Qwen2_5_VisionRotaryEmbedding,
