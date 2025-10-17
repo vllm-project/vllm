@@ -7,6 +7,9 @@ import os
 import shlex
 import signal
 import subprocess
+from datetime import datetime
+
+import pandas as pd
 
 _BAD_PARAMS_TYPE_MSG = (
     "The parameters to vary should be expressed as a JSON list of dictionaries."
@@ -49,14 +52,11 @@ def _override_args(cmd: list[str], params: dict[str, object]):
     return cmd
 
 
-def _get_result_dir(output_dir: str, params: dict[str, object]):
-    return os.path.join(
-        output_dir,
-        "_".join(f"{k}={v}" for k, v in params.items()) + ".json",
-    )
+def _get_path_one_comb(output_dir: str, params: dict[str, object]):
+    return os.path.join(output_dir, "_".join(f"{k}={v}" for k, v in params.items()))
 
 
-def _get_result_path(result_dir: str, run_number: int):
+def _get_path_one_run(result_dir: str, run_number: int):
     return os.path.join(result_dir, f"run={run_number}.json")
 
 
@@ -68,7 +68,7 @@ def benchmark_one_run(
     result_dir: str,
     dry_run: bool,
 ):
-    result_path = _get_result_path(result_dir, run_number)
+    result_path = _get_path_one_run(result_dir, run_number)
 
     server_cmd = _override_args(serve_cmd, serve_comb)
     benchmark_cmd = [
@@ -111,7 +111,7 @@ def benchmark_one_comb(
     num_runs: int,
     dry_run: bool,
 ):
-    result_dir = _get_result_dir(output_dir, serve_comb)
+    result_dir = _get_path_one_comb(output_dir, serve_comb)
     if not dry_run:
         os.makedirs(result_dir, exist_ok=True)
 
@@ -135,9 +135,13 @@ def benchmark_one_comb(
 
             result_data.append(run_data)
 
-    if not dry_run:
-        with open(os.path.join(result_dir, "summary.json"), "w") as f:
-            json.dump(result_data, f)
+    if dry_run:
+        return None
+
+    with open(os.path.join(result_dir, "summary.json"), "w") as f:
+        json.dump(result_data, f)
+
+    return pd.DataFrame.from_records(result_data)
 
 
 def benchmark_all(
@@ -148,7 +152,10 @@ def benchmark_all(
     num_runs: int,
     dry_run: bool,
 ):
-    for serve_comb in _validate_combs(serve_params):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(output_dir, timestamp)
+
+    result_dfs = [
         benchmark_one_comb(
             serve_cmd=serve_cmd,
             bench_cmd=bench_cmd,
@@ -157,6 +164,16 @@ def benchmark_all(
             num_runs=num_runs,
             dry_run=dry_run,
         )
+        for serve_comb in _validate_combs(serve_params)
+    ]
+
+    if dry_run:
+        return None
+
+    combined_df = pd.concat(result_dfs)
+    combined_df.to_csv(os.path.join(output_dir, "summary.csv"))
+
+    return combined_df
 
 
 def main():
