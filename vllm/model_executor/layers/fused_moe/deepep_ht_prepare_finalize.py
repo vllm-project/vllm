@@ -66,7 +66,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
-
+      
+    def have_expert_num_tokens(self) -> bool: 
+        return True
+    
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 

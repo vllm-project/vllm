@@ -16,7 +16,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
+    vllm_kernel_override_batch_invariant,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -30,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     deep_gemm_moe_fp8,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import ( 
+    FusedMoEModularKernel 
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
@@ -49,7 +52,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
-from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
@@ -842,7 +844,7 @@ def get_moe_configs(
     """
 
     # Avoid optimizing for the batch invariant case. Use default config
-    if vllm_is_batch_invariant():
+    if vllm_kernel_override_batch_invariant():
         return None
 
     # First look up if an optimized configuration is available in the configs
@@ -977,7 +979,7 @@ def get_default_config(
     dtype: str | None,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
-    if vllm_is_batch_invariant():
+    if vllm_kernel_override_batch_invariant():
         config = {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": 64,
@@ -1137,7 +1139,7 @@ def fused_topk_bias(
     ) + e_score_correction_bias.unsqueeze(0)
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = vllm_is_batch_invariant()
+    use_sorted = vllm_kernel_override_batch_invariant()
     topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[1]
     topk_weights = scores.gather(1, topk_indices)
     if renormalize:
@@ -1146,11 +1148,7 @@ def fused_topk_bias(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-@torch.compile(
-    dynamic=True,
-    backend=current_platform.simple_compile_backend,
-    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
-)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -1205,7 +1203,7 @@ def grouped_topk(
         )  # [n, n_group]
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = vllm_is_batch_invariant()
+    use_sorted = vllm_kernel_override_batch_invariant()
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=use_sorted)[
         1
     ]  # [n, top_k_group]
@@ -1242,6 +1240,7 @@ def eplb_map_to_physical_and_record(
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
     indices_type: torch.dtype | None = None,
+    fused_experts_method: Callable | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1299,12 +1298,23 @@ def eplb_map_to_physical_and_record(
     # `expert_load_view`: (num_physical_experts,)
 
     # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-    topk_ids_flatten = topk_ids.flatten()
-    expert_load_view.scatter_add_(
-        dim=0,
-        index=topk_ids_flatten.long(),
-        src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
-    )
+    skip_expert_load_scatter_add = (
+        (fused_experts_method is not None)
+        and isinstance(fused_experts_method, FusedMoEModularKernel)
+        and fused_experts_method.have_expert_num_tokens()
+        )
+    
+    if not skip_expert_load_scatter_add: 
+        logger.debug("expert_load_view update from topk_ids.")
+        topk_ids_flatten = topk_ids.flatten()
+        expert_load_view.scatter_add_(
+            dim=0,
+            index=topk_ids_flatten.long(),
+            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+        )
+    
+    else:
+        logger.debug("expert_load_view update in modular_kernel.")
 
     if indices_type is not None:
         topk_ids = topk_ids.to(dtype=indices_type)

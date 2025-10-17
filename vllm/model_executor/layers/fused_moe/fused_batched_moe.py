@@ -510,6 +510,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def output_is_reduced(self) -> bool:
         return False
 
+    def have_expert_num_tokens(self) -> bool: 
+        return True
+
     def prepare(
         self,
         a1: torch.Tensor,

@@ -82,6 +82,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
+    def have_expert_num_tokens(self) -> bool: 
+        return True
+
     def max_num_tokens_per_rank(self) -> int | None:
         return self.max_num_tokens
 

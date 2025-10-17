@@ -609,17 +609,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        if enable_eplb:
-            assert expert_load_view is not None
-            assert logical_to_physical_map is not None
-            assert logical_replica_count is not None
-            assert isinstance(layer, FusedMoE)
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -637,7 +634,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            fused_experts_method=self.fused_experts)
+            global_num_experts=global_num_experts,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
+            fused_experts_method=self.fused_experts,
+        )
 
         if self.rocm_aiter_moe_enabled:
             assert self.fused_experts is None
@@ -992,11 +994,6 @@ def maybe_roundup_hidden_size(
     if moe_parallel_config.use_deepep_ht_kernels:
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
-        )
-
-    if moe_parallel_config.use_deepep_ll_kernels:
-        hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
-            hidden_size
         )
 
     # we are padding globally so EP buffer allocation works
@@ -1944,11 +1941,16 @@ class FusedMoE(CustomOp):
         e_score_correction_bias: torch.Tensor | None = None,
         indices_type: torch.dtype | None = None,
         enable_eplb: bool = False,
-        expert_map: Optional[torch.Tensor] = None,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        expert_map: torch.Tensor | None = None,
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+        global_num_experts: int | None = None,
+        zero_expert_num: int | None = None,
+        zero_expert_type: str | None = None,
+        num_fused_shared_experts: int = 0,
+        fused_experts_method: Callable | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
@@ -2037,62 +2039,14 @@ class FusedMoE(CustomOp):
             assert logical_to_physical_map is not None
             assert logical_replica_count is not None
 
-            # 1. Convert the logical expert ids to physical expert ids
-            # Directly select a random replica for each logical expert
-
-            # TODO: maybe optimize this by using specified kernels,
-            # or compute pseudo-random indices by modulo
-
-            # In case `indices_type` is not `torch.long` or `torch.int`,
-            # e.g. `torch.uint32` as required by dispatch/combine kernels
-            topk_ids_long = topk_ids.long()
-            replica_indices = (
-                torch.rand_like(topk_ids, dtype=torch.float) *
-                logical_replica_count[topk_ids_long]).long().unsqueeze(-1)
-            physical_ids = logical_to_physical_map[topk_ids_long].gather(
-                -1, replica_indices).squeeze(-1)
-
-            topk_ids = physical_ids
-
-            # 2. Record expert load metrics.
-
-            # When using FusedMoEModularKernel,
-            # expert load statistics are handled directly in the kernel using
-            # ExpertTokensMetadata.expert_num_tokens for better performance.
-            # For other implementations or when metadata is not available,
-            # we fall back to here.
-
-            # There is no expert_num_tokens in
-            # expert_tokens_meta of DeepEPHTPrepareAndFinalize
-            # so it is not supported DeepEPHTPrepareAndFinalize for now.
-            # TODO: Maybe it is better to support DeepEPHTPrepareAndFinalize.
-            skip_expert_load_scatter_add = (
-                (fused_experts_method is not None)
-                and isinstance(fused_experts_method, FusedMoEModularKernel)
-                and (fused_experts_method.prepare_finalize.__class__
-                     != "DeepEPHTPrepareAndFinalize"))
-
-            if not skip_expert_load_scatter_add:
-                logger.debug("expert_load_view update from topk_ids.")
-                topk_ids_flatten = topk_ids.flatten()
-
-                # Performance optimization:
-                # `masked_fill` is significantly faster than `masked_select`
-                invalid_mask = topk_ids_flatten < 0
-                # Replace invalid expert ids with 0 (just a dummy position)
-                # to avoid out-of-bounds errors in scatter_add_
-                index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
-                # `src` is the valid mask,
-                # which is 1 for valid and 0 for invalid
-                src = ~invalid_mask
-
-                expert_load_view.scatter_add_(dim=0,
-                                              index=index.long(),
-                                              src=src.to(expert_load_view))
-            else:
-                logger.debug("expert_load_view update in modular_kernel.")
-
-            topk_ids = topk_ids.to(dtype=indices_type)
+            topk_ids = eplb_map_to_physical_and_record(
+                topk_ids=topk_ids,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+                indices_type=indices_type,
+                fused_experts_method=fused_experts_method
+            )
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
@@ -2498,19 +2452,6 @@ class FusedMoE(CustomOp):
         s += f", scoring_func='{self.scoring_func}', activation='{self.activation}'"  # noqa: E501
 
         return s
-
-    def update_map(self, new_expert_map):
-        self.expert_map = new_expert_map
-
-    def get_map(self):
-        return self.expert_map
-
-    def get_log2phy_map(self):
-        return self.logical_to_physical_map
-
-    def clear_expert_load_view(self):
-        if self.expert_load_view is not None:
-            self.expert_load_view.zero_()
 
 
 def moe_forward(

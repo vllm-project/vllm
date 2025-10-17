@@ -94,6 +94,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
 
+    def have_expert_num_tokens(self) -> bool: 
+        return True
+    
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
