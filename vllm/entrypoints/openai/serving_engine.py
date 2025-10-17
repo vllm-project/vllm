@@ -719,14 +719,35 @@ class OpenAIServing:
             error=ErrorInfo(message=message, type=err_type, code=status_code.value)
         )
 
-    def create_rejected_response(
-        self,
-    ) -> ErrorResponse:
-        return self.create_error_response(
-            message="Request rejected due to high load. Please try again later.",
-            err_type="SERVICE_UNAVAILABLE",
-            status_code=503,
-        )
+    def _handle_streaming_error_finish_reason(
+        self, finish_reason: str | None, request_id: str
+    ) -> str | None:
+        """handle error finish reason in streaming mode by logging and
+        returning error data if found"""
+        if finish_reason == "rejected":
+            logger.error(
+                "Request %s was rejected by the vLLM model's safety system",
+                request_id,
+            )
+            return self.create_streaming_error_response("Service Unavailable")
+        return None
+
+    def _handle_error_finish_reason(
+        self, outputs: list[CompletionOutput], request_id: str
+    ) -> ErrorResponse | None:
+        """handle error finish reason by logging and returning 503 if found"""
+        for output in outputs:
+            if output.finish_reason == "rejected":
+                logger.error(
+                    "Request %s was rejected by the vLLM model's safety system",
+                    request_id,
+                )
+                return self.create_error_response(
+                    "Service Unavailable",
+                    err_type="SERVICE_UNAVAILABLE",
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+        return None
 
     def create_streaming_error_response(
         self,

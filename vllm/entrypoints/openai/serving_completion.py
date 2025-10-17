@@ -280,7 +280,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     )
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
-
+            # check for error finish reason and return error
+            for final_res in final_res_batch_checked:
+                error = self._handle_error_finish_reason(final_res.outputs, request_id)
+                if error:
+                    return error
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
                 request,
@@ -428,7 +432,13 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_num_tokens[i] += len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
-
+                    # check for error finish reason and abort streaming
+                    if error_data := self._handle_streaming_error_finish_reason(
+                        finish_reason, request_id
+                    ):
+                        yield f"data: {error_data}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
                     chunk = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,

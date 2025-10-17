@@ -1054,7 +1054,6 @@ class Scheduler(SchedulerInterface):
         if self.rejected:
             # Create EngineCoreOutputs for all rejected requests.
             for request in self.rejected:
-                print(f"request rejected {request.request_id}")
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         new_token_ids=[],
