@@ -334,6 +334,11 @@ def test_tp2_attn_quant_async_tp(
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
     if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition requires torch>=2.9")
+    if inductor_graph_partition and "fp4" in model_name.lower():
+        pytest.skip(
+            "Known bug for fp4 fusion & inductor partition: "
+            "https://github.com/vllm-project/vllm/issues/26988"
+        )
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
