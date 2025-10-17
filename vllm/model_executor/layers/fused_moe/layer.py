@@ -389,7 +389,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         zero_expert_type = getattr(layer, "zero_expert_type", None)
 
         if enable_eplb:
-            if not self.supports_eplb:
+            if self.supports_eplb:
                 assert expert_load_view is not None
                 assert logical_to_physical_map is not None
                 assert logical_replica_count is not None
