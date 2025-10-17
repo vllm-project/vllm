@@ -415,23 +415,6 @@ class HunYuanSparseMoeBlock(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-<<<<<<< HEAD
-        self.experts = FusedMoE(
-            num_experts=self.n_routed_experts,
-            top_k=top_k,
-            hidden_size=config.hidden_size,
-            intermediate_size=intermediate_size,
-            reduce_results=False,
-            renormalize=top_k > 1,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            enable_eplb=self.enable_eplb,
-            eplb_record_metrics=eplb_config.eplb_record_metrics,
-            num_redundant_experts=self.n_redundant_experts,
-        )
-
-=======
->>>>>>> main
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_experts,
