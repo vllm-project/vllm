@@ -129,6 +129,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
@@ -317,6 +318,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "suffix":
+                self.drafter = SuffixDecodingProposer(self.vllm_config)  # type: ignore
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
@@ -2345,6 +2348,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
+        if self.speculative_config and isinstance(self.drafter, SuffixDecodingProposer):
+            self.drafter.update(self.input_batch, valid_sampled_token_ids)
+
         return (
             num_nans_in_logits,
             logprobs_lists,
@@ -2704,6 +2710,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs,
             )
+        elif self.speculative_config.method == "suffix":
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, SuffixDecodingProposer)
+            draft_token_ids = self.drafter.propose(self.input_batch, sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
