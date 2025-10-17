@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 
 from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
+from .noop_elimination import NoOpEliminationPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -119,9 +120,15 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            # pattern matcher replaces from top-to-bottom,
+            # so residual is still the full size here.
+            # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
             rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
             all_gather = self._all_gather(rmsnorm[0])
+            # shape of residual changes but that's fine,
+            # next node is already slicing it, now becomes a noop
             return all_gather, rmsnorm[1]
 
         pm.register_replacement(
@@ -160,7 +167,11 @@ class LastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
         ) -> torch.Tensor:
+            # pattern matcher replaces from top-to-bottom,
+            # so residual is still the full size here.
+            # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
             rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
             normalized = self._all_gather(rmsnorm[0])
             return normalized
@@ -252,12 +263,19 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             rms_norm_weights: torch.Tensor,
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            # pattern matcher replaces from top-to-bottom,
+            # so residual is still the full size here.
+            # add a temporary slice which will become a noop
+            # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
             rms, residual_out = self.rmsnorm_matcher(
                 reduce_scatter, rms_norm_weights, residual
             )
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
+            # shape of residual changes but that's fine,
+            # next node is already slicing it, now becomes a noop
             return all_gather, residual_out
 
         pm.register_replacement(
@@ -297,7 +315,12 @@ class LastAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             rms_norm_weights: torch.Tensor,
             scale: torch.Tensor,
         ) -> torch.Tensor:
+            # pattern matcher replaces from top-to-bottom,
+            # so residual is still the full size here.
+            # add a temporary slice which will become a noop
+            # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
             rms, _ = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
             quant, _ = self.quant_matcher(rms, scale)
             normalized = self._all_gather(quant)
@@ -326,11 +349,26 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     GEMM + ReduceScatter and AllGather + GEMM fusions. These fusions can
     significantly reduce communication overhead and improve overall model
     performance.
+
+    This pass splits up the residual tensor across TP ranks and hence divides its size.
+    Because the pattern matcher starts at the end of the graph, the replacement
+    contains a slice that temporarily conforms the input residual to the correct size.
+    After all patterns have been matched, we use a NoOpEliminationPass to clean up
+    what have now become no-op slices.
+
+    Note that an older version of the pass did not need this as it operated only on
+    custom rms_norm and fused_rms_norm_add custom ops which did not complain about
+    mismatched shapes during replacement. So this approach has the same assumption that
+    correctness is only maintained if all rms_norm operations are split across ranks.
     """
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
+        # Used to cleanup redundant views created temporarily
+        # to circumvent residual shape change issues
+        self.noop_cleanup = NoOpEliminationPass(config)
+        self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="sequence_parallelism_pass"
@@ -388,3 +426,6 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     def __call__(self, graph: fx.Graph):
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+
+        # Clean up nodes
+        self.noop_cleanup(graph)
