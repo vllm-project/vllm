@@ -11,7 +11,6 @@ if TYPE_CHECKING:
 
 import regex as re
 import torch
-import torch.distributed
 from torch import nn
 from transformers import MiniMaxConfig
 
