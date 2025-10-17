@@ -82,8 +82,9 @@ class HTTPConnection:
 
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
-
-        parsed_url = yarl.URL(url, encoded=True)
+        req = requests.Request("GET", url)
+        prepared_req = self.get_sync_client().prepare_request(req)
+        parsed_url = yarl.URL(prepared_req.url, encoded=True)
 
         return client.get(
             parsed_url,

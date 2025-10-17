@@ -49,6 +49,20 @@ async def httpbin_echo_server() -> AsyncGenerator[str, Any]:
 
     await runner.cleanup()
 
+@pytest.mark.asyncio
+async def test_async_client_encodes_unencoded_path(httpbin_echo_server: str):
+    """
+    Test that the AsyncHttpClient correctly encodes special characters in the URL path.
+    """
+    unencoded_segment = "path with spaces"
+    url = f"{httpbin_echo_server}/anything/{unencoded_segment}"
+
+    async with await global_http_connection.get_async_response(url) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+        expected_raw_path = "/anything/path%20with%20spaces"
+        assert data["raw_path"] == expected_raw_path
 
 @pytest.mark.asyncio
 async def test_async_client_preserves_encoded_path(httpbin_echo_server: str):
