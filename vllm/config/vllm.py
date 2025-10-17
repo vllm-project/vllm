@@ -370,6 +370,44 @@ class VllmConfig:
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+            # if cudagraph_mode has full cudagraphs, we need to check supported
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                if self.model_config is not None:
+                    if self.model_config.pooler_config is not None:
+                        logger.warning_once(
+                            "Pooling models do not support full cudagraphs. "
+                            "Overriding cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    # encoder-decoder models do not support full cudagraphs
+                    elif self.model_config.is_encoder_decoder:
+                        logger.warning_once(
+                            "Encoder-decoder models do not support full cudagraphs. "
+                            "Overriding cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    elif (
+                        current_platform.is_cuda()
+                        and current_platform.is_device_capability(100)
+                        and self.model_config.max_model_len > 131072
+                    ):
+                        logger.warning_once(
+                            "NVIDIA Blackwell TRTLLM attention cannot support "
+                            "max_model_len >= 131072 (found "
+                            f"{self.model_config.max_model_len}), causing dynamic "
+                            "dispatching that breaks full cudagraphs. "
+                            "Overriding cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                # decode context parallel do not support full cudagraphs
+                if self.parallel_config.decode_context_parallel_size > 1:
+                    logger.warning_once(
+                        "Decode context parallel (DCP) is enabled, which is "
+                        "incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
                 logger.info("Cudagraph is disabled under eager mode")
