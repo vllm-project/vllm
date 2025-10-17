@@ -440,6 +440,7 @@ def _merge_multimodal_embeddings(
     try:
         # For debugging
         # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
+
         # NOTE: This can avoid D2H sync (#22105), but fails to
         # raise an error if is_multimodal.sum() < len(mm_embeds_flat)
         inputs_embeds.masked_scatter_(
