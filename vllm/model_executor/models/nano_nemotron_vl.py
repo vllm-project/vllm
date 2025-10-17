@@ -1222,7 +1222,19 @@ class NemotronH_Nano_VL_V2(
         return x
 
     def extract_feature(self, pixel_values):
-        vit_embeds = self.vision_model(pixel_values)
+        # Process images in a micro-batch of at most 128 frames per call
+        # This is done on purpose to ensure peak GPU ram usage of huge batch
+        # (namely for really long videos with EVS ON) won't cause any problems
+        # as we don't support chunked prefill for video media
+        micro_batch_size = 128
+        n = pixel_values.shape[0]
+        vit_embeds_list = []
+        for i in range(0, n, micro_batch_size):
+            vit_embeds_list.append(
+                self.vision_model(pixel_values[i : i + micro_batch_size])
+            )
+        vit_embeds = torch.cat(vit_embeds_list, dim=0)
+
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
