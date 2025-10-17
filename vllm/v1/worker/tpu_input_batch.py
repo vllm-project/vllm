@@ -215,8 +215,8 @@ class InputBatch:
         sampling_params = request.sampling_params
         assert sampling_params is not None, "pooling requests not supported yet"
         if sampling_params.sampling_type == SamplingType.GREEDY:
-            # Avoid later division by zero.
-            self.temperature_cpu[req_index] = -1.0
+            # Should avoid division by zero later when apply_temperature.
+            self.temperature_cpu[req_index] = 0.0
             self.greedy_reqs.add(req_id)
         else:
             self.temperature_cpu[req_index] = sampling_params.temperature
