@@ -99,6 +99,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.request import SelfSpecState
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
@@ -1186,6 +1187,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
 
+            # ===== SELF-SPEC: Detect if any request is in ACCUMULATING state =====
+            use_selective_kv = False
+            for req_idx in range(num_reqs):
+                req_id = self.input_batch.req_ids[req_idx]
+                if req_id in self.requests:
+                    request = self.requests[req_id]
+                    if (hasattr(request, 'self_spec_state') and
+                            request.self_spec_state == SelfSpecState.ACCUMULATING):
+                        use_selective_kv = True
+                        logger.debug(
+                            f"Detected request {req_id} in ACCUMULATING state, "
+                            "using selective KV attention")
+                        break
+
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
@@ -1249,10 +1264,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[ubid][layer_name] = attn_metadata_i
                 else:
                     assert isinstance(attn_metadata, dict)
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
+                    # ===== SELF-SPEC: Dispatch to selective KV or regular build =====
+                    if use_selective_kv and hasattr(builder, 'build_with_selective_kv'):
+                        # Use selective KV attention (sparse attention with sink + recent)
+                        attn_metadata_i = builder.build_with_selective_kv(
+                            common_prefix_len=0,  # Cascade attention incompatible with selective KV
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
+                        logger.debug("Built attention metadata with selective KV")
+                    else:
+                        # Regular attention
+                        attn_metadata_i = builder.build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
