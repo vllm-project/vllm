@@ -91,7 +91,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -370,6 +370,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         else:
             self.sample_from_logits_func = self.sample_from_logits
+
+        # For passing scheduler_output between successive
+        # execute_model() and sample_tokens() calls.
+        self.scheduler_output: SchedulerOutput | None = None
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -1077,7 +1081,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
-    ) -> ModelRunnerOutput:
+    ) -> ModelRunnerOutput | None:
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -1086,6 +1090,21 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
             return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+
+        self.scheduler_output = scheduler_output
+        return None
+
+    @torch.no_grad()
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput | None"
+    ) -> ModelRunnerOutput:
+        if self.scheduler_output is None:
+            raise RuntimeError(
+                "State error: sample_tokens() must only be called "
+                "after execute_model() returns None"
+            )
+        scheduler_output = self.scheduler_output
+        self.scheduler_output = None
 
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
@@ -1130,9 +1149,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
                 self.input_batch, padded_num_reqs, self.device
             )
-            if scheduler_output.grammar_bitmask is not None:  # type:ignore
+            if grammar_output is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = (
-                    self.prepare_structured_decoding_input(logits, scheduler_output)  # type:ignore
+                    self.prepare_structured_decoding_input(logits, grammar_output)
                 )
                 logits = self.structured_decode(
                     require_struct_decoding, grammar_bitmask_padded, logits, arange
@@ -1953,10 +1972,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self.model.get_input_embeddings(*args, **kwargs)
 
     def prepare_structured_decoding_input(
-        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
+        self, logits: torch.Tensor, grammar_output: "GrammarOutput"
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = scheduler_output.grammar_bitmask  # type:ignore
-        assert grammar_bitmask is not None
+        grammar_bitmask = grammar_output.grammar_bitmask
         num_reqs, _ = logits.shape
 
         # Reset pre-allocated tensors
@@ -1964,7 +1982,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.require_structured_out_cpu.zero_()
 
         cumulative_mask_idx = 0
-        for req_id in scheduler_output.structured_output_request_ids:  # type: ignore
+        for req_id in grammar_output.structured_output_request_ids:
             if req_id not in self.input_batch.req_id_to_index:
                 continue
             batch_index = self.input_batch.req_id_to_index[req_id]
