@@ -52,12 +52,12 @@ class TTWorker(WorkerBase):
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
         if dp_rank == 0:
             self.mesh_device = open_mesh_device(
-                self.model_config.override_tt_config, self.trace_mode)
+                self.model_config.override_tt_config, self.trace_mode, dp_rank)
             self.device_config.device = self.mesh_device
             assert self.mesh_device is not None
             self.device_config.num_devices = self.mesh_device.get_num_devices()
         else:
-            mesh_grid = get_mesh_grid()
+            mesh_grid = get_mesh_grid(dp_rank)
             self.mesh_device = None
             # Num devices is required for determining num blocks in KV cache.
             self.device_config.num_devices = mesh_grid[0] * mesh_grid[1]
