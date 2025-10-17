@@ -290,6 +290,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config,
                     device=self.device)  # type: ignore
+            elif self.speculative_config.method == "self_specs":
+                pass
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -324,6 +326,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
+            sink_size=self.vllm_config.scheduler_config.sink_size,
+            recent_size=self.vllm_config.scheduler_config.recent_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -3778,6 +3782,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
+                sink_size=self.vllm_config.scheduler_config.sink_size,
+                recent_size=self.vllm_config.scheduler_config.recent_size,
             )
 
     def _allocate_kv_cache_tensors(

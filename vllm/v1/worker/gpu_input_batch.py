@@ -100,6 +100,8 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
+        sink_size: int = 32,
+        recent_size: int = 128,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -238,12 +240,12 @@ class InputBatch:
 
         # ===== SELF-SPEC BUFFERS =====
         # Maximum selective KV indices per request (sink + recent)
-        # Hardcoded for now, should match scheduler config
-        MAX_SELECTIVE_KV_INDICES = 256  # Assumes sink_size=32, recent_size=128, with headroom
+        # Calculated from sink_size and recent_size parameters
+        max_selective_kv_indices = sink_size + recent_size
 
         # Selective KV indices buffer (sparse attention)
         self.selective_kv_indices_cpu_tensor = torch.zeros(
-            (max_num_reqs, MAX_SELECTIVE_KV_INDICES),
+            (max_num_reqs, max_selective_kv_indices),
             dtype=torch.int32,
             device='cpu',
             pin_memory=pin_memory
