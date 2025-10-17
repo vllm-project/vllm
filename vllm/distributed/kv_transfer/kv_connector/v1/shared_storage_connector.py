@@ -174,11 +174,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
                 # layers like FusedMoE/MLP etc.
-                kv_cache_attr = getattr(layer, "kv_cache", None)
-                if kv_cache_attr is None:
+                kv_cache_layer = getattr(layer, "kv_cache", None)
+                if kv_cache_layer is None:
                     continue
-
-                kv_cache_layer = kv_cache_attr[forward_context.virtual_engine]
 
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
