@@ -4,7 +4,7 @@
 import time
 from collections.abc import Callable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, cast
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -112,10 +112,9 @@ class LLMEngine:
         self.output_processor = OutputProcessor(
             self.tokenizer, log_stats=self.log_stats
         )
-        if self.observability_config.otlp_traces_endpoint is not None:
-            tracer = init_tracer(
-                "vllm.llm_engine", self.observability_config.otlp_traces_endpoint
-            )
+        endpoint = getattr(self.observability_config, "otlp_traces_endpoint", None)
+        if endpoint is not None:
+            tracer = init_tracer("vllm.llm_engine", endpoint)
             self.output_processor.tracer = tracer
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
@@ -259,7 +258,10 @@ class LLMEngine:
                 trace_headers,
                 priority,
             )
-            prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
+            if isinstance(prompt, str):
+                prompt_text = prompt
+            elif isinstance(prompt, Mapping):
+                prompt_text = cast(str | None, prompt.get("prompt"))
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -316,7 +318,14 @@ class LLMEngine:
             )
             self.do_log_stats_with_interval()
 
-        return processed_outputs.request_outputs
+        ro = processed_outputs.request_outputs
+        if not ro:
+            return []
+        first = ro[0]
+        if isinstance(first, RequestOutput):
+            return [x for x in ro if isinstance(x, RequestOutput)]
+        else:
+            return [x for x in ro if isinstance(x, PoolingRequestOutput)]
 
     def start_profile(self):
         self.engine_core.profile(True)

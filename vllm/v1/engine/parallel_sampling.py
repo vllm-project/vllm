@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
-from typing import Optional
+from typing import Optional, cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -37,7 +37,7 @@ class ParentRequest:
 
         self.child_requests = set()
         self.output_aggregator = (
-            [None] * sampling_params.n
+            [cast(CompletionOutput, None)] * sampling_params.n
             if (sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
             else []
         )

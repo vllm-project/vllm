@@ -69,14 +69,21 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Stop strings
         params = request.sampling_params
         assert params is not None
-        self.stop = stop = params.stop
+        stop_list: list[str]
+        if params.stop is None:
+            stop_list = []
+        elif isinstance(params.stop, str):
+            stop_list = [params.stop]
+        else:
+            stop_list = params.stop
+        self.stop = stop_list
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if stop and not self.include_stop_str_in_output:
-            self.stop_buffer_length = max(len(s) for s in stop) - 1
+        if self.stop and not self.include_stop_str_in_output:
+            self.stop_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
