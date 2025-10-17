@@ -23,6 +23,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.request import SelfSpecState
 
 
 @dataclass
@@ -44,6 +45,14 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
     prompt_embeds: Optional[torch.Tensor] = None
+
+    # ===== SELF-SPEC ADDITIONS =====
+    pending_output_tokens: list[int] = None
+    self_spec_state: SelfSpecState = SelfSpecState.NORMAL
+    selective_kv_indices: Optional[list[int]] = None
+    num_selective_kv_indices: int = 0
+    full_kv_start_offset: int = 0
+    # ===== END SELF-SPEC ADDITIONS =====
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -226,6 +235,34 @@ class InputBatch:
                                                          pin_memory=pin_memory)
         self.num_accepted_tokens_cpu = \
             self.num_accepted_tokens_cpu_tensor.numpy()
+
+        # ===== SELF-SPEC BUFFERS =====
+        # Maximum selective KV indices per request (sink + recent)
+        # Hardcoded for now, should match scheduler config
+        MAX_SELECTIVE_KV_INDICES = 256  # Assumes sink_size=32, recent_size=128, with headroom
+
+        # Selective KV indices buffer (sparse attention)
+        self.selective_kv_indices_cpu_tensor = torch.zeros(
+            (max_num_reqs, MAX_SELECTIVE_KV_INDICES),
+            dtype=torch.int32,
+            device='cpu',
+            pin_memory=pin_memory
+        )
+
+        self.num_selective_kv_indices_cpu_tensor = torch.zeros(
+            max_num_reqs,
+            dtype=torch.int32,
+            device='cpu',
+            pin_memory=pin_memory
+        )
+
+        self.full_kv_start_offset_cpu_tensor = torch.zeros(
+            max_num_reqs,
+            dtype=torch.int32,
+            device='cpu',
+            pin_memory=pin_memory
+        )
+        # ===== END SELF-SPEC BUFFERS =====
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
@@ -443,6 +480,21 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
+        # Populate self-spec buffers if selective KV indices are provided
+        if request.selective_kv_indices is not None:
+            num_selective = len(request.selective_kv_indices)
+            if num_selective > 0:
+                self.selective_kv_indices_cpu_tensor[
+                    req_index, :num_selective] = torch.tensor(
+                        request.selective_kv_indices, dtype=torch.int32)
+                self.num_selective_kv_indices_cpu_tensor[
+                    req_index] = num_selective
+
+        # Populate full KV start offset
+        if request.full_kv_start_offset > 0:
+            self.full_kv_start_offset_cpu_tensor[
+                req_index] = request.full_kv_start_offset
+
         return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
@@ -577,6 +629,22 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
                     self.allowed_token_ids_mask_cpu_tensor[i1]
 
+        # Swap self-spec buffers
+        tmp_selective_kv = self.selective_kv_indices_cpu_tensor[i1, ...].copy()
+        self.selective_kv_indices_cpu_tensor[i1, ...] = \
+            self.selective_kv_indices_cpu_tensor[i2, ...]
+        self.selective_kv_indices_cpu_tensor[i2, ...] = tmp_selective_kv
+
+        self.num_selective_kv_indices_cpu_tensor[i1], \
+            self.num_selective_kv_indices_cpu_tensor[i2] = \
+            self.num_selective_kv_indices_cpu_tensor[i2], \
+            self.num_selective_kv_indices_cpu_tensor[i1]
+
+        self.full_kv_start_offset_cpu_tensor[i1], \
+            self.full_kv_start_offset_cpu_tensor[i2] = \
+            self.full_kv_start_offset_cpu_tensor[i2], \
+            self.full_kv_start_offset_cpu_tensor[i1]
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -682,6 +750,21 @@ class InputBatch:
                 last_req_index, None)
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
+
+            # Copy self-spec buffers
+            num_selective = self.num_selective_kv_indices_cpu_tensor[
+                last_req_index]
+            if num_selective > 0:
+                self.selective_kv_indices_cpu_tensor[
+                    empty_index, :num_selective] = \
+                    self.selective_kv_indices_cpu_tensor[
+                        last_req_index, :num_selective]
+                self.num_selective_kv_indices_cpu_tensor[
+                    empty_index] = num_selective
+
+            self.full_kv_start_offset_cpu_tensor[
+                empty_index] = self.full_kv_start_offset_cpu_tensor[
+                    last_req_index]
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
