@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
@@ -40,9 +39,6 @@ from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
-
-import torch
-import torch.distributed
 
 
 class MiniMaxText01RMSNormTP(CustomOp):

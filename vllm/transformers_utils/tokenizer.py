@@ -21,11 +21,9 @@ from vllm.transformers_utils.utils import check_gguf_file
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.lora.request import LoRARequest
     from vllm.transformers_utils.tokenizer_base import TokenizerBase
 else:
     ModelConfig = Any
-    LoRARequest = Any
     TokenizerBase = Any
 
 logger = init_logger(__name__)
