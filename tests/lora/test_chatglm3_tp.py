@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import vllm
+import vllm.config
 from vllm.lora.request import LoRARequest
 
 from ..utils import create_new_process_for_each_test, multi_gpu_test
@@ -55,7 +56,7 @@ def test_chatglm3_lora(chatglm3_lora_files):
         MODEL_PATH,
         max_model_len=512,
         enable_lora=True,
-        max_loras=4,
+        max_loras=2,
         max_num_seqs=16,
         max_lora_rank=64,
         trust_remote_code=True,
@@ -75,12 +76,15 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
         MODEL_PATH,
         max_model_len=512,
         enable_lora=True,
-        max_loras=4,
+        max_loras=2,
         max_lora_rank=64,
         max_num_seqs=16,
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=False,
+        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            cudagraph_specialize_lora=False,
+        ),
     )
 
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
@@ -100,12 +104,15 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
         MODEL_PATH,
         max_model_len=512,
         enable_lora=True,
-        max_loras=4,
+        max_loras=2,
         max_lora_rank=64,
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=True,
         gpu_memory_utilization=0.85,
+        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            cudagraph_specialize_lora=False,
+        ),
     )
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
