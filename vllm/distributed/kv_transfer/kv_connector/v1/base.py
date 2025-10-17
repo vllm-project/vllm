@@ -70,7 +70,7 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
-class KVConnectorHMAMixin:
+class SupportsHMA:
     """
     Mixin class for connectors that support hybrid memory allocator (HMA).
     This is required to use the connector together with hybrid memory allocator.
@@ -85,7 +85,7 @@ class KVConnectorHMAMixin:
         Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the the blocks
+        The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
@@ -100,9 +100,9 @@ class KVConnectorHMAMixin:
 
 def supports_hma(connector: Any) -> bool:
     if isinstance(connector, type):
-        return issubclass(connector, KVConnectorHMAMixin)
+        return issubclass(connector, SupportsHMA)
     else:
-        return isinstance(connector, KVConnectorHMAMixin)
+        return isinstance(connector, SupportsHMA)
 
 
 class KVConnectorRole(enum.Enum):
@@ -401,7 +401,7 @@ class KVConnectorBase_V1(ABC):
         Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the the blocks
+        The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
