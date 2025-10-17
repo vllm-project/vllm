@@ -653,6 +653,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B",
+        is_available_online=False,
     ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
