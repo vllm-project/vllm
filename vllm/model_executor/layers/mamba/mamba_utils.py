@@ -51,6 +51,8 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
+        if mamba_cache_dtype.startswith("fp8"):
+            raise ValueError("fp8 mamba conv state is not supported")
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         if mamba_ssm_cache_dtype == "auto":
             temporal_state_dtype = conv_state_dtype
