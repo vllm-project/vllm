@@ -23,11 +23,6 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesResponse,
 )
 from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
-from vllm.entrypoints.chat_utils import (
-    load_chat_template,
-    resolve_hf_chat_template,
-    resolve_mistral_chat_template,
-)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.api_server import (
@@ -42,16 +37,20 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.protocol import ErrorResponse
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
-    LoRAModulePath,
     OpenAIServingModels,
 )
 
 #
 # yapf: enable
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import cli_env_setup, load_aware_call, with_cancellation
+from vllm.entrypoints.utils import (
+    cli_env_setup,
+    load_aware_call,
+    process_chat_template,
+    process_lora_modules,
+    with_cancellation,
+)
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import FlexibleArgumentParser, is_valid_ipv6_address, set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -151,46 +150,11 @@ async def init_app_state(
         if vllm_config.lora_config is not None
         else {}
     )
-    lora_modules = args.lora_modules
-    if default_mm_loras:
-        default_mm_lora_paths = [
-            LoRAModulePath(
-                name=modality,
-                path=lora_path,
-            )
-            for modality, lora_path in default_mm_loras.items()
-        ]
-        if args.lora_modules is None:
-            lora_modules = default_mm_lora_paths
-        else:
-            lora_modules += default_mm_lora_paths
+    lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
 
-    resolved_chat_template = load_chat_template(args.chat_template)
-    if resolved_chat_template is not None:
-        # Get the tokenizer to check official template
-        tokenizer = await engine_client.get_tokenizer()
-
-        if isinstance(tokenizer, MistralTokenizer):
-            # The warning is logged in resolve_mistral_chat_template.
-            resolved_chat_template = resolve_mistral_chat_template(
-                chat_template=resolved_chat_template
-            )
-        else:
-            hf_chat_template = resolve_hf_chat_template(
-                tokenizer=tokenizer,
-                chat_template=None,
-                tools=None,
-                model_config=vllm_config.model_config,
-            )
-
-            if hf_chat_template != resolved_chat_template:
-                logger.warning(
-                    "Using supplied chat template: %s\n"
-                    "It is different from official chat template '%s'. "
-                    "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template,
-                    args.model,
-                )
+    resolved_chat_template = await process_chat_template(
+        args.chat_template, engine_client, model_config
+    )
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
