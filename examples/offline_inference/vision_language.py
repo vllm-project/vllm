@@ -275,7 +275,8 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=2048,
         max_num_seqs=2,
-        mm_processor_kwargs={"do_pan_and_scan": True},
+        # TODO: Support this in transformers backend
+        # mm_processor_kwargs={"do_pan_and_scan": True},
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -751,6 +752,26 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         model="moonshotai/Kimi-VL-A3B-Instruct",
         trust_remote_code=True,
         max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# LightOnOCR
+def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [
+        "<|im_start|>system<|im_end|>\n<|im_start|>user\n<|image_pad|><|im_end|>\n<|im_start|>assistant\n"
+        for _ in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -1736,6 +1757,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "lightonocr": run_lightonocr,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
