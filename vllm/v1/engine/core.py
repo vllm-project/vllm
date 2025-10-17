@@ -372,24 +372,25 @@ class EngineCore:
                 scheduler_output, non_block=True
             )
             assert isinstance(exec_future, Future)
+            model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if scheduler_output.pending_structured_output_tokens:
                 # We need to defer sampling until we have processed the model output
                 # from the prior step.
                 deferred_scheduler_output = scheduler_output
-                grammar_output = None
+                # Block-wait for execute to return (continues running async on the GPU).
+                with self.log_error_detail(scheduler_output):
+                    exec_result = exec_future.result()
+                    assert exec_result is None
             else:
-                # We aren't waiting for any tokens, get the grammar output immediately.
+                # We aren't waiting for any tokens, get any grammar output immediately.
                 grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+                # Block-wait for execute to return (continues running async on the GPU).
+                with self.log_error_detail(scheduler_output):
+                    exec_result = exec_future.result()
 
-            # Block-wait for execute to return (continues running async on the GPU).
-            model_executed = scheduler_output.total_num_scheduled_tokens > 0
-            with self.log_error_detail(scheduler_output):
-                model_output_or_none = exec_future.result()
-
-            if not deferred_scheduler_output:
-                if model_output_or_none is None:
-                    # No pending output tokens needed here, sample immediately.
+                if exec_result is None:
+                    # Call sample tokens.
                     sample_future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
@@ -397,6 +398,7 @@ class EngineCore:
                 else:
                     # No sampling required (e.g. all requests finished).
                     future = cast(Future[ModelRunnerOutput], exec_future)
+                # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output))
                 if (
                     model_executed
@@ -406,8 +408,6 @@ class EngineCore:
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
                     return None, True
-            else:
-                assert model_output_or_none is None
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
@@ -427,7 +427,7 @@ class EngineCore:
         # TODO TBD return outputs here first?
         if deferred_scheduler_output:
             # We now have the tokens needed to compute the bitmask for the
-            # deferred request. Get the bitmask and dispatch sample request.
+            # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )
