@@ -2,7 +2,7 @@
 
 ## Debugging
 
-Please see the [Troubleshooting][troubleshooting-python-multiprocessing]
+Please see the [Troubleshooting](../usage/troubleshooting.md#python-multiprocessing)
 page for information on known issues and how to solve them.
 
 ## Introduction

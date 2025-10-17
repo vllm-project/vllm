@@ -11,9 +11,7 @@ Alongside each architecture, we include some popular models that use it.
 
 If vLLM natively supports a model, its implementation can be found in [vllm/model_executor/models](../../vllm/model_executor/models).
 
-These models are what we list in [supported-text-models][supported-text-models] and [supported-mm-models][supported-mm-models].
-
-[](){ #transformers-backend }
+These models are what we list in [supported text models](#list-of-text-only-language-models) and [supported multimodal models](#list-of-multimodal-language-models).
 
 ### Transformers
 
@@ -60,7 +58,7 @@ For a model to be compatible with the Transformers backend for vLLM it must:
 - be a Transformers compatible custom model (see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)):
     - The model directory must have the correct structure (e.g. `config.json` is present).
     - `config.json` must contain `auto_map.AutoModel`.
-- be a Transformers backend for vLLM compatible model (see [writing-custom-models][writing-custom-models]):
+- be a Transformers backend for vLLM compatible model (see [Writing custom models](#writing-custom-models)):
     - Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
 
 If the compatible model is:
@@ -69,8 +67,6 @@ If the compatible model is:
 - in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference](../serving/offline_inference.md) or `vllm serve <MODEL_DIR>` for the [openai-compatible-server](../serving/openai_compatible_server.md).
 
 This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
-
-[](){ #writing-custom-models }
 
 #### Writing custom models
 
@@ -164,7 +160,7 @@ To determine whether a given model is natively supported, you can check the `con
 If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
 
 Models do not _need_ to be natively supported to be used in vLLM.
-The [Transformers backend][transformers-backend] enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
+The [Transformers backend](#transformers) enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
 
 !!! tip
     The easiest way to check if your model is really supported at runtime is to run the program below:
@@ -306,8 +302,6 @@ output = llm.encode("Hello, my name is")
 print(output)
 ```
 
-[](){ #feature-status-legend }
-
 ## Feature Status Legend
 
 - ✅︎ indicates that the feature is supported for the model.
@@ -315,8 +309,6 @@ print(output)
 - 🚧 indicates that the feature is planned but not yet supported for the model.
 
 - ⚠️ indicates that the feature is available but may have known issues or limitations.
-
-[](){ #supported-text-models }
 
 ## List of Text-only Language Models
 
@@ -582,8 +574,6 @@ These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode)
 
 !!! note
     Named Entity Recognition (NER) usage, please refer to [examples/offline_inference/pooling/ner.py](../../examples/offline_inference/pooling/ner.py), [examples/online_serving/pooling/ner_client.py](../../examples/online_serving/pooling/ner_client.py).
-
-[](){ #supported-mm-models }
 
 ## List of Multimodal Language Models
 

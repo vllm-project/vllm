@@ -1,7 +1,5 @@
 # Using Docker
 
-[](){ #deployment-docker-pre-built-image }
-
 ## Use vLLM's Official Docker Image
 
 vLLM offers an official Docker image for deployment.
@@ -61,8 +59,6 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
 
     RUN uv pip install --system git+https://github.com/huggingface/transformers.git
     ```
-
-[](){ #deployment-docker-build-image-from-source }
 
 ## Building vLLM's Docker Image from Source
 

@@ -217,6 +217,6 @@ Where the `<path/to/model>` is the location where the model is stored, for examp
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]
 
-See [feature-x-hardware][feature-x-hardware] compatibility matrix for feature support information.
+See [Feature x Hardware](../../features/README.md#feature-x-hardware) compatibility matrix for feature support information.
 
 # --8<-- [end:supported-features]
