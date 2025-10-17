@@ -49,6 +49,7 @@ async def httpbin_echo_server() -> AsyncGenerator[str, Any]:
 
     await runner.cleanup()
 
+
 @pytest.mark.asyncio
 async def test_async_client_encodes_unencoded_path(httpbin_echo_server: str):
     """
@@ -63,6 +64,7 @@ async def test_async_client_encodes_unencoded_path(httpbin_echo_server: str):
 
         expected_raw_path = "/anything/path%20with%20spaces"
         assert data["raw_path"] == expected_raw_path
+
 
 @pytest.mark.asyncio
 async def test_async_client_preserves_encoded_path(httpbin_echo_server: str):
