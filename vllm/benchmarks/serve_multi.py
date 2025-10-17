@@ -17,7 +17,7 @@ _BAD_PARAMS_TYPE_MSG = (
 )
 
 
-def _validate_combs(params: list[dict[str, object]]):
+def _validate_params(params: list[dict[str, object]]):
     if not isinstance(params, list):
         raise TypeError(f"{_BAD_PARAMS_TYPE_MSG} Found JSON type {type(params)}")
 
@@ -53,8 +53,17 @@ def _override_args(cmd: list[str], params: dict[str, object]):
     return cmd
 
 
-def _get_path_one_comb(output_dir: Path, params: dict[str, object]):
-    return output_dir / "_".join(f"{k}={v}" for k, v in params.items())
+def _get_path_one_comb(
+    output_dir: Path,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+):
+    return output_dir / "_".join(
+        (
+            *(f"s_{k}={v}" for k, v in serve_comb.items()),
+            *(f"b_{k}={v}" for k, v in bench_comb.items()),
+        )
+    )
 
 
 def _get_path_one_run(result_dir: Path, run_number: int):
@@ -64,16 +73,17 @@ def _get_path_one_run(result_dir: Path, run_number: int):
 def benchmark_one_run(
     serve_cmd: list[str],
     bench_cmd: list[str],
-    serve_comb: dict[str, object],
+    serve_overrides: dict[str, object],
+    bench_overrides: dict[str, object],
     run_number: int,
     result_dir: Path,
     dry_run: bool,
 ):
     result_path = _get_path_one_run(result_dir, run_number)
 
-    server_cmd = _override_args(serve_cmd, serve_comb)
+    server_cmd = _override_args(serve_cmd, serve_overrides)
     benchmark_cmd = [
-        *bench_cmd,
+        *_override_args(bench_cmd, bench_overrides),
         "--save-result",
         "--result-dir",
         result_dir,
@@ -82,7 +92,8 @@ def benchmark_one_run(
     ]
 
     print("=" * 60)
-    print(f"Parameter Combination: {serve_comb}")
+    print(f"Server overrides: {serve_overrides}")
+    print(f"Benchmark overrides: {bench_overrides}")
     print(f"Run Number: {run_number}")
     print(f"Server command: {server_cmd}")
     print(f"Benchmark command: {benchmark_cmd}")
@@ -107,7 +118,7 @@ def benchmark_one_run(
         run_data = json.load(f)
 
     run_data["run_number"] = run_number
-    run_data.update(serve_comb)
+    run_data.update(serve_overrides)
 
     return run_data
 
@@ -115,12 +126,17 @@ def benchmark_one_run(
 def benchmark_one_comb(
     serve_cmd: list[str],
     bench_cmd: list[str],
-    serve_comb: dict[str, object],
+    serve_overrides: dict[str, object],
+    bench_overrides: dict[str, object],
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
 ):
-    result_dir = _get_path_one_comb(output_dir, serve_comb)
+    result_dir = _get_path_one_comb(
+        output_dir,
+        serve_comb=serve_overrides,
+        bench_comb=bench_overrides,
+    )
     if not dry_run:
         result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -128,7 +144,8 @@ def benchmark_one_comb(
         benchmark_one_run(
             serve_cmd=serve_cmd,
             bench_cmd=bench_cmd,
-            serve_comb=serve_comb,
+            serve_overrides=serve_overrides,
+            bench_overrides=bench_overrides,
             run_number=run_number,
             result_dir=result_dir,
             dry_run=dry_run,
@@ -149,6 +166,7 @@ def benchmark_all(
     serve_cmd: list[str],
     bench_cmd: list[str],
     serve_params: list[dict[str, object]],
+    bench_params: list[dict[str, object]],
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
@@ -160,12 +178,14 @@ def benchmark_all(
         benchmark_one_comb(
             serve_cmd=serve_cmd,
             bench_cmd=bench_cmd,
-            serve_comb=serve_comb,
+            serve_overrides=serve_combs,
+            bench_overrides=bench_combs,
             output_dir=output_dir,
             num_runs=num_runs,
             dry_run=dry_run,
         )
-        for serve_comb in _validate_combs(serve_params)
+        for serve_combs in _validate_params(serve_params)
+        for bench_combs in _validate_params(bench_params)
     ]
 
     if dry_run:
@@ -201,6 +221,13 @@ def main():
         "`vllm serve` command.",
     )
     parser.add_argument(
+        "--bench-params",
+        type=str,
+        default=None,
+        help="Path to JSON file containing parameter combinations for the "
+        "`vllm bench serve` command.",
+    )
+    parser.add_argument(
         "-o",
         "--output-dir",
         type=str,
@@ -231,10 +258,18 @@ def main():
         # i.e.: run serve_cmd without any modification
         serve_params = [{}]
 
+    if args.bench_params:
+        with open(args.bench_params, "rb") as f:
+            bench_params = json.load(f)
+    else:
+        # i.e.: run bench_cmd without any modification
+        bench_params = [{}]
+
     benchmark_all(
         serve_cmd=serve_cmd,
         bench_cmd=bench_cmd,
         serve_params=serve_params,
+        bench_params=bench_params,
         output_dir=Path(args.output_dir),
         num_runs=args.num_runs,
         dry_run=args.dry_run,
