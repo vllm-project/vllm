@@ -318,4 +318,6 @@ def create_flashinfer_prepare_finalize(
         else:
             return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)
     # Fp8 only supports AllGather
-    return FlashInferAllGatherMoEPrepareAndFinalize(use_dp=use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale)
+    return FlashInferAllGatherMoEPrepareAndFinalize(
+        use_dp=use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+    )

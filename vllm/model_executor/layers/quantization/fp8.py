@@ -3,6 +3,7 @@
 
 from collections.abc import Callable
 from enum import Enum
+from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -122,7 +123,10 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
     # prefer FlashInfer backends when available and enabled on supported GPUs
     if (
         current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and (
+            current_platform.is_device_capability(100)
+            or current_platform.is_device_capability(90)
+        )
         and envs.VLLM_USE_FLASHINFER_MOE_FP8
         and has_flashinfer_moe()
     ):
@@ -131,7 +135,7 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
             logger.info_once("Using FlashInfer FP8 MoE TRTLLM backend for SM100")
             return Fp8MoeBackend.FLASHINFER_TRTLLM
         else:
-            logger.info_once("Using FlashInfer FP8 MoE CUTLASS backend for SM100")
+            logger.info_once("Using FlashInfer FP8 MoE CUTLASS backend for SM90/SM100")
             return Fp8MoeBackend.FLASHINFER_CUTLASS
 
     # weight-only path for older GPUs without native FP8
@@ -595,6 +599,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+            if self.block_quant:
+                self.flashinfer_moe_fn = partial(
+                    flashinfer_cutlass_moe_fp8,
+                    moe=self.moe,
+                    use_deepseek_fp8_block_scale=True,
+                )
+            else:
+                self.flashinfer_moe_fn = flashinfer_cutlass_moe_fp8
 
         self.allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
         self.allow_cutlass_block_scaled_grouped_gemm = (
@@ -980,7 +992,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe
+                self.moe,
+                use_deepseek_fp8_block_scale=self.block_quant is not None,
             )
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
@@ -1027,6 +1040,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             experts = select_cutlass_fp8_gemm_impl(
                 self.moe,
                 self.moe_quant_config,
+                use_deepseek_fp8_block_scale=self.block_quant is not None,
             )
             logger.debug_once("Using %s", experts.__class__.__name__)
             return experts
@@ -1227,10 +1241,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_map=expert_map,
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert activation == 'silu', (
-                f"Expected 'silu' activation but got {activation}")
-
-            result = flashinfer_cutlass_moe_fp8(
+            assert activation == "silu", (
+                f"Expected 'silu' activation but got {activation}"
+            )
+            result = self.flashinfer_moe_fn(
                 x,
                 layer,
                 topk_weights,
@@ -1240,7 +1254,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                use_deepseek_fp8_block_scale=self.block_quant is not None,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts

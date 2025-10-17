@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -189,14 +190,16 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
-    return create_flashinfer_prepare_finalize(use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale)
+    return create_flashinfer_prepare_finalize(
+        use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+    )
 
 
 def select_cutlass_fp8_gemm_impl(
     moe: FusedMoEConfig | None,
     quant_config: FusedMoEQuantConfig,
     out_dtype: torch.dtype | None = None,
-    use_deepseek_fp8_block_scale: bool = False
+    use_deepseek_fp8_block_scale: bool = False,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
 
@@ -230,15 +233,20 @@ def flashinfer_cutlass_moe_fp8(
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     use_deepseek_fp8_block_scale: bool = False,
+    moe: FusedMoEConfig | None = None,
 ) -> torch.Tensor:
     quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
     assert quant_config is not None
 
     fused_experts = mk.FusedMoEModularKernel(
-        build_flashinfer_fp8_cutlass_moe_prepare_finalize(moe=None, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale),
+        build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+            moe=moe, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+        ),
         select_cutlass_fp8_gemm_impl(
-            moe=None, quant_config=quant_config, out_dtype=hidden_states.dtype,
-                                     use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+            moe=moe,
+            quant_config=quant_config,
+            out_dtype=hidden_states.dtype,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
         ),
     )
 
@@ -258,7 +266,9 @@ def flashinfer_cutlass_moe_fp8(
 
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
     flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-    if flashinfer_moe_backend == "throughput":
+    if flashinfer_moe_backend == "throughput" or current_platform.is_device_capability(
+        90
+    ):
         return FlashinferMoeBackend.CUTLASS
     elif flashinfer_moe_backend == "latency":
         return FlashinferMoeBackend.TENSORRT_LLM
