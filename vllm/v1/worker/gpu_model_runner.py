@@ -1515,6 +1515,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
+        ec_connector_output = None
         if self.supports_mm_inputs:
             with self.maybe_get_ec_connector_output(
                     scheduler_output,
