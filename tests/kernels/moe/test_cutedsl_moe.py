@@ -13,7 +13,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
     scaled_fp4_grouped_quantize,
-    silu_and_mul_scaled_nvfp4_experts_quantize,
 )
 
 if torch.cuda.get_device_capability() < (10, 0):
