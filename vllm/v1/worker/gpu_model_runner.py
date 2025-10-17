@@ -1756,6 +1756,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             merge_by_field_config=model.merge_by_field_config,
                         )
                     )
+
                     micro_batch_outputs = model.get_multimodal_embeddings(
                         **micro_batch_mm_inputs
                     )
