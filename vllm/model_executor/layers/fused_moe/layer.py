@@ -266,6 +266,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         else:
             return None
 
+        return None
+
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
