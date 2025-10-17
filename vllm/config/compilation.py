@@ -274,9 +274,8 @@ class CompilationConfig:
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
     """
-    compile_sizes: list[int] = Field(default=None)
-    """Sizes to compile for inductor. If unset, `self.cudagraph_capture_sizes`
-    will be used."""
+    compile_sizes: list[int] = Field(default_factory=list)
+    """Sizes to compile for inductor."""
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
@@ -682,12 +681,6 @@ class CompilationConfig:
                 )
             self.cudagraph_capture_sizes = dedup_sizes
 
-        if self.compile_sizes is None:
-            self.compile_sizes = self.cudagraph_capture_sizes
-        else:
-            # de-duplicate the sizes provided by the config
-            self.compile_sizes = list(set(self.compile_sizes))
-
         # sort to make sure cudagraph capture sizes are in descending order
         self.cudagraph_capture_sizes.sort(reverse=True)
         self.max_capture_size = (
@@ -705,6 +698,12 @@ class CompilationConfig:
                 else:
                     self.bs_to_padded_graph_size[bs] = end
         self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
+
+    @field_validator("compile_sizes")
+    @classmethod
+    def _validate_compile_sizes(cls, value: list[int]) -> list[int]:
+        """Deduplicate compile sizes."""
+        return list(set(value))
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when mode is
