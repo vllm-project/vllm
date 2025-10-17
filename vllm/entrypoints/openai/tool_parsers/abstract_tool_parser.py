@@ -12,7 +12,8 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import import_from_path, is_list_of
+from vllm.utils.collections import is_list_of
+from vllm.utils.import_utils import import_from_path
 
 logger = init_logger(__name__)
 

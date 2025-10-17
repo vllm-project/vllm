@@ -14,6 +14,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEActivationFormat,
@@ -353,6 +356,8 @@ class Fp8LinearMethod(LinearMethodBase):
         # Disable marlin for rocm
         if current_platform.is_rocm():
             self.use_marlin = False
+        if vllm_is_batch_invariant():
+            self.use_marlin = False
 
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
 
@@ -534,6 +539,66 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # If batch invariant mode is enabled, dequantize and use BF16 compute
+        if vllm_is_batch_invariant():
+            # Dequantize FP8 weights to BF16
+            weight_fp8 = layer.weight.to(torch.bfloat16)
+            weight_scale = layer.weight_scale.to(torch.bfloat16)
+
+            # Handle different quantization granularities
+            if self.block_quant:
+                # Block-wise quantization:
+                # - Weight is NOT transposed, shape is [N, K] (output_size, input_size)
+                # - Scale has shape [num_blocks_k, num_blocks_n] (TRANSPOSED!)
+                assert self.weight_block_size is not None
+                block_n, block_k = self.weight_block_size  # Note: order is [N, K]
+
+                N, K = weight_fp8.shape
+
+                # Scale is stored transposed: [num_blocks_k, num_blocks_n]
+                # We need to transpose it to [num_blocks_n, num_blocks_k] first
+                weight_scale = weight_scale.t()
+
+                # Expand scale to match weight dimensions
+                # scale_expanded should have shape [N, K]
+                scale_expanded = weight_scale.repeat_interleave(
+                    block_n, dim=0
+                ).repeat_interleave(block_k, dim=1)
+                # Trim to exact weight size (in case of padding)
+                scale_expanded = scale_expanded[:N, :K]
+                weight_bf16 = weight_fp8 * scale_expanded
+            else:
+                # Per-tensor quantization: weight IS transposed to [K, N]
+                # scale should be scalar or [1] or per-output-channel [N]
+                if weight_scale.numel() == 1:
+                    # Per-tensor: simple scalar multiplication
+                    weight_bf16 = weight_fp8 * weight_scale
+                else:
+                    # Multiple scales (fused modules like QKV)
+                    # Try to infer correct broadcasting
+                    # weight is [K, N], scale could be [num_logical_weights]
+                    # Need to figure out how to broadcast - for now just try
+                    # direct multiplication
+                    if (
+                        weight_scale.dim() == 1
+                        and weight_scale.shape[0] == weight_fp8.shape[0]
+                    ):
+                        # Per-row scaling
+                        weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
+                    else:
+                        # Fallback
+                        weight_bf16 = weight_fp8 * weight_scale
+
+            # For block quant, weight is [N, K], for per-tensor it's [K, N]
+            # F.linear expects weight to be [N, K], so:
+            if self.block_quant:
+                # Already in correct shape [N, K]
+                output = torch.nn.functional.linear(x, weight_bf16, bias)
+            else:
+                # Need to transpose back: [K, N] -> [N, K]
+                output = torch.nn.functional.linear(x, weight_bf16.t(), bias)
+            return output
+
         if self.use_marlin:
             return apply_fp8_marlin_linear(
                 input=x,
