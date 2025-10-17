@@ -227,7 +227,7 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
-    optimization_level: OptimizationLevel | None = OptimizationLevel.O2
+    optimization_level: OptimizationLevel = OptimizationLevel.O2
     """The optimization level. These levels trade startup time cost for
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
