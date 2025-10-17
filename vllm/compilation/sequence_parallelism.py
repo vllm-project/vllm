@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
@@ -17,9 +19,18 @@ from vllm.platforms import current_platform
 
 from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
+from .noop_elimination import NoOpEliminationPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
+
+
+def get_first_out_wrapper(fn):
+    @functools.wraps(fn)
+    def wrapper(*args):
+        return fn(*args)[0]
+
+    return wrapper
 
 
 class _SequenceParallelPatternHelper:
@@ -119,54 +130,26 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            # pattern matcher replaces from top-to-bottom,
+            # so residual is still the full size here.
+            # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
             rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
             all_gather = self._all_gather(rmsnorm[0])
+            # shape of residual changes but that's fine,
+            # next node is already slicing it, now becomes a noop
             return all_gather, rmsnorm[1]
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
-
-
-class LastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
-
-    def get_inputs(self):
-        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-
-        return [
-            residual,
-            mm_1,
-            rms_norm_weights,
-        ]
-
-    def register(self, pm_pass: PatternMatcherPass):
-        def pattern(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-        ) -> torch.Tensor:
-            all_reduce = self._all_reduce(mm_1)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, rms_norm_weights, residual)
-            return rmsnorm[0]
-
-        def replacement(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-        ) -> torch.Tensor:
-            reduce_scatter = self._reduce_scatter(mm_1)
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
-            normalized = self._all_gather(rmsnorm[0])
-            return normalized
-
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            get_first_out_wrapper(pattern),
+            get_first_out_wrapper(replacement),
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
         )
 
 
@@ -252,59 +235,31 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             rms_norm_weights: torch.Tensor,
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            # pattern matcher replaces from top-to-bottom,
+            # so residual is still the full size here.
+            # add a temporary slice which will become a noop
+            # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
             rms, residual_out = self.rmsnorm_matcher(
                 reduce_scatter, rms_norm_weights, residual
             )
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
+            # shape of residual changes but that's fine,
+            # next node is already slicing it, now becomes a noop
             return all_gather, residual_out
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
-
-class LastAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
-        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
-
-    def get_inputs(self):
-        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        scale = torch.empty([1, 1], device=self.device, dtype=torch.float32)
-
-        return [residual, mm_1, rms_norm_weights, scale]
-
-    def register(self, pm_pass: PatternMatcherPass):
-        def pattern(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> torch.Tensor:
-            all_reduce = self._all_reduce(mm_1)
-            rms, _ = self.rmsnorm_matcher(all_reduce, rms_norm_weights, residual)
-            quant, _ = self.quant_matcher(rms, scale)
-            return quant
-
-        def replacement(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> torch.Tensor:
-            reduce_scatter = self._reduce_scatter(mm_1)
-            rms, _ = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
-            quant, _ = self.quant_matcher(rms, scale)
-            normalized = self._all_gather(quant)
-            return normalized
-
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            get_first_out_wrapper(pattern),
+            get_first_out_wrapper(replacement),
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
         )
 
 
@@ -326,11 +281,33 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     GEMM + ReduceScatter and AllGather + GEMM fusions. These fusions can
     significantly reduce communication overhead and improve overall model
     performance.
+
+
+    This pass splits up the residual tensor across TP ranks and hence divides its size.
+    Because the pattern matcher starts at the end of the graph, the replacement
+    contains a slice that temporarily conforms the input residual to the correct size.
+    After all patterns have been matched, we use a NoOpEliminationPass to clean up
+    what have now become no-op slices.
+
+    Note that an older version of the pass did not need this as it operated only on
+    custom rms_norm and fused_rms_norm_add custom ops which did not complain about
+    mismatched shapes during replacement. So this approach has the same assumption that
+    correctness is only maintained if all rms_norm operations are split across ranks.
+
+    Correctness-wise, this is approach strictly better than before - before,
+    the graph was incorrect semantically and shape-wise during the pass.
+    With this approach there's only semantic incorrectness during the pass.
+    Both approaches restore a correct graph once all patterns are matched.
     """
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
+
+        # Used to cleanup redundant views created temporarily
+        # to circumvent residual shape change issues
+        self.noop_cleanup = NoOpEliminationPass(config)
+        self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="sequence_parallelism_pass"
@@ -344,9 +321,6 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             MiddleAllReduceRMSNormStaticFP8Pattern(
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
-            LastAllReduceRMSNormStaticFP8Pattern(
-                epsilon, self.model_dtype, self.device
-            ).register(self.patterns)
 
             # Normal RMSNorm patterns
             FirstAllReduceRMSNormPattern(
@@ -357,9 +331,6 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
 
-            LastAllReduceRMSNormPattern(
-                epsilon, self.model_dtype, self.device
-            ).register(self.patterns)
         self.dump_patterns(config, self.patterns)
 
     def is_applicable(self, shape: int | None) -> bool:
@@ -388,3 +359,5 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     def __call__(self, graph: fx.Graph):
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+        # Clean up reshape nodes
+        self.noop_cleanup(graph)
