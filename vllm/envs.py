@@ -45,6 +45,11 @@ if TYPE_CHECKING:
     VLLM_LOGITS_PROCESSOR_THREADS: int | None = None
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
+    VLLM_ATTENTION_BACKEND: Optional[str] = None
+    VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
+    VLLM_USE_TRITON_SAMPLER: bool = False
+    VLLM_PP_LAYER_PARTITION: Optional[str] = None
+    VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_ATTENTION_BACKEND: str | None = None
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
@@ -606,6 +611,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ),
     ),
     # If set, vllm will use flashinfer sampler
+    "VLLM_USE_FLASHINFER_SAMPLER":
+    lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
+    if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
+
+    # If set, vllm will use triton sampler
+    "VLLM_USE_TRITON_SAMPLER":
+    lambda: bool(int(os.environ.get("VLLM_USE_TRITON_SAMPLER", "0"))),
+
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: bool(
         int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])
     )
@@ -1501,6 +1514,7 @@ def compute_hash() -> str:
         "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
+        "VLLM_USE_TRITON_SAMPLER",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
