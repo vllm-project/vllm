@@ -154,13 +154,13 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
         gpu_name = gpu_name.replace("-", "_")
 
         config_fname = None
-        if op_type == "shrink":
-            config_fname = f"{gpu_name}_{op_type.upper()}.json"
-        else:
-            assert op_type == "expand"
+        if op_type == "expand":
             config_fname = (
                 f"{gpu_name}_{op_type.upper()}_{str(add_inputs).upper()}.json"
             )
+        else:
+            config_fname = f"{gpu_name}_{op_type.upper()}.json"
+
 
         config_path = Path(f"{user_defined_config_folder}/{config_fname}")
         if not config_path.exists():
@@ -186,8 +186,9 @@ def get_lora_op_configs(
     rank: int,
     num_slices: int,
     add_inputs: bool | None = None,
+    hidden_size_2: int | None = None,
 ) -> dict[str, int | None]:
-    assert op_type in ["shrink", "expand"]
+    assert op_type in ["shrink", "expand", "fused_moe_lora_gate_up", "fused_moe_lora_down"]
 
     # default config
     default = {}
@@ -245,6 +246,13 @@ def get_lora_op_configs(
         config_data.get(str(n))
         or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n))]
     )
+    if hidden_size_2 is not None:
+        assert op_type in ["fused_moe_lora_gate_up", "fused_moe_lora_down"]
+        n2 = hidden_size_2
+        config_data = (
+            config_data.get(str(n2))
+            or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n2))]
+        )
 
     assert config_data is not None
     return config_data

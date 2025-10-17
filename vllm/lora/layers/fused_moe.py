@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -101,16 +102,25 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens = hidden_states.size(0)
                 M = min(num_tokens, CHUNK_SIZE)
 
-                get_config_func = functools.partial(
-                    try_get_optimal_moe_config,
-                    layer.w13_weight.size(),
-                    layer.w2_weight.size(),
-                    top_k,
-                    config_dtype,
-                    block_shape=layer.quant_method.moe_quant_config.block_shape,
+                lora_config = get_lora_op_configs(
+                    "fused_moe_lora_gate_up",
+                    max_loras=self.w1_lora_a_stacked.shape[0],
+                    batch=M,
+                    hidden_size=self.w1_lora_a_stacked.shape[-1],  # hidden_size
+                    hidden_size_2=self.w1_lora_b_stacked.shape[-2],  # hidden_size_2
+                    rank=self.w1_lora_a_stacked.shape[-2],  # lora rank
+                    num_slices=2,
                 )
+                # Convert lowercase keys (e.g. "block_m") to uppercase format (e.g. "BLOCK_SIZE_M")
+                config = {}
+                for k, v in lora_config.items():
+                    if k.startswith('block_'):
+                        # Convert "block_m" -> "BLOCK_SIZE_M"
+                        new_key = "BLOCK_SIZE_" + k[6:].upper()
+                        config[new_key] = v
+                    else:
+                        config[k.upper()] = v
 
-                config = get_config_func(M)
                 (
                     sorted_token_ids_lora,
                     expert_ids_lora,
@@ -173,16 +183,24 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens = hidden_states.size(0)
                 M = min(num_tokens, CHUNK_SIZE)
 
-                get_config_func = functools.partial(
-                    try_get_optimal_moe_config,
-                    layer.w13_weight.size(),
-                    layer.w2_weight.size(),
-                    top_k,
-                    config_dtype,
-                    block_shape=layer.quant_method.moe_quant_config.block_shape,
+                lora_config = get_lora_op_configs(
+                    "fused_moe_lora_down",
+                    max_loras=layer.w2_lora_a_stacked.shape[0],
+                    batch=M,
+                    hidden_size=layer.w2_lora_a_stacked.shape[-1],  # hidden_size
+                    hidden_size_2=layer.w2_lora_b_stacked.shape[-2],  # hidden_size_2
+                    rank=layer.w2_lora_a_stacked.shape[-2],  # lora rank
+                    num_slices=1,
                 )
-
-                config = get_config_func(M)
+                # Convert lowercase keys (e.g. "block_m") to uppercase format (e.g. "BLOCK_SIZE_M")
+                config = {}
+                for k, v in lora_config.items():
+                    if k.startswith('block_'):
+                        # Convert "block_m" -> "BLOCK_SIZE_M"
+                        new_key = "BLOCK_SIZE_" + k[6:].upper()
+                        config[new_key] = v
+                    else:
+                        config[k.upper()] = v
 
                 sorted_token_ids_lora = moe_state_dict["sorted_token_ids_lora"]
                 expert_ids_lora = moe_state_dict["expert_ids_lora"]
