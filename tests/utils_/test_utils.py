@@ -24,7 +24,6 @@ from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.utils import (
     FlexibleArgumentParser,
     MemorySnapshot,
-    PlaceholderModule,
     bind_kv_cache,
     common_broadcastable_dtype,
     current_stream,
@@ -38,7 +37,6 @@ from vllm.utils import (
     sha256,
     split_host_port,
     split_zmq_path,
-    swap_dict_values,
     unique_filepath,
 )
 
@@ -474,70 +472,6 @@ def test_is_lossless_cast(src_dtype, tgt_dtype, expected_result):
 )
 def test_common_broadcastable_dtype(dtypes, expected_result):
     assert common_broadcastable_dtype(dtypes) == expected_result
-
-
-def test_placeholder_module_error_handling():
-    placeholder = PlaceholderModule("placeholder_1234")
-
-    def build_ctx():
-        return pytest.raises(ModuleNotFoundError, match="No module named")
-
-    with build_ctx():
-        int(placeholder)
-
-    with build_ctx():
-        placeholder()
-
-    with build_ctx():
-        _ = placeholder.some_attr
-
-    with build_ctx():
-        # Test conflict with internal __name attribute
-        _ = placeholder.name
-
-    # OK to print the placeholder or use it in a f-string
-    _ = repr(placeholder)
-    _ = str(placeholder)
-
-    # No error yet; only error when it is used downstream
-    placeholder_attr = placeholder.placeholder_attr("attr")
-
-    with build_ctx():
-        int(placeholder_attr)
-
-    with build_ctx():
-        placeholder_attr()
-
-    with build_ctx():
-        _ = placeholder_attr.some_attr
-
-    with build_ctx():
-        # Test conflict with internal __module attribute
-        _ = placeholder_attr.module
-
-
-@pytest.mark.parametrize(
-    "obj,key1,key2",
-    [
-        # Tests for both keys exist
-        ({1: "a", 2: "b"}, 1, 2),
-        # Tests for one key does not exist
-        ({1: "a", 2: "b"}, 1, 3),
-        # Tests for both keys do not exist
-        ({1: "a", 2: "b"}, 3, 4),
-    ],
-)
-def test_swap_dict_values(obj, key1, key2):
-    original_obj = obj.copy()
-    swap_dict_values(obj, key1, key2)
-    if key1 in original_obj:
-        assert obj[key2] == original_obj[key1]
-    else:
-        assert key2 not in obj
-    if key2 in original_obj:
-        assert obj[key1] == original_obj[key2]
-    else:
-        assert key1 not in obj
 
 
 def test_model_specification(

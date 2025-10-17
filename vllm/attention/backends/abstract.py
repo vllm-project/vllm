@@ -207,6 +207,9 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        pass
+
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     @abstractmethod
