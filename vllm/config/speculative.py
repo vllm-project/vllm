@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp"]
+                            "longcat_flash_mtp", "mtp", "self_specs"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -233,6 +233,10 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "self_specs":
+                # Self-speculative decoding doesn't use a separate model
+                # Keep model as None
+                pass
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without "
@@ -563,6 +567,11 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         method = self.method
-        model = None if method == "ngram" else self.draft_model_config.model
+        if method == "ngram" or method == "self_specs":
+            model = None
+        elif self.draft_model_config is not None:
+            model = self.draft_model_config.model
+        else:
+            model = None
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

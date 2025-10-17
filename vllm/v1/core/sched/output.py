@@ -152,14 +152,6 @@ class SchedulerOutput:
     # included in the dictionary.
     scheduled_spec_decode_tokens: dict[str, list[int]]
 
-    # ===== SELF-SPEC SPARSE ATTENTION FIELDS =====
-    sparse_selected_kv_indices_of_scheduled_reqs: dict[str, list[int]] = field(default_factory=dict)
-    """Maps request_id -> list of selected KV indices (sink + recent tokens)"""
-
-    full_kv_start_offset: dict[str, int] = field(default_factory=dict)
-    """Maps request_id -> offset where full KV starts (for transition from sparse to full)"""
-    # ===== END SELF-SPEC FIELDS =====
-
     # req_id -> encoder input indices that need processing.
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
@@ -184,3 +176,11 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    # ===== SELF-SPEC SPARSE ATTENTION FIELDS =====
+    sparse_selected_kv_indices_of_scheduled_reqs: dict[str, list[int]] = field(default_factory=dict)
+    """Maps request_id -> list of selected KV indices (sink + recent tokens)"""
+
+    full_kv_start_offset: dict[str, int] = field(default_factory=dict)
+    """Maps request_id -> offset where full KV starts (for transition from sparse to full)"""
+    # ===== END SELF-SPEC FIELDS =====
