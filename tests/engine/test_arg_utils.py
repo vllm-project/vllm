@@ -274,6 +274,60 @@ def test_compilation_config():
     )
 
 
+def test_compilation_config_json_and_dot_notation():
+    """Test that JSON and dot notation arguments can be combined correctly."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    
+    # Test case 1: JSON then dot notation
+    args = parser.parse_args([
+        '-O', '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
+        '-O.debug_dump_path=/home/alexm/debug_dump'
+    ])
+    config = args.compilation_config
+    assert config.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert config.debug_dump_path == "/home/alexm/debug_dump"
+    
+    # Test case 2: Dot notation then JSON
+    args = parser.parse_args([
+        '-O.debug_dump_path=/home/alexm/debug_dump',
+        '-O', '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ])
+    config = args.compilation_config
+    assert config.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert config.debug_dump_path == "/home/alexm/debug_dump"
+    
+    # Test case 3: Multiple dot notation arguments
+    args = parser.parse_args([
+        '-O.cudagraph_mode=FULL_DECODE_ONLY',
+        '-O.debug_dump_path=/home/alexm/debug_dump'
+    ])
+    config = args.compilation_config
+    assert config.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert config.debug_dump_path == "/home/alexm/debug_dump"
+    
+    # Test case 4: Multiple JSON arguments
+    args = parser.parse_args([
+        '-O', '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
+        '-O', '{"debug_dump_path": "/home/alexm/debug_dump"}'
+    ])
+    config = args.compilation_config
+    assert config.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert config.debug_dump_path == "/home/alexm/debug_dump"
+    
+    # Test case 5: Mix all formats
+    args = parser.parse_args([
+        '-O', '{"level": 1}',
+        '-O.cudagraph_mode=FULL_DECODE_ONLY',
+        '-O', '{"debug_dump_path": "/home/alexm/debug_dump"}',
+        '-O.use_inductor=true'
+    ])
+    config = args.compilation_config
+    assert config.level == 1
+    assert config.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert config.debug_dump_path == "/home/alexm/debug_dump"
+    assert config.use_inductor is True
+
+
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
