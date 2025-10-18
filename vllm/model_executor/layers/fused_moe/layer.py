@@ -293,6 +293,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def supports_eplb(self) -> bool:
         return False
 
+    @property
+    def allow_inplace(self) -> bool:
+        return False
+
     @abstractmethod
     def apply(
         self,
@@ -337,6 +341,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         self.disable_expert_map = not fused_experts.supports_expert_map()
         self.old_method_name = old_moe_method.__class__.__name__
         self._supports_eplb = old_moe_method.supports_eplb
+        self._allow_inplace = old_moe_method.allow_inplace
         if isinstance(old_moe_method, torch.nn.Module):
             self.load_state_dict(old_moe_method.state_dict())
         logger.debug("Swapping out %s", self.old_method_name)
@@ -344,6 +349,10 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     @property
     def supports_eplb(self) -> bool:
         return self._supports_eplb
+
+    @property
+    def allow_inplace(self) -> bool:
+        return self._allow_inplace
 
     def create_weights(
         self,
@@ -430,7 +439,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=True,  # TODO(bnell): make sure this is handled properly
+            inplace=self.allow_inplace,
             activation=activation,
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
@@ -501,6 +510,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     scope="local",
                 )
             self.flashinfer_cutlass_moe = None  # type: ignore
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    @property
+    def allow_inplace(self) -> bool:
+        return True
 
     def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
         if self.rocm_aiter_moe_enabled:

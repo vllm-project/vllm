@@ -596,6 +596,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             block_shape=None,
         )
 
+    @property
+    def allow_inplace(self) -> bool:
+        return True
+
     def apply(
         self,
         layer: torch.nn.Module,

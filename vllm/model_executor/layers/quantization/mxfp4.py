@@ -850,6 +850,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
                 )
 
+    @property
+    def allow_inplace(self) -> bool:
+        return True
+
     def apply(
         self,
         layer: torch.nn.Module,
