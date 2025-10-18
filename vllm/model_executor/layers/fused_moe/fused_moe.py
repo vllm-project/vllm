@@ -1647,6 +1647,7 @@ def fused_experts(
 
 SILU_NO_MUL: str = activation_without_mul("silu")
 GELU_NO_MUL: str = activation_without_mul("gelu")
+RELU2_NO_MUL: str = activation_without_mul("relu2")
 
 
 def _get_config_quant_dtype(
@@ -1914,7 +1915,8 @@ def fused_experts_impl(
             intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
         elif activation == GELU_NO_MUL:
             intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
-
+        elif activation == RELU2_NO_MUL:
+            intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
