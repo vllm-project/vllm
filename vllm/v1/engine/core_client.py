@@ -40,7 +40,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
@@ -601,7 +601,6 @@ class MPClient(EngineCoreClient):
             else:
                 self.start_engine_core_monitor()
 
-            self.start_engine_core_monitor()
             self.engine_registry = {}
             engine_ids = [i for i in range(dp_size)]
             engine_core_identities = generate_identity_group(
@@ -645,7 +644,6 @@ class MPClient(EngineCoreClient):
 
     def start_engine_core_actor_monitor(self):
         engine_manager = self.resources.engine_manager
-
         if (
             not isinstance(engine_manager, CoreEngineActorManager)
             or not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
@@ -653,28 +651,37 @@ class MPClient(EngineCoreClient):
             return
 
         def monitor_actors():
+            import time
+
+            import ray
+
             while True:
                 all_actors = (
                     engine_manager.local_engine_actors
                     + engine_manager.remote_engine_actors
                 )
-                if all_actors is None:
+
+                if not all_actors:
                     return
 
-                # for i, actor in enumerate(all_actors):
-                #     actor_id = actor._actor_id.hex()
-                #     actor_info = ray.state.actors(actor_id)
-                #     actor_state = actor_info.get("State", "UNKNOWN")
-                # if actor_state == "DEAD":
-                #     fault_info = FaultInfo(
-                #         type="engine_actor dead",
-                #         message=f"Engine core actor id {actor_id} "
-                #         f"(status: {actor_state}).",
-                #         engine_index=int(
-                #             engine_manager.actor_id_to_dp_rank[actor_id]
-                #         ),
-                #     )
-                # todo send fault_info msg to clientGuard
+                for i, actor in enumerate(all_actors):
+                    actor_id = actor._actor_id.hex()
+                    actor_info = ray.state.actors(actor_id)
+                    actor_state = actor_info.get("State", "UNKNOWN")
+                    if actor_state == "DEAD":
+                        fault_info = FaultInfo(
+                            type="engine_actor dead",
+                            message=f"Engine core actor id {actor_id} "
+                            f"(status: {actor_state}).",
+                            engine_id=engine_manager.actor_id_to_dp_rank[actor_id],
+                            additional_info=None,
+                        )
+                        engine_manager.engine_down_socket.send_multipart(
+                            [b"", fault_info.serialize().encode("utf-8")]
+                        )
+
+                time.sleep(3)
+                # Implements the "check once every 3 seconds" frequency control
 
         Thread(target=monitor_actors, daemon=True, name="MPClientEngineMonitor").start()
 
@@ -697,6 +704,7 @@ class MPClient(EngineCoreClient):
         # callback to inform the engine.
         def monitor_engine_cores():
             sentinels = [proc.sentinel for proc in engine_processes]
+            _self = self_ref()
             if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
                 while engine_manager.processes is not None:
                     died = multiprocessing.connection.wait(sentinels)
@@ -706,19 +714,22 @@ class MPClient(EngineCoreClient):
                             for proc in engine_processes
                             if proc.sentinel == sentinel
                         )
-                        # fault_info = FaultInfo(
-                        #     type="engine_core dead",
-                        #     message=f"Engine core proc {died_proc.pid} "
-                        #     f"(PID: {died_proc.name}) died unexpectedly.",
-                        #     engine_index=int(died_proc.name[-1]),
-                        # )
+                        fault_info = FaultInfo(
+                            type="engine_core dead",
+                            message=f"Engine core proc {died_proc.pid} "
+                            f"(PID: {died_proc.name}) died unexpectedly.",
+                            engine_id=died_proc.name[-1],
+                            additional_info=None,
+                        )
+                        engine_manager.engine_down_socket.send_multipart(
+                            [b"", fault_info.serialize().encode("utf-8")]
+                        )
                         logger.error(
                             "Engine core proc %s died unexpectedly, "
                             "shutting down client.",
                             died_proc,
                         )
-
-                        # todo send fault_info msg to clientGuard
+                _self.shutdown()
 
             else:
                 died = multiprocessing.connection.wait(sentinels)

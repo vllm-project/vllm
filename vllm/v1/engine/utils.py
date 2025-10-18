@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import multiprocessing
 import os
 import uuid
 import weakref
@@ -29,6 +28,7 @@ from vllm.utils import (
     zmq_socket_ctx,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -193,22 +193,24 @@ class CoreEngineProcManager:
         if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
             sentinels = [proc.sentinel for proc in self.processes]
             while self.processes is not None:
-                died = multiprocessing.connection.wait(sentinels)
+                died = connection.wait(sentinels)
                 for sentinel in died:
                     died_proc = next(
                         proc for proc in self.processes if proc.sentinel == sentinel
                     )
-                    # fault_info = FaultInfo(
-                    #     type="engine_core dead",
-                    #     message=f"Engine core proc {died_proc.pid} "
-                    #     f"(PID: {died_proc.name}) died unexpectedly.",
-                    #     engine_index=int(died_proc.name[-1]),
-                    # )
+                    fault_info = FaultInfo(
+                        type="engine_core dead",
+                        message=f"Engine core proc {died_proc.pid} "
+                        f"(PID: {died_proc.name}) died unexpectedly.",
+                        engine_id=died_proc.name[-1],
+                        additional_info=None,
+                    )
+                    self.engine_down_socket.send_multipart([b"", fault_info.to_json()])
+
                     logger.error(
                         "Engine core proc %s died unexpectedly, shutting down client.",
                         died_proc,
                     )
-                    # todo send dead engine to clientGuard
         else:
             connection.wait(proc.sentinel for proc in self.processes)
 
