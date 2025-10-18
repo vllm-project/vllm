@@ -547,22 +547,19 @@ def _iter_sla(
         ]
 
         if all(sla_results):
-            print("SLA criteria has been met.")
-
             if request_rate_right == init_request_rate:
                 print("SLA is satisfied even with unbounded request rate.")
                 break
 
+            print("SLA criteria has been met.")
             request_rate_left = request_rate
         else:
             print("SLA criteria has not been met.")
-
             request_rate_right = request_rate
 
         # Use `<= 1` because `(odd + even) // 2 == 1`
         if abs(request_rate_left - request_rate_right) <= 1:
             print("Binary search has converged.")
-
             break
 
     if dry_run:
