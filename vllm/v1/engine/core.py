@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
@@ -131,79 +132,52 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def _send_msg(
         self, src_socket: zmq.Socket, msg: Any, serialize: bool = True
-    ) -> tuple[bool, None | str]:
+    ) -> tuple[bool, str | None]:
         """
-        Send message to the corresponding ROUTER via the specified DEALER socket
-
-        Parameters:
+        Send message to ROUTER via the specified DEALER socket.
+        Args:
             src_socket: DEALER socket for sending messages
-            (e.g., fault_report_socket or client_cmd_socket)
-            msg: Content of the message to be sent (any type)
-            serialize: Whether to JSON-serialize the message (True by default)
-
+            msg: Message content
+            serialize: Whether to encode/serialize the message (default: True)
         Returns:
-            Tuple (success, error_msg)
-            - success: Boolean indicating if the send was successful
-            - error_msg: Error message, None if successful
+            (success, error_msg)
         """
         try:
-            # Process message content (serialize or convert directly)
             if serialize:
-                try:
-                    # JSON-serialize messages of any type
-                    msg_bytes = str(msg).encode("utf-8")
-                except TypeError as e:
-                    error = f"Message serialization failed: {str(e)}"
-                    logger.error(error)
-                    return (False, error)
+                msg_bytes = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+            elif isinstance(msg, bytes):
+                msg_bytes = msg
+            elif isinstance(msg, str):
+                msg_bytes = msg.encode("utf-8")
             else:
-                # For non-serialized messages, ensure they can be converted to bytes
-                if isinstance(msg, str):
-                    msg_bytes = msg.encode("utf-8")
-                elif isinstance(msg, bytes):
-                    msg_bytes = msg
-                else:
-                    error = "Non-serialized messages must be str or bytes"
-                    logger.error(error)
-                    return (False, error)
+                raise TypeError("Non-serialized messages must be str or bytes")
 
-            # Send message in DEALER protocol format: [empty frame, message content]
+            # DEALER 协议格式：[empty frame, message content]
             src_socket.send_multipart([b"", msg_bytes])
-            logger.debug("Message sent via socket %s", src_socket)
-            return (True, None)
+            logger.debug("Sent message via %s: %s", src_socket, msg)
+            return True, None
 
-        except zmq.ZMQError as e:
-            error = f"ZMQ error: {str(e)}"
+        except (
+            zmq.ZMQError,
+            UnicodeEncodeError,
+            TypeError,
+            ValueError,
+            Exception,
+        ) as e:
+            error = f"Send message failed: {e}"
             logger.error(error)
-            return (False, error)
-        except UnicodeEncodeError:
-            error = "Message encoding failed: cannot encode to UTF-8"
-            logger.error(error)
-            return (False, error)
-        except Exception as e:
-            error = f"Unexpected error while sending message: {str(e)}"
-            logger.exception(error)
-            return (False, error)
+            return False, error
 
     def _recv_cmd(self, poll_timeout: int = 1000) -> tuple[bool, None | str]:
         """
-        Receives a command message from the client command socket using
-         non-blocking polling.Uses a ZMQ Poller to check for incoming messages
-        within the specified timeout period.Validates the message format to
-        ensure it conforms to the DEALER socket specification([empty frame,
-         message content]). If valid,decodes the message content from UTF-8 bytes.
+        Receives client guard commands in non-blocking mode via ZMQ Poller.
+        Returns (False, None) on timeout, format error, or exception.
+        Message must follow DEALER format: [empty frame, content].
 
         Args:
-            poll_timeout: Timeout in milliseconds for polling (default: 1000).
-
+            poll_timeout: Polling timeout in milliseconds (default: 1000)
         Returns:
-            A tuple with two elements:
-            - First element (bool): True if a valid message was received and
-            decoded successfully; False if no message was received within the timeout,
-            or if any error/validation failure occurred.
-            - Second element (None | str): If the first element is True, contains the
-            decoded UTF-8 message string;if the first element is False, is None
-            (regardless of the reason for failure).
+            (Whether reception succeeded, decoded message string/None)
         """
         try:
             # Use Poller for non-blocking reception
@@ -219,21 +193,12 @@ class EngineCoreGuard(threading.Thread):  # changed
                 parts = self.client_cmd_socket.recv_multipart()
 
                 # Validate message format
-                if len(parts) != 2:
-                    logger.warning(
-                        "Invalid message format, expected 2 parts, received %s ",
-                        len(parts),
-                    )
-                    return (False, None)
+                assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
 
                 empty_frame, message_bytes = parts
 
                 # Validate empty frame
-                if empty_frame != b"":
-                    logger.warning(
-                        "Empty frame format error, actual value: %s", empty_frame
-                    )
-                    return (False, None)
+                assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
 
                 # Decode message content
                 message = message_bytes.decode("utf-8")
@@ -242,14 +207,8 @@ class EngineCoreGuard(threading.Thread):  # changed
             # No message received within timeout
             return (False, None)
 
-        except zmq.ZMQError as e:
-            logger.error("ZMQ error: %s", e)
-            return (False, None)
-        except UnicodeDecodeError:
-            logger.error("Message decoding failed, not in UTF-8 format")
-            return (False, None)
-        except Exception as e:
-            logger.error("Unknown error occurred while receiving message: %s", e)
+        except (zmq.ZMQError, UnicodeDecodeError, Exception) as e:
+            logger.error("error occurred while receiving message: %s", e)
             return (False, None)
 
     def _stop_worker_execution(self):
