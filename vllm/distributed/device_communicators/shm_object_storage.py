@@ -77,47 +77,49 @@ class SingleWriterShmRingBuffer:
     Scenario 3: Case 1 - data_buffer_start <= data_buffer_end
     ```
     Starting from empty state in Scenario 2:
-    [.........................................................]
+    [.............................................................................]
     ^start=end(0)
 
     Allocate 40 bytes (id=2) - enough room to append:
-    [id:2|size:40|data........................][..................]
-    ^start(0)                                   ^end(48)
+    [id:2|size:40|data..........................][................................]
+    ^start(0)                                    ^end(48)
 
     Allocate 30 bytes (id=3):
-    [id:2|size:40|data..........................][id:3|size:30|data............][..]
-    ^start(0)                                                                   ^end(86)
+    [id:2|size:40|data..........................][id:3|size:30|data...........][..]
+    ^start(0)                                                                  ^end(86)
 
     Readers free id:2 (start advances but we remain in Case 1):
-    [FREED......................................][id:3|size:30|data............][..]
-                                                 ^start(48)                     ^end(86)
+    [FREED......................................][id:3|size:30|data...........][..]
+                                                 ^start(48)                    ^end(86)
 
     Allocate 20 bytes (id=4) - tail has insufficient space, so wrap to the
     beginning while still evaluating Case 1:
-    [id:4|size:10|data...][FREE.................][id:3|size:30|data............][..]
-                          ^end(18)              ^start(48)
+    [id:4|size:10|data...][FREE.................][id:3|size:30|data...........][..]
+                          ^end(18)              ^start(48)                 (86)^  ^(100)
     (After this allocation we transition into Case 2 because start > end.)
     ```
 
     Scenario 4: Case 2 - data_buffer_start > data_buffer_end
     ```
     Continuing after wrapping in Scenario 3:
-    [id:4|size:10|data...][FREE.................][id:3|size:30|data............][..]
-                          ^end(18)              ^start(48)
+    [id:4|size:10|data...][FREE.................][id:3|size:30|data...........][..]
+                          ^end(18)              ^start(48)                 (86)^  ^(100)
 
     Allocate 8 bytes (id=5) between end and start:
-    [id:4|size:10|data..][id:5|size:8|..][FREE..][id:3|size:30|data............][..]
-                                  end(44)^       ^start(48)
+    [id:4|size:10|data..][id:5|size:8|..][FREE..][id:3|size:30|data...........][..]
+                                  end(44)^       ^start(48)                (86)^  ^(100)
     ```
 
     Scenario 5: Error Handling - Out of Space
     ```
     Starting from after Scenario 4:
-    [id:4|size:10|data..][id:5|size:8|..][FREE..][id:3|size:30|data............][..]
-                                  end(44)^       ^start(48)
+    [id:4|size:10|data..][id:5|size:8|..][FREE..][id:3|size:30|data...........][..]
+                                  end(44)^       ^start(48)                (86)^  ^(100)
 
     Trying to allocate 20 more bytes (total request = 28 including metadata):
-    cur_allocated = 44 (gap to end) + (buffer_size - start) = 44 + (100 - 48) = 96
+    cur_allocated = allocated_before_end_ptr + allocated_after_start_ptr
+                  = end + (buffer_size - start)
+                  = 44 + (100 - 48) = 96
     cur_allocated + requested = 96 + 28 >= buffer_size(100)
     -> Raises MemoryError: "Not enough space in the data buffer"
     ```
