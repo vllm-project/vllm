@@ -948,7 +948,7 @@ class EagleProposer:
                 indexer_layers[first_layer]
                 .get_attn_backend()
                 .get_builder_cls()(
-                    indexer_layers[first_layer].get_kv_cache_spec(),
+                    indexer_layers[first_layer].get_kv_cache_spec(self.vllm_config),
                     self.indexer_layer_names,
                     self.vllm_config,
                     self.device,
