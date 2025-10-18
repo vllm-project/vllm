@@ -72,7 +72,6 @@ from vllm.utils import (
     cdiv,
     check_use_alibi,
     is_pin_memory_available,
-    kv_cache_dtype_str_to_dtype,
     length_from_prompt_token_ids_or_embeds,
     round_up,
 )
@@ -81,6 +80,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import (
     get_dtype_size,
+    kv_cache_dtype_str_to_dtype,
     supports_dynamo,
 )
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
