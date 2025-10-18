@@ -666,60 +666,27 @@ class Qwen3MoeForCausalLM(
         self.expert_weights = []
 
         self.moe_layers: list[FusedMoE] = []
-        example_layer = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
 
             assert isinstance(layer, Qwen3MoeDecoderLayer)
             if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
-                example_layer = layer.mlp
+                self.example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_layer is None:
+        if self.example_moe is None:
             raise RuntimeError("No Qwen3MoE layer found in the model.layers.")
 
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
         self.num_shared_experts = 0
-        self.num_logical_experts = example_layer.n_logical_experts
-        self.num_physical_experts = example_layer.n_physical_experts
-        self.num_local_physical_experts = example_layer.n_local_physical_experts
-        self.num_routed_experts = example_layer.n_routed_experts
-        self.num_redundant_experts = example_layer.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for layer in self.model.layers:
-            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
-                moe = layer.mlp
-                moe.n_local_physical_experts = num_local_physical_experts
-                moe.n_physical_experts = num_physical_experts
-                moe.n_redundant_experts = self.num_redundant_experts
-                moe.experts.update_expert_map()
+        self.num_logical_experts = self.example_moe.n_logical_experts
+        self.num_physical_experts = self.example_moe.n_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
+        self.num_routed_experts = self.example_moe.n_routed_experts
+        self.num_redundant_experts = self.example_moe.n_redundant_experts
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
