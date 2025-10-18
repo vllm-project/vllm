@@ -828,6 +828,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             else:
                 return OAITritonExperts(self.moe_quant_config)
 
+    @property
+    def allow_inplace(self) -> bool:
+        return True
+
     def apply(
         self,
         layer: torch.nn.Module,
