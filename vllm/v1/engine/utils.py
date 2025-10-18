@@ -205,10 +205,12 @@ class CoreEngineProcManager:
                         engine_id=died_proc.name[-1],
                         additional_info=None,
                     )
-                    self.engine_down_socket.send_multipart([b"", fault_info.to_json()])
+                    self.engine_down_socket.send_multipart(
+                        [b"", fault_info.serialize().encode("utf-8")]
+                    )
 
                     logger.error(
-                        "Engine core proc %s died unexpectedly, shutting down client.",
+                        "Engine core proc %s died unexpectedly",
                         died_proc,
                     )
         else:
@@ -377,10 +379,6 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
-
-            if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-                actor_id = actor._actor_id.hex()
-                self.actor_id_to_dp_rank[actor_id] = f"engine_{index}"
 
             if local_client:
                 self.local_engine_actors.append(actor)

@@ -5,6 +5,7 @@ import contextlib
 import multiprocessing
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -16,6 +17,7 @@ from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
+import ray
 import zmq
 import zmq.asyncio
 
@@ -651,10 +653,6 @@ class MPClient(EngineCoreClient):
             return
 
         def monitor_actors():
-            import time
-
-            import ray
-
             while True:
                 all_actors = (
                     engine_manager.local_engine_actors
@@ -668,12 +666,21 @@ class MPClient(EngineCoreClient):
                     actor_id = actor._actor_id.hex()
                     actor_info = ray.state.actors(actor_id)
                     actor_state = actor_info.get("State", "UNKNOWN")
+                    if actor in engine_manager.local_engine_actors:
+                        actor_index = engine_manager.local_engine_actors.index(actor)
+                    elif actor in engine_manager.remote_engine_actors:
+                        actor_index = engine_manager.remote_engine_actors.index(
+                            actor
+                        ) + len(engine_manager.local_engine_actors)
+                    else:
+                        logger.error("Unknown actor ")
+
                     if actor_state == "DEAD":
                         fault_info = FaultInfo(
                             type="engine_actor dead",
                             message=f"Engine core actor id {actor_id} "
                             f"(status: {actor_state}).",
-                            engine_id=engine_manager.actor_id_to_dp_rank[actor_id],
+                            engine_id=actor_index,
                             additional_info=None,
                         )
                         engine_manager.engine_down_socket.send_multipart(
@@ -706,7 +713,7 @@ class MPClient(EngineCoreClient):
             sentinels = [proc.sentinel for proc in engine_processes]
             _self = self_ref()
             if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-                while engine_manager.processes is not None:
+                while engine_processes:
                     died = multiprocessing.connection.wait(sentinels)
                     for sentinel in died:
                         died_proc = next(
@@ -725,12 +732,9 @@ class MPClient(EngineCoreClient):
                             [b"", fault_info.serialize().encode("utf-8")]
                         )
                         logger.error(
-                            "Engine core proc %s died unexpectedly, "
-                            "shutting down client.",
-                            died_proc,
+                            "Engine core proc %s died unexpectedly",
+                            died_proc.name,
                         )
-                _self.shutdown()
-
             else:
                 died = multiprocessing.connection.wait(sentinels)
                 _self = self_ref()
@@ -744,10 +748,10 @@ class MPClient(EngineCoreClient):
                     "Engine core proc %s died unexpectedly, shutting down client.",
                     proc_name,
                 )
-                _self.shutdown()
-                # Note: For MPClient, we don't have a failure callback mechanism
-                # like MultiprocExecutor, but we set engine_dead flag which will
-                # cause subsequent operations to raise EngineDeadError
+            _self.shutdown()
+            # Note: For MPClient, we don't have a failure callback mechanism
+            # like MultiprocExecutor, but we set engine_dead flag which will
+            # cause subsequent operations to raise EngineDeadError
 
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"

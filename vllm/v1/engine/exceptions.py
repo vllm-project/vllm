@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import time
 from dataclasses import dataclass
-from datetime import datetime
 
 
 class EngineGenerateError(Exception):
@@ -42,7 +42,6 @@ class FaultInfo:
 
     def __post_init__(self):
         # If no exit time is specified, the current timestamp will be used by default.
-        import time
 
         local_time = time.localtime(time.time())
         if self.timestamp is None:
@@ -59,7 +58,6 @@ class FaultInfo:
         return cls(
             type=type(exception).__name__,
             message=str(exception),
-            timestamp=datetime.now().isoformat(),
             engine_id=str(engine_id),
             additional_info=additional_info or {},
         )
