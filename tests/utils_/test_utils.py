@@ -23,23 +23,24 @@ from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 
 from vllm.utils import (
     FlexibleArgumentParser,
-    MemorySnapshot,
     bind_kv_cache,
-    common_broadcastable_dtype,
-    current_stream,
     get_open_port,
     get_tcp_uri,
-    is_lossless_cast,
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
-    memory_profiling,
     sha256,
     split_host_port,
     split_zmq_path,
     unique_filepath,
 )
+from vllm.utils.torch_utils import (
+    common_broadcastable_dtype,
+    current_stream,
+    is_lossless_cast,
+)
 
+from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from ..utils import create_new_process_for_each_test, flat_product
 
 
@@ -409,7 +410,7 @@ def test_bind_kv_cache_non_attention():
 
 
 def test_bind_kv_cache_pp():
-    with patch("vllm.utils.cuda_device_count_stateless", lambda: 2):
+    with patch("vllm.utils.torch_utils.cuda_device_count_stateless", lambda: 2):
         # this test runs with 1 GPU, but we simulate 2 GPUs
         cfg = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=2))
     with set_current_vllm_config(cfg):
