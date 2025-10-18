@@ -186,7 +186,7 @@ def test_get_kwargs():
     # lists with unions should become str type.
     # If not, we cannot know which type to use for parsing
     assert kwargs["list_union"]["type"] is str
-    # sets should work
+    # sets should work like lists
     assert kwargs["set_n"]["type"] is int
     assert kwargs["set_n"]["nargs"] == "+"
     # literals of literals should have merged choices
@@ -231,30 +231,30 @@ def test_compilation_config():
 
     # set to O3
     args = parser.parse_args(["-O0"])
-    assert args.compilation_config.level == 0
+    assert args.compilation_config.mode == 0
 
     # set to O 3 (space)
     args = parser.parse_args(["-O", "1"])
-    assert args.compilation_config.level == 1
+    assert args.compilation_config.mode == 1
 
     # set to O 3 (equals)
     args = parser.parse_args(["-O=2"])
-    assert args.compilation_config.level == 2
+    assert args.compilation_config.mode == 2
 
-    # set to O.level 3
-    args = parser.parse_args(["-O.level", "3"])
-    assert args.compilation_config.level == 3
+    # set to O.mode 3
+    args = parser.parse_args(["-O.mode", "3"])
+    assert args.compilation_config.mode == 3
 
     # set to string form of a dict
     args = parser.parse_args(
         [
             "-O",
-            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
             '"use_inductor": false}',
         ]
     )
     assert (
-        args.compilation_config.level == 3
+        args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and not args.compilation_config.use_inductor
     )
@@ -263,12 +263,12 @@ def test_compilation_config():
     args = parser.parse_args(
         [
             "--compilation-config="
-            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
             '"use_inductor": true}',
         ]
     )
     assert (
-        args.compilation_config.level == 3
+        args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and args.compilation_config.use_inductor
     )
