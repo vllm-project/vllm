@@ -14,7 +14,17 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
 )
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.utils import is_xgrammar_supported
+
+if is_xgrammar_supported():
+    from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+else:
+    class XgrammarBackend:
+        def __init__(self, *args, **kwargs):
+            raise ValueError(
+                "xgrammar is not supported on this platform. "
+                "Cannot initialize XgrammarBackend."
+            )
 
 if TYPE_CHECKING:
     import numpy as np

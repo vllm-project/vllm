@@ -13,6 +13,7 @@ from diskcache import Cache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
@@ -182,7 +183,7 @@ def get_outlines_cache():
 
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
-re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
+re_replacement_seq = re.compile(r"^.{0,6}\ufffd+.{0,6}$")
 
 
 def _reduced_vocabulary(
@@ -458,3 +459,8 @@ def choice_as_grammar(choice: list[str]) -> str:
     escaped_choices = (escape_ebnf_string(c) for c in choice)
     grammar = "root ::= " + " | ".join(f'"{c}"' for c in escaped_choices)
     return grammar
+
+
+def is_xgrammar_supported() -> bool:
+    arch = current_platform.get_cpu_architecture()
+    return arch in (CpuArchEnum.X86, CpuArchEnum.ARM)
