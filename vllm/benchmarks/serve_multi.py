@@ -48,10 +48,10 @@ class SLACriterionBase(ABC):
 
     def print_and_validate(
         self,
-        metrics: dict[str, object],
+        metrics: dict[str, float],
         metrics_key: str,
     ) -> bool:
-        metric = float(metrics[metrics_key])  # type: ignore
+        metric = metrics[metrics_key]
         result = self.validate(metric)
 
         cond = self.format_cond(f"{metrics_key} = {metric:.2f}")
@@ -419,18 +419,18 @@ def _get_sla_base_path(
     )
 
 
-def _get_sla_run_path(base_path: Path, run_number: int | None):
-    if run_number is None:
+def _get_sla_iter_path(base_path: Path, request_rate: int | None):
+    if request_rate is None:
         return base_path / "summary.json"
 
-    return base_path / f"run={run_number}"
+    return base_path / f"request_rate={request_rate}"
 
 
-def _get_sla_iter_path(run_path: Path, request_rate: int | None):
-    if request_rate is None:
-        return run_path / "summary.json"
+def _get_sla_run_path(iter_path: Path, run_number: int | None):
+    if run_number is None:
+        return iter_path / "summary.json"
 
-    return run_path / f"request_rate={request_rate}.json"
+    return iter_path / f"run={run_number}.json"
 
 
 def _sla_needs_server(
@@ -438,17 +438,53 @@ def _sla_needs_server(
     bench_combs: list[dict[str, object]],
     sla_combs: list[dict[str, SLACriterionBase]],
     output_dir: Path,
-    num_runs: int,
 ):
     for bench_comb in bench_combs:
         for sla_comb in sla_combs:
             base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb, sla_comb)
-            for run_number in range(num_runs):
-                run_path = _get_sla_run_path(base_path, run_number)
-                if not _get_sla_iter_path(run_path, request_rate=None).exists():
-                    return True
+            if not _get_sla_iter_path(base_path, request_rate=None).exists():
+                return True
 
     return False
+
+
+def _run_sla(
+    port: int | None,
+    bench_cmd: list[str],
+    *,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+    iter_path: Path,
+    num_runs: int,
+    dry_run: bool,
+):
+    iter_data = list[dict[str, object]]()
+
+    for run_number in range(num_runs):
+        run_path = _get_sla_run_path(iter_path, run_number)
+
+        run_data = _run_benchmark(
+            bench_cmd,
+            serve_overrides=serve_comb,
+            bench_overrides=bench_comb,
+            run_number=run_number,
+            output_path=run_path,
+            dry_run=dry_run,
+        )
+
+        if port is not None:
+            _reset_caches(port)
+
+        if run_data is not None:
+            iter_data.append(run_data)
+
+    if dry_run:
+        return None
+
+    with _get_sla_run_path(iter_path, run_number=None).open("w") as f:
+        json.dump(iter_data, f)
+
+    return iter_data
 
 
 def _iter_sla(
@@ -458,15 +494,15 @@ def _iter_sla(
     serve_comb: dict[str, object],
     bench_comb: dict[str, object],
     sla_comb: dict[str, SLACriterionBase],
-    run_path: Path,
-    run_number: int,
+    base_path: Path,
+    num_runs: int,
     dry_run: bool,
     init_request_rate: int = 4096,
 ):
     print("[SLA START]")
     print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
 
-    run_data = list[dict[str, object]]()
+    sla_data = list[dict[str, object]]()
 
     # Binary search
     request_rate_left: int = 0
@@ -477,14 +513,15 @@ def _iter_sla(
         print(f"Search bounds: [{request_rate_left}, {request_rate_right}] req/s")
         print(f"Testing request rate: {request_rate} req/s")
 
-        iter_path = _get_sla_iter_path(run_path, request_rate)
+        iter_path = _get_sla_iter_path(base_path, request_rate)
 
-        iter_data = _run_benchmark(
+        iter_data = _run_sla(
+            port,
             bench_cmd,
-            serve_overrides=serve_comb,
-            bench_overrides={**bench_comb, "request_rate": request_rate},
-            run_number=run_number,
-            output_path=iter_path,
+            serve_comb=serve_comb,
+            bench_comb={**bench_comb, "request_rate": request_rate},
+            iter_path=iter_path,
+            num_runs=num_runs,
             dry_run=dry_run,
         )
 
@@ -492,15 +529,20 @@ def _iter_sla(
             _reset_caches(port)
 
         if iter_data is not None:
-            run_data.append(iter_data)
+            sla_data.extend(iter_data)
 
         if iter_data is None:
             assert dry_run
             print("Omitting binary search iterations.")
             break
 
+        iter_data_mean = {
+            k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
+            for k in sla_comb
+        }
+
         sla_results = [
-            criterion.print_and_validate(iter_data, k)
+            criterion.print_and_validate(iter_data_mean, k)
             for k, criterion in sla_comb.items()
         ]
 
@@ -527,54 +569,15 @@ def _iter_sla(
         print("[SLA END]")
         return None
 
-    with _get_sla_iter_path(run_path, request_rate=None).open("w") as f:
-        json.dump(run_data, f)
+    with _get_sla_iter_path(base_path, request_rate=None).open("w") as f:
+        json.dump(sla_data, f)
 
     print("[SLA END]")
 
-    return run_data
+    return sla_data
 
 
-def _run_sla(
-    port: int | None,
-    bench_cmd: list[str],
-    *,
-    serve_comb: dict[str, object],
-    bench_comb: dict[str, object],
-    sla_comb: dict[str, SLACriterionBase],
-    base_path: Path,
-    num_runs: int,
-    dry_run: bool,
-):
-    comb_data = list[dict[str, object]]()
-
-    for run_number in range(num_runs):
-        run_path = _get_sla_run_path(base_path, run_number)
-
-        run_data = _iter_sla(
-            port,
-            bench_cmd,
-            serve_comb=serve_comb,
-            bench_comb=bench_comb,
-            sla_comb=sla_comb,
-            run_path=run_path,
-            run_number=run_number,
-            dry_run=dry_run,
-        )
-
-        if run_data is not None:
-            comb_data.extend(run_data)
-
-    if dry_run:
-        return None
-
-    with _get_sla_run_path(base_path, run_number=None).open("w") as f:
-        json.dump(comb_data, f)
-
-    return comb_data
-
-
-def run_sla(
+def run_slas(
     serve_cmd: list[str],
     bench_cmd: list[str],
     *,
@@ -603,9 +606,7 @@ def run_sla(
                 serve_overrides=serve_comb,
                 dry_run=dry_run,
             )
-            if _sla_needs_server(
-                serve_comb, bench_params, sla_params, output_dir, num_runs
-            )
+            if _sla_needs_server(serve_comb, bench_params, sla_params, output_dir)
             else contextlib.nullcontext()
         ) as port:
             for bench_comb in bench_params:
@@ -614,7 +615,7 @@ def run_sla(
                         output_dir, serve_comb, bench_comb, sla_comb
                     )
 
-                    comb_data = _run_sla(
+                    comb_data = _iter_sla(
                         port,
                         bench_cmd,
                         serve_comb=serve_comb,
@@ -656,7 +657,7 @@ def run_main(
         raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
 
     if sla_params:
-        return run_sla(
+        return run_slas(
             serve_cmd=serve_cmd,
             bench_cmd=bench_cmd,
             serve_params=serve_params,
@@ -734,9 +735,8 @@ def main():
     parser.add_argument(
         "--num-runs",
         type=int,
-        default=None,
-        help="Number of runs per parameter combination. "
-        "Defaults to 3 (regular mode) or 1 (SLA mode).",
+        default=3,
+        help="Number of runs per parameter combination.",
     )
     parser.add_argument(
         "--dry-run",
@@ -777,13 +777,10 @@ def main():
     if args.sla_params:
         with open(args.sla_params, "rb") as f:
             sla_params = _parse_sla(json.load(f))
-
-        default_num_runs = 1
     else:
         sla_params = []
-        default_num_runs = 3
 
-    num_runs = default_num_runs if args.num_runs is None else args.num_runs
+    num_runs = args.num_runs
     if num_runs < 1:
         raise ValueError("`num_runs` should be at least 1.")
 
