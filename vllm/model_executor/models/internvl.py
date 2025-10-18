@@ -51,8 +51,8 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import set_default_torch_num_threads
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 from .interfaces import (
     MultiModalEmbeddings,

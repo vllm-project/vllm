@@ -5,7 +5,7 @@ import dataclasses
 import pytest
 
 from vllm.config import CompilationMode
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
 

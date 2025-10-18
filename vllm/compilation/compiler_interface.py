@@ -16,7 +16,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 class CompilerInterface:

@@ -16,8 +16,8 @@ from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

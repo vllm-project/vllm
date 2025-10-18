@@ -22,7 +22,8 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.config.vllm import set_current_vllm_config
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
