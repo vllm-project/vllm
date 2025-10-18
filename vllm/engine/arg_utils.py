@@ -419,6 +419,9 @@ class EngineArgs:
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = SchedulerConfig.max_num_seqs
+    max_waiting_queue_length: int | None = get_field(
+        SchedulerConfig, "max_waiting_queue_length"
+    )
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
@@ -995,6 +998,9 @@ class EngineArgs:
             **scheduler_kwargs["max_long_partial_prefills"],
         )
         scheduler_group.add_argument(
+            "--max-waiting-queue-length", **scheduler_kwargs["max_waiting_queue_length"]
+        )
+        scheduler_group.add_argument(
             "--cuda-graph-sizes", **scheduler_kwargs["cuda_graph_sizes"]
         )
         scheduler_group.add_argument(
@@ -1547,6 +1553,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            max_waiting_queue_length=self.max_waiting_queue_length,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
