@@ -1276,6 +1276,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "hf",
             "custom",
             "prefix_repetition",
+            "prefix_repetition_with_random_lengths",
             "spec_bench",
         ],
         help="Name of the dataset to benchmark on.",
@@ -1575,6 +1576,61 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Number of output tokens per request, used only for prefix "
         "repetition dataset.",
     )
+    
+    # Arguments for Prefix Repetition with Random Lengths Dataset
+    prefix_repetition_random_length_group = parser.add_argument_group(
+        "prefix repetition dataset options")
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-input-len-mean",
+        type=int,
+        default=256,
+        help="Input length mean for prefix repetition random lengths dataset.",
+    )
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-input-len-std",
+        type=int,
+        default=128,
+        help="Input length standard dev for prefix repetition random lengths dataset.",
+    )
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-output-len-mean",
+        type=int,
+        default=256,
+        help="Output length mean for prefix repetition dataset.",
+    )
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-output-len-std",
+        type=int,
+        default=128,
+        help="Output length standard dev for prefix repetition random lengths dataset.",
+    )
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-prefix-hit-ratio-mean",
+        type=float,
+        default=0.1,
+        help="Mean % prefix hits with respect to input length"
+        "for prefix repetition random lengths dataset.",
+    )
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-prefix-hit-ratio-std",
+        type=float,
+        default=0.05,
+        help="Standard dev of % prefix hits with respect to input length"
+        "for prefix repetition random lengths dataset.",
+    )
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-max-model-len",
+        type=int,
+        default=32768,
+        help="Max model length for LLM",
+    )
+    prefix_repetition_random_length_group.add_argument(
+        "--prefix-repetition-random-len-num-prefixes",
+        type=int,
+        default=10,
+        help="Number of prefixes to generate, used only for prefix repetition "
+        "dataset. Prompts per prefix is num_requests // num_prefixes.",
+    )
 
 
 def get_samples(args, tokenizer) -> list[SampleRequest]:
@@ -1836,6 +1892,20 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 output_len=args.prefix_repetition_output_len,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
+            ),
+            "prefix_repetition_with_random_lengths":
+            lambda: PrefixRepetitionRandomLengthsDataset(
+                random_seed=args.seed).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                prefix_hit_ratio_mean=args.prefix_repetition_random_len_prefix_hit_ratio_mean,
+                prefix_hit_ratio_std=args.prefix_repetition_random_len_prefix_hit_ratio_std,
+                input_len_mean=args.prefix_repetition_random_len_input_len_mean,
+                input_len_std=args.prefix_repetition_random_len_input_len_std,
+                output_len_mean=args.prefix_repetition_random_len_output_len_mean,
+                output_len_std=args.prefix_repetition_random_len_output_len_std,
+                num_prefixes=args.prefix_repetition_random_len_num_prefixes,
+                max_model_len=args.prefix_repetition_random_len_max_model_len
             ),
         }
 
@@ -3100,3 +3170,87 @@ class MMStarDataset(HuggingFaceDataset):
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
         return sampled_requests
+
+    
+# -----------------------------------------------------------------------------
+# Prefix Repetition with Random Lengths Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class PrefixRepetitionRandomLengthsDataset(BenchmarkDataset):
+    # Default values
+    DEFAULT_MAX_PREFIX_LENGTH = 100000
+
+    def __init__(
+        self,
+        random_seed
+    ) -> None:
+        super().__init__()
+        self.random_seed = random_seed
+        np.random.seed(self.random_seed)
+
+    def sample(
+        self,
+        tokenizer,
+        num_requests: int,
+        input_len_mean: int,
+        input_len_std: int,
+        output_len_mean: int,
+        output_len_std: int,
+        prefix_hit_ratio_mean: int,
+        prefix_hit_ratio_std: int,
+        num_prefixes: int,
+        max_model_len: int,
+        request_id_prefix: str = "",
+        **kwargs,
+    ) -> list[SampleRequest]:
+        vocab_size = tokenizer.vocab_size
+        if num_requests < num_prefixes == 0:
+            raise ValueError(
+                f"num_requests ({num_requests}) must be greater than or equal "
+                f"to num_prefixes ({num_prefixes})"
+            )
+
+        def _generate_approx_length_tokens(target_length: int) -> list[int]:
+            """Generate tokens that decode and re-encode to exactly
+            target_length."""
+            # Generate random tokens
+            tokens = np.random.randint(
+                0, vocab_size, size=target_length).tolist()
+            return tokens
+
+        requests = []
+        all_prefixes = []
+        for _ in range(num_prefixes):
+            prefix_tokens = _generate_approx_length_tokens(
+                PrefixRepetitionRandomLengthsDataset.DEFAULT_MAX_PREFIX_LENGTH)
+            all_prefixes.append(prefix_tokens)
+
+        for ind in range(num_requests):
+            input_len = max(1, min(int(np.random.normal(
+                loc=input_len_mean, scale=input_len_std)), max_model_len))
+            prefix_hit_ratio = max(0, min(np.random.normal(
+                loc=prefix_hit_ratio_mean, scale=prefix_hit_ratio_std), 1))
+            prefix_len = int(prefix_hit_ratio * input_len)
+            prefix_idx = np.random.randint(0, len(all_prefixes))
+            prefix_tokens = all_prefixes[prefix_idx][:prefix_len]
+            suffix_len = input_len - prefix_len
+            suffix_tokens = _generate_approx_length_tokens(suffix_len)
+
+            combined_tokens = prefix_tokens + suffix_tokens
+            prompt = tokenizer.decode(combined_tokens)
+            prompt_len = len(combined_tokens)
+            # Keep a buffer of 10 tokens from max_model_len
+            output_len = max(1, min(int(np.random.normal(
+                loc=output_len_mean, scale=output_len_std)), max_model_len - input_len - 10))
+
+            requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(ind),
+                )
+            )
+        np.random.shuffle(requests)
+        return requests
