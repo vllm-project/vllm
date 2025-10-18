@@ -8,7 +8,7 @@ Centralizes custom operation definitions to avoid duplicate registrations.
 import torch
 from torch.library import Library
 
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 # Shared library for all compilation test operations
 # Using "silly" namespace to match existing test expectations

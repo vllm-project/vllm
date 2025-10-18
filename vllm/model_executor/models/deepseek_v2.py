@@ -79,8 +79,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
     DeepseekV32IndexerMetadata,
@@ -481,7 +481,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return MLAAttentionSpec(  # Only has one vector instead of K + V
             block_size=self.cache_config.block_size,
             num_kv_heads=1,

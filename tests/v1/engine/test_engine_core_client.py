@@ -21,7 +21,7 @@ from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublis
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import AsyncMPClient, EngineCoreClient, SyncMPClient
