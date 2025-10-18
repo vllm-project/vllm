@@ -157,9 +157,7 @@ class SingleWriterShmRingBuffer:
 
         if create:
             # we are creating a buffer
-            self.metadata = {
-                self.monotonic_id_end: self.data_buffer_end
-            }  # monotonic_id -> start address
+            self.metadata = {}  # monotonic_id -> start address
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.data_buffer_size, name=name
             )
