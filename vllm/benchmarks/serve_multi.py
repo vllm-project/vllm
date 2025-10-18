@@ -15,6 +15,7 @@ from typing import Literal, get_args
 
 import pandas as pd
 import requests
+import seaborn as sns
 from typing_extensions import assert_never, override
 
 _BAD_PARAMS_TYPE_MSG = (
@@ -662,7 +663,7 @@ def _find_sla_value(
     return sla_data, left
 
 
-def _iter_sla(
+def _search_sla(
     server: ServerWrapper | None,
     bench_cmd: list[str],
     *,
@@ -744,6 +745,75 @@ def _iter_sla(
     return sla_data
 
 
+def _plot_throughput_latency_curve(
+    all_data: list[dict[str, object]],
+    serve_combs: list[dict[str, object]],
+    bench_comb: dict[str, object],
+    output_dir: Path,
+):
+    fig_path = output_dir / "-".join(
+        (
+            "BENCH",
+            *(f"{k}={v}" for k, v in bench_comb.items()),
+        )
+    ).replace("/", "_").replace("..", "__")  # Sanitize
+
+    df = pd.DataFrame.from_records(
+        [item for item in all_data if all(item[k] == bench_comb[k] for k in bench_comb)]
+    )
+
+    # Group together points with similar throughput
+    df["request_throughput"] = df["request_throughput"].round()
+
+    # Preserve the key order using dictionary
+    all_comb_keys = {k: None for comb in serve_combs for k in comb}
+    for k in all_comb_keys:
+        df[k] = df[k].astype(str)
+
+    keys_per_comb = [comb.keys() for comb in serve_combs]
+    if (
+        all(ks == keys_per_comb[0] for ks in keys_per_comb)
+        and len(keys_per_comb[0]) <= 3
+    ):
+        hue, style, size, *_ = (*keys_per_comb[0], None, None)
+        ax = sns.lineplot(
+            df,
+            x="request_throughput",
+            y="p99_e2el_ms",
+            hue=hue,
+            style=style,
+            size=size,
+            markers=True,
+        )
+    else:
+        df["category"] = df[list(all_comb_keys)].agg("-".join, axis=1)
+        ax = sns.lineplot(
+            df,
+            x="request_throughput",
+            y="p99_e2el_ms",
+            hue="category",
+            markers=True,
+        )
+
+    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
+
+    fig = ax.get_figure()
+    assert fig is not None
+
+    fig.tight_layout()
+    fig.savefig(fig_path)
+
+
+def _plot_throughput_latency_curves(
+    all_data: list[dict[str, object]],
+    serve_combs: list[dict[str, object]],
+    bench_combs: list[dict[str, object]],
+    output_dir: Path,
+):
+    for bench_comb in bench_combs:
+        _plot_throughput_latency_curve(all_data, serve_combs, bench_comb, output_dir)
+
+
 def run_slas(
     serve_cmd: list[str],
     bench_cmd: list[str],
@@ -787,7 +857,7 @@ def run_slas(
                 for sla_comb in sla_params:
                     base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb)
 
-                    comb_data = _iter_sla(
+                    comb_data = _search_sla(
                         server_address,
                         bench_cmd,
                         serve_comb=serve_comb,
@@ -807,6 +877,8 @@ def run_slas(
 
     combined_df = pd.DataFrame.from_records(all_data)
     combined_df.to_csv(output_dir / "summary.csv")
+
+    _plot_throughput_latency_curves(all_data, serve_params, bench_params, output_dir)
 
     return combined_df
 
