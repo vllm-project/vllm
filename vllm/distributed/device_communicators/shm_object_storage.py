@@ -36,6 +36,10 @@ class SingleWriterShmRingBuffer:
     - monotonic_id_start/end: Track the range of active buffer IDs
     - data_buffer_start/end: Track the physical memory range in use
     - Automatic wraparound when reaching buffer end
+    - Always keeps at least one byte free so empty and full states remain
+      distinguishable
+    - Resets pointers to 0 when the buffer becomes empty to maximize contiguous
+      allocations
     - Lazy garbage collection based on is_free_fn checks
 
     Example Usage Scenarios:
@@ -66,29 +70,57 @@ class SingleWriterShmRingBuffer:
                                 ^start(28)                       ^end(66)
 
     After both are freed:
-    [FREED..............................................][..]
-                                                         ^start=end(66)
+    [FREE.....................................................]
+    ^start=end(0)  (pointers reset to maximize contiguous allocations)
     ```
 
-    Scenario 3: Wraparound Allocation (continuing from Scenario 2)
+    Scenario 3: Case 1 - data_buffer_start <= data_buffer_end
     ```
-    Starting from after memory reclamation in Scenario 2:
-    [FREED..............................................][..]
-                                                         ^start=end(66)
+    Starting from empty state in Scenario 2:
+    [.............................................................................]
+    ^start=end(0)
 
-    Allocate 40 bytes (id=2) - only 34 bytes available at end, so wraparound:
-    [id:2|size:40|data........................][FREED.............][..]
-                                              ^end(148)            ^start(66)
+    Allocate 40 bytes (id=2) - enough room to append:
+    [id:2|size:40|data..........................][................................]
+    ^start(0)                                    ^end(48)
+
+    Allocate 30 bytes (id=3):
+    [id:2|size:40|data..........................][id:3|size:30|data...........][..]
+    ^start(0)                                                                  ^end(86)
+
+    Readers free id:2 (start advances but we remain in Case 1):
+    [FREED......................................][id:3|size:30|data...........][..]
+                                                 ^start(48)                    ^end(86)
+
+    Allocate 20 bytes (id=4) - tail has insufficient space, so wrap to the
+    beginning while still evaluating Case 1:
+    [id:4|size:10|data...][FREE.................][id:3|size:30|data...........][..]
+                          ^end(18)              ^start(48)                 (86)^  ^(100)
+    (After this allocation we transition into Case 2 because start > end.)
     ```
 
-    Scenario 4: Error Handling - Out of Space
+    Scenario 4: Case 2 - data_buffer_start > data_buffer_end
     ```
-    Starting from after wraparound allocation in Scenario 3:
-    [id:2|size:40|data........................][FREED.............][..]
-                                              ^end(148)            ^start(66)
+    Continuing after wrapping in Scenario 3:
+    [id:4|size:10|data...][FREE.................][id:3|size:30|data...........][..]
+                          ^end(18)              ^start(48)                 (86)^  ^(100)
 
-    Trying to allocate 20 more bytes:
-    occupied_size_new = end + size - start = 148 + 28 - 66 > buffer_size(100)
+    Allocate 8 bytes (id=5) between end and start:
+    [id:4|size:10|data..][id:5|size:8|..][FREE..][id:3|size:30|data...........][..]
+                                  end(44)^       ^start(48)                (86)^  ^(100)
+    ```
+
+    Scenario 5: Error Handling - Out of Space
+    ```
+    Starting from after Scenario 4:
+    [id:4|size:10|data..][id:5|size:8|..][FREE..][id:3|size:30|data...........][..]
+                                  end(44)^       ^start(48)                (86)^  ^(100)
+
+    Trying to allocate 20 more bytes (total request = 28 including metadata):
+    cur_allocated = allocated_before_end_ptr + allocated_after_start_ptr
+                  = end + (buffer_size - start)
+                  = 44 + (100 - 48) = 96
+    cur_allocated + requested = 96 + 28 >= buffer_size(100)
     -> Raises MemoryError: "Not enough space in the data buffer"
     ```
 
@@ -127,9 +159,7 @@ class SingleWriterShmRingBuffer:
 
         if create:
             # we are creating a buffer
-            self.metadata = {
-                self.monotonic_id_end: self.data_buffer_end
-            }  # monotonic_id -> start address
+            self.metadata: dict[int, int] = {}  # monotonic_id -> start address
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.data_buffer_size, name=name
             )
@@ -194,44 +224,70 @@ class SingleWriterShmRingBuffer:
         assert self.is_writer, "Only the writer can allocate buffers."
         assert size > 0, "Size must be greater than 0"
         size += self.MD_SIZE  # add metadata size to the buffer size
-        # reset to beginning if the buffer does have enough contiguous space
-        buffer_end_reset = self.data_buffer_end % self.data_buffer_size
-        if buffer_end_reset + size > self.data_buffer_size:
-            buffer_end_reset = (
-                self.data_buffer_end // self.data_buffer_size + 1
-            ) * self.data_buffer_size
-        else:  # no reset needed
-            buffer_end_reset = self.data_buffer_end
 
-        # check if we have enough space in the data buffer
-        # i.e. if the new end (self.data_buffer_end + size)
-        # exceeds the start of the data buffer
-        occupied_size_new = buffer_end_reset + size - self.data_buffer_start
-        if occupied_size_new > self.data_buffer_size:
+        # NOTE: We never allow the buffer being fully allocated,
+        #       i.e.: at least 1 byte should be free,
+        #       so that we will not be confused between empty state and full state
+        #       when `self.data_buffer_start == self.data_buffer_end`.
+        cur_allocated = (
+            self.data_buffer_end - self.data_buffer_start
+            if self.data_buffer_start <= self.data_buffer_end
+            else self.data_buffer_end + (self.data_buffer_size - self.data_buffer_start)
+        )
+        if cur_allocated + size >= self.data_buffer_size:
             raise MemoryError(
                 "Not enough space in the data buffer, "
                 "try calling free_buf() to free up space"
             )
-        self.data_buffer_end = buffer_end_reset
+
+        # try possible allocations
+        if self.data_buffer_start <= self.data_buffer_end:
+            # case 1:
+            # | FREE | <data_buffer_start> | ALLOCATED | <data_buffer_end> | FREE |
+            if self.data_buffer_end + size <= self.data_buffer_size:
+                allocated_buffer_start = self.data_buffer_end
+                allocated_buffer_end = allocated_buffer_start + size
+            elif size <= self.data_buffer_start:
+                allocated_buffer_start = 0
+                allocated_buffer_end = size
+            else:
+                raise MemoryError(
+                    "Not enough space in the data buffer, "
+                    "try calling free_buf() to free up space"
+                )
+        else:
+            # case 2:
+            # | ALLOCATED | <data_buffer_end> | FREE | <data_buffer_start> | ALLOCATED |
+            if self.data_buffer_end + size <= self.data_buffer_start:
+                allocated_buffer_start = self.data_buffer_end
+                allocated_buffer_end = allocated_buffer_start + size
+            else:
+                raise MemoryError(
+                    "Not enough space in the data buffer, "
+                    "try calling free_buf() to free up space"
+                )
 
         # first 4 bytes as the monotonic id
-        buf_idx = self.data_buffer_end % self.data_buffer_size
-        self.shared_memory.buf[buf_idx : buf_idx + self.ID_NBYTES] = self.int2byte(
-            self.monotonic_id_end
-        )
+        self.shared_memory.buf[
+            allocated_buffer_start : allocated_buffer_start + self.ID_NBYTES
+        ] = self.int2byte(self.monotonic_id_end)
         # next 4 bytes as the size of the data buffer
-        self.shared_memory.buf[buf_idx + self.ID_NBYTES : buf_idx + self.MD_SIZE] = (
-            self.int2byte(size)
-        )
+        self.shared_memory.buf[
+            allocated_buffer_start + self.ID_NBYTES : allocated_buffer_start
+            + self.MD_SIZE
+        ] = self.int2byte(size)
 
         # record metadata
-        self.metadata[self.monotonic_id_end % self.ID_MAX] = self.data_buffer_end
-        # update buffer and monotonic id indices
-        current_buffer_end = self.data_buffer_end
+        self.metadata[self.monotonic_id_end % self.ID_MAX] = allocated_buffer_start
+
+        # update buffer
+        self.data_buffer_end = allocated_buffer_end
+
+        # update monotonic id indices
         current_id_end = self.monotonic_id_end
-        self.data_buffer_end += size
         self.monotonic_id_end = (self.monotonic_id_end + 1) % self.ID_MAX
-        return current_buffer_end, current_id_end
+
+        return allocated_buffer_start, current_id_end
 
     @contextmanager
     def access_buf(self, address: int):
@@ -288,7 +344,11 @@ class SingleWriterShmRingBuffer:
                     self.monotonic_id_start = (
                         self.monotonic_id_start + 1
                     ) % self.ID_MAX
-                    self.data_buffer_start = address
+                    if self.monotonic_id_start in self.metadata:
+                        # forward to the start address of next item if possible
+                        self.data_buffer_start = self.metadata[self.monotonic_id_start]
+                    else:
+                        self.data_buffer_start = address + metadata[1]
                     freed_bytes += metadata[1]
                 else:
                     # there are still readers, we cannot free the buffer
@@ -302,10 +362,11 @@ class SingleWriterShmRingBuffer:
             self.monotonic_id_end,
         )
 
-        # buffer wrap around
-        if self.data_buffer_start >= self.data_buffer_size:
-            self.data_buffer_start -= self.data_buffer_size
-            self.data_buffer_end -= self.data_buffer_size
+        if self.data_buffer_start == self.data_buffer_end:
+            # reset data_buffer pointers to 0 if empty
+            # this will allow allocating a large block because we don't allow wrapping
+            self.data_buffer_start = 0
+            self.data_buffer_end = 0
 
         monotonic_id_after = self.monotonic_id_start
         # id wrap around
