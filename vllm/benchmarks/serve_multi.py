@@ -334,7 +334,7 @@ def _get_comb_base_path(
             "BENCH",
             *(f"{k}={v}" for k, v in bench_comb.items()),
         )
-    )
+    ).replace("/", "_").replace("..", "__")  # Sanitize
 
 
 def _get_comb_run_path(base_path: Path, run_number: int | None):
@@ -450,7 +450,7 @@ def _get_sla_base_path(
             "BENCH",
             *(f"{k}={v}" for k, v in bench_comb.items()),
         )
-    )
+    ).replace("/", "_").replace("..", "__")  # Sanitize
 
 
 def _get_sla_iter_path(
