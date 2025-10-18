@@ -186,6 +186,25 @@ class EngineCoreGuard(threading.Thread):  # changed
             return (False, error)
 
     def _recv_cmd(self, poll_timeout: int = 1000) -> tuple[bool, None | str]:
+        """
+        Receives a command message from the client command socket using
+         non-blocking polling.Uses a ZMQ Poller to check for incoming messages
+        within the specified timeout period.Validates the message format to
+        ensure it conforms to the DEALER socket specification([empty frame,
+         message content]). If valid,decodes the message content from UTF-8 bytes.
+
+        Args:
+            poll_timeout: Timeout in milliseconds for polling (default: 1000).
+
+        Returns:
+            A tuple with two elements:
+            - First element (bool): True if a valid message was received and
+            decoded successfully; False if no message was received within the timeout,
+            or if any error/validation failure occurred.
+            - Second element (None | str): If the first element is True, contains the
+            decoded UTF-8 message string;if the first element is False, is None
+            (regardless of the reason for failure).
+        """
         try:
             # Use Poller for non-blocking reception
             self.poller.register(self.client_cmd_socket, zmq.POLLIN)
