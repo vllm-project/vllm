@@ -83,7 +83,7 @@ def get_moe_quant_method(
 
         # Stash useful metadata so downstream components can access the prefix of
         # the layer that this quant config instance applies to.
-        setattr(cloned_config, "_layer_prefix", prefix)
+        cloned_config._layer_prefix = prefix  # type: ignore[attr-defined]
 
         return moe_method_cls(cloned_config, layer.moe_config)
     return None
@@ -476,7 +476,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe)
         self.quant_config = quant_config
-        self.layer_prefix = getattr(self.quant_config, "_layer_prefix", "")
+        self.layer_prefix = getattr(self.quant_config, "_layer_prefix", "")  # type: ignore[attr-defined]
 
         self._supported_quant_types = {
             4: scalar_types.uint4b8,
