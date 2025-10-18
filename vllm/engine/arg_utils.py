@@ -361,7 +361,7 @@ class EngineArgs:
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int | None = ModelConfig.seed
-    max_model_len: int | None = ModelConfig.max_model_len
+    max_model_len: int = get_field(ModelConfig, "max_model_len")
     cuda_graph_sizes: list[int] = get_field(SchedulerConfig, "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -414,11 +414,11 @@ class EngineArgs:
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
-    max_num_batched_tokens: int | None = SchedulerConfig.max_num_batched_tokens
+    max_num_batched_tokens: int = get_field(SchedulerConfig, "max_num_batched_tokens")
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_seqs: int | None = SchedulerConfig.max_num_seqs
+    max_num_seqs: int = get_field(SchedulerConfig, "max_num_seqs")
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
@@ -469,7 +469,9 @@ class EngineArgs:
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
-    enable_chunked_prefill: bool | None = SchedulerConfig.enable_chunked_prefill
+    enable_chunked_prefill: bool | None = get_field(
+        SchedulerConfig, "enable_chunked_prefill"
+    )
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     disable_hybrid_kv_cache_manager: bool = (
@@ -1752,7 +1754,7 @@ class EngineArgs:
             incremental_prefill_supported = (
                 pooling_type is not None
                 and pooling_type.lower() == "last"
-                and is_causal
+                and bool(is_causal)
             )
 
             action = "Enabling" if incremental_prefill_supported else "Disabling"
