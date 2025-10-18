@@ -720,13 +720,8 @@ class PrometheusStatLogger(StatLoggerBase):
             )
 
             # Update KV cache lifetime metric
-            if hasattr(scheduler_stats, "kv_cache_lifetime_stats"):
-                lifetime_stats = scheduler_stats.kv_cache_lifetime_stats
-
-                for lifetime in lifetime_stats.drain_pending_lifetimes():
-                    self.histogram_kv_cache_lifetime_seconds[engine_idx].observe(
-                        lifetime
-                    )
+            for lifetime in scheduler_stats.kv_cache_block_lifetimes:
+                self.histogram_kv_cache_lifetime_seconds[engine_idx].observe(lifetime)
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(

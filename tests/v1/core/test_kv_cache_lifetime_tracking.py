@@ -52,17 +52,6 @@ class TestKVCacheLifetimeStats:
         assert stats.total_blocks_freed == 0
         assert stats.total_lifetime_seconds == 0.0
         assert stats.average_lifetime_seconds == 0.0
-        assert stats.drain_pending_lifetimes() == []
-
-    def test_drain_pending_lifetimes(self):
-        """Test draining pending lifetime samples."""
-        stats = KVCacheLifetimeStats()
-        stats.add_block_lifetime(2.0)
-        stats.add_block_lifetime(4.0)
-
-        pending = stats.drain_pending_lifetimes()
-        assert pending == [2.0, 4.0]
-        assert stats.drain_pending_lifetimes() == []
 
 
 class TestKVCacheBlockLifetime:
@@ -175,6 +164,24 @@ class TestBlockPoolLifetimeTracking:
         pool.reset_lifetime_stats()
         assert pool.lifetime_stats.total_blocks_freed == 0
 
+    @patch("time.monotonic")
+    def test_collect_recent_lifetimes(self, mock_time):
+        """Collected lifetimes should reflect recent frees only once."""
+        mock_time.side_effect = [100.0, 110.0]
+
+        pool = BlockPool(
+            num_gpu_blocks=4, enable_caching=False, enable_kv_cache_events=False
+        )
+
+        blocks = pool.get_new_blocks(1)
+        mock_time.return_value = 110.0
+
+        pool.free_blocks(blocks)
+
+        lifetimes = pool.collect_recent_lifetimes()
+        assert lifetimes == [10.0]
+        assert pool.collect_recent_lifetimes() == []
+
     def test_reset_prefix_cache_resets_lifetime_stats(self):
         """Resetting the prefix cache should also clear lifetime stats."""
 
@@ -230,6 +237,21 @@ class TestKVCacheManagerLifetimeIntegration:
                 # Test stats reset
                 manager.reset_kv_cache_lifetime_stats()
                 mock_pool.reset_lifetime_stats.assert_called_once()
+
+    def test_collect_recent_kv_cache_lifetimes(self):
+        """KVCacheManager should proxy recent lifetime collection."""
+        with patch("vllm.v1.core.kv_cache_manager.get_kv_cache_coordinator"):
+            from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+            with patch.object(KVCacheManager, "__init__", return_value=None):
+                manager = KVCacheManager.__new__(KVCacheManager)
+
+                mock_pool = MagicMock()
+                mock_pool.collect_recent_lifetimes.return_value = [3.0]
+                manager.block_pool = mock_pool
+
+                assert manager.collect_recent_kv_cache_lifetimes() == [3.0]
+                mock_pool.collect_recent_lifetimes.assert_called_once()
 
     def test_reset_prefix_cache_resets_lifetime_stats(self):
         """KVCacheManager.reset_prefix_cache should clear lifetime stats."""
@@ -309,6 +331,7 @@ class TestPrometheusMetricIntegration:
                 kv_cache_usage=0.5,
                 prefix_cache_stats=PrefixCacheStats(),
                 kv_cache_lifetime_stats=lifetime_stats,
+                kv_cache_block_lifetimes=[10.0, 20.0],
             )
 
             # Record the stats
@@ -324,6 +347,7 @@ class TestPrometheusMetricIntegration:
             assert mock_histogram.observe.call_count == 2
 
             # Record again to ensure only deltas are recorded
+            scheduler_stats.kv_cache_block_lifetimes = []
             logger.record(scheduler_stats, None, 0)
 
             assert mock_histogram.observe.call_count == 2

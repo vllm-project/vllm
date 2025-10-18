@@ -1233,12 +1233,16 @@ class Scheduler(SchedulerInterface):
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
 
+        lifetime_stats = self.kv_cache_manager.get_kv_cache_lifetime_stats()
+        recent_lifetimes = self.kv_cache_manager.collect_recent_kv_cache_lifetimes()
+
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
-            kv_cache_lifetime_stats=self.kv_cache_manager.get_kv_cache_lifetime_stats(),
+            kv_cache_lifetime_stats=lifetime_stats,
+            kv_cache_block_lifetimes=recent_lifetimes,
             spec_decoding_stats=spec_decoding_stats,
             num_corrupted_reqs=sum(req.is_output_corrupted for req in self.running),
             kv_connector_stats=(
