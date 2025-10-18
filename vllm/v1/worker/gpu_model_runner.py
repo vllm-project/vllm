@@ -2310,6 +2310,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if i not in invalid_req_indices_set
             }
 
+        # Collect updates in the for loop and apply a batch update at the end
+        # to vectorize updates to tensors and numpy arrays.
+        start_indices = self.input_batch.num_tokens_no_spec.tolist()
+        # Indices and values to update for num_tokens and num_tokens_no_spec
+        num_tokens_indices_to_update: list[int] = []
+        num_tokens_values_to_update: list[int] = []
+
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -2324,7 +2331,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not sampled_ids:
                 continue
 
-            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            start_idx = start_indices[req_idx]
             end_idx = start_idx + len(sampled_ids)
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
@@ -2332,14 +2339,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"{self.max_model_len}"
             )
 
+            # TODO(Jialin): batchify the update to token_ids_cpu and is_token_ids
             self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
             self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
-            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-            self.input_batch.num_tokens[req_idx] = end_idx
+
+            # Collect updates to num_tokens and num_tokens_no_spec,
+            # which is equivilent to
+            # - self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            # - self.input_batch.num_tokens[req_idx] = end_idx
+            num_tokens_indices_to_update.append(req_idx)
+            num_tokens_values_to_update.append(end_idx)
 
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
+
+        # Apply tensor / numpy array updates in batch
+        if num_tokens_indices_to_update:
+            # Batch update num_tokens arrays
+            self.input_batch.num_tokens[num_tokens_indices_to_update] = (
+                num_tokens_values_to_update
+            )
+            self.input_batch.num_tokens_no_spec[num_tokens_indices_to_update] = (
+                num_tokens_values_to_update
+            )
 
         return (
             num_nans_in_logits,
