@@ -6,7 +6,7 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 
 from ..utils import create_new_process_for_each_test
 
