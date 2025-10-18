@@ -98,7 +98,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         engine_input_q: queue.Queue,
         client_cmd_addr: str,
         worker_cmd_addr: str,
-        fault_report_addr:str,
+        fault_report_addr: str,
         guard_identity: str,
     ):
         super().__init__(daemon=True)
@@ -237,7 +237,6 @@ class EngineCoreGuard(threading.Thread):  # changed
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
         self._send_msg(self.fault_report_socket, msg, serialize=False)
 
-
     def _execute_cmd(self, cmd_str):
         """
         Execute a command received from ClientGuard.
@@ -261,7 +260,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             )
             success = False
 
-        self._notify_client_execution_result(success)
+        self._send_execution_result(success)
 
     def pause(self, timeout: int = 1) -> bool:
         """
@@ -292,7 +291,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             success = True
         return success
 
-    def retry(self):
+    def retry(self, timeout: int = 1):
         """
         Handle the retry instruction from the ClientGuard.
         This instruction tells the EngineCore to continue its busy loop
@@ -302,13 +301,13 @@ class EngineCoreGuard(threading.Thread):  # changed
         """
         # Nothing needs to be done for EngineCore
         self.cmd_q.put(None)
-        # Ensure EngineCore has received the instruction
-        self.cmd_q.join()
+        # Ensure busy loop has been recovered.
+        success = self.busy_loop_active.wait(timeout=timeout)
+        return success
 
     def _send_execution_result(self, success: bool):
         msg = {"engine_index": self.engine_index, "success": success}
         self._send_msg(self.client_cmd_socket, msg, serialize=True)
-
 
 
 def busy_loop_wrapper(busy_loop_func):
@@ -344,7 +343,6 @@ def busy_loop_wrapper(busy_loop_func):
                         if cmd_str is not None:
                             method, params = deserialize_method_call(cmd_str)
                             run_method(self, method, args=(), kwargs=params)
-                        self.cmd_q.task_done()
                         # recovery succeeded; restart the busy loop
                         continue
                     except queue.Empty:
@@ -842,11 +840,15 @@ class EngineCoreProc(EngineCore):
             if self.enable_fault_tolerance:
                 # Track whether the busy loop is currently active.
                 self.busy_loop_active = threading.Event()
-                self.fault_signal_q = queue.Queue()
-                self.cmd_q = queue.Queue()
+                self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
+                self.cmd_q: queue.Queue[str | None] = queue.Queue()
                 self.engine_recovery_timeout = ft_config.engine_recovery_timeout
                 engine_core_guard_ids = addresses.engine_core_guard_identities
                 assert engine_core_guard_ids is not None
+                assert addresses.fault_report_addr is not None
+                assert addresses.client_cmd_addr is not None
+                assert addresses.engine_core_cmd_addr is not None
+
                 self.engine_core_guard = EngineCoreGuard(
                     engine_index=self.engine_index,
                     fault_signal_q=self.fault_signal_q,
@@ -857,7 +859,6 @@ class EngineCoreProc(EngineCore):
                     client_cmd_addr=addresses.client_cmd_addr,
                     worker_cmd_addr=addresses.engine_core_cmd_addr,
                     guard_identity=engine_core_guard_ids[self.engine_index],
-
                 )
                 self.engine_core_guard.start()
                 # Do not shut down the engine immediately upon failure.
