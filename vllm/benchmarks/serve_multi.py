@@ -184,7 +184,8 @@ class ServerWrapper:
         self.server_address = server_address
 
     def reset_caches(self) -> None:
-        if self.server_cmd[0] == "vllm":
+        # Use `.endswith()` to match `/bin/...`
+        if self.server_cmd[0].endswith("vllm"):
             print("Resetting caches...")
 
             res = requests.post(f"{self.server_address}/reset_prefix_cache")
@@ -192,7 +193,7 @@ class ServerWrapper:
 
             res = requests.post(f"{self.server_address}/reset_mm_cache")
             res.raise_for_status()
-        elif self.server_cmd[0] == "infinity_emb":
+        elif self.server_cmd[0].endswith("infinity_emb"):
             if "--vector-disk-cache" in self.server_cmd:
                 raise NotImplementedError(
                     "Infinity server uses caching but does not expose a method "
