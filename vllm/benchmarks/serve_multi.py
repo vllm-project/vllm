@@ -476,7 +476,7 @@ def _iter_sla(
         iter_data = _run_benchmark(
             bench_cmd,
             serve_overrides=serve_comb,
-            bench_overrides=bench_comb,
+            bench_overrides={**bench_comb, "request_rate": request_rate},
             run_number=run_number,
             output_path=iter_path,
             dry_run=dry_run,
