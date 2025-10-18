@@ -58,6 +58,7 @@ class StructuredOutputsParams:
                 self.choice is not None,
                 self.grammar is not None,
                 self.json_object is not None,
+                self.structural_tag is not None,
             ]
         )
         if count > 1:
@@ -65,6 +66,37 @@ class StructuredOutputsParams:
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
             )
+
+    def all_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+                "structural_tag",
+            )
+        )
+
+    def all_non_structural_tag_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+            )
+        )
 
 
 @dataclass
