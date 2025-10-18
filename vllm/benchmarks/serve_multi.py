@@ -147,6 +147,10 @@ def _iter_cmd_key_candidates(param_key: str):
         yield "--" + k
 
 
+def _normalize_cmd_key(param_key: str):
+    return next(_iter_cmd_key_candidates(param_key))
+
+
 def _override_args(cmd: list[str], params: dict[str, object]):
     cmd = list(cmd)
 
@@ -156,7 +160,7 @@ def _override_args(cmd: list[str], params: dict[str, object]):
                 k_idx = cmd.index(k_candidate)
 
                 if isinstance(v, bool):
-                    cmd[k_idx] = k if v else "--no-" + k
+                    cmd[k_idx] = _normalize_cmd_key(k if v else "no-" + k)
                 else:
                     cmd[k_idx + 1] = str(v)
 
@@ -165,9 +169,9 @@ def _override_args(cmd: list[str], params: dict[str, object]):
                 continue
         else:
             if isinstance(v, bool):
-                cmd.append(k if v else "--no-" + k)
+                cmd.append(_normalize_cmd_key(k if v else "no-" + k))
             else:
-                cmd.extend([next(_iter_cmd_key_candidates(k)), str(v)])
+                cmd.extend([_normalize_cmd_key(k), str(v)])
 
     return cmd
 
