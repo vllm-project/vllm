@@ -615,6 +615,7 @@ def _iter_sla(
         dry_run=dry_run,
     )
     if sla_data_0 is None:
+        assert dry_run
         print("Omitting SLA search iterations.")
         print("[SLA END]")
         return None
@@ -658,10 +659,6 @@ def _iter_sla(
 
     sla_data = sla_data_0 + sla_data_1 + sla_data_2
     print(f"Maximum {sla_variable} for SLA: {sla_value} req/s.")
-
-    if dry_run:
-        print("[SLA END]")
-        return None
 
     with _get_sla_iter_path(base_path, sla_variable, sla_value=None).open("w") as f:
         json.dump(sla_data, f)
