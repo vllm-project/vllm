@@ -6,6 +6,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -23,6 +25,8 @@ from vllm.v1.worker.ubatching import (
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
 DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
+
+logger = init_logger(__name__)
 
 
 def dequant_fp8(
@@ -137,16 +141,25 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
+        q_dtype = quant_config.quant_dtype
+
+        if envs.VLLM_FLASHINFER_MOE_BACKEND == "cutedsl":
+            logger.info_once(
+                "Skip quantization when using FlashInfer CUTEDSL for "
+                "ModelOptNvFp4FusedMoE."
+            )
+            q_dtype = None
+
         x, x_scales = moe_kernel_quantize_input(
             x,
             quant_config.a1_scale,
-            quant_config.quant_dtype,
+            q_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
         )
         x = x.view((num_experts, -1, hidden_dim))
 
-        if quant_config.quant_dtype is not None:
+        if q_dtype is not None:
             assert x_scales is not None
             x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
