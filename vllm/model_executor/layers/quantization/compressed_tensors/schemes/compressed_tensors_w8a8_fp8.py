@@ -12,7 +12,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
-    check_aiter_fp8_linear_support,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
@@ -20,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy,
+    use_aiter_fp8_linear,
     validate_fp8_block_shape,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -61,7 +61,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-        self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        self.use_aiter_and_is_supported = use_aiter_fp8_linear()
 
         if self.weight_block_size is not None:
             assert not self.is_static_input_scheme
