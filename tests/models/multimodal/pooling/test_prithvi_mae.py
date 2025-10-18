@@ -39,7 +39,7 @@ def _run_test(
         max_num_seqs=32,
         default_torch_num_threads=1,
     ) as vllm_model:
-        vllm_model.llm.encode(prompt, pooling_task="token_classify")
+        vllm_model.llm.encode(prompt, pooling_task="plugin")
 
 
 MODELS = ["mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]

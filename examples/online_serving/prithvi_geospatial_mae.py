@@ -34,7 +34,6 @@ def main():
         },
         "priority": 0,
         "model": "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
-        "softmax": False,
     }
 
     ret = requests.post(server_endpoint, json=request_payload_url)
