@@ -68,6 +68,15 @@ class EPLBConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
+    distributed_master_ip: str = "127.0.0.1"
+    """distributed master ip for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    distributed_master_port: int = 0
+    """distributed master port """
+    distributed_node_rank: int = 0
+    """distributed node rank """
+    distributed_node_size: int = 1
+    """distributed node size """
     pipeline_parallel_size: int = 1
     """Number of pipeline parallel groups."""
     tensor_parallel_size: int = 1
@@ -517,9 +526,12 @@ class ParallelConfig:
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
+            elif current_platform.is_cuda() and self.distributed_node_size > 1:
+                backend = "mp"
             elif (
                 current_platform.is_cuda()
                 and cuda_device_count_stateless() < self.world_size
+                and self.distributed_node_size == 1
             ):
                 if not ray_found:
                     raise ValueError(
@@ -593,6 +605,11 @@ class ParallelConfig:
             logger.debug(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
+            )
+        if self.distributed_node_size > 1:
+            self.disable_custom_all_reduce = True
+            logger.debug(
+                "Disabled the custom all-reduce since we are running on multi-node."
             )
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(

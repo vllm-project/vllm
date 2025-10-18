@@ -108,7 +108,16 @@ class EngineCore:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
+        # No scheduler needed for distributed inference for folo
+        self.batch_queue_size = 0
+        self.batch_queue: (
+            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]] | None
+        ) = None
 
+        self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
+        if self.vllm_config.parallel_config.distributed_node_rank > 0:
+            self._scheduler = None
+            return
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
             vllm_config
@@ -150,7 +159,7 @@ class EngineCore:
             * vllm_config.parallel_config.decode_context_parallel_size
         )
 
-        self.scheduler: SchedulerInterface = Scheduler(
+        self._scheduler = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
@@ -174,14 +183,10 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]] | None
-        ) = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if (
             self.vllm_config.cache_config.enable_prefix_caching
             or self.scheduler.get_kv_connector() is not None
@@ -198,6 +203,16 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+
+    @property
+    def scheduler(self) -> SchedulerInterface:
+        if not isinstance(self._scheduler, SchedulerInterface):
+            raise RuntimeError("Scheduler is not initialized")
+        return self._scheduler
+
+    @property
+    def scheduless_mode(self) -> bool:
+        return self._scheduler is None
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -393,10 +408,11 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def shutdown(self):
-        self.structured_output_manager.clear_backend()
+        if self.structured_output_manager:
+            self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
-        if self.scheduler:
+        if not self.scheduless_mode:
             self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
@@ -404,8 +420,8 @@ class EngineCore:
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
-        # re-sync the internal caches (P0 sender, P1 receiver)
-        if self.scheduler.has_unfinished_requests():
+        # re-sync the internal caches ((P0 sender, P1 receiver)
+        if not self.scheduless_mode and self.scheduler.has_unfinished_requests():
             logger.warning(
                 "Resetting the multi-modal cache when requests are "
                 "in progress may lead to desynced internal caches."
@@ -805,12 +821,18 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
-            # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+        if not self.scheduless_mode:
+            # Loop until process is sent a SIGINT or SIGTERM
+            while True:
+                # 1) Poll the input queue until there is work to do.
+                self._process_input_queue()
+                # 2) Step the engine core and return the outputs.
+                self._process_engine_step()
+        else:
+            # Loop until process is sent a SIGINT or SIGTERM
+            while True:
+                # No real scheduler for follower nodes
+                time.sleep(1)
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
