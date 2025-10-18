@@ -479,6 +479,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
     guided_decoding_disable_fallback: bool | None = None
@@ -1410,8 +1411,15 @@ class EngineArgs:
                 "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
             )
 
-            # Local DP size defaults to global DP size if not set.
-            data_parallel_size_local = self.data_parallel_size
+            if self.data_parallel_backend == "ray" and (
+                envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
+            ):
+                # Data parallel size defaults to 1 if DP ranks are spanning
+                # multiple nodes
+                data_parallel_size_local = 1
+            else:
+                # Otherwise local DP size defaults to global DP size if not set
+                data_parallel_size_local = self.data_parallel_size
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
@@ -1440,13 +1448,6 @@ class EngineArgs:
         )
 
         if self.async_scheduling:
-            # Async scheduling does not work with the uniprocess backend.
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "mp"
-                logger.info(
-                    "Defaulting to mp-based distributed executor "
-                    "backend for async scheduling."
-                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Async scheduling is not supported with pipeline-parallel-size > 1."
@@ -1502,6 +1503,15 @@ class EngineArgs:
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
+
+        if self.async_scheduling and (
+            parallel_config.distributed_executor_backend not in ("mp", "uni")
+        ):
+            raise ValueError(
+                "Currently, async scheduling only supports `mp` or `uni` "
+                "distributed executor backend, but you choose "
+                f"`{parallel_config.distributed_executor_backend}`."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
