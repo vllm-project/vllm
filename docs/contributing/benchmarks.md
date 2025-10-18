@@ -1038,6 +1038,19 @@ For example, to ensure E2E latency below a target value for 99% of requests:
 ]
 ```
 
+Example command:
+
+```bash
+python vllm/benchmarks/serve_multi.py \
+    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --serve-params benchmarks/serve_hparams.json \
+    --bench-params benchmarks/bench_hparams.json \
+    --sla-params benchmarks/sla_hparams.json \
+    --sla-variable max_concurrency \
+    -o benchmarks/results
+```
+
 The algorithm for adjusting the SLA variable is as follows:
 
 1. Run the benchmark with infinite QPS, and use the corresponding metrics to determine the initial value of the variable.
