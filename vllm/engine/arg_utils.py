@@ -19,7 +19,6 @@ from typing import (
     TypeAlias,
     TypeVar,
     Union,
-    cast,
     get_args,
     get_origin,
 )
@@ -54,7 +53,6 @@ from vllm.config import (
     get_attr_docs,
 )
 from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
-from vllm.config.device import Device
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -1258,7 +1256,7 @@ class EngineArgs:
         """
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
+        device_config = DeviceConfig(device=current_platform.device_type)
 
         model_config = self.create_model_config()
         self.model = model_config.model

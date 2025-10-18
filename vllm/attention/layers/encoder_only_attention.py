@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from collections.abc import Hashable
 from copy import copy
+from typing import cast
 
 import torch
 
@@ -24,7 +26,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 @functools.lru_cache
 def create_encoder_only_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "EncoderOnlyAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -80,7 +82,7 @@ class EncoderOnlyAttention(Attention):
             )
 
             attn_backend = create_encoder_only_attention_backend(
-                underlying_attn_backend
+                cast(Hashable, underlying_attn_backend)
             )
         else:
             # in v0 encoder only attention is handled inside the backends

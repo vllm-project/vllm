@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from collections.abc import Hashable
 from copy import copy
+from typing import cast
 
 import numpy as np
 import torch
@@ -80,7 +82,7 @@ def _get_cross_slot_mapping(
 
 @functools.lru_cache
 def create_cross_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "CrossAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -155,7 +157,9 @@ class CrossAttention(Attention):
                 head_size, dtype, kv_cache_dtype, block_size
             )
 
-            attn_backend = create_cross_attention_backend(underlying_attn_backend)
+            attn_backend = create_cross_attention_backend(
+                cast(Hashable, underlying_attn_backend)
+            )
         else:
             # in v0 cross attention is handled inside the backends
             attn_backend = None

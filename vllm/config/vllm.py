@@ -303,22 +303,10 @@ class VllmConfig:
         # we use the default mode. The default mode depends on other
         # settings (see the below code).
         if self.compilation_config.mode is None:
-            if envs.VLLM_USE_V1:
-                if (
-                    self.model_config is not None
-                    and not self.model_config.enforce_eager
-                ):
-                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
-                else:
-                    self.compilation_config.mode = CompilationMode.NONE
-
+            if not (self.model_config is None or self.model_config.enforce_eager):
+                self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
-                # NB: Passing both --enforce-eager and a compilation mode
-                # in V0 means the compilation mode wins out.
                 self.compilation_config.mode = CompilationMode.NONE
-        else:
-            assert self.compilation_config.mode >= CompilationMode.NONE
-            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
         # compilation mode and backend.

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from typing import ClassVar
+from collections.abc import Hashable
+from typing import ClassVar, cast
 
 import torch
 
@@ -24,7 +25,7 @@ from ..layer import Attention
 
 @functools.lru_cache
 def create_chunked_local_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
     attention_chunk_size: int,
     block_size: int,
 ) -> type[AttentionBackend]:
@@ -84,7 +85,9 @@ class ChunkedLocalAttention(Attention):
             )
 
             attn_backend = create_chunked_local_attention_backend(
-                underlying_attn_backend, attention_chunk_size, block_size
+                cast(Hashable, underlying_attn_backend),
+                attention_chunk_size,
+                block_size,
             )
         else:
             # in v0 the local attention is handled inside the backends
