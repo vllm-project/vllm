@@ -331,7 +331,6 @@ def _run_benchmark(
 
     subprocess.run(
         benchmark_cmd,
-        stdout=subprocess.DEVNULL,
         capture_output=server.capture_output,
         check=True,
     )
