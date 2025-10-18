@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import json
 import os
 import uuid
 import weakref
@@ -25,6 +26,7 @@ from vllm.utils import (
     get_mp_context,
     get_open_zmq_ipc_path,
     make_zmq_socket,
+    serialize_method_call,
     zmq_socket_ctx,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -1125,3 +1127,55 @@ def generate_identity_group(peer1, peer2, use, n):
         identity_str = f"{peer1}_{peer2}_{use}_{id}".encode()
         identitys.append(identity_str)
     return identitys
+
+
+class FaultHandler:
+    def __init__(self, cmd_socket: zmq.socket, client_cmd_registry: dict) -> None:
+        self.cmd_socket = cmd_socket
+        self.client_cmd_registry = client_cmd_registry
+
+    def handle_fault(self, instruction: str, timeout) -> bool:
+        kwargs = {"timeout": timeout}
+        for identity in self.client_cmd_registry.values():
+            serialized_instruction = serialize_method_call(instruction, **kwargs)
+            self.cmd_socket.send_multipart([identity, b"", serialized_instruction])
+
+        poller = zmq.Poller()
+        poller.register(self.cmd_socket, zmq.POLLIN)
+
+        engine_indexes = [engine_index for engine_index in self.client_cmd_registry]
+        while engine_indexes:
+            socks = dict(poller.poll(timeout))
+            if self.cmd_socket not in socks:
+                logger.error(
+                    "Timeout while waiting for responses from engines: %s",
+                    engine_indexes,
+                )
+                return False
+
+            try:
+                parts = self.cmd_socket.recv_multipart()
+                if len(parts) != 3:
+                    logger.error("Malformed response: %s", parts)
+                    return False
+                identity, _, response = parts
+                response_dict = json.loads(response.decode("utf-8"))
+
+                engine_id = response_dict.get("engine_id")
+                success = response_dict.get("success", False)
+
+                if engine_id in engine_indexes:
+                    engine_indexes.remove(engine_id)
+
+                if not success:
+                    logger.error(
+                        "Engine %s reported failure: %s",
+                        engine_id,
+                        response_dict.get("reason", "unknown"),
+                    )
+                    return False
+
+            except Exception as e:
+                logger.error("Error while receiving response: %s", e)
+                return False
+        return True
