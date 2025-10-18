@@ -69,6 +69,7 @@ There are several notable differences when using Ray:
 - A single launch command (on any node) is needed to start all local and remote DP ranks, therefore it is more convenient compared to launching on each node
 - There is no need to specify `--data-parallel-address`, and the node where the command is run is used as `--data-parallel-address`
 - There is no need to specify `--data-parallel-rpc-port`
+- When a single DP group requires multiple nodes, *e.g.* in case a single model replica needs to run on at least two nodes, make sure to set `VLLM_RAY_DP_PACK_STRATEGY="span"` in which case `--data-parallel-size-local` is ignored and will be automatically determined
 - Remote DP ranks will be allocated based on node resources of the Ray cluster
 
 Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
