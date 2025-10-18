@@ -151,7 +151,7 @@ class CpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         import vllm.envs as envs
-        from vllm.utils.mem_utils import GiB_bytes
+        from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
         if kv_cache_space is None:

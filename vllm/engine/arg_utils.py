@@ -82,7 +82,7 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser, get_ip, is_in_ray_actor
-from vllm.utils.mem_utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:

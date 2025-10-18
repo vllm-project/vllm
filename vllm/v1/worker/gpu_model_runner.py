@@ -83,7 +83,8 @@ from vllm.utils import (
     supports_dynamo,
 )
 from vllm.utils.jsontree import json_map_leaves
-from vllm.utils.mem_utils import DeviceMemoryProfiler, GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (

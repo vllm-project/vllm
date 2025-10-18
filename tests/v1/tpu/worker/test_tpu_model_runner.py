@@ -13,7 +13,7 @@ from vllm.config import (
 )
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.utils.mem_utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.worker.tpu_model_runner import (

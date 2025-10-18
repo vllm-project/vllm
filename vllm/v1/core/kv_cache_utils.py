@@ -13,7 +13,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256_cbor
-from vllm.utils.mem_utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
