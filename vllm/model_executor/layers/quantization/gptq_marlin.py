@@ -81,9 +81,6 @@ def get_moe_quant_method(
         ):  # noqa: E712
             return UnquantizedFusedMoEMethod(layer.moe_config)
 
-        if prefix:
-            # Dynamic per module/layer rules may override base config
-            override_config(cloned_config, prefix=prefix)
         # Stash useful metadata so downstream components can access the prefix of
         # the layer that this quant config instance applies to.
         setattr(cloned_config, "_layer_prefix", prefix)
