@@ -296,7 +296,6 @@ class Sampler(nn.Module):
         if sampling_metadata.no_penalties:
             return logits
 
-        assert sampling_metadata.prompt_token_ids is not None
         return apply_all_penalties(
             logits,
             sampling_metadata.prompt_token_ids,
