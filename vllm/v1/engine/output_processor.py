@@ -23,6 +23,7 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import IterationStats, LoRARequestStates, RequestStateStats
+from vllm.v1.outputs import token_ids_to_list
 
 
 class RequestOutputCollector:
@@ -421,7 +422,9 @@ class OutputProcessor:
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
             )
 
-            new_token_ids = engine_core_output.new_token_ids
+            new_token_ids: list[int] = token_ids_to_list(
+                engine_core_output.new_token_ids
+            )
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason

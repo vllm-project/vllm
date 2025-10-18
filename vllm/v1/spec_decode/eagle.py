@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import TokenIDs, get_token_count, token_ids_to_list
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -476,7 +477,7 @@ class EagleProposer:
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[TokenIDs],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -491,6 +492,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
+            token_ids = token_ids_to_list(token_ids)
             if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
@@ -808,7 +810,7 @@ class EagleProposer:
     def prepare_inputs(
         self,
         common_attn_metadata: CommonAttentionMetadata,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[TokenIDs],
         num_draft_tokens: list[int],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
@@ -834,7 +836,7 @@ class EagleProposer:
         #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
         num_rejected_tokens = [
-            n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
+            n + 1 - get_token_count(sampled_token_ids[i]) if n > 0 else 0
             for i, n in enumerate(num_draft_tokens)
         ]
         num_rejected_tokens = torch.tensor(num_rejected_tokens, dtype=torch.int32)
