@@ -285,7 +285,7 @@ def _run_benchmark(
     run_data.update(serve_overrides)
 
     with output_path.open("w") as f:
-        json.dump(run_data, f)
+        json.dump(run_data, f, indent=4)
 
     print("[END BENCHMARK]")
 
@@ -357,7 +357,7 @@ def _run_comb(
         return None
 
     with _get_comb_run_path(base_path, run_number=None).open("w") as f:
-        json.dump(comb_data, f)
+        json.dump(comb_data, f, indent=4)
 
     return comb_data
 
@@ -486,7 +486,7 @@ def _run_sla(
         return None
 
     with _get_sla_run_path(iter_path, run_number=None).open("w") as f:
-        json.dump(iter_data, f)
+        json.dump(iter_data, f, indent=4)
 
     return iter_data
 
@@ -661,7 +661,7 @@ def _iter_sla(
     print(f"Maximum {sla_variable} for SLA: {sla_value} req/s.")
 
     with _get_sla_iter_path(base_path, sla_variable, sla_value=None).open("w") as f:
-        json.dump(sla_data, f)
+        json.dump(sla_data, f, indent=4)
 
     print("[SLA END]")
 
