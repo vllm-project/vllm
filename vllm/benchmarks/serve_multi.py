@@ -3,7 +3,6 @@
 import argparse
 import contextlib
 import json
-import math
 import os
 import shlex
 import signal
@@ -462,7 +461,7 @@ def _iter_sla(
     run_path: Path,
     run_number: int,
     dry_run: bool,
-    init_request_rate: int = 1 << 20,
+    init_request_rate: int = 8192,
 ):
     print("[SLA START]")
     print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
@@ -471,7 +470,7 @@ def _iter_sla(
 
     # Binary search
     request_rate_left: int = 0
-    request_rate_right: int = init_request_rate
+    request_rate_right: int = init_request_rate * 2
 
     while request_rate_right > request_rate_left:
         request_rate = (request_rate_left + request_rate_right) // 2
@@ -510,18 +509,12 @@ def _iter_sla(
             if request_rate_right == init_request_rate:
                 print("SLA is satisfied even with unbounded request rate.")
                 break
-            else:
-                request_rate_left = request_rate
+
+            request_rate_left = request_rate
         else:
             print("SLA criteria has not been met.")
 
-            if request_rate_right == init_request_rate:
-                # Save some iterations
-                request_rate_right = math.ceil(
-                    float(iter_data["request_throughput"]) * 8  # type: ignore
-                )
-            else:
-                request_rate_right = request_rate
+            request_rate_right = request_rate
 
         if abs(request_rate_left - request_rate_right) < 1:
             print("Binary search has converged.")
