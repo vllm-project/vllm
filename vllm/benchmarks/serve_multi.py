@@ -622,6 +622,7 @@ def _iter_sla(
         sum(float(item["request_throughput"]) for item in sla_data_0)  # type: ignore
         / len(sla_data_0)
     )
+    print(f"Initial {sla_variable} to search: {sla_init_value} req/s.")
 
     sla_data_1, max_value = _find_sla_value(
         port,
