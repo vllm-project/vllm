@@ -28,15 +28,18 @@ import gc
 import pickle
 import weakref
 from collections import namedtuple
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
-from typing import Any, Callable, Optional, Union
+from typing import Any, Optional
 from unittest.mock import patch
 
 import torch
 import torch.distributed
+import torch.distributed._functional_collectives as funcol
+import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup
 from typing_extensions import deprecated
 
@@ -49,9 +52,9 @@ from vllm.logger import init_logger
 from vllm.utils import (
     direct_register_custom_op,
     get_distributed_init_method,
-    resolve_obj_by_qualname,
     supports_custom_op,
 )
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 
 @dataclass
@@ -63,7 +66,7 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: dict[str, Union[torch.Tensor, Any]],
+    tensor_dict: dict[str, torch.Tensor | Any],
 ) -> tuple[list[tuple[str, Any]], list[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
@@ -159,6 +162,90 @@ def all_gather_fake(
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
+def patched_fused_scaled_matmul_reduce_scatter_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    bias: torch.Tensor | None = None,
+    result_scale: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    use_fast_accum: bool = False,
+) -> torch.Tensor:
+    # Copied from
+    # https://github.com/pytorch/pytorch/blob/50c338c2da905062449e4d9ac807832d1b5cd90e/torch/distributed/_symmetric_memory/__init__.py#L1189
+    if A_scale.numel() > 1:
+        if A_scale.shape[:-1] != A.shape[:-1]:
+            raise ValueError(
+                "For row-wise scaling, the leading dims of A_scale "
+                "must match the leading dims of A "
+                f"(A shape: {A.shape}, A_scale shape: {A_scale.shape})"
+            )
+        A_scale = A_scale.flatten(0, -2).contiguous()
+    elif A_scale.numel() != 1:
+        raise ValueError(
+            "Invalid A_scale shape "
+            f"(A shape: {A.shape}, A_scale shape: {A_scale.shape})"
+        )
+
+    C = torch._scaled_mm(
+        A.flatten(0, -2).contiguous(),
+        B,
+        A_scale,
+        B_scale,
+        bias,
+        result_scale,
+        out_dtype,
+        use_fast_accum,
+    )
+    C = C.view(*output_shape[:-1], B.shape[1])
+    res = funcol.reduce_scatter_tensor(
+        C,
+        reduce_op,
+        orig_scatter_dim,  # need original scatter dim for 3D+ output tensor here
+        group_name,
+    )
+    res = funcol.wait_tensor(res)
+    return res
+
+
+def patched_fused_scaled_matmul_reduce_scatter(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    bias: torch.Tensor | None = None,
+    result_scale: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    use_fast_accum: bool = False,
+) -> torch.Tensor:
+    return torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
+        A,
+        B,
+        A_scale,
+        B_scale,
+        reduce_op,
+        orig_scatter_dim,
+        scatter_dim_after_maybe_reshape,
+        group_name,
+        output_shape,
+        bias,
+        result_scale,
+        out_dtype,
+        use_fast_accum,
+    )
+
+
 if supports_custom_op():
     direct_register_custom_op(
         op_name="all_reduce",
@@ -176,6 +263,15 @@ if supports_custom_op():
         op_name="all_gather",
         op_func=all_gather,
         fake_impl=all_gather_fake,
+    )
+
+    # TODO: Remove this once the pytorch fix
+    # (https://github.com/pytorch/pytorch/pull/165086) gets released,
+    # in either 2.9.1 or 2.10
+    direct_register_custom_op(
+        op_name="patched_fused_scaled_matmul_reduce_scatter",
+        op_func=patched_fused_scaled_matmul_reduce_scatter,
+        fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
     )
 
 
@@ -205,17 +301,17 @@ class GroupCoordinator:
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
     # device communicator (if use_device_communicator=True)
-    device_communicator: Optional[DeviceCommunicatorBase]
-    mq_broadcaster: Optional[Any]  # shared memory broadcaster
+    device_communicator: DeviceCommunicatorBase | None
+    mq_broadcaster: Any | None  # shared memory broadcaster
 
     def __init__(
         self,
         group_ranks: list[list[int]],
         local_rank: int,
-        torch_distributed_backend: Union[str, Backend],
+        torch_distributed_backend: str | Backend,
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
-        group_name: Optional[str] = None,
+        group_name: str | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -273,7 +369,7 @@ class GroupCoordinator:
 
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
-        self.mq_broadcaster: Optional[MessageQueue] = None
+        self.mq_broadcaster: MessageQueue | None = None
         if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6
@@ -345,9 +441,7 @@ class GroupCoordinator:
         return self.ranks[(rank_in_group - 1) % world_size]
 
     @contextmanager
-    def graph_capture(
-        self, graph_capture_context: Optional[GraphCaptureContext] = None
-    ):
+    def graph_capture(self, graph_capture_context: GraphCaptureContext | None = None):
         if graph_capture_context is None:
             stream = torch.cuda.Stream()
             graph_capture_context = GraphCaptureContext(stream)
@@ -428,9 +522,9 @@ class GroupCoordinator:
 
     def all_gatherv(
         self,
-        input_: Union[torch.Tensor, list[torch.Tensor]],
+        input_: torch.Tensor | list[torch.Tensor],
         dim: int = 0,
-        sizes: Optional[list[int]] = None,
+        sizes: list[int] | None = None,
     ):
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
@@ -453,7 +547,7 @@ class GroupCoordinator:
             return self._reduce_scatter_out_place(input_, dim)
 
     def reduce_scatterv(
-        self, input_: torch.Tensor, dim: int = -1, sizes: Optional[list[int]] = None
+        self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
@@ -466,7 +560,7 @@ class GroupCoordinator:
 
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """
         NOTE: We assume that the input tensor is on the same device across
         all the ranks.
@@ -495,7 +589,7 @@ class GroupCoordinator:
         )
         return input_
 
-    def broadcast_object(self, obj: Optional[Any] = None, src: int = 0):
+    def broadcast_object(self, obj: Any | None = None, src: int = 0):
         """Broadcast the input object.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -520,7 +614,7 @@ class GroupCoordinator:
             return recv[0]
 
     def broadcast_object_list(
-        self, obj_list: list[Any], src: int = 0, group: Optional[ProcessGroup] = None
+        self, obj_list: list[Any], src: int = 0, group: ProcessGroup | None = None
     ):
         """Broadcast the input object list.
         NOTE: `src` is the local rank of the source rank.
@@ -601,11 +695,11 @@ class GroupCoordinator:
 
     def broadcast_tensor_dict(
         self,
-        tensor_dict: Optional[dict[str, Union[torch.Tensor, Any]]] = None,
+        tensor_dict: dict[str, torch.Tensor | Any] | None = None,
         src: int = 0,
-        group: Optional[ProcessGroup] = None,
-        metadata_group: Optional[ProcessGroup] = None,
-    ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
+        group: ProcessGroup | None = None,
+        metadata_group: ProcessGroup | None = None,
+    ) -> dict[str, torch.Tensor | Any] | None:
         """Broadcast the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -683,11 +777,11 @@ class GroupCoordinator:
 
     def send_tensor_dict(
         self,
-        tensor_dict: dict[str, Union[torch.Tensor, Any]],
-        dst: Optional[int] = None,
+        tensor_dict: dict[str, torch.Tensor | Any],
+        dst: int | None = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
-        all_gather_tensors: Optional[dict[str, bool]] = None,
-    ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
+        all_gather_tensors: dict[str, bool] | None = None,
+    ) -> dict[str, torch.Tensor | Any] | None:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
 
@@ -771,10 +865,10 @@ class GroupCoordinator:
 
     def recv_tensor_dict(
         self,
-        src: Optional[int] = None,
+        src: int | None = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
-        all_gather_tensors: Optional[dict[str, bool]] = None,
-    ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
+        all_gather_tensors: dict[str, bool] | None = None,
+    ) -> dict[str, torch.Tensor | Any] | None:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
 
@@ -869,7 +963,7 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
-    def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
+    def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if self.device_communicator is None:
@@ -877,7 +971,7 @@ class GroupCoordinator:
         self.device_communicator.send(tensor, dst)
 
     def recv(
-        self, size: torch.Size, dtype: torch.dtype, src: Optional[int] = None
+        self, size: torch.Size, dtype: torch.dtype, src: int | None = None
     ) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
@@ -923,8 +1017,8 @@ class GroupCoordinator:
             return hidden_states
 
 
-_WORLD: Optional[GroupCoordinator] = None
-_NODE_COUNT: Optional[int] = None
+_WORLD: GroupCoordinator | None = None
+_NODE_COUNT: int | None = None
 
 
 def get_world_group() -> GroupCoordinator:
@@ -949,7 +1043,7 @@ def init_model_parallel_group(
     local_rank: int,
     backend: str,
     use_message_queue_broadcaster: bool = False,
-    group_name: Optional[str] = None,
+    group_name: str | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -961,7 +1055,7 @@ def init_model_parallel_group(
     )
 
 
-_TP: Optional[GroupCoordinator] = None
+_TP: GroupCoordinator | None = None
 
 
 def get_tp_group() -> GroupCoordinator:
@@ -978,7 +1072,7 @@ def get_tensor_model_parallel_group():
     return get_tp_group()
 
 
-_DCP: Optional[GroupCoordinator] = None
+_DCP: GroupCoordinator | None = None
 
 
 def get_dcp_group() -> GroupCoordinator:
@@ -989,9 +1083,9 @@ def get_dcp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_context_model_parallel_group = get_dcp_group
 
-_PP: Optional[GroupCoordinator] = None
+_PP: GroupCoordinator | None = None
 
-_DP: Optional[GroupCoordinator] = None
+_DP: GroupCoordinator | None = None
 
 
 def get_dp_group() -> GroupCoordinator:
@@ -999,7 +1093,7 @@ def get_dp_group() -> GroupCoordinator:
     return _DP
 
 
-_EP: Optional[GroupCoordinator] = None
+_EP: GroupCoordinator | None = None
 
 
 def get_ep_group() -> GroupCoordinator:
@@ -1057,7 +1151,7 @@ def init_distributed_environment(
     distributed_init_method: str = "env://",
     local_rank: int = -1,
     backend: str = "nccl",
-    timeout: Optional[timedelta] = None,
+    timeout: timedelta | None = None,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1153,8 +1247,8 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    decode_context_model_parallel_size: Optional[int] = 1,
-    backend: Optional[str] = None,
+    decode_context_model_parallel_size: int | None = 1,
+    backend: str | None = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -1283,8 +1377,8 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
-    decode_context_model_parallel_size: Optional[int] = 1,
-    backend: Optional[str] = None,
+    decode_context_model_parallel_size: int | None = 1,
+    backend: str | None = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -1449,7 +1543,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 
 
 def in_the_same_node_as(
-    pg: Union[ProcessGroup, StatelessProcessGroup], source_rank: int = 0
+    pg: ProcessGroup | StatelessProcessGroup, source_rank: int = 0
 ) -> list[bool]:
     """
     This is a collective operation that returns if each rank is in the same node
@@ -1569,7 +1663,7 @@ def is_global_first_rank() -> bool:
         return True
 
 
-def _node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
+def _node_count(pg: ProcessGroup | StatelessProcessGroup) -> int:
     """
     Returns the total number of nodes in the process group.
 

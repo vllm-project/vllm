@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import hashlib
 import inspect
-from typing import Callable, Optional, TypeVar, Union, overload
+import os
+import sys
+from collections.abc import Callable
+from typing import TypeVar, overload
 from unittest.mock import patch
 
 import torch
@@ -11,12 +15,14 @@ import torch.nn as nn
 from packaging import version
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.utils import resolve_obj_by_qualname, supports_dynamo
+from vllm.utils import supports_dynamo
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .monitor import start_monitoring_torch_compile
 
@@ -57,14 +63,14 @@ def _should_ignore_torch_compile(cls) -> bool:
 @overload
 def support_torch_compile(
     *,
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> Callable[[_T], _T]: ...
 
 
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]],
+    dynamic_arg_dims: dict[str, int | list[int]] | None,
 ) -> Callable[[_T], _T]: ...
 
 
@@ -73,11 +79,11 @@ def support_torch_compile(cls: _T) -> _T: ...
 
 
 def support_torch_compile(
-    cls: Optional[_T] = None,
+    cls: _T | None = None,
     *,
-    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
-) -> Union[Callable[[_T], _T], _T]:
+    dynamic_arg_dims: dict[str, int | list[int]] | None = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
+) -> Callable[[_T], _T] | _T:
     """
     A decorator to add support for compiling the forward method of a class.
 
@@ -132,8 +138,8 @@ def support_torch_compile(
     """
 
     def cls_decorator_helper(cls: _T) -> _T:
-        # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
-        # to avoid too much indentation for `_support_torch_compile``
+        # helper to pass `dynamic_arg_dims` to `_support_torch_compile`
+        # to avoid too much indentation for `_support_torch_compile`
         if not hasattr(cls, "forward"):
             raise TypeError("decorated class should have a forward method.")
         sig = inspect.signature(cls.forward)
@@ -143,9 +149,9 @@ def support_torch_compile(
             for k, v in sig.parameters.items():
                 if v.annotation in [
                     torch.Tensor,
-                    Optional[torch.Tensor],
+                    torch.Tensor | None,
                     IntermediateTensors,
-                    Optional[IntermediateTensors],
+                    IntermediateTensors | None,
                 ]:
                     inferred_dynamic_arg_dims[k] = 0
 
@@ -176,10 +182,37 @@ def support_torch_compile(
     return cls_decorator_helper
 
 
+def _model_hash_key(fn) -> str:
+    import vllm
+
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(vllm.__version__.encode())
+    sha256_hash.update(fn.__qualname__.encode())
+    sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
+    return sha256_hash.hexdigest()
+
+
+def _verify_source_unchanged(source_info, vllm_config) -> None:
+    from .caching import _compute_code_hash, _compute_code_hash_with_content
+
+    file_contents = {}
+    for source in source_info.inlined_sources:
+        module = sys.modules[source.module]
+        file = inspect.getfile(module)
+        vllm_config.compilation_config.traced_files.add(file)
+        file_contents[file] = source.content
+    expected_checksum = _compute_code_hash_with_content(file_contents)
+    actual_checksum = _compute_code_hash(set(file_contents.keys()))
+    if expected_checksum != actual_checksum:
+        raise RuntimeError(
+            "Source code has changed since the last compilation. Recompiling the model."
+        )
+
+
 def _support_torch_compile(
     cls: _T,
-    dynamic_arg_dims: dict[str, Union[int, list[int]]],
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    dynamic_arg_dims: dict[str, int | list[int]],
+    enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -201,11 +234,11 @@ def _support_torch_compile(
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
         enable_compile = enable_if is None or enable_if(vllm_config)
-        # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
+        # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = (
-            vllm_config.compilation_config.level
-            in [CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS]
+            vllm_config.compilation_config.mode
+            in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
             or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile
@@ -215,7 +248,7 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level
+            self, compilation_mode=vllm_config.compilation_config.mode
         )
 
     cls.__init__ = __init__
@@ -226,6 +259,64 @@ def _support_torch_compile(
         # need to compile the model inside.
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
+
+        if getattr(self, "aot_compiled_fn", None) is not None:
+            return self.aot_compiled_fn(self, *args, **kwargs)
+
+        cache_dir = None
+        aot_compilation_path = None
+        if envs.VLLM_USE_AOT_COMPILE:
+            """
+            When using torch.compile in AOT mode, we store the cache artifacts
+            under VLLM_CACHE_ROOT/torch_aot_compile/{hash}/rank_i_j. The {hash}
+            contains all of the factors except for the source files being
+            traced through, because we don't actually know which source files
+            to check at this point (before dynamo runs).
+            On loading we will actually look at the source files being traced
+            through. If any source file have changed (compared with the
+            serialized backend artifacts), then we need to generate a new AOT
+            compile artifact from scratch.
+            """
+            from .caching import compilation_config_hash_factors
+
+            factors: list[str] = compilation_config_hash_factors(self.vllm_config)
+
+            factors.append(_model_hash_key(self.forward))
+            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
+
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT,
+                "torch_aot_compile",
+                hash_key,
+            )
+
+            rank = self.vllm_config.parallel_config.rank
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+            aot_compilation_path = os.path.join(cache_dir, "model")
+            try:
+                with (
+                    set_current_vllm_config(self.vllm_config),
+                    open(aot_compilation_path, "rb") as f,
+                ):
+                    start_monitoring_torch_compile(self.vllm_config)
+                    loaded_fn = torch.compiler.load_compiled_function(f)
+                _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
+                self.aot_compiled_fn = loaded_fn
+            except Exception as e:
+                if os.path.exists(aot_compilation_path):
+                    logger.warning(
+                        "Cannot load aot compilation from path %s, error: %s",
+                        aot_compilation_path,
+                        str(e),
+                    )
+                if envs.VLLM_FORCE_AOT_LOAD:
+                    raise e
+            if getattr(self, "aot_compiled_fn", None) is not None:
+                logger.info(
+                    "Directly load AOT compilation from path %s", aot_compilation_path
+                )
+                return self.aot_compiled_fn(self, *args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
@@ -275,15 +366,15 @@ def _support_torch_compile(
             )
 
             # 2. every time Dynamo sees a function call, it will inline
-            # the function by calling InliningInstructionTranslator.inline_call
+            # the function by calling InliningInstructionTranslator.inline_call_
             # we hijack this function to know all the functions called
             # during Dynamo tracing, and their corresponding files
-            inline_call = InliningInstructionTranslator.inline_call
+            inline_call = InliningInstructionTranslator.inline_call_
 
-            def patched_inline_call(parent, func, args, kwargs):
-                code = func.get_code()
+            def patched_inline_call(self_):
+                code = self_.f_code
                 self.vllm_config.compilation_config.traced_files.add(code.co_filename)
-                return inline_call(parent, func, args, kwargs)
+                return inline_call(self_)
 
             # Disable the C++ compilation of symbolic shape guards. C++-fication
             # of symbolic shape guards can improve guard overhead. But, since
@@ -300,13 +391,21 @@ def _support_torch_compile(
 
             with (
                 patch.object(
-                    InliningInstructionTranslator, "inline_call", patched_inline_call
+                    InliningInstructionTranslator, "inline_call_", patched_inline_call
                 ),
                 torch._dynamo.config.patch(**dynamo_config_patches),
                 maybe_use_cudagraph_partition_wrapper(self.vllm_config),
                 _torch27_patch_tensor_subclasses(),
             ):
-                output = self.compiled_callable(*args, **kwargs)
+                if envs.VLLM_USE_AOT_COMPILE:
+                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                    assert aot_compilation_path is not None
+                    assert cache_dir is not None
+                    os.makedirs(cache_dir, exist_ok=True)
+                    self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
+                else:
+                    output = self.compiled_callable(*args, **kwargs)
             return output
 
         # usually, capturing the model once is enough, and then we can

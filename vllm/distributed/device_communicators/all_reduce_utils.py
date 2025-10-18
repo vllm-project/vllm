@@ -10,7 +10,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from itertools import product
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -19,6 +19,9 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.utils import cuda_device_count_stateless, update_environment_variables
 
 logger = init_logger(__name__)
@@ -71,6 +74,9 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
         is_symmetric_memory_enabled,
     )
 
+    if vllm_is_batch_invariant():
+        return False
+
     if not is_symmetric_memory_enabled():
         return False
     if world_size < NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]:
@@ -86,7 +92,7 @@ def producer(
     producer_queue,
     consumer_queue,
     result_queue,
-    cuda_visible_devices: Optional[str] = None,
+    cuda_visible_devices: str | None = None,
 ):
     if cuda_visible_devices is not None:
         update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
@@ -120,7 +126,7 @@ def consumer(
     producer_queue,
     consumer_queue,
     result_queue,
-    cuda_visible_devices: Optional[str] = None,
+    cuda_visible_devices: str | None = None,
 ):
     if cuda_visible_devices is not None:
         update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
@@ -253,7 +259,7 @@ def can_actually_p2p(
 #  e.g. used by different vllm engines. The device id in the cache file is a
 #  **local** device id, i.e. from 0 to num_dev-1, where num_dev is the number
 #  of visible devices in the vllm engine.
-_gpu_p2p_access_cache: Optional[dict[str, bool]] = None
+_gpu_p2p_access_cache: dict[str, bool] | None = None
 
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:

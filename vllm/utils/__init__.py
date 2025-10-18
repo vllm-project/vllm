@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
-import asyncio
-import concurrent
 import contextlib
 import datetime
 import enum
@@ -12,8 +8,6 @@ import gc
 import getpass
 import hashlib
 import importlib
-import importlib.metadata
-import importlib.util
 import inspect
 import ipaddress
 import json
@@ -29,7 +23,6 @@ import textwrap
 import threading
 import time
 import traceback
-import types
 import uuid
 import warnings
 import weakref
@@ -41,34 +34,19 @@ from argparse import (
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
 )
-from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
-from collections import UserDict, defaultdict
+from collections import defaultdict
 from collections.abc import (
-    AsyncGenerator,
-    Awaitable,
+    Callable,
     Collection,
     Generator,
-    Hashable,
-    Iterable,
     Iterator,
-    Mapping,
     Sequence,
 )
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Generic,
-    Literal,
-    TextIO,
-    TypeVar,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -87,8 +65,6 @@ import zmq.asyncio
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
-from transformers.tokenization_utils_base import BatchEncoding
-from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -99,6 +75,12 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig, VllmConfig
     from vllm.sequence import IntermediateTensors
+else:
+    Namespace = object
+
+    ModelConfig = object
+    VllmConfig = object
+    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
@@ -171,12 +153,8 @@ def set_default_torch_num_threads(num_threads: int):
     torch.set_num_threads(old_num_threads)
 
 
-P = ParamSpec("P")
 T = TypeVar("T")
 U = TypeVar("U")
-
-_K = TypeVar("_K", bound=Hashable)
-_V = TypeVar("_V")
 
 
 class Device(enum.Enum):
@@ -223,296 +201,10 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-class AsyncMicrobatchTokenizer:
-    """Asynchronous tokenizer with micro-batching.
-
-    Pulls pending encode/decode requests from a queue and batches them
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used
-    so the event loop stays responsive.
-    """
-
-    def __init__(
-        self,
-        tokenizer,
-        max_batch_size: int = 32,
-        batch_wait_timeout_s: float = 0.002,
-    ) -> None:
-        self.tokenizer = tokenizer
-        self.max_batch_size = max_batch_size
-        self.batch_wait_timeout_s = batch_wait_timeout_s
-
-        self._loop = asyncio.get_running_loop()
-        self._queues: dict[
-            tuple,
-            asyncio.Queue[
-                Union[
-                    tuple[str, dict, asyncio.Future], tuple[list[int], asyncio.Future]
-                ]
-            ],
-        ] = {}
-        self._batcher_tasks: list[asyncio.Task] = []
-
-        # Single-thread executor for blocking tokenizer calls.
-        self._executor = ThreadPoolExecutor(max_workers=1)
-
-    # === Public async API ===
-    async def __call__(self, prompt, **kwargs):
-        result_future: asyncio.Future = self._loop.create_future()
-        key = self._queue_key("encode", kwargs)
-        queue = self._get_queue(self._loop, key)
-        await queue.put((prompt, kwargs, result_future))
-        return await result_future
-
-    async def decode(self, token_ids, **kwargs):
-        result_future: asyncio.Future = self._loop.create_future()
-        key = self._queue_key("decode", kwargs)
-        queue = self._get_queue(self._loop, key)
-        await queue.put((token_ids, result_future))
-        return await result_future
-
-    # === Internal helpers ===
-    def _get_queue(
-        self, loop: asyncio.AbstractEventLoop, key: tuple
-    ) -> asyncio.Queue[
-        Union[tuple[str, dict, asyncio.Future], tuple[list[int], asyncio.Future]]
-    ]:
-        """Get the request queue for the given operation key, creating a new
-        queue and batcher task if needed."""
-        queue = self._queues.get(key)
-        if queue is None:
-            self._queues[key] = queue = asyncio.Queue()
-            if key[0] == "encode":
-                can_batch = key[1] != "other"
-                coro = self._batch_encode_loop(queue, can_batch)
-            else:
-                assert key[0] == "decode", f"Unknown operation type: {key[0]}."
-                coro = self._batch_decode_loop(queue)
-            self._batcher_tasks.append(loop.create_task(coro))
-        return queue
-
-    async def _batch_encode_loop(self, queue: asyncio.Queue, can_batch: bool):
-        """Batch incoming encode requests for efficiency."""
-        while True:
-            prompt, kwargs, result_future = await queue.get()
-            prompts = [prompt]
-            kwargs_list = [kwargs]
-            result_futures = [result_future]
-            deadline = self._loop.time() + self.batch_wait_timeout_s
-
-            while len(prompts) < self.max_batch_size:
-                timeout = deadline - self._loop.time()
-                if timeout <= 0:
-                    break
-                try:
-                    prompt, kwargs, result_future = await asyncio.wait_for(
-                        queue.get(), timeout
-                    )
-                    prompts.append(prompt)
-                    result_futures.append(result_future)
-                    if not can_batch:
-                        kwargs_list.append(kwargs)
-                except asyncio.TimeoutError:
-                    break
-
-            try:
-                # If every request uses identical kwargs we can run a single
-                # batched tokenizer call for a big speed-up.
-                if can_batch and len(prompts) > 1:
-                    batch_encode_fn = partial(self.tokenizer, prompts, **kwargs)
-                    results = await self._loop.run_in_executor(
-                        self._executor, batch_encode_fn
-                    )
-
-                    for i, fut in enumerate(result_futures):
-                        if not fut.done():
-                            data = {k: v[i] for k, v in results.items()}
-                            fut.set_result(BatchEncoding(data))
-                else:
-                    encode_fn = lambda prompts=prompts, kwargs=kwargs_list: [
-                        self.tokenizer(p, **kw) for p, kw in zip(prompts, kwargs)
-                    ]
-                    results = await self._loop.run_in_executor(
-                        self._executor, encode_fn
-                    )
-
-                    for fut, res in zip(result_futures, results):
-                        if not fut.done():
-                            fut.set_result(res)
-            except Exception as e:
-                for fut in result_futures:
-                    if not fut.done():
-                        fut.set_exception(e)
-
-    async def _batch_decode_loop(self, queue: asyncio.Queue):
-        """Batch incoming decode requests for efficiency."""
-        while True:
-            token_ids, result_future = await queue.get()
-            token_ids_list = [token_ids]
-            result_futures = [result_future]
-            deadline = self._loop.time() + self.batch_wait_timeout_s
-
-            while len(token_ids_list) < self.max_batch_size:
-                timeout = deadline - self._loop.time()
-                if timeout <= 0:
-                    break
-                try:
-                    token_ids, result_future = await asyncio.wait_for(
-                        queue.get(), timeout
-                    )
-                    token_ids_list.append(token_ids)
-                    result_futures.append(result_future)
-                except asyncio.TimeoutError:
-                    break
-
-            try:
-                # Perform a single batched decode call for all requests
-                results = await self._loop.run_in_executor(
-                    self._executor, self.tokenizer.batch_decode, token_ids_list
-                )
-                for fut, res in zip(result_futures, results):
-                    if not fut.done():
-                        fut.set_result(res)
-            except Exception as e:
-                for fut in result_futures:
-                    if not fut.done():
-                        fut.set_exception(e)
-
-    def _queue_key(self, op: str, kwargs: dict) -> tuple:
-        """
-        Return a normalized key describing operation + kwargs.
-
-        - `add_special_tokens`: {True/False}
-        - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None),
-            returns a key for a can_batch queue.
-          - If `truncation` is True and `max_length` is None or equals
-            `tokenizer.model_max_length`, returns a key for a can_batch queue.
-          - Otherwise, returns a key for a cannot_batch queue.
-
-        Examples:
-          - Decode: ("decode",)
-          - Encode typical:
-            ("encode", add_special_tokens, bool_truncation, max_length_label)
-          - Fallback: ("encode", "other")
-        """
-
-        if op == "decode":
-            return ("decode",)
-
-        add_special_tokens = kwargs.get("add_special_tokens", True)
-        truncation = kwargs.get("truncation", False)
-        max_length = kwargs.get("max_length")
-
-        if not truncation:
-            return "encode", add_special_tokens, False, None
-
-        model_max = getattr(self.tokenizer, "model_max_length", None)
-        if max_length is None or (model_max is not None and max_length == model_max):
-            return "encode", add_special_tokens, True, "model_max"
-
-        return "encode", "other"
-
-    def __del__(self):
-        if (
-            (tasks := getattr(self, "_batcher_tasks", None))
-            and (loop := getattr(self, "_loop", None))
-            and not loop.is_closed()
-        ):
-
-            def cancel_tasks():
-                for task in tasks:
-                    task.cancel()
-
-            loop.call_soon_threadsafe(cancel_tasks)
-
-
-def cancel_task_threadsafe(task: Task):
-    if task and not task.done():
-        run_in_loop(task.get_loop(), task.cancel)
-
-
-def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
     for sock in sockets:
         if sock is not None:
             sock.close(linger=0)
-
-
-def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
-    if in_loop(loop):
-        function(*args)
-    elif not loop.is_closed():
-        loop.call_soon_threadsafe(function, *args)
-
-
-def in_loop(event_loop: AbstractEventLoop) -> bool:
-    try:
-        return asyncio.get_running_loop() == event_loop
-    except RuntimeError:
-        return False
-
-
-def make_async(
-    func: Callable[P, T], executor: concurrent.futures.Executor | None = None
-) -> Callable[P, Awaitable[T]]:
-    """Take a blocking function, and run it on in an executor thread.
-
-    This function prevents the blocking function from blocking the
-    asyncio event loop.
-    The code in this function needs to be thread safe.
-    """
-
-    def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
-        loop = asyncio.get_event_loop()
-        p_func = partial(func, *args, **kwargs)
-        return loop.run_in_executor(executor=executor, func=p_func)
-
-    return _async_wrapper
-
-
-async def merge_async_iterators(
-    *iterators: AsyncGenerator[T, None],
-) -> AsyncGenerator[tuple[int, T], None]:
-    """Merge multiple asynchronous iterators into a single iterator.
-
-    This method handle the case where some iterators finish before others.
-    When it yields, it yields a tuple (i, item) where i is the index of the
-    iterator that yields the item.
-    """
-    if len(iterators) == 1:
-        # Fast-path single iterator case.
-        async for item in iterators[0]:
-            yield 0, item
-        return
-
-    loop = asyncio.get_running_loop()
-
-    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
-    try:
-        while awaits:
-            done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
-            for d in done:
-                pair = awaits.pop(d)
-                try:
-                    item = await d
-                    i, it = pair
-                    awaits[loop.create_task(anext(it))] = pair
-                    yield i, item
-                except StopAsyncIteration:
-                    pass
-    finally:
-        # Cancel any remaining iterators
-        for f, (_, it) in awaits.items():
-            with contextlib.suppress(BaseException):
-                f.cancel()
-                await it.aclose()
-
-
-async def collect_from_async_generator(iterator: AsyncGenerator[T, None]) -> list[T]:
-    """Collect all items from an async generator into a list."""
-    items = []
-    async for item in iterator:
-        items.append(item)
-    return items
 
 
 def get_ip() -> str:
@@ -712,12 +404,6 @@ def update_environment_variables(envs: dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst: list[T], chunk_size: int):
-    """Yield successive chunk_size chunks from lst."""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
-
-
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
@@ -767,8 +453,8 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
 ) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -795,8 +481,8 @@ def create_kv_caches_with_random_flash(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
     cache_layout: str | None = "NHD",
@@ -805,7 +491,7 @@ def create_kv_caches_with_random_flash(
 
     current_platform.seed_everything(seed)
 
-    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     assert cache_layout in ("NHD", "HND")
     stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
@@ -818,7 +504,7 @@ def create_kv_caches_with_random_flash(
 
     for _ in range(num_layers):
         key_value_cache = torch.empty(
-            size=kv_cache_allocation_shape, dtype=torch_dtype, device=device
+            size=kv_cache_allocation_shape, dtype=dtype, device=device
         ).permute(*stride_order)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_value_cache.uniform_(-scale, scale)
@@ -837,8 +523,8 @@ def create_kv_caches_with_random(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
@@ -850,14 +536,14 @@ def create_kv_caches_with_random(
 
     current_platform.seed_everything(seed)
 
-    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
     scale = head_size**-0.5
-    x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
+    x = 16 // torch.tensor([], dtype=dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
     key_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
-        key_cache = torch.empty(size=key_cache_shape, dtype=torch_dtype, device=device)
+        key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_cache.uniform_(-scale, scale)
         elif cache_dtype == "fp8":
@@ -869,9 +555,7 @@ def create_kv_caches_with_random(
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
     value_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
-        value_cache = torch.empty(
-            size=value_cache_shape, dtype=torch_dtype, device=device
-        )
+        value_cache = torch.empty(size=value_cache_shape, dtype=dtype, device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             value_cache.uniform_(-scale, scale)
         elif cache_dtype == "fp8":
@@ -952,7 +636,7 @@ def make_tensor_with_pad(
     dtype: torch.dtype,
     *,
     max_len: int | None = None,
-    device: Union[str, torch.device] | None = None,
+    device: str | torch.device | None = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
@@ -974,7 +658,7 @@ def make_tensor_with_pad(
 def async_tensor_h2d(
     data: list,
     dtype: torch.dtype,
-    target_device: Union[str, torch.device],
+    target_device: str | torch.device,
     pin_memory: bool,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
@@ -1034,53 +718,6 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
         dtypes,
         key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
     )
-
-
-def as_list(maybe_list: Iterable[T]) -> list[T]:
-    """Convert iterable to list, unless it's already a list."""
-    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
-
-
-def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
-    if isinstance(obj, str) or not isinstance(obj, Iterable):
-        return [obj]  # type: ignore[list-item]
-    return obj
-
-
-# `collections` helpers
-def is_list_of(
-    value: object,
-    typ: Union[type[T], tuple[type[T], ...]],
-    *,
-    check: Literal["first", "all"] = "first",
-) -> TypeIs[list[T]]:
-    if not isinstance(value, list):
-        return False
-
-    if check == "first":
-        return len(value) == 0 or isinstance(value[0], typ)
-    elif check == "all":
-        return all(isinstance(v, typ) for v in value)
-
-    assert_never(check)
-
-
-def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
-    """Flatten a list of lists to a single list."""
-    return [item for sublist in lists for item in sublist]
-
-
-def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
-    """
-    Unlike [`itertools.groupby`][], groups are not broken by
-    non-contiguous data.
-    """
-    groups = defaultdict[_K, list[_V]](list)
-
-    for value in values:
-        groups[key(value)].append(value)
-
-    return groups.items()
 
 
 # TODO: This function can be removed if transformer_modules classes are
@@ -1143,7 +780,7 @@ def find_nccl_library() -> str:
             so_file = "librccl.so.1"
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.info("Found nccl from library %s", so_file)
+        logger.debug_once("Found nccl from library %s", so_file)
     return so_file
 
 
@@ -1160,8 +797,6 @@ def find_nccl_include_paths() -> list[str] | None:
         paths.append(inc)
 
     try:
-        import importlib.util
-
         spec = importlib.util.find_spec("nvidia.nccl")
         if spec and getattr(spec, "submodule_search_locations", None):
             for loc in spec.submodule_search_locations:
@@ -1255,90 +890,6 @@ def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
         enable_trace_function_call(log_path)
 
 
-# `functools` helpers
-def identity(value: T, **kwargs) -> T:
-    """Returns the first provided value."""
-    return value
-
-
-F = TypeVar("F", bound=Callable[..., Any])
-
-
-def deprecate_args(
-    start_index: int,
-    is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: str | None = None,
-) -> Callable[[F], F]:
-    if not callable(is_deprecated):
-        is_deprecated = partial(identity, is_deprecated)
-
-    def wrapper(fn: F) -> F:
-        params = inspect.signature(fn).parameters
-        pos_types = (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        pos_kws = [kw for kw, param in params.items() if param.kind in pos_types]
-
-        @wraps(fn)
-        def inner(*args, **kwargs):
-            if is_deprecated():
-                deprecated_args = pos_kws[start_index : len(args)]
-                if deprecated_args:
-                    msg = (
-                        f"The positional arguments {deprecated_args} are "
-                        "deprecated and will be removed in a future update."
-                    )
-                    if additional_message is not None:
-                        msg += f" {additional_message}"
-
-                    warnings.warn(
-                        DeprecationWarning(msg),
-                        stacklevel=3,  # The inner function takes up one level
-                    )
-
-            return fn(*args, **kwargs)
-
-        return inner  # type: ignore
-
-    return wrapper
-
-
-def deprecate_kwargs(
-    *kws: str,
-    is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: str | None = None,
-) -> Callable[[F], F]:
-    deprecated_kws = set(kws)
-
-    if not callable(is_deprecated):
-        is_deprecated = partial(identity, is_deprecated)
-
-    def wrapper(fn: F) -> F:
-        @wraps(fn)
-        def inner(*args, **kwargs):
-            if is_deprecated():
-                deprecated_kwargs = kwargs.keys() & deprecated_kws
-                if deprecated_kwargs:
-                    msg = (
-                        f"The keyword arguments {deprecated_kwargs} are "
-                        "deprecated and will be removed in a future update."
-                    )
-                    if additional_message is not None:
-                        msg += f" {additional_message}"
-
-                    warnings.warn(
-                        DeprecationWarning(msg),
-                        stacklevel=3,  # The inner function takes up one level
-                    )
-
-            return fn(*args, **kwargs)
-
-        return inner  # type: ignore
-
-    return wrapper
-
-
 @lru_cache(maxsize=8)
 def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
@@ -1349,7 +900,6 @@ def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     # c1cd946818442aca8c7f812b16d187ce1586c3bc/
     # torch/cuda/__init__.py#L831C1-L831C17
     import torch.cuda
-    import torch.version
 
     from vllm.platforms import current_platform
 
@@ -1425,21 +975,6 @@ def weak_bind(
             unbound(inst, *args, **kwargs)
 
     return weak_bound
-
-
-def run_once(f: Callable[P, None]) -> Callable[P, None]:
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        if wrapper.has_run:  # type: ignore[attr-defined]
-            return
-
-        with wrapper.lock:  # type: ignore[attr-defined]
-            if not wrapper.has_run:  # type: ignore[attr-defined]
-                wrapper.has_run = True  # type: ignore[attr-defined]
-                return f(*args, **kwargs)
-
-    wrapper.has_run = False  # type: ignore[attr-defined]
-    wrapper.lock = threading.Lock()  # type: ignore[attr-defined]
-    return wrapper
 
 
 class StoreBoolean(Action):
@@ -1685,16 +1220,16 @@ class FlexibleArgumentParser(ArgumentParser):
             elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # -O.<...> handled later
-                # also handle -O=<level> here
-                level = arg[3:] if arg[2] == "=" else arg[2:]
-                processed_args.append(f"-O.level={level}")
+                # also handle -O=<mode> here
+                mode = arg[3:] if arg[2] == "=" else arg[2:]
+                processed_args.append(f"-O.mode={mode}")
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
                 and args[i + 1] in {"0", "1", "2", "3"}
             ):
-                # Convert -O <n> to -O.level <n>
-                processed_args.append("-O.level")
+                # Convert -O <n> to -O.mode <n>
+                processed_args.append("-O.mode")
             else:
                 processed_args.append(arg)
 
@@ -1892,7 +1427,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # only expecting a flat dictionary of atomic types
         processed_args: list[str] = []
 
-        config: dict[str, Union[int, str]] = {}
+        config: dict[str, int | str] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -1922,128 +1457,6 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(str(value))
 
         return processed_args
-
-
-async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args, **kwargs):
-    """Utility function to run async task in a lock"""
-    async with lock:
-        return await task(*args, **kwargs)
-
-
-@lru_cache
-def supports_kw(
-    callable: Callable[..., object],
-    kw_name: str,
-    *,
-    requires_kw_only: bool = False,
-    allow_var_kwargs: bool = True,
-) -> bool:
-    """Check if a keyword is a valid kwarg for a callable; if requires_kw_only
-    disallows kwargs names that can also be positional arguments.
-    """
-    params = inspect.signature(callable).parameters
-    if not params:
-        return False
-
-    param_val = params.get(kw_name)
-
-    # Types where the it may be valid, i.e., explicitly defined & nonvariadic
-    passable_kw_types = set(
-        (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        )
-    )
-
-    if param_val:
-        is_sig_param = param_val.kind in passable_kw_types
-        # We want kwargs only, but this is passable as a positional arg
-        if (
-            requires_kw_only
-            and is_sig_param
-            and param_val.kind != inspect.Parameter.KEYWORD_ONLY
-        ):
-            return False
-        if (requires_kw_only and param_val.kind == inspect.Parameter.KEYWORD_ONLY) or (
-            not requires_kw_only and is_sig_param
-        ):
-            return True
-
-    # If we're okay with var-kwargs, it's supported as long as
-    # the kw_name isn't something like *args, **kwargs
-    if allow_var_kwargs:
-        # Get the last param; type is ignored here because params is a proxy
-        # mapping, but it wraps an ordered dict, and they appear in order.
-        # Ref: https://docs.python.org/3/library/inspect.html#inspect.Signature.parameters
-        last_param = params[next(reversed(params))]  # type: ignore
-        return (
-            last_param.kind == inspect.Parameter.VAR_KEYWORD
-            and last_param.name != kw_name
-        )
-
-    return False
-
-
-def get_allowed_kwarg_only_overrides(
-    callable: Callable[..., object],
-    overrides: Mapping[str, object] | None,
-    *,
-    requires_kw_only: bool = True,
-    allow_var_kwargs: bool = False,
-) -> dict[str, Any]:
-    """
-    Given a callable which has one or more keyword only params and a dict
-    mapping param names to values, drop values that can be not be kwarg
-    expanded to overwrite one or more keyword-only args. This is used in a
-    few places to handle custom processor overrides for multimodal models,
-    e.g., for profiling when processor options provided by the user
-    may affect the number of mm tokens per instance.
-
-    Args:
-        callable: Callable which takes 0 or more keyword only arguments.
-                  If None is provided, all overrides names are allowed.
-        overrides: Potential overrides to be used when invoking the callable.
-        allow_var_kwargs: Allows overrides that are expandable for var kwargs.
-
-    Returns:
-        Dictionary containing the kwargs to be leveraged which may be used
-        to overwrite one or more keyword only arguments when invoking the
-        callable.
-    """
-    if not overrides:
-        return {}
-
-    # Drop any mm_processor_kwargs provided by the user that
-    # are not kwargs, unless it can fit it var_kwargs param
-    filtered_overrides = {
-        kwarg_name: val
-        for kwarg_name, val in overrides.items()
-        if supports_kw(
-            callable,
-            kwarg_name,
-            requires_kw_only=requires_kw_only,
-            allow_var_kwargs=allow_var_kwargs,
-        )
-    }
-
-    # If anything is dropped, log a warning
-    dropped_keys = overrides.keys() - filtered_overrides.keys()
-    if dropped_keys:
-        if requires_kw_only:
-            logger.warning(
-                "The following intended overrides are not keyword-only args "
-                "and will be dropped: %s",
-                dropped_keys,
-            )
-        else:
-            logger.warning(
-                "The following intended overrides are not keyword args "
-                "and will be dropped: %s",
-                dropped_keys,
-            )
-
-    return filtered_overrides
 
 
 # Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
@@ -2092,50 +1505,6 @@ class AtomicCounter:
         return self._value
 
 
-# Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping[str, T], Generic[T]):
-    def __init__(self, factory: dict[str, Callable[[], T]]):
-        self._factory = factory
-        self._dict: dict[str, T] = {}
-
-    def __getitem__(self, key: str) -> T:
-        if key not in self._dict:
-            if key not in self._factory:
-                raise KeyError(key)
-            self._dict[key] = self._factory[key]()
-        return self._dict[key]
-
-    def __setitem__(self, key: str, value: Callable[[], T]):
-        self._factory[key] = value
-
-    def __iter__(self):
-        return iter(self._factory)
-
-    def __len__(self):
-        return len(self._factory)
-
-
-class ClassRegistry(UserDict[type[T], _V]):
-    def __getitem__(self, key: type[T]) -> _V:
-        for cls in key.mro():
-            if cls in self.data:
-                return self.data[cls]
-
-        raise KeyError(key)
-
-    def __contains__(self, key: object) -> bool:
-        return self.contains(key)
-
-    def contains(self, key: object, *, strict: bool = False) -> bool:
-        if not isinstance(key, type):
-            return False
-
-        if strict:
-            return key in self.data
-
-        return any(cls in self.data for cls in key.mro())
-
-
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -2149,10 +1518,11 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[
-        torch.Tensor, list[torch.Tensor], tuple[torch.Tensor], IntermediateTensors
-    ],
-) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    tensors: torch.Tensor
+    | list[torch.Tensor]
+    | tuple[torch.Tensor]
+    | IntermediateTensors,
+) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -2181,253 +1551,6 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
-
-
-def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
-    """
-    Import a Python file according to its file path.
-
-    Based on the official recipe:
-    https://docs.python.org/3/library/importlib.html#importing-a-source-file-directly
-    """
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None:
-        raise ModuleNotFoundError(f"No module named '{module_name}'")
-
-    assert spec.loader is not None
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-@cache
-def get_vllm_optional_dependencies():
-    metadata = importlib.metadata.metadata("vllm")
-    requirements = metadata.get_all("Requires-Dist", [])
-    extras = metadata.get_all("Provides-Extra", [])
-
-    return {
-        extra: [
-            re.split(r";|>=|<=|==", req)[0]
-            for req in requirements
-            if req.endswith(f'extra == "{extra}"')
-        ]
-        for extra in extras
-    }
-
-
-class _PlaceholderBase:
-    """
-    Disallows downstream usage of placeholder modules.
-
-    We need to explicitly override each dunder method because
-    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
-    is not called when they are accessed.
-
-    Info:
-        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
-    """
-
-    def __getattr__(self, key: str) -> Never:
-        """
-        The main class should implement this to throw an error
-        for attribute accesses representing downstream usage.
-        """
-        raise NotImplementedError
-
-    # [Basic customization]
-
-    def __lt__(self, other: object):
-        return self.__getattr__("__lt__")
-
-    def __le__(self, other: object):
-        return self.__getattr__("__le__")
-
-    def __eq__(self, other: object):
-        return self.__getattr__("__eq__")
-
-    def __ne__(self, other: object):
-        return self.__getattr__("__ne__")
-
-    def __gt__(self, other: object):
-        return self.__getattr__("__gt__")
-
-    def __ge__(self, other: object):
-        return self.__getattr__("__ge__")
-
-    def __hash__(self):
-        return self.__getattr__("__hash__")
-
-    def __bool__(self):
-        return self.__getattr__("__bool__")
-
-    # [Callable objects]
-
-    def __call__(self, *args: object, **kwargs: object):
-        return self.__getattr__("__call__")
-
-    # [Container types]
-
-    def __len__(self):
-        return self.__getattr__("__len__")
-
-    def __getitem__(self, key: object):
-        return self.__getattr__("__getitem__")
-
-    def __setitem__(self, key: object, value: object):
-        return self.__getattr__("__setitem__")
-
-    def __delitem__(self, key: object):
-        return self.__getattr__("__delitem__")
-
-    # __missing__ is optional according to __getitem__ specification,
-    # so it is skipped
-
-    # __iter__ and __reversed__ have a default implementation
-    # based on __len__ and __getitem__, so they are skipped.
-
-    # [Numeric Types]
-
-    def __add__(self, other: object):
-        return self.__getattr__("__add__")
-
-    def __sub__(self, other: object):
-        return self.__getattr__("__sub__")
-
-    def __mul__(self, other: object):
-        return self.__getattr__("__mul__")
-
-    def __matmul__(self, other: object):
-        return self.__getattr__("__matmul__")
-
-    def __truediv__(self, other: object):
-        return self.__getattr__("__truediv__")
-
-    def __floordiv__(self, other: object):
-        return self.__getattr__("__floordiv__")
-
-    def __mod__(self, other: object):
-        return self.__getattr__("__mod__")
-
-    def __divmod__(self, other: object):
-        return self.__getattr__("__divmod__")
-
-    def __pow__(self, other: object, modulo: object = ...):
-        return self.__getattr__("__pow__")
-
-    def __lshift__(self, other: object):
-        return self.__getattr__("__lshift__")
-
-    def __rshift__(self, other: object):
-        return self.__getattr__("__rshift__")
-
-    def __and__(self, other: object):
-        return self.__getattr__("__and__")
-
-    def __xor__(self, other: object):
-        return self.__getattr__("__xor__")
-
-    def __or__(self, other: object):
-        return self.__getattr__("__or__")
-
-    # r* and i* methods have lower priority than
-    # the methods for left operand so they are skipped
-
-    def __neg__(self):
-        return self.__getattr__("__neg__")
-
-    def __pos__(self):
-        return self.__getattr__("__pos__")
-
-    def __abs__(self):
-        return self.__getattr__("__abs__")
-
-    def __invert__(self):
-        return self.__getattr__("__invert__")
-
-    # __complex__, __int__ and __float__ have a default implementation
-    # based on __index__, so they are skipped.
-
-    def __index__(self):
-        return self.__getattr__("__index__")
-
-    def __round__(self, ndigits: object = ...):
-        return self.__getattr__("__round__")
-
-    def __trunc__(self):
-        return self.__getattr__("__trunc__")
-
-    def __floor__(self):
-        return self.__getattr__("__floor__")
-
-    def __ceil__(self):
-        return self.__getattr__("__ceil__")
-
-    # [Context managers]
-
-    def __enter__(self):
-        return self.__getattr__("__enter__")
-
-    def __exit__(self, *args: object, **kwargs: object):
-        return self.__getattr__("__exit__")
-
-
-class PlaceholderModule(_PlaceholderBase):
-    """
-    A placeholder object to use when a module does not exist.
-
-    This enables more informative errors when trying to access attributes
-    of a module that does not exist.
-    """
-
-    def __init__(self, name: str) -> None:
-        super().__init__()
-
-        # Apply name mangling to avoid conflicting with module attributes
-        self.__name = name
-
-    def placeholder_attr(self, attr_path: str):
-        return _PlaceholderModuleAttr(self, attr_path)
-
-    def __getattr__(self, key: str):
-        name = self.__name
-
-        try:
-            importlib.import_module(name)
-        except ImportError as exc:
-            for extra, names in get_vllm_optional_dependencies().items():
-                if name in names:
-                    msg = f"Please install vllm[{extra}] for {extra} support"
-                    raise ImportError(msg) from exc
-
-            raise exc
-
-        raise AssertionError(
-            "PlaceholderModule should not be used "
-            "when the original module can be imported"
-        )
-
-
-class _PlaceholderModuleAttr(_PlaceholderBase):
-    def __init__(self, module: PlaceholderModule, attr_path: str) -> None:
-        super().__init__()
-
-        # Apply name mangling to avoid conflicting with module attributes
-        self.__module = module
-        self.__attr_path = attr_path
-
-    def placeholder_attr(self, attr_path: str):
-        return _PlaceholderModuleAttr(self.__module, f"{self.__attr_path}.{attr_path}")
-
-    def __getattr__(self, key: str):
-        getattr(self.__module, f"{self.__attr_path}.{key}")
-
-        raise AssertionError(
-            "PlaceholderModule should not be used "
-            "when the original module can be imported"
-        )
 
 
 # create a library to hold the custom op
@@ -2492,15 +1615,6 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
-
-
-def resolve_obj_by_qualname(qualname: str) -> Any:
-    """
-    Resolve an object by its fully-qualified class name.
-    """
-    module_name, obj_name = qualname.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, obj_name)
 
 
 def kill_process_tree(pid: int):
@@ -2584,7 +1698,7 @@ class MemorySnapshot:
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
-    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
+    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             free_memory=self.free_memory - other.free_memory,
@@ -2778,13 +1892,13 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
-    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
     bind: bool | None = None,
     identity: bytes | None = None,
     linger: int | None = None,
-) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
+) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
     mem = psutil.virtual_memory()
@@ -2950,7 +2064,7 @@ def bind_kv_cache(
 
 def run_method(
     obj: Any,
-    method: Union[str, bytes, Callable],
+    method: str | bytes | Callable,
     args: tuple[Any],
     kwargs: dict[str, Any],
 ) -> Any:
@@ -3048,73 +2162,6 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
 
     type.__setattr__(cls, "__init__", wrapped_init)
     return cls
-
-
-class LazyLoader(types.ModuleType):
-    """
-    LazyLoader module borrowed from Tensorflow
-    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with an addition of "module caching".
-
-    Lazily import a module, mainly to avoid pulling in large dependencies.
-    Modules such as `xgrammar` might do additional side effects, so we
-    only want to use this when it is needed, delaying all eager effects
-    """
-
-    def __init__(
-        self,
-        local_name: str,
-        parent_module_globals: dict[str, Any],
-        name: str,
-    ):
-        self._local_name = local_name
-        self._parent_module_globals = parent_module_globals
-        self._module: types.ModuleType | None = None
-
-        super().__init__(str(name))
-
-    def _load(self) -> types.ModuleType:
-        # Import the target module and insert it into the parent's namespace
-        try:
-            module = importlib.import_module(self.__name__)
-            self._parent_module_globals[self._local_name] = module
-            # The additional add to sys.modules
-            # ensures library is actually loaded.
-            sys.modules[self._local_name] = module
-        except ModuleNotFoundError as err:
-            raise err from None
-
-        # Update this object's dict so that if someone keeps a
-        # reference to the LazyLoader, lookups are efficient
-        # (__getattr__ is only called on lookups that fail).
-        self.__dict__.update(module.__dict__)
-        return module
-
-    def __getattr__(self, item: Any) -> Any:
-        if self._module is None:
-            self._module = self._load()
-        return getattr(self._module, item)
-
-    def __dir__(self) -> list[str]:
-        if self._module is None:
-            self._module = self._load()
-        return dir(self._module)
-
-
-def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
-    """
-    Helper function to swap values for two keys
-    """
-    v1 = obj.get(key1)
-    v2 = obj.get(key2)
-    if v1 is not None:
-        obj[key2] = v1
-    else:
-        obj.pop(key2, None)
-    if v2 is not None:
-        obj[key1] = v2
-    else:
-        obj.pop(key1, None)
 
 
 @contextlib.contextmanager
@@ -3261,6 +2308,33 @@ def is_torch_equal_or_newer(target: str) -> bool:
 def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
     torch_version = version.parse(torch_version)
     return torch_version >= version.parse(target)
+
+
+def _is_torch_equal(target: str) -> bool:
+    assert target.count(".") == 2
+    torch_version = str(torch.__version__)
+    torch_version = version.parse(torch_version)
+    # torch version is like "2.6.0.dev20240101" or "2.6.0.dev20240101+cpu"
+    # or "2.6.0+cu128" but never "2.6.0.1"
+    return (
+        torch_version >= version.parse(target)
+        and version.parse(target + ".1") > torch_version
+    )
+
+
+def is_torch_equal(target: str) -> bool:
+    """Check if the installed torch version is == the target version.
+
+    Args:
+        target: a version string, like "2.6.0".
+
+    Returns:
+        Whether the condition meets.
+    """
+    try:
+        return _is_torch_equal(target)
+    except Exception:
+        return Version(importlib.metadata.version("torch")) == Version(target)
 
 
 @cache

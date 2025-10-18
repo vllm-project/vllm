@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -13,7 +11,7 @@ import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -93,18 +91,20 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_regex(grammar_spec)
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            ctx = self.compiler.compile_structural_tag(structural_tag)
+            if "structures" in s_tag:
+                # Falling back to deprecated method of compiling structural tag
+                tags = [
+                    xgr.StructuralTagItem(
+                        begin=s["begin"],
+                        schema=json.dumps(s["schema"]),
+                        end=s["end"],
+                    )
+                    for s in s_tag["structures"]
+                ]
+                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+            else:
+                logger.info("Compiling structural tag grammar_spec: %s", grammar_spec)
+                ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -322,17 +322,19 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.structural_tag:
         try:
             s_tag = json.loads(so_params.structural_tag)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            xgr.Grammar.from_structural_tag(structural_tag)
+
+            # Using the deprecated method of compiling structural tag
+            if "structures" in s_tag:
+                tags = [
+                    xgr.StructuralTagItem(
+                        begin=s["begin"],
+                        schema=json.dumps(s["schema"]),
+                        end=s["end"],
+                    )
+                    for s in s_tag["structures"]
+                ]
+                xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+            else:
+                xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise ValueError("Invalid structural tag specification.") from e
