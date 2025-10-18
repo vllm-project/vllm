@@ -663,6 +663,17 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @staticmethod
+    def flatten_tp_across_dp(
+        tp_size: int, dp_size: int, dp_rank: int
+    ) -> tuple[int, int]:
+        tp_rank = 0 if tp_size == 1 else get_tensor_model_parallel_rank()
+        # There are actually dp_size * tp_size devices. Update tp_size
+        # and tp_rank so we shard across all devices.
+        flatten_tp_size = dp_size * tp_size
+        flatten_tp_rank = dp_rank * tp_size + tp_rank
+        return flatten_tp_size, flatten_tp_rank
+
+    @staticmethod
     def make(
         tp_size_: int, dp_size_: int, vllm_parallel_config: ParallelConfig
     ) -> "FusedMoEParallelConfig":
@@ -737,19 +748,13 @@ class FusedMoEParallelConfig:
                 between the 4 devices.
         """
 
-        def flatten_tp_across_dp(dp_rank: int):
-            tp_rank = 0 if tp_size_ == 1 else get_tensor_model_parallel_rank()
-            # There are actually dp_size_ * tp_size_ devices. Update tp_size
-            # and tp_rank so we shard across all devices.
-            tp_size = dp_size_ * tp_size_
-            tp_rank = dp_rank * tp_size_ + tp_rank
-            return tp_size, tp_rank
-
         use_ep = dp_size_ * tp_size_ > 1 and vllm_parallel_config.enable_expert_parallel
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+            tp_size_, dp_size_, dp_rank
+        )
 
         if not use_ep:
             return FusedMoEParallelConfig(
