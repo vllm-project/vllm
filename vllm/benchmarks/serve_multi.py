@@ -176,6 +176,32 @@ def _override_args(cmd: list[str], params: dict[str, object]):
     return cmd
 
 
+class ServerWrapper:
+    def __init__(self, server_cmd: list[str], server_address: str) -> None:
+        super().__init__()
+
+        self.server_cmd = server_cmd
+        self.server_address = server_address
+
+    def reset_caches(self) -> None:
+        if self.server_cmd[0] == "vllm":
+            print("Resetting caches...")
+
+            res = requests.post(f"{self.server_address}/reset_prefix_cache")
+            res.raise_for_status()
+
+            res = requests.post(f"{self.server_address}/reset_mm_cache")
+            res.raise_for_status()
+        elif self.server_cmd[0] == "infinity_emb":
+            if "--vector-disk-cache" in self.server_cmd:
+                raise NotImplementedError(
+                    "Infinity server uses caching but does not expose a method "
+                    "to reset the cache"
+                )
+        else:
+            raise NotImplementedError(self.server_cmd[0])
+
+
 @contextlib.contextmanager
 def _run_server(
     serve_cmd: list[str],
@@ -216,12 +242,12 @@ def _run_server(
         server_cmd,
         start_new_session=True,
         stdout=subprocess.DEVNULL,
-        # Need VLLM_SERVER_DEV_MODE=1 for /reset_prefix_cache
+        # Need VLLM_SERVER_DEV_MODE=1 for `_reset_caches`
         env={**os.environ, "VLLM_SERVER_DEV_MODE": "1"},
     )
 
     try:
-        yield server_address
+        yield ServerWrapper(server_cmd, server_address)
     finally:
         if server_process.poll() is None:
             # In case only some processes have been terminated
@@ -232,18 +258,8 @@ def _run_server(
         print("[END SERVER]")
 
 
-def _reset_caches(server_address: str):
-    print("Resetting caches...")
-
-    res = requests.post(f"{server_address}/reset_prefix_cache")
-    res.raise_for_status()
-
-    res = requests.post(f"{server_address}/reset_mm_cache")
-    res.raise_for_status()
-
-
 def _run_benchmark(
-    server_address: str | None,
+    server: ServerWrapper | None,
     bench_cmd: list[str],
     *,
     serve_overrides: dict[str, object],
@@ -288,8 +304,8 @@ def _run_benchmark(
         check=True,
     )
 
-    if server_address is not None:
-        _reset_caches(server_address)
+    if server is not None:
+        server.reset_caches()
 
     with output_path.open("rb") as f:
         run_data = json.load(f)
@@ -341,7 +357,7 @@ def _comb_needs_server(
 
 
 def _run_comb(
-    server_address: str | None,
+    server: ServerWrapper | None,
     bench_cmd: list[str],
     *,
     serve_comb: dict[str, object],
@@ -354,7 +370,7 @@ def _run_comb(
 
     for run_number in range(num_runs):
         run_data = _run_benchmark(
-            server_address,
+            server,
             bench_cmd,
             serve_overrides=serve_comb,
             bench_overrides=bench_comb,
@@ -395,12 +411,12 @@ def run_combs(
             )
             if _comb_needs_server(serve_comb, bench_params, output_dir)
             else contextlib.nullcontext()
-        ) as server_address:
+        ) as server:
             for bench_comb in bench_params:
                 base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
 
                 comb_data = _run_comb(
-                    server_address,
+                    server,
                     bench_cmd,
                     serve_comb=serve_comb,
                     bench_comb=bench_comb,
@@ -470,7 +486,7 @@ def _sla_needs_server(
 
 
 def _run_sla(
-    server_address: str | None,
+    server: ServerWrapper | None,
     bench_cmd: list[str],
     *,
     serve_comb: dict[str, object],
@@ -483,7 +499,7 @@ def _run_sla(
 
     for run_number in range(num_runs):
         run_data = _run_benchmark(
-            server_address,
+            server,
             bench_cmd,
             serve_overrides=serve_comb,
             bench_overrides=bench_comb,
@@ -519,7 +535,7 @@ def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
 
 
 def _estimate_sla_bounds(
-    server_address: str | None,
+    server: ServerWrapper | None,
     bench_cmd: list[str],
     *,
     serve_comb: dict[str, object],
@@ -543,7 +559,7 @@ def _estimate_sla_bounds(
         print(f"Testing {sla_variable}: {val} req/s")
 
         iter_data = _run_sla(
-            server_address,
+            server,
             bench_cmd,
             serve_comb=serve_comb,
             bench_comb={**bench_comb, sla_variable: val},
@@ -579,7 +595,7 @@ def _estimate_sla_bounds(
 
 
 def _find_sla_value(
-    server_address: str | None,
+    server: ServerWrapper | None,
     bench_cmd: list[str],
     *,
     serve_comb: dict[str, object],
@@ -602,7 +618,7 @@ def _find_sla_value(
         print(f"Testing {sla_variable}: {val} req/s")
 
         iter_data = _run_sla(
-            server_address,
+            server,
             bench_cmd,
             serve_comb=serve_comb,
             bench_comb={**bench_comb, sla_variable: val},
@@ -638,7 +654,7 @@ def _find_sla_value(
 
 
 def _iter_sla(
-    server_address: str | None,
+    server: ServerWrapper | None,
     bench_cmd: list[str],
     *,
     serve_comb: dict[str, object],
@@ -654,7 +670,7 @@ def _iter_sla(
     print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
 
     sla_data_0 = _run_sla(
-        server_address,
+        server,
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb={**bench_comb, sla_variable: sla_inf_value},
@@ -675,7 +691,7 @@ def _iter_sla(
     print(f"Initial {sla_variable} to search: {sla_init_value} req/s.")
 
     sla_data_1, (sla_min, sla_max) = _estimate_sla_bounds(
-        server_address,
+        server,
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb,
@@ -690,7 +706,7 @@ def _iter_sla(
     print(f"Range of {sla_variable} to search: [{sla_min}, {sla_max}] req/s.")
 
     sla_data_2, sla_value = _find_sla_value(
-        server_address,
+        server,
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb,
