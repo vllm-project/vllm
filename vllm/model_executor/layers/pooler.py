@@ -219,7 +219,8 @@ class AllPool(PoolingMethod):
         self, hidden_states: torch.Tensor, pooling_cursor: PoolingCursor
     ) -> list[torch.Tensor] | torch.Tensor:
         raise NotImplementedError(
-            "forward_all is not implemented for AllPool. Use forward instead.")
+            "forward_all is not implemented for AllPool. Use forward instead."
+        )
 
     def forward(
         self,
