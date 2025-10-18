@@ -54,6 +54,6 @@ echo "Prime-RL integration test environment setup complete!"
 
 echo "Running Prime-RL integration tests..."
 export WANDB_MODE=offline # this makes this test not require a WANDB_API_KEY
-uv run pytest -vs tests/integration/test_rl.py -m gpu
+uv run pytest -v -s tests/integration/test_rl.py -m gpu
 
 echo "Prime-RL integration tests completed!"
