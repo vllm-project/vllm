@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
@@ -37,7 +37,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "JinaVLForRanking",
     "InternVLChatModel",
     "InternLM2ForRewardModel",
-    "TransformersForMultimodalLM",
+    "TransformersMultiModalForCausalLM",
     "PrithviGeoSpatialMAE",
     "UltravoxModel",
     "DeepSeekMTPModel",

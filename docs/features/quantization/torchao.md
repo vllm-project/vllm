@@ -27,7 +27,7 @@ You can quantize your own huggingface model with torchao, e.g. [transformers](ht
     quantization_config = TorchAoConfig(Int8WeightOnlyConfig())
     quantized_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype="auto",
+        dtype="auto",
         device_map="auto",
         quantization_config=quantization_config
     )

@@ -341,6 +341,15 @@ def async_tp_pass_on_test_model(
     async_tp_pass = AsyncTPPass(vllm_config)
     backend = TestBackend(async_tp_pass)
 
+    assert (
+        async_tp_pass.compilation_config.splitting_ops
+        == vllm_config.compilation_config.splitting_ops
+    )
+    assert (
+        async_tp_pass.compilation_config.use_inductor_graph_partition
+        == vllm_config.compilation_config.use_inductor_graph_partition
+    )
+
     model = test_model_cls(hidden_size, dtype)  # Pass dtype to model constructor
 
     hidden_states = torch.randn(

@@ -9,7 +9,7 @@ NixlConnector is a high-performance KV cache transfer connector for vLLM's disag
 Install the NIXL library: `uv pip install nixl`, as a quick start.
 
 - Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for more installation instructions
-- The specified required NIXL version can be found in [requirements/kv_connectors.txt](gh-file:requirements/kv_connectors.txt) and other relevant config files
+- The specified required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
 
 For non-cuda platform, please install nixl with ucx build from source, instructed as below.
 
@@ -170,6 +170,6 @@ Support use case: Prefill with 'HND' and decode with 'NHD' with experimental con
 
 Refer to these example scripts in the vLLM repository:
 
-- [run_accuracy_test.sh](gh-file:tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh)
-- [toy_proxy_server.py](gh-file:tests/v1/kv_connector/nixl_integration/toy_proxy_server.py)
-- [test_accuracy.py](gh-file:tests/v1/kv_connector/nixl_integration/test_accuracy.py)
+- [run_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh)
+- [toy_proxy_server.py](../../tests/v1/kv_connector/nixl_integration/toy_proxy_server.py)
+- [test_accuracy.py](../../tests/v1/kv_connector/nixl_integration/test_accuracy.py)

@@ -3,7 +3,7 @@
 import functools
 import operator
 import time
-import weakref
+from dataclasses import dataclass
 from typing import ClassVar
 
 import regex as re
@@ -19,6 +19,12 @@ from .inductor_pass import InductorPass
 logger = init_logger(__name__)
 
 
+@dataclass
+class InductorCompilationConfig:
+    splitting_ops: list[str] | None = None
+    use_inductor_graph_partition: bool = False
+
+
 class VllmInductorPass(InductorPass):
     """
     An inductor pass with access to vLLM PassConfig.
@@ -29,7 +35,12 @@ class VllmInductorPass(InductorPass):
     """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):
-        self.compilation_config = weakref.proxy(config.compilation_config)
+        # Get only the necessary CompilationConfig for the inductor pass, since
+        # full `CompilationConfig` contains pointer to model which is unsafe.
+        self.compilation_config = InductorCompilationConfig(
+            splitting_ops=config.compilation_config.splitting_ops,
+            use_inductor_graph_partition=config.compilation_config.use_inductor_graph_partition,
+        )
         self.pass_config = config.compilation_config.pass_config
         self.model_dtype = config.model_config.dtype if config.model_config else None
         self.device = config.device_config.device if config.device_config else None
@@ -117,7 +128,8 @@ class VllmPatternMatcherPass(VllmInductorPass):
                 f" please add to dump_patterns if there are any errors.\n\n"
                 f"from torch._higher_order_ops.auto_functionalize import "
                 f"auto_functionalized as auto_functionalized\n"
-                f"from torch._inductor.pattern_matcher import *",
+                f"from torch._inductor.pattern_matcher import *\n"
+                f"vllm = torch.ops.vllm",
                 file=f,
             )
 
