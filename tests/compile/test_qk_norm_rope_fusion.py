@@ -24,7 +24,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.attention import Attention, AttentionType
 from vllm.platforms import current_platform
 
-
 class QKNormRoPETestModel(torch.nn.Module):
     """A minimal model that exercises the unfused Q/K RMSNorm + RoPE pattern.
 
@@ -105,7 +104,7 @@ def test_qk_norm_rope_fusion(dtype, T, num_heads, num_kv_heads, head_dim):
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rms_norm", "+rotary_embedding", "+fused_qk_norm_rope"],
+            custom_ops=["+rms_norm", "+rotary_embedding"],
             pass_config=PassConfig(
                 enable_qk_norm_rope_fusion=True,
                 enable_noop=True,
