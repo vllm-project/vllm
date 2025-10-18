@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+import uuid
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -20,7 +21,12 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils import (
+    get_mp_context,
+    get_open_zmq_ipc_path,
+    make_zmq_socket,
+    zmq_socket_ctx,
+)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
@@ -63,6 +69,11 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    #
+    engine_core_cmd_addr: str | None = None
+    fault_report_addr: str | None = None
+    client_cmd_addr: str | None = None
+    engine_core_guard_identities: dict | None = None
 
 
 @dataclass
@@ -95,6 +106,7 @@ class CoreEngineProcManager:
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        fault_report_address: str | None = None,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -104,7 +116,19 @@ class CoreEngineProcManager:
             "executor_class": executor_class,
             "log_stats": log_stats,
         }
-
+        if fault_report_address:
+            zmq_ctx = zmq.Context()
+            num_identity = 1
+            identity = generate_identity_group(
+                "core_engine_proc_manager", "clinet_guard", "report", num_identity
+            )[0]
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=fault_report_address,
+                socket_type=zmq.DEALER,
+                bind=True,
+                identity=identity,
+            )
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
@@ -143,6 +167,19 @@ class CoreEngineProcManager:
             # Kill other procs if not all are running.
             if self.finished_procs():
                 self.close()
+
+    def _report_engine_dead(self, dead_message):
+        """Send engine dead message to ClientGuard"""
+        try:
+            self.engine_down_socket.send_multipart(
+                [
+                    b"",  # Empty frame separator
+                    dead_message.encode("utf-8"),
+                ]
+            )
+            logger.info("Sent message to ClientGuard: %s", dead_message)
+        except Exception as e:
+            logger.error("Failed to send message: %s", e)
 
     def close(self):
         """Shutdown all procs."""
@@ -717,6 +754,17 @@ def launch_core_engines(
         ],
     )
 
+    if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
+        addresses.engine_core_cmd_addr = get_engine_client_zmq_addr(
+            local_only=client_local_only, host=host
+        )
+        addresses.fault_report_addr = get_engine_client_zmq_addr(
+            local_only=client_local_only, host=host
+        )
+        addresses.client_cmd_addr = get_engine_client_zmq_addr(
+            local_only=client_local_only, host=host
+        )
+
     # Run the DP Coordinator process with rank 0 when in
     # online DP mode.
     run_coordinator = dp_size > 1 and not offline_mode and dp_rank == 0
@@ -979,3 +1027,38 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
+
+
+def generate_unique_uuids(n: int):
+    """Generate a set of unique UUID v4 objects.
+
+    Generates a specified number of unique UUID (version 4) objects.
+    UUID v4 uses cryptographically strong random numbers, ensuring
+    an extremely low probability of collisions.
+
+    Args:
+        n: The number of unique UUIDs to generate
+
+    Returns:
+        A set containing 'n' unique UUID objects
+    """
+    uuids: set[uuid.UUID] = set()
+    while len(uuids) < n:
+        # Generate a random UUID (version 4) and add to the set
+        uuids.add(uuid.uuid4())
+    return uuids
+
+
+def generate_identity_group(peer1, peer2, use, n):
+    """
+    Generate n unique identities for ZMQ ROUTER nodes
+
+    Format: peer1_peer2_use_random number
+    Return: list with identities in byte type as elements
+    """
+    identitys = list()
+    uuids = generate_unique_uuids(n)
+    for id in uuids:
+        identity_str = f"{peer1}_{peer2}_{use}_{id}".encode()
+        identitys.append(identity_str)
+    return identitys

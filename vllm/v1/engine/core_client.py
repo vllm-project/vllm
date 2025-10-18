@@ -44,6 +44,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
+    generate_identity_group,
     launch_core_engines,
 )
 from vllm.v1.executor.abstract import Executor
@@ -418,8 +419,62 @@ class BackgroundResources:
 
 
 class ClientGuard:
-    def __init__(self):
+    def __init__(
+        self, fault_receiver_addr: str, cmd_addr: str, engine_registry: dict[int, str]
+    ):
+        self.engine_registry = engine_registry
+        self.zmq_ctx = zmq.Context()
+        self.fault_receiver_socket = make_zmq_socket(
+            ctx=self.zmq_ctx,
+            path=fault_receiver_addr,
+            socket_type=zmq.ROUTER,
+            bind=True,
+        )
+        self.cmd_socket = make_zmq_socket(
+            ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
+        )
+
+    def recv_msg(
+        self, socket: zmq.Socket | zmq.asyncio.Socket
+    ) -> tuple[None | str, None | str]:
+        """
+        Receive messages from socket in blocking mode
+
+        This function will block until a message is received
+
+        Returns:
+            Tuple (sender_identity, message), both string types
+            Returns (None, None) if error occurs
+        """
+        try:
+            # Use blocking receive - will wait until a message arrives
+            parts = socket.recv_multipart()
+
+            # Verify message format
+            assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
+
+            identity_bytes, empty_frame, message_bytes = parts
+
+            # Verify empty frame
+            assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+
+            # Convert to string
+            sender_identity = identity_bytes.decode("utf-8")
+            message = message_bytes.decode("utf-8")
+
+            return (sender_identity, message)
+
+        except (zmq.ZMQError, UnicodeDecodeError, Exception) as e:
+            logger.error("error occurred while receiving message: %s", e)
+            return (None, None)
+
+    def handle_fault(self, instruction):
         pass
+
+    def shutdown_guard(self):
+        self.fault_receiver_socket.close()
+        self.cmd_socket.close()
+        self.zmq_ctx.term()
 
 
 class MPClient(EngineCoreClient):
@@ -541,7 +596,17 @@ class MPClient(EngineCoreClient):
 
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
-
+            self.engine_registry = {}
+            engine_ids = [i for i in range(dp_size)]
+            engine_core_identities = generate_identity_group(
+                peer1="client",
+                peer2="engine_core_guard",
+                use="report and cmd",
+                n=dp_size,
+            )
+            self.engine_registry = dict(zip(engine_ids, engine_core_identities))
+            addresses.engine_core_guard_identities = self.engine_registry
+            # todo 拉起ClientGuard
             success = True
         finally:
             if not success:
