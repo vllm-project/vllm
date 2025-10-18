@@ -201,6 +201,7 @@ _EMBEDDING_MODELS = {
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
     "LlavaNextForConditionalGeneration": (
