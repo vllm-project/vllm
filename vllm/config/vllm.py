@@ -77,7 +77,9 @@ class VllmConfig:
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
-    observability_config: ObservabilityConfig | None = None
+    observability_config: ObservabilityConfig = Field(
+        default_factory=ObservabilityConfig
+    )
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""

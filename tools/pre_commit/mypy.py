@@ -26,6 +26,7 @@ import regex as re
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/engine",
     "vllm/distributed",
     "vllm/entrypoints",
     "vllm/executor",
@@ -36,6 +37,7 @@ FILES = [
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
+    "vllm/utils",
 ]
 
 # After fixing errors resulting from changing follow_imports
@@ -44,7 +46,6 @@ SEPARATE_GROUPS = [
     "tests",
     "vllm/attention",
     "vllm/compilation",
-    "vllm/engine",
     "vllm/inputs",
     "vllm/lora",
     "vllm/model_executor",

@@ -55,6 +55,7 @@ from vllm.config import (
 )
 from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
 from vllm.config.device import Device
+from vllm.config.lora import LoRAExtraVocabSize, MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -66,8 +67,14 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
-from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.parallel import (
+    All2allBackendType,
+    DataParallelBackend,
+    DistributedExecutorBackend,
+    ExpertPlacementStrategy,
+)
 from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -240,11 +247,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             default = field.default
             # Handle pydantic.Field defaults
             if isinstance(default, FieldInfo):
-                default = (
-                    default.default
-                    if default.default_factory is None
-                    else default.default_factory()
-                )
+                if default.default_factory is None:
+                    default = default.default
+                else:
+                    default_factory = cast(Callable[[], Any], default.default_factory)
+                    default = default_factory()
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -380,9 +387,9 @@ class EngineArgs:
     data_parallel_address: str | None = None
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
-    data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    all2all_backend: str | None = ParallelConfig.all2all_backend
+    all2all_backend: All2allBackendType | None = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
@@ -430,7 +437,7 @@ class EngineArgs:
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
-    quantization: QuantizationMethods | None = ModelConfig.quantization
+    quantization: str | QuantizationMethods | None = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
@@ -452,16 +459,16 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
-    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
-    max_lora_rank: int = LoRAConfig.max_lora_rank
+    max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    lora_extra_vocab_size: LoRAExtraVocabSize = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -482,7 +489,7 @@ class EngineArgs:
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
 
     # Deprecated guided decoding fields
-    guided_decoding_backend: str | None = None
+    guided_decoding_backend: StructuredOutputsBackend | None = None
     guided_decoding_disable_fallback: bool | None = None
     guided_decoding_disable_any_whitespace: bool | None = None
     guided_decoding_disable_additional_properties: bool | None = None
@@ -518,7 +525,7 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str = ModelConfig.override_attention_dtype
+    override_attention_dtype: str | None = ModelConfig.override_attention_dtype
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -527,7 +534,7 @@ class EngineArgs:
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
-    pt_load_map_location: str = LoadConfig.pt_load_map_location
+    pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
 
     # DEPRECATED
     enable_multimodal_encoder_data_parallel: bool = False
@@ -1125,7 +1132,7 @@ class EngineArgs:
             runner=self.runner,
             convert=self.convert,
             task=self.task,
-            tokenizer=self.tokenizer,
+            tokenizer=self.tokenizer,  # type: ignore[arg-type]
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
@@ -1139,7 +1146,7 @@ class EngineArgs:
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
-            max_model_len=self.max_model_len,
+            max_model_len=self.max_model_len,  # type: ignore[arg-type]
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,
@@ -1334,7 +1341,7 @@ class EngineArgs:
         )
 
         cache_config = CacheConfig(
-            block_size=self.block_size,
+            block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
@@ -1530,9 +1537,9 @@ class EngineArgs:
 
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
-            max_num_batched_tokens=self.max_num_batched_tokens,
-            max_num_seqs=self.max_num_seqs,
-            max_model_len=model_config.max_model_len,
+            max_num_batched_tokens=self.max_num_batched_tokens,  # type: ignore[arg-type]
+            max_num_seqs=self.max_num_seqs,  # type: ignore[arg-type]
+            max_model_len=model_config.max_model_len,  # type: ignore[arg-type]
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -1584,17 +1591,15 @@ class EngineArgs:
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
-            so_config.guided_decoding_backend = self.guided_decoding_backend
+            so_config.backend = self.guided_decoding_backend
         if self.guided_decoding_disable_fallback is not None:
-            so_config.guided_decoding_disable_fallback = (
-                self.guided_decoding_disable_fallback
-            )
+            so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
-            so_config.guided_decoding_disable_any_whitespace = (
+            so_config.disable_any_whitespace = (
                 self.guided_decoding_disable_any_whitespace
             )
         if self.guided_decoding_disable_additional_properties is not None:
-            so_config.guided_decoding_disable_additional_properties = (
+            so_config.disable_additional_properties = (
                 self.guided_decoding_disable_additional_properties
             )
 
@@ -1632,6 +1637,13 @@ class EngineArgs:
         if self.logits_processor_pattern != EngineArgs.logits_processor_pattern:
             _raise_or_fallback(
                 feature_name="--logits-processor-pattern", recommend_to_remove=False
+            )
+            return False
+
+        # No Mamba or Encoder-Decoder so far.
+        if not getattr(model_config, "is_v1_compatible", True):
+            _raise_or_fallback(
+                feature_name=str(model_config.architectures), recommend_to_remove=False
             )
             return False
 
@@ -1719,7 +1731,7 @@ class EngineArgs:
         return True
 
     def _set_default_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+        self, usage_context: UsageContext | None, model_config: ModelConfig
     ) -> None:
         """Set Default Arguments for V1 Engine."""
 
@@ -1747,6 +1759,7 @@ class EngineArgs:
                 else:
                     self.enable_prefix_caching = True
         else:
+            assert model_config.pooler_config is not None
             pooling_type = model_config.pooler_config.pooling_type
             is_causal = getattr(model_config.hf_config, "is_causal", True)
             incremental_prefill_supported = (

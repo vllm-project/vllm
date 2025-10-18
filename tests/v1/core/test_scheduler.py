@@ -1021,7 +1021,7 @@ def test_kv_connector_unable_to_allocate():
     """
 
     # Setup Scheduler With Mock External Cache Hit.
-    BLOCK_SIZE = 4
+    BLOCK_SIZE = 8
     NUM_BLOCKS = 10
     scheduler = create_scheduler(
         enable_prefix_caching=True,
@@ -1103,7 +1103,7 @@ def test_kv_connector_handles_preemption():
     """
 
     # Setup Scheduler With Mock External Cache Hit.
-    BLOCK_SIZE = 2
+    BLOCK_SIZE = 8
     # NOTE: there is 1 null block, so this is 6 blocks.
     NUM_BLOCKS = 7
     scheduler = create_scheduler(
@@ -1124,8 +1124,8 @@ def test_kv_connector_handles_preemption():
     # Both can be scheduled at first, but the second request
     # will be preempted and re-scheduled.
     NUM_REQUESTS = 2
-    NUM_TOKENS = BLOCK_SIZE * 2 + 1
-    MAX_TOKENS = BLOCK_SIZE * 2
+    NUM_TOKENS = 3 * BLOCK_SIZE - 1
+    MAX_TOKENS = 4
     requests = create_requests(
         num_requests=NUM_REQUESTS,
         num_tokens=NUM_TOKENS,

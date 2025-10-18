@@ -475,7 +475,7 @@ def find_nccl_include_paths() -> list[str] | None:
 
     try:
         spec = importlib.util.find_spec("nvidia.nccl")
-        if spec and getattr(spec, "submodule_search_locations", None):
+        if spec is not None and spec.submodule_search_locations is not None:
             for loc in spec.submodule_search_locations:
                 inc_dir = os.path.join(loc, "include")
                 if os.path.exists(os.path.join(inc_dir, "nccl.h")):
