@@ -441,7 +441,6 @@ def _get_sla_base_path(
     output_dir: Path,
     serve_comb: dict[str, object],
     bench_comb: dict[str, object],
-    sla_comb: dict[str, SLACriterionBase],
 ):
     return output_dir / "-".join(
         (
@@ -449,15 +448,19 @@ def _get_sla_base_path(
             *(f"{k}={v}" for k, v in serve_comb.items()),
             "BENCH",
             *(f"{k}={v}" for k, v in bench_comb.items()),
-            "SLA",
-            *(v.format_cond(k) for k, v in sla_comb.items()),
         )
     )
 
 
-def _get_sla_iter_path(base_path: Path, sla_variable: str, sla_value: int | None):
+def _get_sla_iter_path(
+    base_path: Path,
+    sla_comb: dict[str, SLACriterionBase],
+    sla_variable: str,
+    sla_value: int | None,
+):
     if sla_value is None:
-        return base_path / "summary.json"
+        prefix = "-".join(v.format_cond(k) for k, v in sla_comb.items())
+        return base_path / f"SLA-{prefix}.json"
 
     return base_path / f"{sla_variable}={sla_value}"
 
@@ -477,9 +480,14 @@ def _sla_needs_server(
     output_dir: Path,
 ):
     for bench_comb in bench_combs:
+        base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb)
         for sla_comb in sla_combs:
-            base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb, sla_comb)
-            if not _get_sla_iter_path(base_path, sla_variable, sla_value=None).exists():
+            if not _get_sla_iter_path(
+                base_path,
+                sla_comb,
+                sla_variable,
+                sla_value=None,
+            ).exists():
                 return True
 
     return False
@@ -563,7 +571,7 @@ def _estimate_sla_bounds(
             bench_cmd,
             serve_comb=serve_comb,
             bench_comb={**bench_comb, sla_variable: val},
-            iter_path=_get_sla_iter_path(base_path, sla_variable, val),
+            iter_path=_get_sla_iter_path(base_path, sla_comb, sla_variable, val),
             num_runs=num_runs,
             dry_run=dry_run,
         )
@@ -622,7 +630,7 @@ def _find_sla_value(
             bench_cmd,
             serve_comb=serve_comb,
             bench_comb={**bench_comb, sla_variable: val},
-            iter_path=_get_sla_iter_path(base_path, sla_variable, val),
+            iter_path=_get_sla_iter_path(base_path, sla_comb, sla_variable, val),
             num_runs=num_runs,
             dry_run=dry_run,
         )
@@ -674,7 +682,7 @@ def _iter_sla(
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb={**bench_comb, sla_variable: sla_inf_value},
-        iter_path=_get_sla_iter_path(base_path, sla_variable, sla_inf_value),
+        iter_path=_get_sla_iter_path(base_path, sla_comb, sla_variable, sla_inf_value),
         num_runs=num_runs,
         dry_run=dry_run,
     )
@@ -722,7 +730,12 @@ def _iter_sla(
     sla_data = sla_data_0 + sla_data_1 + sla_data_2
     print(f"Maximum {sla_variable} for SLA: {sla_value} req/s.")
 
-    with _get_sla_iter_path(base_path, sla_variable, sla_value=None).open("w") as f:
+    with _get_sla_iter_path(
+        base_path,
+        sla_comb,
+        sla_variable,
+        sla_value=None,
+    ).open("w") as f:
         json.dump(sla_data, f, indent=4)
 
     print("[SLA END]")
@@ -771,9 +784,7 @@ def run_slas(
         ) as server_address:
             for bench_comb in bench_params:
                 for sla_comb in sla_params:
-                    base_path = _get_sla_base_path(
-                        output_dir, serve_comb, bench_comb, sla_comb
-                    )
+                    base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb)
 
                     comb_data = _iter_sla(
                         server_address,
