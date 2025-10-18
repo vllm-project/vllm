@@ -200,11 +200,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
                 # layers like FusedMoE
-                kv_cache = getattr(layer, "kv_cache", None)
-                if kv_cache is None:
+                layer = getattr(layer, "kv_cache", None)
+                if layer is None:
                     continue
-
-                layer = kv_cache[forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
                     request.request_id + "#" + layer_name, remote_address
