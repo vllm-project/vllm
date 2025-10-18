@@ -4,12 +4,9 @@
 import contextlib
 import datetime
 import enum
-import gc
 import getpass
 import hashlib
 import importlib
-import importlib.metadata
-import importlib.util
 import inspect
 import ipaddress
 import json
@@ -23,9 +20,7 @@ import sys
 import tempfile
 import textwrap
 import threading
-import time
 import traceback
-import types
 import uuid
 import warnings
 import weakref
@@ -37,29 +32,17 @@ from argparse import (
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
 )
-from collections import UserDict, defaultdict
+from collections import defaultdict
 from collections.abc import (
     Callable,
     Collection,
-    Generator,
-    Hashable,
-    Iterable,
     Iterator,
-    Mapping,
     Sequence,
 )
 from concurrent.futures.process import ProcessPoolExecutor
-from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Generic,
-    Literal,
-    TextIO,
-    TypeVar,
-)
+from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -71,14 +54,12 @@ import psutil
 import regex as re
 import setproctitle
 import torch
-import torch.types
 import yaml
 import zmq
 import zmq.asyncio
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
-from typing_extensions import Never, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -119,17 +100,6 @@ STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
-MB_bytes = 1_000_000
-"""The number of bytes in one megabyte (MB)."""
-
-MiB_bytes = 1 << 20
-"""The number of bytes in one mebibyte (MiB)."""
-
-GB_bytes = 1_000_000_000
-"""The number of bytes in one gigabyte (GB)."""
-
-GiB_bytes = 1 << 30
-"""The number of bytes in one gibibyte (GiB)."""
 
 # ANSI color codes
 CYAN = "\033[1;36m"
@@ -167,11 +137,17 @@ def set_default_torch_num_threads(num_threads: int):
     torch.set_num_threads(old_num_threads)
 
 
+def kv_cache_dtype_str_to_dtype(
+    kv_cache_dtype: str, model_config: ModelConfig
+) -> torch.dtype:
+    if kv_cache_dtype == "auto":
+        # Model config may not be specified for unit tests, default to float16
+        return model_config.dtype if model_config else torch.half
+    return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+
+
 T = TypeVar("T")
 U = TypeVar("U")
-
-_K = TypeVar("_K", bound=Hashable)
-_V = TypeVar("_V")
 
 
 class Device(enum.Enum):
@@ -195,23 +171,6 @@ class Counter:
 
     def reset(self) -> None:
         self.counter = 0
-
-
-@cache
-def get_max_shared_memory_bytes(gpu: int = 0) -> int:
-    """Returns the maximum shared memory per thread block in bytes."""
-    from vllm import _custom_ops as ops
-
-    max_shared_mem = ops.get_max_shared_memory_per_block_device_attribute(gpu)
-    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
-    # will fail
-    assert max_shared_mem > 0, "max_shared_mem can not be zero"
-    return int(max_shared_mem)
-
-
-def get_cpu_memory() -> int:
-    """Returns the total CPU memory of the node in bytes."""
-    return psutil.virtual_memory().total
 
 
 def random_uuid() -> str:
@@ -421,12 +380,6 @@ def update_environment_variables(envs: dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst: list[T], chunk_size: int):
-    """Yield successive chunk_size chunks from lst."""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
-
-
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
@@ -604,30 +557,6 @@ def is_uva_available() -> bool:
     return is_pin_memory_available()
 
 
-class DeviceMemoryProfiler:
-    def __init__(self, device: torch.types.Device | None = None):
-        self.device = device
-
-    def current_memory_usage(self) -> float:
-        # Return the memory usage in bytes.
-        from vllm.platforms import current_platform
-
-        gc.collect()
-        return current_platform.get_current_memory_usage(self.device)
-
-    def __enter__(self):
-        self.initial_memory = self.current_memory_usage()
-        # This allows us to call methods of the context manager if needed
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.final_memory = self.current_memory_usage()
-        self.consumed_memory = self.final_memory - self.initial_memory
-
-        # Force garbage collection
-        gc.collect()
-
-
 def make_ndarray_with_pad(
     x: list[list[T]],
     pad: T,
@@ -743,53 +672,6 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     )
 
 
-def as_list(maybe_list: Iterable[T]) -> list[T]:
-    """Convert iterable to list, unless it's already a list."""
-    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
-
-
-def as_iter(obj: T | Iterable[T]) -> Iterable[T]:
-    if isinstance(obj, str) or not isinstance(obj, Iterable):
-        return [obj]  # type: ignore[list-item]
-    return obj
-
-
-# `collections` helpers
-def is_list_of(
-    value: object,
-    typ: type[T] | tuple[type[T], ...],
-    *,
-    check: Literal["first", "all"] = "first",
-) -> TypeIs[list[T]]:
-    if not isinstance(value, list):
-        return False
-
-    if check == "first":
-        return len(value) == 0 or isinstance(value[0], typ)
-    elif check == "all":
-        return all(isinstance(v, typ) for v in value)
-
-    assert_never(check)
-
-
-def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
-    """Flatten a list of lists to a single list."""
-    return [item for sublist in lists for item in sublist]
-
-
-def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
-    """
-    Unlike [`itertools.groupby`][], groups are not broken by
-    non-contiguous data.
-    """
-    groups = defaultdict[_K, list[_V]](list)
-
-    for value in values:
-        groups[key(value)].append(value)
-
-    return groups.items()
-
-
 # TODO: This function can be removed if transformer_modules classes are
 # serialized by value when communicating between processes
 def init_cached_hf_modules() -> None:
@@ -867,8 +749,6 @@ def find_nccl_include_paths() -> list[str] | None:
         paths.append(inc)
 
     try:
-        import importlib.util
-
         spec = importlib.util.find_spec("nvidia.nccl")
         if spec and getattr(spec, "submodule_search_locations", None):
             for loc in spec.submodule_search_locations:
@@ -972,7 +852,6 @@ def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     # c1cd946818442aca8c7f812b16d187ce1586c3bc/
     # torch/cuda/__init__.py#L831C1-L831C17
     import torch.cuda
-    import torch.version
 
     from vllm.platforms import current_platform
 
@@ -1578,50 +1457,6 @@ class AtomicCounter:
         return self._value
 
 
-# Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping[str, T], Generic[T]):
-    def __init__(self, factory: dict[str, Callable[[], T]]):
-        self._factory = factory
-        self._dict: dict[str, T] = {}
-
-    def __getitem__(self, key: str) -> T:
-        if key not in self._dict:
-            if key not in self._factory:
-                raise KeyError(key)
-            self._dict[key] = self._factory[key]()
-        return self._dict[key]
-
-    def __setitem__(self, key: str, value: Callable[[], T]):
-        self._factory[key] = value
-
-    def __iter__(self):
-        return iter(self._factory)
-
-    def __len__(self):
-        return len(self._factory)
-
-
-class ClassRegistry(UserDict[type[T], _V]):
-    def __getitem__(self, key: type[T]) -> _V:
-        for cls in key.mro():
-            if cls in self.data:
-                return self.data[cls]
-
-        raise KeyError(key)
-
-    def __contains__(self, key: object) -> bool:
-        return self.contains(key)
-
-    def contains(self, key: object, *, strict: bool = False) -> bool:
-        if not isinstance(key, type):
-            return False
-
-        if strict:
-            return key in self.data
-
-        return any(cls in self.data for cls in key.mro())
-
-
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -1668,253 +1503,6 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
-
-
-def import_from_path(module_name: str, file_path: str | os.PathLike):
-    """
-    Import a Python file according to its file path.
-
-    Based on the official recipe:
-    https://docs.python.org/3/library/importlib.html#importing-a-source-file-directly
-    """
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None:
-        raise ModuleNotFoundError(f"No module named '{module_name}'")
-
-    assert spec.loader is not None
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-@cache
-def get_vllm_optional_dependencies():
-    metadata = importlib.metadata.metadata("vllm")
-    requirements = metadata.get_all("Requires-Dist", [])
-    extras = metadata.get_all("Provides-Extra", [])
-
-    return {
-        extra: [
-            re.split(r";|>=|<=|==", req)[0]
-            for req in requirements
-            if req.endswith(f'extra == "{extra}"')
-        ]
-        for extra in extras
-    }
-
-
-class _PlaceholderBase:
-    """
-    Disallows downstream usage of placeholder modules.
-
-    We need to explicitly override each dunder method because
-    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
-    is not called when they are accessed.
-
-    Info:
-        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
-    """
-
-    def __getattr__(self, key: str) -> Never:
-        """
-        The main class should implement this to throw an error
-        for attribute accesses representing downstream usage.
-        """
-        raise NotImplementedError
-
-    # [Basic customization]
-
-    def __lt__(self, other: object):
-        return self.__getattr__("__lt__")
-
-    def __le__(self, other: object):
-        return self.__getattr__("__le__")
-
-    def __eq__(self, other: object):
-        return self.__getattr__("__eq__")
-
-    def __ne__(self, other: object):
-        return self.__getattr__("__ne__")
-
-    def __gt__(self, other: object):
-        return self.__getattr__("__gt__")
-
-    def __ge__(self, other: object):
-        return self.__getattr__("__ge__")
-
-    def __hash__(self):
-        return self.__getattr__("__hash__")
-
-    def __bool__(self):
-        return self.__getattr__("__bool__")
-
-    # [Callable objects]
-
-    def __call__(self, *args: object, **kwargs: object):
-        return self.__getattr__("__call__")
-
-    # [Container types]
-
-    def __len__(self):
-        return self.__getattr__("__len__")
-
-    def __getitem__(self, key: object):
-        return self.__getattr__("__getitem__")
-
-    def __setitem__(self, key: object, value: object):
-        return self.__getattr__("__setitem__")
-
-    def __delitem__(self, key: object):
-        return self.__getattr__("__delitem__")
-
-    # __missing__ is optional according to __getitem__ specification,
-    # so it is skipped
-
-    # __iter__ and __reversed__ have a default implementation
-    # based on __len__ and __getitem__, so they are skipped.
-
-    # [Numeric Types]
-
-    def __add__(self, other: object):
-        return self.__getattr__("__add__")
-
-    def __sub__(self, other: object):
-        return self.__getattr__("__sub__")
-
-    def __mul__(self, other: object):
-        return self.__getattr__("__mul__")
-
-    def __matmul__(self, other: object):
-        return self.__getattr__("__matmul__")
-
-    def __truediv__(self, other: object):
-        return self.__getattr__("__truediv__")
-
-    def __floordiv__(self, other: object):
-        return self.__getattr__("__floordiv__")
-
-    def __mod__(self, other: object):
-        return self.__getattr__("__mod__")
-
-    def __divmod__(self, other: object):
-        return self.__getattr__("__divmod__")
-
-    def __pow__(self, other: object, modulo: object = ...):
-        return self.__getattr__("__pow__")
-
-    def __lshift__(self, other: object):
-        return self.__getattr__("__lshift__")
-
-    def __rshift__(self, other: object):
-        return self.__getattr__("__rshift__")
-
-    def __and__(self, other: object):
-        return self.__getattr__("__and__")
-
-    def __xor__(self, other: object):
-        return self.__getattr__("__xor__")
-
-    def __or__(self, other: object):
-        return self.__getattr__("__or__")
-
-    # r* and i* methods have lower priority than
-    # the methods for left operand so they are skipped
-
-    def __neg__(self):
-        return self.__getattr__("__neg__")
-
-    def __pos__(self):
-        return self.__getattr__("__pos__")
-
-    def __abs__(self):
-        return self.__getattr__("__abs__")
-
-    def __invert__(self):
-        return self.__getattr__("__invert__")
-
-    # __complex__, __int__ and __float__ have a default implementation
-    # based on __index__, so they are skipped.
-
-    def __index__(self):
-        return self.__getattr__("__index__")
-
-    def __round__(self, ndigits: object = ...):
-        return self.__getattr__("__round__")
-
-    def __trunc__(self):
-        return self.__getattr__("__trunc__")
-
-    def __floor__(self):
-        return self.__getattr__("__floor__")
-
-    def __ceil__(self):
-        return self.__getattr__("__ceil__")
-
-    # [Context managers]
-
-    def __enter__(self):
-        return self.__getattr__("__enter__")
-
-    def __exit__(self, *args: object, **kwargs: object):
-        return self.__getattr__("__exit__")
-
-
-class PlaceholderModule(_PlaceholderBase):
-    """
-    A placeholder object to use when a module does not exist.
-
-    This enables more informative errors when trying to access attributes
-    of a module that does not exist.
-    """
-
-    def __init__(self, name: str) -> None:
-        super().__init__()
-
-        # Apply name mangling to avoid conflicting with module attributes
-        self.__name = name
-
-    def placeholder_attr(self, attr_path: str):
-        return _PlaceholderModuleAttr(self, attr_path)
-
-    def __getattr__(self, key: str):
-        name = self.__name
-
-        try:
-            importlib.import_module(name)
-        except ImportError as exc:
-            for extra, names in get_vllm_optional_dependencies().items():
-                if name in names:
-                    msg = f"Please install vllm[{extra}] for {extra} support"
-                    raise ImportError(msg) from exc
-
-            raise exc
-
-        raise AssertionError(
-            "PlaceholderModule should not be used "
-            "when the original module can be imported"
-        )
-
-
-class _PlaceholderModuleAttr(_PlaceholderBase):
-    def __init__(self, module: PlaceholderModule, attr_path: str) -> None:
-        super().__init__()
-
-        # Apply name mangling to avoid conflicting with module attributes
-        self.__module = module
-        self.__attr_path = attr_path
-
-    def placeholder_attr(self, attr_path: str):
-        return _PlaceholderModuleAttr(self.__module, f"{self.__attr_path}.{attr_path}")
-
-    def __getattr__(self, key: str):
-        getattr(self.__module, f"{self.__attr_path}.{key}")
-
-        raise AssertionError(
-            "PlaceholderModule should not be used "
-            "when the original module can be imported"
-        )
 
 
 # create a library to hold the custom op
@@ -1981,15 +1569,6 @@ def direct_register_custom_op(
         my_lib._register_fake(op_name, fake_impl)
 
 
-def resolve_obj_by_qualname(qualname: str) -> Any:
-    """
-    Resolve an object by its fully-qualified class name.
-    """
-    module_name, obj_name = qualname.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, obj_name)
-
-
 def kill_process_tree(pid: int):
     """
     Kills all descendant processes of the given pid by sending SIGKILL.
@@ -2013,183 +1592,6 @@ def kill_process_tree(pid: int):
     # Finally kill the parent
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
-
-
-@dataclass
-class MemorySnapshot:
-    """Memory snapshot."""
-
-    torch_peak: int = 0
-    free_memory: int = 0
-    total_memory: int = 0
-    cuda_memory: int = 0
-    torch_memory: int = 0
-    non_torch_memory: int = 0
-    timestamp: float = 0.0
-    auto_measure: bool = True
-
-    def __post_init__(self):
-        if self.auto_measure:
-            self.measure()
-
-    def measure(self):
-        from vllm.platforms import current_platform
-
-        # we measure the torch peak memory usage via allocated_bytes,
-        # rather than `torch.cuda.memory_reserved()` .
-        # After `torch.cuda.reset_peak_memory_stats()`,
-        # `torch.cuda.memory_reserved()` will keep growing, and only shrink
-        # when we call `torch.cuda.empty_cache()` or OOM happens.
-        self.torch_peak = torch.cuda.memory_stats().get("allocated_bytes.all.peak", 0)
-
-        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
-        shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
-        if (
-            current_platform.is_cuda()
-            and current_platform.get_device_capability() in shared_sysmem_device_mem_sms
-        ):
-            # On UMA (Orin, Thor and Spark) platform,
-            # where both CPU and GPU rely on system memory,
-            # the cudaMemGetInfo function shows the amount of free system memory
-            # rather than what’s actually available.
-            # In the case,
-            # torch.cuda.mem_get_info() only reports "free" memory,
-            # which can be lower than what is actually
-            # available due to not including cache memory.
-            # There’s also a comprehensive reference page
-            # that explains how you can compute the proper value yourself.
-            # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
-            self.free_memory = psutil.virtual_memory().available
-
-        self.cuda_memory = self.total_memory - self.free_memory
-
-        # torch.cuda.memory_reserved() is how many bytes
-        # PyTorch gets from cuda (by calling cudaMalloc, etc.)
-        # this is used to measure the non-torch memory usage
-        self.torch_memory = torch.cuda.memory_reserved()
-
-        self.non_torch_memory = self.cuda_memory - self.torch_memory
-        self.timestamp = time.time()
-
-    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
-        return MemorySnapshot(
-            torch_peak=self.torch_peak - other.torch_peak,
-            free_memory=self.free_memory - other.free_memory,
-            total_memory=self.total_memory - other.total_memory,
-            cuda_memory=self.cuda_memory - other.cuda_memory,
-            torch_memory=self.torch_memory - other.torch_memory,
-            non_torch_memory=self.non_torch_memory - other.non_torch_memory,
-            timestamp=self.timestamp - other.timestamp,
-            auto_measure=False,
-        )
-
-
-@dataclass
-class MemoryProfilingResult:
-    """Memory profiling result. All numbers are in bytes."""
-
-    non_kv_cache_memory: int = 0
-    torch_peak_increase: int = 0
-    non_torch_increase: int = 0
-    weights_memory: float = 0
-    before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
-    before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
-    after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
-    profile_time: float = 0.0
-
-    def __repr__(self) -> str:
-        return (
-            f"Memory profiling takes {self.profile_time:.2f} seconds. "
-            f"Total non KV cache memory: "
-            f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
-            f"torch peak memory increase: "
-            f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
-            f"non-torch forward increase memory: "
-            f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
-            f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB."
-        )
-
-
-@contextlib.contextmanager
-def memory_profiling(
-    baseline_snapshot: MemorySnapshot, weights_memory: int
-) -> Generator[MemoryProfilingResult, None, None]:
-    """Memory profiling context manager.
-    baseline_snapshot: the memory snapshot before the current vLLM instance.
-    weights_memory: memory used by PyTorch when loading the model weights.
-        Note that, before loading the model weights, we also initialize the device
-        and distributed environment, which may consume some memory. This part is not
-        included in the weights_memory because PyTorch does not control it.
-
-    The memory in one GPU can be classified into 3 categories:
-    1. memory used by anything other than the current vLLM instance.
-    2. memory used by torch in the current vLLM instance.
-    3. memory used in the current vLLM instance, but not by torch.
-
-    A quantitive example:
-
-    Before creating the current vLLM instance:
-        category 1: 1 GiB
-        category 2: 0 GiB
-        category 3: 0 GiB
-
-    After creating the current vLLM instance and loading the model,
-    (i.e. before profiling):
-        category 1: 1 GiB
-        category 2: 2 GiB (model weights take 2 GiB)
-        category 3: 0.5 GiB (memory used by NCCL)
-
-    During profiling (peak):
-        category 1: 1 GiB
-        category 2: 4 GiB (peak activation tensors take 2 GiB)
-        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
-
-    After profiling:
-        category 1: 1 GiB
-        category 2: 3 GiB (after garbage-collecting activation tensors)
-        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
-
-    In this case, non-kv cache takes 5 GiB in total, including:
-    a. 2 GiB used by the model weights (category 2)
-    b. 2 GiB reserved for the peak activation tensors (category 2)
-    c. 1 GiB used by non-torch components (category 3)
-
-    The memory used for loading weights (a.) is directly given from the argument `weights_memory`.
-
-    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
-
-    The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
-    """  # noqa
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-
-    result = MemoryProfilingResult()
-
-    result.before_create = baseline_snapshot
-    # the part of memory used for holding the model weights
-    result.weights_memory = weights_memory
-
-    result.before_profile.measure()
-
-    yield result
-
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    result.after_profile.measure()
-
-    diff_profile = result.after_profile - result.before_profile
-    diff_from_create = result.after_profile - result.before_create
-    result.torch_peak_increase = diff_profile.torch_peak
-    result.non_torch_increase = diff_from_create.non_torch_memory
-    result.profile_time = diff_profile.timestamp
-
-    non_torch_memory = result.non_torch_increase
-    peak_activation_memory = result.torch_peak_increase
-    result.non_kv_cache_memory = (
-        non_torch_memory + peak_activation_memory + result.weights_memory
-    )  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
@@ -2535,73 +1937,6 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
 
     type.__setattr__(cls, "__init__", wrapped_init)
     return cls
-
-
-class LazyLoader(types.ModuleType):
-    """
-    LazyLoader module borrowed from Tensorflow
-    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with an addition of "module caching".
-
-    Lazily import a module, mainly to avoid pulling in large dependencies.
-    Modules such as `xgrammar` might do additional side effects, so we
-    only want to use this when it is needed, delaying all eager effects
-    """
-
-    def __init__(
-        self,
-        local_name: str,
-        parent_module_globals: dict[str, Any],
-        name: str,
-    ):
-        self._local_name = local_name
-        self._parent_module_globals = parent_module_globals
-        self._module: types.ModuleType | None = None
-
-        super().__init__(str(name))
-
-    def _load(self) -> types.ModuleType:
-        # Import the target module and insert it into the parent's namespace
-        try:
-            module = importlib.import_module(self.__name__)
-            self._parent_module_globals[self._local_name] = module
-            # The additional add to sys.modules
-            # ensures library is actually loaded.
-            sys.modules[self._local_name] = module
-        except ModuleNotFoundError as err:
-            raise err from None
-
-        # Update this object's dict so that if someone keeps a
-        # reference to the LazyLoader, lookups are efficient
-        # (__getattr__ is only called on lookups that fail).
-        self.__dict__.update(module.__dict__)
-        return module
-
-    def __getattr__(self, item: Any) -> Any:
-        if self._module is None:
-            self._module = self._load()
-        return getattr(self._module, item)
-
-    def __dir__(self) -> list[str]:
-        if self._module is None:
-            self._module = self._load()
-        return dir(self._module)
-
-
-def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
-    """
-    Helper function to swap values for two keys
-    """
-    v1 = obj.get(key1)
-    v2 = obj.get(key2)
-    if v1 is not None:
-        obj[key2] = v1
-    else:
-        obj.pop(key2, None)
-    if v2 is not None:
-        obj[key1] = v2
-    else:
-        obj.pop(key1, None)
 
 
 @contextlib.contextmanager

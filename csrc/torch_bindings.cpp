@@ -175,12 +175,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
-  // Polynomial Normalization.
-  ops.def(
-      "poly_norm(Tensor! out, Tensor input, Tensor weight, Tensor bias, float "
-      "epsilon) -> ()");
-  ops.impl("poly_norm", torch::kCUDA, &poly_norm);
-
   // Function for fused QK Norm and RoPE
   ops.def(
       "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "

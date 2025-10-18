@@ -6,6 +6,7 @@ import contextlib
 import copy
 import functools
 import importlib
+import itertools
 import json
 import os
 import random
@@ -15,7 +16,7 @@ import sys
 import tempfile
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
@@ -45,10 +46,10 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (
     FlexibleArgumentParser,
-    GB_bytes,
     cuda_device_count_stateless,
     get_open_port,
 )
+from vllm.utils.mem_constants import GB_bytes
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -1261,3 +1262,23 @@ def check_answers(
     frac_ok = numok / len(answer)
     print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
     assert frac_ok >= accept_rate
+
+
+def flat_product(*iterables: Iterable[Any]):
+    """
+    Flatten lists of tuples of the cartesian product.
+    Useful when we want to avoid nested tuples to allow
+    test params to be unpacked directly from the decorator.
+
+    Example:
+    flat_product([(1, 2), (3, 4)], ["a", "b"]) ->
+    [
+      (1, 2, "a"),
+      (1, 2, "b"),
+      (3, 4, "a"),
+      (3, 4, "b"),
+    ]
+    """
+    for element in itertools.product(*iterables):
+        normalized = (e if isinstance(e, tuple) else (e,) for e in element)
+        yield tuple(itertools.chain(*normalized))
