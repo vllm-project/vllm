@@ -20,9 +20,22 @@ logger = init_logger(__name__)
 if has_triton_kernels():
     try:
         import triton_kernels.swiglu
-        from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
-        from triton_kernels.routing import RoutingData, routing, routing_from_bitmatrix
-        from triton_kernels.tensor import Bitmatrix
+        from triton_kernels.matmul_ogs import (
+            FnSpecs,
+            FusedActivation,
+            GatherIndx,
+            RoutingData,
+            ScatterIndx,
+            matmul_ogs,
+        )
+        from triton_kernels.tensor import (
+            BIT,
+            Bitmatrix,
+            SparseMatrix,
+            Tensor,
+            make_ragged_tensor_metadata,
+        )
+        from triton_kernels.topk import topk as triton_topk
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -69,6 +82,62 @@ def pack_bitmatrix(
         y = tl.reduce_or(x, axis=1)
         bitmatrix_ptrs = bitmatrix + offsets_m[:, None] * bm_cols + offs[None, :]
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
+
+
+def routing_from_bitmatrix(
+    bitmatrix: "Bitmatrix",
+    expt_scal: torch.Tensor,
+    expt_indx: torch.Tensor,
+    n_expts_tot: int,
+    n_expts_act: int,
+):
+    sparse_logits = SparseMatrix(
+        indx=expt_indx,
+        vals=expt_scal,
+        mask=bitmatrix,
+    )
+    dispatch_index = sparse_logits.mask_metadata.col_sorted_indx
+    combine_indx = sparse_logits.mask_metadata.row_sorted_indx
+    ragged_batch_metadata = make_ragged_tensor_metadata(
+        sparse_logits.mask_metadata.col_sum,
+        dispatch_index.shape[0],
+    )
+    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    routing_data = RoutingData(
+        gate_scal,
+        ragged_batch_metadata.batch_sizes,
+        n_expts_tot,
+        n_expts_act,
+        ragged_batch_metadata,
+    )
+    gather_idx = GatherIndx(combine_indx, dispatch_index)
+    scatter_idx = ScatterIndx(dispatch_index, combine_indx)
+    return routing_data, gather_idx, scatter_idx
+
+
+def routing(
+    logits: "torch.Tensor | Tensor",
+    n_expts_act: int,
+    sm_first: bool = False,
+    expt_indx: torch.Tensor | None = None,
+    n_rows: torch.Tensor | None = None,
+):
+    if sm_first:
+        logits = torch.softmax(logits, dim=-1)
+    sparse_logits = triton_topk(
+        logits,
+        n_expts_act,
+        apply_softmax=not sm_first,
+        y_indx=expt_indx,
+        n_rows=n_rows,
+    )
+    return routing_from_bitmatrix(
+        sparse_logits.mask,
+        sparse_logits.vals,
+        sparse_logits.indx,
+        logits.shape[-1],
+        n_expts_act,
+    )
 
 
 def triton_kernel_moe_forward(
@@ -202,7 +271,10 @@ def make_routing_data(
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
     bitmatrix = Bitmatrix(
-        bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None
+        bitmatrix,
+        dtype=BIT,
+        shape=bitmatrix_shape,
+        shape_max=bitmatrix_shape_max,
     )
 
     # matmul_ogs expects invalid topk_weights to be -1s
