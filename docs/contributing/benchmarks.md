@@ -1019,7 +1019,7 @@ python vllm/benchmarks/serve_multi.py \
 
 By passing SLA constraints via `--sla-params`, you can run this script in SLA mode, causing it to adjust either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints.
 
-For example, to ensure E2E latency below a target value for 99% of requests:
+For example, to ensure E2E latency within a target value for 99% of requests:
 
 ```json
 [
