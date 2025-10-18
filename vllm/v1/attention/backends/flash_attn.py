@@ -58,10 +58,15 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
+        # FIXME (zyongye): change this until FA4 support more head_dim
+        if envs.VLLM_FLASH_ATTN_VERSION == 4:
+            return [64, 96, 128]
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        if envs.VLLM_FLASH_ATTN_VERSION == 4:
+            return [128]
         return [MultipleOf(16)]
 
     @classmethod
@@ -493,8 +498,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.sinks = sinks
         if self.sinks is not None:
-            assert self.vllm_flash_attn_version == 3, (
-                "Sinks are only supported in FlashAttention 3"
+            assert self.vllm_flash_attn_version in [3, 4], (
+                "Sinks are only supported in FlashAttention 3 and 4"
             )
             assert self.sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
@@ -616,6 +621,9 @@ class FlashAttentionImpl(AttentionImpl):
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
             if self.dcp_world_size > 1:
+                assert get_flash_attn_version() != 4, (
+                    "Distributed Context Parallel doesn't support FA4 yet"
+                )
                 self._forward_with_dcp(
                     query[:num_actual_tokens],
                     key[:num_actual_tokens],
@@ -630,29 +638,59 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
-                    block_table=block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
-                    num_splits=attn_metadata.max_num_splits,
-                    s_aux=self.sinks,
-                )
+                if envs.VLLM_FLASH_ATTN_VERSION == 4:
+                    from flash_attn.cute.interface import _flash_attn_fwd
+
+                    window_size = (
+                        None
+                        if self.sliding_window[0] == -1
+                        else self.sliding_window[0],
+                        None
+                        if self.sliding_window[1] == -1
+                        else self.sliding_window[1],
+                    )
+                    output, lse, *rest = _flash_attn_fwd(
+                        q=query[:num_actual_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_k=None,
+                        seqused_q=None,
+                        seqused_k=seqused_k,
+                        page_table=block_table,
+                        softmax_scale=self.scale,
+                        causal=attn_metadata.causal,
+                        window_size_left=window_size[0],
+                        window_size_right=window_size[1],
+                        learnable_sink=self.sinks,
+                        softcap=self.logits_soft_cap,
+                        return_lse=False,
+                        out=output[:num_actual_tokens],
+                    )
+                else:
+                    flash_attn_varlen_func(
+                        q=query[:num_actual_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:num_actual_tokens],
+                        cu_seqlens_q=cu_seqlens_q,
+                        max_seqlen_q=max_seqlen_q,
+                        seqused_k=seqused_k,
+                        max_seqlen_k=max_seqlen_k,
+                        softmax_scale=self.scale,
+                        causal=attn_metadata.causal,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=self.sliding_window,
+                        block_table=block_table,
+                        softcap=self.logits_soft_cap,
+                        scheduler_metadata=scheduler_metadata,
+                        fa_version=self.vllm_flash_attn_version,
+                        q_descale=layer._q_scale.expand(descale_shape),
+                        k_descale=layer._k_scale.expand(descale_shape),
+                        v_descale=layer._v_scale.expand(descale_shape),
+                        num_splits=attn_metadata.max_num_splits,
+                        s_aux=self.sinks,
+                    )
                 return output
 
         # Cascade attention (rare case).
