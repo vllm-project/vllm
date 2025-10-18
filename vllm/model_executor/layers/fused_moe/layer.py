@@ -357,6 +357,10 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def allow_inplace(self) -> bool:
         return self.old_quant_method.allow_inplace
 
+    @property
+    def allow_inplace(self) -> bool:
+        return self._allow_inplace
+
     def create_weights(
         self,
         layer: torch.nn.Module,
