@@ -32,6 +32,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   #define stride_tag
 #endif
 
+  ops.def("arg_topk_impl(Tensor input, int k, bool sorted) -> (Tensor, Tensor)");
+  ops.impl("arg_topk_impl", torch::kCUDA, &arg_topk_impl);
+  
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
       "y_q, Tensor! y_s,"
