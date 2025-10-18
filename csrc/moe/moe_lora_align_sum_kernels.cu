@@ -24,7 +24,7 @@ __device__ __forceinline__ int32_t index(int32_t total_col, int32_t row,
 // TODO: Refactor common parts with moe_align_sum_kernels
 template <typename scalar_t, typename token_cnts_t>
 __global__ void moe_lora_align_sum_kernel(
-    scalar_t* __restrict__ topk_ids, scalar_t* __restrict__ token_lora_mapping,
+    scalar_t* __restrict__ topk_ids, int32_t* token_lora_mapping,
     int64_t block_size, int num_experts, int max_loras, size_t numel,
     int max_num_tokens_padded, int max_num_m_blocks,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
@@ -130,10 +130,10 @@ void moe_lora_align_block_size(torch::Tensor topk_ids,
   const int topk_num = topk_ids.size(1);
 
   int max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1);
-  max_num_tokens_padded = (block_size == 0) ? max_num_tokens_padded
-                                            : round_to_next_multiple_of(
-                                                  max_num_tokens_padded,
-                                                  static_cast<int>(block_size));
+
+  TORCH_CHECK(block_size > 0, "block_size should be greater than 0. ");
+  max_num_tokens_padded = round_to_next_multiple_of(
+      max_num_tokens_padded, static_cast<int>(block_size));
   int max_num_m_blocks = div_ceil(max_num_tokens_padded, block_size);
 
   int device_max_shared_mem;
@@ -163,7 +163,7 @@ void moe_lora_align_block_size(torch::Tensor topk_ids,
             (void*)kernel, shared_mem));
         kernel<<<max_loras, blockDim, shared_mem, stream>>>(
             topk_ids.data_ptr<scalar_t>(),
-            token_lora_mapping.data_ptr<scalar_t>(), block_size, num_experts,
+            token_lora_mapping.data_ptr<int32_t>(), block_size, num_experts,
             max_loras, topk_ids.numel(), max_num_tokens_padded,
             max_num_m_blocks, sorted_token_ids.data_ptr<int32_t>(),
             expert_ids.data_ptr<int32_t>(), topk_num,
