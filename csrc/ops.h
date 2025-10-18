@@ -92,6 +92,12 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
+                        int64_t num_heads_k, int64_t num_heads_v,
+                        int64_t head_dim, double eps, torch::Tensor& q_weight,
+                        torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
+                        bool is_neox, torch::Tensor& position_ids);
+
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
                                  const torch::Tensor& output_mask,
