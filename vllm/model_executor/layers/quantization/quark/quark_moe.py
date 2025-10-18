@@ -310,7 +310,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                rocm_aiter_fused_experts,
                 shuffle_weights,
             )
 
@@ -322,17 +321,11 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
-            self.rocm_aiter_fused_experts_func = rocm_aiter_fused_experts
         elif self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(layer, False)
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
-            self.fused_experts_func = None
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            self.fused_experts_func = fused_experts
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -369,8 +362,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW8A8Fp8MoEMethod` yet."
@@ -392,7 +383,11 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         )
 
         if self.rocm_aiter_moe_enabled:
-            return self.rocm_aiter_fused_experts_func(
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                rocm_aiter_fused_experts,
+            )
+
+            return rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -403,7 +398,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 quant_config=self.moe_quant_config,
                 expert_map=expert_map,
             )
-        if self.use_marlin:
+        elif self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."
             return fused_marlin_moe(
                 x,
@@ -421,22 +416,22 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
 
-        assert self.fused_experts_func is not None
-
-        return self.fused_experts_func(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            quant_config=self.moe_quant_config,
-        )
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                quant_config=self.moe_quant_config,
+            )
 
 
 class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
@@ -601,6 +596,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             block_shape=None,
         )
 
+    @property
+    def allow_inplace(self) -> bool:
+        return True
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -624,8 +623,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkOCP_MX_MoEMethod` yet."

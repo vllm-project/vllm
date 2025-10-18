@@ -273,7 +273,7 @@ class DeviceCommunicatorBase:
             )
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module)
+            module.init_prepare_finalize()
 
     def dispatch(
         self,
