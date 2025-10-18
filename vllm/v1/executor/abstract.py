@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import Any, Literal, TypeVar, overload
+from typing import Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -21,7 +21,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
-_R = TypeVar("_R", default=Any)
+_R = TypeVar("_R")
 
 FailureCallback = Callable[[], None]
 
@@ -202,7 +202,7 @@ class Executor(ABC):
         self.collective_rpc("execute_dummy_batch")
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        output = self.collective_rpc("take_draft_token_ids")
+        output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
     @property
@@ -241,6 +241,7 @@ class Executor(ABC):
 
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
+        output: list[tuple[SupportedTask, ...]]
         output = self.collective_rpc("get_supported_tasks")
         return output[0]
 
@@ -257,7 +258,7 @@ class Executor(ABC):
         return all(self.collective_rpc("pin_lora", args=(lora_id,)))
 
     def list_loras(self) -> set[int]:
-        sets = self.collective_rpc("list_loras")
+        sets: list[set[int]] = self.collective_rpc("list_loras")
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
