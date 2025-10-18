@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    is_valid_flashinfer_cutlass_fused_moe,
-)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
