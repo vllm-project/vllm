@@ -1632,13 +1632,6 @@ class EngineArgs:
             )
             return False
 
-        # No Mamba or Encoder-Decoder so far.
-        if not model_config.is_v1_compatible:
-            _raise_or_fallback(
-                feature_name=model_config.architectures, recommend_to_remove=False
-            )
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (
             self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
@@ -1767,11 +1760,6 @@ class EngineArgs:
             if self.enable_prefix_caching is None:
                 self.enable_prefix_caching = incremental_prefill_supported
                 logger.info("(%s) prefix caching by default", action)
-
-        # V1 should use the new scheduler by default.
-        # Swap it only if this arg is set to the original V0 default
-        if self.scheduler_cls == EngineArgs.scheduler_cls:
-            self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
         # When no user override, set the default values based on the usage
         # context.

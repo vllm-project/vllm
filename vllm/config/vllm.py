@@ -7,13 +7,13 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import field, replace
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -22,7 +22,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationLevel, CUDAGraphMode
+from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .fault_tolerance import FaultToleranceConfig
 from .kv_events import KVEventsConfig
@@ -58,23 +58,23 @@ class VllmConfig:
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
     # try to download a model
-    model_config: ModelConfig = None  # type: ignore
+    model_config: ModelConfig = Field(default=None)
     """Model configuration."""
-    cache_config: CacheConfig = field(default_factory=CacheConfig)
+    cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
-    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    scheduler_config: SchedulerConfig = Field(default_factory=SchedulerConfig)
     """Scheduler configuration."""
-    device_config: DeviceConfig = field(default_factory=DeviceConfig)
+    device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
-    load_config: LoadConfig = field(default_factory=LoadConfig)
+    load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
-    structured_outputs_config: StructuredOutputsConfig = field(
+    structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
@@ -82,20 +82,14 @@ class VllmConfig:
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
-    compilation_config: CompilationConfig = field(default_factory=CompilationConfig)
+    compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
-    As a shorthand, `-O<n>` can be used to directly specify the compilation
-    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
-    Currently, -O <n> and -O=<n> are supported as well but this will likely be
-    removed in favor of clearer -O<n> syntax in the future.
-
-    NOTE: level 0 is the default level without any optimization. level 1 and 2
-    are for internal testing only. level 3 is the recommended level for
-    production, also default in V1.
+    As a shorthand, one can append compilation arguments via 
+    -0.parameter=arguement such as `-O.mode=3` (same as `-O='{"mode":3}'`).
 
     You can specify the full compilation config like so:
-    `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
+    `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
@@ -106,7 +100,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict | SupportsHash = field(default_factory=dict)
+    additional_config: dict | SupportsHash = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
@@ -308,33 +302,33 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        # If the user does not explicitly set a compilation level, then
-        # we use the default level. The default level depends on other
+        # If the user does not explicitly set a compilation mode, then
+        # we use the default mode. The default mode depends on other
         # settings (see the below code).
-        if self.compilation_config.level is None:
+        if self.compilation_config.mode is None:
             if envs.VLLM_USE_V1:
                 if (
                     self.model_config is not None
                     and not self.model_config.enforce_eager
                 ):
-                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
                 else:
-                    self.compilation_config.level = CompilationLevel.NO_COMPILATION
+                    self.compilation_config.mode = CompilationMode.NONE
 
             else:
-                # NB: Passing both --enforce-eager and a compilation level
-                # in V0 means the compilation level wins out.
-                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+                # NB: Passing both --enforce-eager and a compilation mode
+                # in V0 means the compilation mode wins out.
+                self.compilation_config.mode = CompilationMode.NONE
         else:
-            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
-            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+            assert self.compilation_config.mode >= CompilationMode.NONE
+            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
-        # compilation level and backend.
+        # compilation mode and backend.
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
-                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+                and self.compilation_config.mode > CompilationMode.NONE
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
@@ -353,7 +347,7 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode is None:
                 if (
                     envs.VLLM_USE_V1
-                    and self.compilation_config.level == CompilationLevel.PIECEWISE
+                    and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
                 ):
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
@@ -489,10 +483,10 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # Do this after all the updates to compilation_config.level
+        # Do this after all the updates to compilation_config.mode
         if (
             envs.VLLM_USE_V1
-            and self.compilation_config.level == CompilationLevel.PIECEWISE
+            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
         ):
             self.compilation_config.set_splitting_ops_for_v1()
 
@@ -511,8 +505,8 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.level == CompilationLevel.PIECEWISE, (
-                    "Compilation level should be CompilationLevel.PIECEWISE "
+                assert self.compilation_config.mode == CompilationMode.VLLM_COMPILE, (
+                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
@@ -841,7 +835,7 @@ def set_current_vllm_config(
 
         if (
             check_compile
-            and vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
+            and vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and compilation_counter.num_models_seen == num_models_seen
         ):
             # If the model supports compilation,

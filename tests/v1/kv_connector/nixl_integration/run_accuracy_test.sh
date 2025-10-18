@@ -19,11 +19,18 @@ done
 
 echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
 
+DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
+if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
+  KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
+else
+  KV_CONFIG_HETERO_LAYOUT=''
+fi
+
 # Build the kv-transfer-config once
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}'}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
 fi
 
 # Models to run
@@ -117,6 +124,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -157,6 +165,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
