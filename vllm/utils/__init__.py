@@ -98,6 +98,15 @@ CYAN = "\033[1;36m"
 RESET = "\033[0;0m"
 
 
+def kv_cache_dtype_str_to_dtype(
+    kv_cache_dtype: str, model_config: ModelConfig
+) -> torch.dtype:
+    if kv_cache_dtype == "auto":
+        # Model config may not be specified for unit tests, default to float16
+        return model_config.dtype if model_config else torch.half
+    return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+
+
 T = TypeVar("T")
 U = TypeVar("U")
 
