@@ -437,6 +437,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, engine_indexes, model_name
         )
 
+        histogram_kv_cache_lifetime = self._histogram_cls(
+            name="vllm:kv_cache_block_lifetime_seconds",
+            documentation=("Histogram of individual KV cache block lifetimes "
+                           "in seconds."),
+            buckets=[
+                0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+                600.0, 1200.0, 3600.0, 7200.0, 14400.0
+            ],
+            labelnames=labelnames)
+        self.histogram_kv_cache_lifetime_seconds = make_per_engine(
+            histogram_kv_cache_lifetime, engine_indexes, model_name)
+
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
             documentation=(
@@ -882,6 +894,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
             )
+
+            # Update KV cache lifetime metric
+            for lifetime in scheduler_stats.kv_cache_block_lifetimes:
+                self.histogram_kv_cache_lifetime_seconds[engine_idx].observe(
+                    lifetime)
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
