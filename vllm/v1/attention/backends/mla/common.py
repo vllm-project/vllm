@@ -558,6 +558,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
+        if (
+            self.dcp_world_size > 1
+            and self.__class__.reorder_batch_threshold > 1
+            and self.__class__.__name__ != "FlashAttnMLAMetadataBuilder"
+        ):
+            logger.warning_once(
+                "DCP is enabled but not FlashAttnMLA is used. "
+                "Set query_len_support back to SINGLE_ONLY "
+                "and reorder_batch_threshold back to 1."
+            )
+            self.__class__.query_len_support = QueryLenSupport.SINGLE_ONLY
+            self.__class__.reorder_batch_threshold = 1
+
         # Don't try to access the runner on AMD
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
