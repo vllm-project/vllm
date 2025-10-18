@@ -4,6 +4,7 @@
 import os
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +28,7 @@ from vllm.v1.executor.ray_utils import (
     initialize_ray_cluster,
     ray,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 
 if ray is not None:
     from ray.actor import ActorHandle
@@ -383,11 +385,9 @@ class RayDistributedExecutor(Executor):
         ):
             self.shutdown()
 
-    def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: bool = False,
-    ):
+    def execute_model(  # type: ignore[override]
+        self, scheduler_output: SchedulerOutput, non_block: bool = False
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         """Execute the model on the Ray workers.
 
         Args:
