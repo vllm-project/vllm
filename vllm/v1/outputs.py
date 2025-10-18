@@ -88,6 +88,7 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them.
     invalid_block_ids: set[int] = field(default_factory=set)
+    expected_finished_reqs: int = 0
 
     def is_empty(self):
         return (
