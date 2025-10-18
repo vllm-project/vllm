@@ -518,6 +518,66 @@ def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
     assert_never(sla_variable)
 
 
+def _estimate_sla_bounds(
+    server_address: str | None,
+    bench_cmd: list[str],
+    *,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+    sla_comb: dict[str, SLACriterionBase],
+    base_path: Path,
+    num_runs: int,
+    dry_run: bool,
+    sla_variable: SLAVariable,
+    init_value: int,
+    max_value: int,
+    gamma: float = 2.0,
+):
+    sla_data = list[dict[str, object]]()
+
+    assert init_value > 1 and gamma > 1
+
+    val: int = init_value
+
+    while True:
+        print(f"Testing {sla_variable}: {val} req/s")
+
+        iter_data = _run_sla(
+            server_address,
+            bench_cmd,
+            serve_comb=serve_comb,
+            bench_comb={**bench_comb, sla_variable: val},
+            iter_path=_get_sla_iter_path(base_path, sla_variable, val),
+            num_runs=num_runs,
+            dry_run=dry_run,
+        )
+
+        assert iter_data is not None
+        sla_data.extend(iter_data)
+
+        iter_data_mean = {
+            k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
+            for k in sla_comb
+        }
+
+        sla_results = [
+            criterion.print_and_validate(iter_data_mean, k)
+            for k, criterion in sla_comb.items()
+        ]
+
+        if all(sla_results):
+            print("SLA criteria are met.")
+            val *= 2
+        else:
+            print("SLA criteria are not met.")
+            break
+
+        if val >= max_value:
+            break
+
+    return sla_data, (int(val ** (1 / gamma)), val)
+
+
 def _find_sla_value(
     server_address: str | None,
     bench_cmd: list[str],
@@ -531,23 +591,11 @@ def _find_sla_value(
     sla_variable: SLAVariable,
     min_value: int,
     max_value: int,
-    mode: Literal["window_left", "window_right", "binary"] = "binary",
 ):
     sla_data = list[dict[str, object]]()
 
-    left: int
-    right: int
-    if mode == "window_left":
-        left = max_value
-        right = max_value
-    elif mode == "window_right":
-        left = min_value
-        right = min_value
-    elif mode == "binary":
-        left = min_value
-        right = max_value
-    else:
-        assert_never(mode)
+    left: int = min_value
+    right: int = max_value
 
     while True:
         val = (left + right) // 2
@@ -578,38 +626,13 @@ def _find_sla_value(
 
         if all(sla_results):
             print("SLA criteria are met.")
-
-            if mode == "window_left":
-                break
-            elif mode == "window_right":
-                left = right = 1 if val == 0 else val * 2
-            elif mode == "binary":
-                left = val
-            else:
-                assert_never(mode)
+            left = val
         else:
             print("SLA criteria are not met.")
+            right = val
 
-            if mode == "window_left":
-                left = right = val // 2
-            elif mode == "window_right":
-                break
-            elif mode == "binary":
-                right = val
-            else:
-                assert_never(mode)
-
-        if mode == "window_left":
-            if left <= min_value:
-                break
-        elif mode == "window_right":
-            if right >= max_value:
-                break
-        elif mode == "binary":
-            if right - left <= 1:
-                break
-        else:
-            assert_never(mode)
+        if right - left <= 1:
+            break
 
     return sla_data, val
 
@@ -651,7 +674,7 @@ def _iter_sla(
     )
     print(f"Initial {sla_variable} to search: {sla_init_value} req/s.")
 
-    sla_data_1, max_value = _find_sla_value(
+    sla_data_1, (sla_min, sla_max) = _estimate_sla_bounds(
         server_address,
         bench_cmd,
         serve_comb=serve_comb,
@@ -661,11 +684,10 @@ def _iter_sla(
         num_runs=num_runs,
         dry_run=dry_run,
         sla_variable=sla_variable,
-        min_value=sla_init_value,
+        init_value=sla_init_value,
         max_value=sla_inf_value,
-        mode="window_right",
     )
-    print(f"Maximum {sla_variable} to search: {max_value} req/s.")
+    print(f"Range of {sla_variable} to search: [{sla_min}, {sla_max}] req/s.")
 
     sla_data_2, sla_value = _find_sla_value(
         server_address,
@@ -677,9 +699,8 @@ def _iter_sla(
         num_runs=num_runs,
         dry_run=dry_run,
         sla_variable=sla_variable,
-        min_value=0,
-        max_value=max_value,
-        mode="binary",
+        min_value=sla_min,
+        max_value=sla_max,
     )
 
     sla_data = sla_data_0 + sla_data_1 + sla_data_2
