@@ -179,6 +179,7 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
             quant_config.block_shape,
             is_fp4_scale_swizzled=not self.use_dp,
         )
+
         if self.use_dp:
             topk_weights, topk_ids, a1q, a1q_scale = get_dp_group().all_gatherv(
                 [topk_weights, topk_ids, a1q, a1q_scale],
