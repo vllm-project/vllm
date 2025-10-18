@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import multiprocessing
 import os
 import weakref
 from collections.abc import Callable, Iterator
@@ -130,6 +131,8 @@ class CoreEngineProcManager:
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
+        self.vllm_config = vllm_config
+
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
@@ -150,7 +153,27 @@ class CoreEngineProcManager:
 
     def join_first(self):
         """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            sentinels = [proc.sentinel for proc in self.processes]
+            while self.processes is not None:
+                died = multiprocessing.connection.wait(sentinels)
+                for sentinel in died:
+                    died_proc = next(
+                        proc for proc in self.processes if proc.sentinel == sentinel
+                    )
+                    # fault_info = FaultInfo(
+                    #     type="engine_core dead",
+                    #     message=f"Engine core proc {died_proc.pid} "
+                    #     f"(PID: {died_proc.name}) died unexpectedly.",
+                    #     engine_index=int(died_proc.name[-1]),
+                    # )
+                    logger.error(
+                        "Engine core proc %s died unexpectedly, shutting down client.",
+                        died_proc,
+                    )
+                    # todo send dead engine to clientGuard
+        else:
+            connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -235,6 +258,8 @@ class CoreEngineActorManager:
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
+        self.actor_id_to_dp_rank = {}
+
         env_vars_list = get_env_vars_to_copy(destination="DPEngineCoreActor")
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
@@ -313,6 +338,11 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
+
+            if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                actor_id = actor._actor_id.hex()
+                self.actor_id_to_dp_rank[actor_id] = f"engine_{index}"
+
             if local_client:
                 self.local_engine_actors.append(actor)
             else:

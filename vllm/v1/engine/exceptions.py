@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+import time
 from dataclasses import dataclass
 
 
@@ -23,4 +25,37 @@ class EngineDeadError(Exception):
 
 @dataclass
 class FaultInfo:
-    pass
+    type: str
+    message: str
+    engine_index: int
+    exit_time: str = None
+    additional_info: str | None = None
+
+    def __post_init__(self):
+        # If no exit time is specified, the current timestamp will be used by default.
+        local_time = time.localtime(time.time())
+        if self.exit_time is None:
+            self.exit_time = time.strftime("%H:%M:%S", local_time)
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type,
+            "message": self.message,
+            "engine_index": self.engine_index,
+            "exit_time": self.exit_time,
+            "additional_info": self.additional_info,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "FaultInfo":
+        data = json.loads(json_str)
+        return cls(
+            type=data["type"],
+            message=data["message"],
+            engine_index=data["engine_index"],
+            exit_time=data.get("exit_time"),
+            additional_info=data.get("additional_info"),
+        )

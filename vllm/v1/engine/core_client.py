@@ -458,6 +458,7 @@ class MPClient(EngineCoreClient):
         self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
         success = False
+
         try:
             # State used for data parallel.
             self.engines_running = False
@@ -540,7 +541,10 @@ class MPClient(EngineCoreClient):
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
             # Start monitoring engine core processes for unexpected failures
-            self.start_engine_core_monitor()
+            if self.vllm_config.parallel_config.data_parallel_backend == "ray":
+                self.start_engine_core_actor_monitor()
+            else:
+                self.start_engine_core_monitor()
 
             success = True
         finally:
@@ -572,6 +576,41 @@ class MPClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return self.engines_running
 
+    def start_engine_core_actor_monitor(self):
+        engine_manager = self.resources.engine_manager
+
+        if (
+            not isinstance(engine_manager, CoreEngineActorManager)
+            or not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
+        ):
+            return
+
+        def monitor_actors():
+            while True:
+                all_actors = (
+                    engine_manager.local_engine_actors
+                    + engine_manager.remote_engine_actors
+                )
+                if all_actors is None:
+                    return
+
+                # for i, actor in enumerate(all_actors):
+                #     actor_id = actor._actor_id.hex()
+                #     actor_info = ray.state.actors(actor_id)
+                #     actor_state = actor_info.get("State", "UNKNOWN")
+                # if actor_state == "DEAD":
+                #     fault_info = FaultInfo(
+                #         type="engine_actor dead",
+                #         message=f"Engine core actor id {actor_id} "
+                #         f"(status: {actor_state}).",
+                #         engine_index=int(
+                #             engine_manager.actor_id_to_dp_rank[actor_id]
+                #         ),
+                #     )
+                # todo send fault_info msg to clientGuard
+
+        Thread(target=monitor_actors, daemon=True, name="MPClientEngineMonitor").start()
+
     def start_engine_core_monitor(self):
         """Start a monitor thread for engine core processes."""
         engine_manager = self.resources.engine_manager
@@ -591,22 +630,46 @@ class MPClient(EngineCoreClient):
         # callback to inform the engine.
         def monitor_engine_cores():
             sentinels = [proc.sentinel for proc in engine_processes]
-            died = multiprocessing.connection.wait(sentinels)
-            _self = self_ref()
-            if not _self or _self.resources.engine_dead:
-                return
-            _self.resources.engine_dead = True
-            proc_name = next(
-                proc.name for proc in engine_processes if proc.sentinel == died[0]
-            )
-            logger.error(
-                "Engine core proc %s died unexpectedly, shutting down client.",
-                proc_name,
-            )
-            _self.shutdown()
-            # Note: For MPClient, we don't have a failure callback mechanism
-            # like MultiprocExecutor, but we set engine_dead flag which will
-            # cause subsequent operations to raise EngineDeadError
+            if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                while engine_manager.processes is not None:
+                    died = multiprocessing.connection.wait(sentinels)
+                    for sentinel in died:
+                        died_proc = next(
+                            proc
+                            for proc in engine_processes
+                            if proc.sentinel == sentinel
+                        )
+                        # fault_info = FaultInfo(
+                        #     type="engine_core dead",
+                        #     message=f"Engine core proc {died_proc.pid} "
+                        #     f"(PID: {died_proc.name}) died unexpectedly.",
+                        #     engine_index=int(died_proc.name[-1]),
+                        # )
+                        logger.error(
+                            "Engine core proc %s died unexpectedly, "
+                            "shutting down client.",
+                            died_proc,
+                        )
+
+                        # todo send fault_info msg to clientGuard
+
+            else:
+                died = multiprocessing.connection.wait(sentinels)
+                _self = self_ref()
+                if not _self or _self.resources.engine_dead:
+                    return
+                _self.resources.engine_dead = True
+                proc_name = next(
+                    proc.name for proc in engine_processes if proc.sentinel == died[0]
+                )
+                logger.error(
+                    "Engine core proc %s died unexpectedly, shutting down client.",
+                    proc_name,
+                )
+                _self.shutdown()
+                # Note: For MPClient, we don't have a failure callback mechanism
+                # like MultiprocExecutor, but we set engine_dead flag which will
+                # cause subsequent operations to raise EngineDeadError
 
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
