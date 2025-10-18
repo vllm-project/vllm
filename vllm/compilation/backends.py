@@ -22,6 +22,7 @@ from vllm.compilation.partition_rules import (
     resolve_defined_ops,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -245,9 +246,9 @@ class CompilerManager:
             if graph_index == 0:
                 # adds some info logging for the first graph
                 if runtime_shape is None:
-                    logger.info("Cache the graph for dynamic shape for later use")
+                    logger.debug("Cache the graph for dynamic shape for later use")
                 else:
-                    logger.info(
+                    logger.debug(
                         "Cache the graph of shape %s for later use", str(runtime_shape)
                     )
             if runtime_shape is None:
@@ -603,12 +604,14 @@ class VllmBackend:
 
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
 
-        if disable_cache:
-            logger.info("vLLM's torch.compile cache is disabled.")
-        else:
-            logger.info(
-                "Using cache directory: %s for vLLM's torch.compile", local_cache_dir
-            )
+        if is_local_first_rank():
+            if disable_cache:
+                logger.info_once("vLLM's torch.compile cache is disabled.")
+            else:
+                logger.info_once(
+                    "Using cache directory: %s for vLLM's torch.compile",
+                    local_cache_dir,
+                )
 
         self.compiler_manager.initialize_cache(
             local_cache_dir, disable_cache, self.prefix
@@ -620,7 +623,7 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.time() - torch_compile_start_time
-        logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        logger.debug("Dynamo bytecode transform time: %.2f s", dynamo_time)
         self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
