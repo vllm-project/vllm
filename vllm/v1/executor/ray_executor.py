@@ -4,7 +4,6 @@
 import os
 from collections import defaultdict
 from collections.abc import Callable
-from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +27,6 @@ from vllm.v1.executor.ray_utils import (
     initialize_ray_cluster,
     ray,
 )
-from vllm.v1.outputs import ModelRunnerOutput
 
 if ray is not None:
     from ray.actor import ActorHandle
@@ -379,7 +377,7 @@ class RayDistributedExecutor(Executor):
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
-        self._run_workers("reinitialize_distributed", reconfig_request)
+        self.collective_rpc("reinitialize_distributed", args=(reconfig_request,))
         if (
             reconfig_request.new_data_parallel_rank
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
@@ -390,7 +388,7 @@ class RayDistributedExecutor(Executor):
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ):
         """Execute the model on the Ray workers.
 
         Args:
@@ -417,6 +415,7 @@ class RayDistributedExecutor(Executor):
             return FutureWrapper(refs)
 
         # Get output from all workers when connector is present
+        assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
             outputs = [ref.get() for ref in refs]

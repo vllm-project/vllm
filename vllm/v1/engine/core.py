@@ -463,14 +463,6 @@ class EngineCore:
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
-    def save_tensorized_model(
-        self,
-        tensorizer_config,
-    ) -> None:
-        self.model_executor.save_tensorized_model(
-            tensorizer_config=tensorizer_config,
-        )
-
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
 

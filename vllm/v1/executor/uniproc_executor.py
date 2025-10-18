@@ -98,7 +98,6 @@ class UniProcExecutor(Executor):
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
         ):
             self.shutdown()
-        return
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:
