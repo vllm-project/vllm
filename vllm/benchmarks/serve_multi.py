@@ -588,10 +588,10 @@ def _find_sla_value(
                 assert_never(mode)
 
         if mode == "window_left":
-            if left == min_value:
+            if left <= min_value:
                 break
         elif mode == "window_right":
-            if right == max_value:
+            if right >= max_value:
                 break
         elif mode == "binary":
             if right - left <= 1:
