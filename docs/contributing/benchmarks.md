@@ -7,6 +7,7 @@ toc_depth: 4
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
 - **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
+- **[Batch Scripts]**: Run `vllm bench` against multiple configurations conveniently
 - **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
 - **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
@@ -923,6 +924,131 @@ to account for the extra prompt which is the query. The token accounting to repo
 throughput numbers correctly is also adjusted.
 
 </details>
+
+## Batch Scripts
+
+### Batch Serving Script
+
+[`vllm/benchmarks/serve_multi.py`](../../vllm/benchmarks/serve_multi.py) automatically starts `vllm serve` and runs `vllm bench serve` over multiple configurations.
+
+#### Batch Mode
+
+The basic purpose of this script is to evaluate vLLM under different settings. Follows these steps to run the script:
+
+1. Construct the base command to `vllm serve`, and pass it to the `--serve-cmd` option.
+2. Construct the base command to `vllm bench serve`, and pass it to the `--bench-cmd` option.
+3. (Optional) If you would like to vary the settings of `vllm serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--serve-params`.
+
+    - Example: Tuning `--max-num-seqs` and `--max-num-batched-tokens`:
+
+    ```json
+    [
+        {
+            "max_num_seqs": 32,
+            "max_num_batched_tokens": 1024
+        },
+        {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024
+        },
+        {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 2048
+        },
+        {
+            "max_num_seqs": 128,
+            "max_num_batched_tokens": 2048
+        },
+        {
+            "max_num_seqs": 128,
+            "max_num_batched_tokens": 4096
+        },
+        {
+            "max_num_seqs": 256,
+            "max_num_batched_tokens": 4096
+        }
+    ]
+    ```
+4. (Optional) If you would like to vary the settings of `vllm bench serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--bench-params`.
+
+    - Example: Using different input/output lengths for random dataset:
+
+    ```json
+    [
+        {
+            "random_input_len": 128,
+            "random_output_len": 32
+        },
+        {
+            "random_input_len": 256,
+            "random_output_len": 64
+        },
+        {
+            "random_input_len": 512,
+            "random_output_len": 128
+        }
+    ]
+    ```
+5. Determine where you want to save the results, and pass that to `--output-dir`.
+
+Example command:
+
+```bash
+python vllm/benchmarks/serve_multi.py \
+    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --serve-params benchmarks/serve_hparams.json \
+    --bench-params benchmarks/bench_hparams.json \
+    -o benchmarks/results
+```
+
+!!! important
+    If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
+
+    We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
+    Between each benchmark run, we call the `/reset_prefix_cache` and `/reset_mm_cache` endpoints to get a clean slate for the next run.
+    In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
+
+!!! note
+    By default, each parameter combination is run 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
+
+!!! tip
+    You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
+  
+#### SLA Mode
+
+By passing SLA constraints via `--sla-params`, you can run this script in SLA mode, causing it to adjust either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints.
+
+For example, to ensure E2E latency below a target value for 99% of requests:
+
+```json
+[
+    {
+        "p99_e2el_ms": "<=200"
+    },
+    {
+        "p99_e2el_ms": "<=500"
+    },
+    {
+        "p99_e2el_ms": "<=1000"
+    },
+    {
+        "p99_e2el_ms": "<=2000"
+    }
+]
+```
+
+The algorithm for adjusting the SLA variable is as follows:
+
+1. Run the benchmark with infinite QPS, and use the corresponding metrics to determine the initial value of the variable.
+    - For example, the initial request rate is set to the concurrency under infinite QPS.
+2. Keep doubling the value until the SLA is no longer satisfied. This gives a relatively narrow window in which it is possible to satisfy the SLA.
+3. Apply binary search over the window to find the maximum value that still satisfies the SLA.
+
+!!! important
+    SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
+
+    For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
 
 ## Performance Benchmarks
 
