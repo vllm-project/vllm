@@ -1068,7 +1068,9 @@ def main():
 
     serve_cmd = shlex.split(args.serve_cmd)
     bench_cmd = shlex.split(args.bench_cmd)
-    after_bench_cmd = shlex.split(args.after_bench_cmd)
+    after_bench_cmd = (
+        [] if args.after_bench_cmd is None else shlex.split(args.after_bench_cmd)
+    )
 
     serve_params: list[dict[str, object]]
     if args.serve_params:
