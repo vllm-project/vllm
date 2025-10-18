@@ -470,6 +470,9 @@ class EngineArgs:
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: bool | None = SchedulerConfig.enable_chunked_prefill
+    enable_hybrid_chunked_prefill: bool | None = (
+        SchedulerConfig.enable_hybrid_chunked_prefill
+    )
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     disable_hybrid_kv_cache_manager: bool = (
@@ -1013,6 +1016,10 @@ class EngineArgs:
             "--enable-chunked-prefill", **scheduler_kwargs["enable_chunked_prefill"]
         )
         scheduler_group.add_argument(
+            "--enable-hybrid-chunked-prefill",
+            **scheduler_kwargs["enable_hybrid_chunked_prefill"],
+        )
+        scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
         )
         scheduler_group.add_argument(
@@ -1536,6 +1543,7 @@ class EngineArgs:
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            enable_hybrid_chunked_prefill=self.enable_hybrid_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
