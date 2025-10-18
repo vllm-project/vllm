@@ -451,21 +451,12 @@ class ClientGuard:
             parts = socket.recv_multipart()
 
             # Verify message format
-            if len(parts) != 3:
-                logger.warning(
-                    "Received message with invalid format, number of parts: %s",
-                    len(parts),
-                )
-                return (None, None)
+            assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
 
             identity_bytes, empty_frame, message_bytes = parts
 
             # Verify empty frame
-            if empty_frame != b"":
-                logger.warning(
-                    "Message empty frame format error, actual value:: %s", empty_frame
-                )
-                return (None, None)
+            assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
 
             # Convert to string
             sender_identity = identity_bytes.decode("utf-8")
@@ -473,14 +464,8 @@ class ClientGuard:
 
             return (sender_identity, message)
 
-        except zmq.ZMQError as e:
-            logger.error("ZMQ error: %s", e)
-            return (None, None)
-        except UnicodeDecodeError:
-            logger.error("Message decoding failed, not in UTF-8 format")
-            return (None, None)
-        except Exception as e:
-            logger.error("Unknown error occurred while receiving message: %s", e)
+        except (zmq.ZMQError, UnicodeDecodeError, Exception) as e:
+            logger.error("error occurred while receiving message: %s", e)
             return (None, None)
 
     def handle_fault(self, instruction):
