@@ -541,6 +541,8 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
+    global_cache_hit_threshold: float = SchedulerConfig.global_cache_hit_threshold
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1017,6 +1019,10 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
+        )
+        scheduler_group.add_argument(
+            "--global-cache-hit-threshold",
+            **scheduler_kwargs["global_cache_hit_threshold"],
         )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
@@ -1547,6 +1553,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            global_cache_hit_threshold=self.global_cache_hit_threshold,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
