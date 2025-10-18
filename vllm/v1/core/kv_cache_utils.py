@@ -26,17 +26,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 # BlockHash represents the hash of a single KV-cache block used for
-# prefix caching.  Treating it as a distinct type from ``bytes`` helps
+# prefix caching.  Treating it as a distinct type from `bytes` helps
 # catch accidental misuse when passing around raw byte strings.
 BlockHash = NewType("BlockHash", bytes)
 
-# ``BlockHashWithGroupId`` combines a ``BlockHash`` with its KV cache group ID.
+# `BlockHashWithGroupId` combines a `BlockHash` with its KV cache group ID.
 # It is represented as raw bytes for compactness and efficiency. The helper
-# functions below pack/unpack the ``BlockHash`` and group id into/from the key.
+# functions below pack/unpack the `BlockHash` and group id into/from the key.
 BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 
 # ExternalBlockHash is used for reproducible prefix-cache block hashing.
-# It's a union of ``bytes`` and ``int`` to keep backward compatibility
+# It's a union of `bytes` and `int` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
 ExternalBlockHash: TypeAlias = bytes | int
 
@@ -44,7 +44,7 @@ ExternalBlockHash: TypeAlias = bytes | int
 def make_block_hash_with_group_id(
     block_hash: BlockHash, group_id: int
 ) -> BlockHashWithGroupId:
-    """Pack a ``BlockHash`` and group id into a ``BlockHashWithGroupId``.
+    """Pack a `BlockHash` and group id into a `BlockHashWithGroupId`.
 
     The group id is encoded using 4 bytes in big-endian order and appended to
     the block hash bytes.  This representation avoids creating tuples while
@@ -54,12 +54,12 @@ def make_block_hash_with_group_id(
 
 
 def get_block_hash(key: BlockHashWithGroupId) -> BlockHash:
-    """Extract the ``BlockHash`` from a ``BlockHashWithGroupId``."""
+    """Extract the `BlockHash` from a `BlockHashWithGroupId`."""
     return BlockHash(key[:-4])
 
 
 def get_group_id(key: BlockHashWithGroupId) -> int:
-    """Extract the group id from a ``BlockHashWithGroupId``."""
+    """Extract the group id from a `BlockHashWithGroupId`."""
     return int.from_bytes(key[-4:], "big", signed=False)
 
 

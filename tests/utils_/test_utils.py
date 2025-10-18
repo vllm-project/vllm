@@ -24,7 +24,6 @@ from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.utils import (
     FlexibleArgumentParser,
     MemorySnapshot,
-    PlaceholderModule,
     bind_kv_cache,
     common_broadcastable_dtype,
     current_stream,
@@ -41,7 +40,7 @@ from vllm.utils import (
     unique_filepath,
 )
 
-from ..utils import create_new_process_for_each_test
+from ..utils import create_new_process_for_each_test, flat_product
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -475,46 +474,6 @@ def test_common_broadcastable_dtype(dtypes, expected_result):
     assert common_broadcastable_dtype(dtypes) == expected_result
 
 
-def test_placeholder_module_error_handling():
-    placeholder = PlaceholderModule("placeholder_1234")
-
-    def build_ctx():
-        return pytest.raises(ModuleNotFoundError, match="No module named")
-
-    with build_ctx():
-        int(placeholder)
-
-    with build_ctx():
-        placeholder()
-
-    with build_ctx():
-        _ = placeholder.some_attr
-
-    with build_ctx():
-        # Test conflict with internal __name attribute
-        _ = placeholder.name
-
-    # OK to print the placeholder or use it in a f-string
-    _ = repr(placeholder)
-    _ = str(placeholder)
-
-    # No error yet; only error when it is used downstream
-    placeholder_attr = placeholder.placeholder_attr("attr")
-
-    with build_ctx():
-        int(placeholder_attr)
-
-    with build_ctx():
-        placeholder_attr()
-
-    with build_ctx():
-        _ = placeholder_attr.some_attr
-
-    with build_ctx():
-        # Test conflict with internal __module attribute
-        _ = placeholder_attr.module
-
-
 def test_model_specification(
     parser_with_config, cli_config_file, cli_config_file_with_model
 ):
@@ -812,3 +771,25 @@ def test_unique_filepath():
         paths.add(path)
     assert len(paths) == 10
     assert len(list(Path(temp_dir).glob("*.txt"))) == 10
+
+
+def test_flat_product():
+    # Check regular itertools.product behavior
+    result1 = list(flat_product([1, 2, 3], ["a", "b"]))
+    assert result1 == [
+        (1, "a"),
+        (1, "b"),
+        (2, "a"),
+        (2, "b"),
+        (3, "a"),
+        (3, "b"),
+    ]
+
+    # check that the tuples get flattened
+    result2 = list(flat_product([(1, 2), (3, 4)], ["a", "b"], [(5, 6)]))
+    assert result2 == [
+        (1, 2, "a", 5, 6),
+        (1, 2, "b", 5, 6),
+        (3, 4, "a", 5, 6),
+        (3, 4, "b", 5, 6),
+    ]
