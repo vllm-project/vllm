@@ -5,7 +5,7 @@ import os
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import is_torch_equal
+from vllm.utils.torch_utils import is_torch_equal
 
 logger = init_logger(__name__)
 

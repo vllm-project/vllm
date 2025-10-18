@@ -11,8 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
-    set_default_torch_dtype,
 )
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
