@@ -58,17 +58,21 @@ class PoolingMetadata:
         )
 
     def build_pooling_cursor(
-        self, num_scheduled_tokens: list[int], seq_lens_cpu: torch.Tensor, device: torch.device
+        self,
+        num_scheduled_tokens: list[int],
+        seq_lens_cpu: torch.Tensor,
+        device: torch.device,
     ):
         self.pooling_cursor = build_pooling_cursor(
-            num_scheduled_tokens,
-            seq_lens_cpu,
-            self.prompt_lens, device
+            num_scheduled_tokens, seq_lens_cpu, self.prompt_lens, device
         )
 
 
 def build_pooling_cursor(
-    num_scheduled_tokens: list[int], seq_lens_cpu: torch.Tensor, prompt_lens: torch.Tensor, device: torch.device
+    num_scheduled_tokens: list[int],
+    seq_lens_cpu: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    device: torch.device,
 ):
     assert len(prompt_lens) == len(num_scheduled_tokens)
 
