@@ -60,6 +60,7 @@ class OpenAIServingTokenization(OpenAIServing):
             return error_check_ret
 
         request_id = f"tokn-{self._base_request_id(raw_request)}"
+        self._log_arrival(request_id)
 
         try:
             lora_request = self._maybe_get_adapters(request)
@@ -135,6 +136,7 @@ class OpenAIServingTokenization(OpenAIServing):
             return error_check_ret
 
         request_id = f"tokn-{self._base_request_id(raw_request)}"
+        self._log_arrival(request_id)
 
         lora_request = self._maybe_get_adapters(request)
 
