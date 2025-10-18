@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from abc import ABC
 from collections.abc import Callable
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, TypeVar
 
 from vllm.config import VllmConfig
-from vllm.executor.executor_base import ExecutorBase
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.executor.executor_base import ExecutorBase
 from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher as _ExecutorWithExternalLauncher,
 )
 from vllm.v1.executor.uniproc_executor import UniProcExecutor as _UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.worker_base import WorkerBase
+
+_R = TypeVar("_R", default=Any)
 
 FailureCallback = Callable[[], None]
 
@@ -23,10 +26,8 @@ UniProcExecutor = _UniProcExecutor
 ExecutorWithExternalLauncher = _ExecutorWithExternalLauncher
 
 
-class Executor(ExecutorBase):
-    """
-    Abstract class for v1 executors, mainly define some methods for v1.
-    For methods shared by v0 and v1, define them in ExecutorBase"""
+class Executor(ExecutorBase, ABC):
+    """Abstract base class for vLLM Executors."""
 
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:
@@ -35,10 +36,10 @@ class Executor(ExecutorBase):
         distributed_executor_backend = parallel_config.distributed_executor_backend
         # distributed_executor_backend must be set in VllmConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
-            if not issubclass(distributed_executor_backend, ExecutorBase):
+            if not issubclass(distributed_executor_backend, Executor):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {distributed_executor_backend}."
+                    f"Executor. Got {distributed_executor_backend}."
                 )
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
@@ -59,10 +60,10 @@ class Executor(ExecutorBase):
             executor_class = ExecutorWithExternalLauncher
         elif isinstance(distributed_executor_backend, str):
             executor_class = resolve_obj_by_qualname(distributed_executor_backend)
-            if not issubclass(executor_class, ExecutorBase):
+            if not issubclass(executor_class, Executor):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {executor_class}."
+                    f"Executor. Got {executor_class}."
                 )
         else:
             raise ValueError(
@@ -93,12 +94,36 @@ class Executor(ExecutorBase):
 
     def collective_rpc(
         self,
-        method: str | Callable,
+        method: str | Callable[[WorkerBase], _R],
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict | None = None,
         non_block: bool = False,
-    ) -> list[Any]:
+    ) -> list[_R] | list[Future[_R]]:
+        """
+        Execute an RPC call on all workers.
+
+        Args:
+            method: Name of the worker method to execute, or a callable that
+                is serialized and sent to all workers to execute.
+
+                If the method is a callable, it should accept an additional
+                `self` argument, in addition to the arguments passed in `args`
+                and `kwargs`. The `self` argument will be the worker object.
+            timeout: Maximum time in seconds to wait for execution. Raises a
+                [`TimeoutError`][] on timeout. `None` means wait indefinitely.
+            args: Positional arguments to pass to the worker method.
+            kwargs: Keyword arguments to pass to the worker method.
+            non_block: If `True`, returns a list of Futures instead of waiting
+                for the results.
+
+        Returns:
+            A list containing the results from each worker.
+
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
+        """
         raise NotImplementedError
 
     def execute_model(

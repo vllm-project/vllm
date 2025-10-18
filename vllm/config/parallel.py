@@ -25,11 +25,11 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.executor.executor_base import ExecutorBase
+    from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
     PlacementGroup = Any
-    ExecutorBase = Any
+    Executor = Any
 
 logger = init_logger(__name__)
 
@@ -189,7 +189,7 @@ class ParallelConfig:
     """ray distributed model workers placement group."""
 
     distributed_executor_backend: (
-        str | DistributedExecutorBackend | type[ExecutorBase] | None
+        str | DistributedExecutorBackend | type[Executor] | None
     ) = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
@@ -563,7 +563,7 @@ class ParallelConfig:
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
-        from vllm.executor.executor_base import ExecutorBase
+        from vllm.v1.executor import Executor
 
         # Enable batch invariance settings if requested
         if vllm_is_batch_invariant():
@@ -574,14 +574,14 @@ class ParallelConfig:
             and not isinstance(self.distributed_executor_backend, str)
             and not (
                 isinstance(self.distributed_executor_backend, type)
-                and issubclass(self.distributed_executor_backend, ExecutorBase)
+                and issubclass(self.distributed_executor_backend, Executor)
             )
         ):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
                 "values are 'ray', 'mp' 'uni', 'external_launcher', "
-                " custom ExecutorBase subclass or its import path."
+                " custom Executor subclass or its import path."
             )
         if self.use_ray:
             from vllm.v1.executor import ray_utils
