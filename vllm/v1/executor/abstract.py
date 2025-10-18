@@ -5,21 +5,22 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 
-import torch
-import torch.distributed as dist
-
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.uniproc_executor import (  # noqa
-    ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0,
-)
-from vllm.executor.uniproc_executor import UniProcExecutor as UniProcExecutorV0  # noqa
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.executor.uniproc_executor import (
+    ExecutorWithExternalLauncher as _ExecutorWithExternalLauncher,
+)
+from vllm.v1.executor.uniproc_executor import UniProcExecutor as _UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 FailureCallback = Callable[[], None]
+
+# For backwards compatibility.
+UniProcExecutor = _UniProcExecutor
+ExecutorWithExternalLauncher = _ExecutorWithExternalLauncher
 
 
 class Executor(ExecutorBase):
@@ -123,19 +124,3 @@ class Executor(ExecutorBase):
 
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start,))
-
-
-class UniProcExecutor(UniProcExecutorV0, Executor):
-    pass
-
-
-class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
-    def determine_available_memory(self) -> list[int]:  # in bytes
-        # we need to get the min across all ranks.
-        memory = super().determine_available_memory()
-        from vllm.distributed.parallel_state import get_world_group
-
-        cpu_group = get_world_group().cpu_group
-        memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
-        dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
-        return [memory_tensor.item()]

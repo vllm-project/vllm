@@ -7,18 +7,21 @@ from functools import cached_property
 from multiprocessing import Lock
 from typing import Any
 
+import torch
+import torch.distributed as dist
+
 import vllm.envs as envs
-from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port, run_method
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 
-class UniProcExecutor(ExecutorBase):
+class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
@@ -140,3 +143,13 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         return distributed_init_method, rank, local_rank
+
+    def determine_available_memory(self) -> list[int]:  # in bytes
+        # we need to get the min across all ranks.
+        memory = super().determine_available_memory()
+        from vllm.distributed.parallel_state import get_world_group
+
+        cpu_group = get_world_group().cpu_group
+        memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
+        dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
+        return [memory_tensor.item()]
