@@ -759,14 +759,17 @@ class StepPooler(Pooler):
     ) -> torch.Tensor | list[torch.Tensor]:
         pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
-
-        pooled_data = list[torch.Tensor]()
-
         pooling_params = get_pooling_params(pooling_metadata)
 
+        pooled_data = []
         for data, token_id, pooling_param in zip(
             pooled_data_lst, prompt_token_ids, pooling_params
         ):
+            # for unfinished chunked prefill
+            if data is None:
+                pooled_data.append(data)
+                continue
+
             step_tag_id = pooling_param.step_tag_id
             returned_token_ids = pooling_param.returned_token_ids
 
