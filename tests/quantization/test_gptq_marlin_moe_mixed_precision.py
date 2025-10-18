@@ -43,7 +43,7 @@ def test_gptq_marlin_moe_method_uses_dynamic_bits_override():
     config = _make_marlin_config()
 
     eight_bit_config = deepcopy(config)
-    setattr(eight_bit_config, "_layer_prefix", "model.layers.1.mlp.experts")
+    eight_bit_config._layer_prefix = "model.layers.1.mlp.experts"
     eight_bit_method = GPTQMarlinMoEMethod(eight_bit_config, MagicMock())
 
     assert eight_bit_method.quant_metadata["bits"] == 8
@@ -73,7 +73,7 @@ def test_gptq_marlin_moe_method_retains_base_bits_without_override():
     config = _make_marlin_config()
 
     four_bit_config = deepcopy(config)
-    setattr(four_bit_config, "_layer_prefix", "model.layers.5.mlp.experts")
+    four_bit_config._layer_prefix = "model.layers.5.mlp.experts"
     four_bit_method = GPTQMarlinMoEMethod(four_bit_config, MagicMock())
 
     assert four_bit_method.quant_metadata["bits"] == 4

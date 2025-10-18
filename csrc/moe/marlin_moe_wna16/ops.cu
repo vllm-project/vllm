@@ -220,8 +220,7 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
   int sh_block_meta_size = tb_m * 4;
   int sh_a_size = pipe_stages * (tb_m * tb_k) * 2;
   int b_thread_vecs = num_bits == 4 ? 1 : 2;
-  int sh_b_size =
-      pipe_stages * (tb_k * tb_n / pack_factor) * 4 * b_thread_vecs;
+  int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4 * b_thread_vecs;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_bias_size = tb_n * 2;
   int tmp_size =
