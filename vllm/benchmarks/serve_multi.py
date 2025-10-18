@@ -11,7 +11,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import pandas as pd
 import requests
@@ -504,6 +504,20 @@ def _run_sla(
     return iter_data
 
 
+SLAVariable = Literal["request_rate", "max_concurrency"]
+
+
+def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
+    request_throughput = float(run_data["request_throughput"])  # type: ignore
+    if sla_variable == "request_rate":
+        return request_throughput
+    if sla_variable == "max_concurrency":
+        mean_latency_ms = float(run_data["mean_e2el_ms"])  # type: ignore
+        return request_throughput * mean_latency_ms / 1000
+
+    assert_never(sla_variable)
+
+
 def _find_sla_value(
     server_address: str | None,
     bench_cmd: list[str],
@@ -514,7 +528,7 @@ def _find_sla_value(
     base_path: Path,
     num_runs: int,
     dry_run: bool,
-    sla_variable: str,
+    sla_variable: SLAVariable,
     min_value: int,
     max_value: int,
     mode: Literal["window_left", "window_right", "binary"] = "binary",
@@ -607,7 +621,7 @@ def _iter_sla(
     serve_comb: dict[str, object],
     bench_comb: dict[str, object],
     sla_comb: dict[str, SLACriterionBase],
-    sla_variable: str,
+    sla_variable: SLAVariable,
     sla_inf_value: int = 8192,  # The value that represents infinite QPS
     base_path: Path,
     num_runs: int,
@@ -632,7 +646,7 @@ def _iter_sla(
         return None
 
     sla_init_value = math.ceil(
-        sum(float(item["request_throughput"]) for item in sla_data_0)  # type: ignore
+        sum(_estimate_sla_value(item, sla_variable) for item in sla_data_0)
         / len(sla_data_0)
     )
     print(f"Initial {sla_variable} to search: {sla_init_value} req/s.")
@@ -686,7 +700,7 @@ def run_slas(
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
-    sla_variable: str,
+    sla_variable: SLAVariable,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
@@ -755,7 +769,7 @@ def run_main(
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
-    sla_variable: str,
+    sla_variable: SLAVariable,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
@@ -840,7 +854,7 @@ def main():
     parser.add_argument(
         "--sla-variable",
         type=str,
-        choices=["request_rate", "max_concurrency"],
+        choices=get_args(SLAVariable),
         default="request_rate",
         help="Whether to tune request rate or maximum concurrency to satisfy "
         "the SLA constraints.",

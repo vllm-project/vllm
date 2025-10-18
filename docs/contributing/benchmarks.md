@@ -714,7 +714,7 @@ Generate synthetic image inputs alongside random text prompts to stress-test vis
 
 Notes:
 
-- Works only with online benchmark via the OpenAI  backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Works only with online benchmark via the OpenAI backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
 - Video sampling is not yet implemented.
 
 Start the server (example):
