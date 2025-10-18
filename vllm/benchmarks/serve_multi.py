@@ -425,11 +425,11 @@ def _get_sla_base_path(
     )
 
 
-def _get_sla_iter_path(base_path: Path, request_rate: int | None):
-    if request_rate is None:
+def _get_sla_iter_path(base_path: Path, sla_variable: str, sla_value: int | None):
+    if sla_value is None:
         return base_path / "summary.json"
 
-    return base_path / f"request_rate={request_rate}"
+    return base_path / f"{sla_variable}={sla_value}"
 
 
 def _get_sla_run_path(iter_path: Path, run_number: int | None):
@@ -443,12 +443,13 @@ def _sla_needs_server(
     serve_comb: dict[str, object],
     bench_combs: list[dict[str, object]],
     sla_combs: list[dict[str, SLACriterionBase]],
+    sla_variable: str,
     output_dir: Path,
 ):
     for bench_comb in bench_combs:
         for sla_comb in sla_combs:
             base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb, sla_comb)
-            if not _get_sla_iter_path(base_path, request_rate=None).exists():
+            if not _get_sla_iter_path(base_path, sla_variable, sla_value=None).exists():
                 return True
 
     return False
@@ -489,7 +490,7 @@ def _run_sla(
     return iter_data
 
 
-def _find_sla_request_rate(
+def _find_sla_value(
     port: int | None,
     bench_cmd: list[str],
     *,
@@ -499,47 +500,43 @@ def _find_sla_request_rate(
     base_path: Path,
     num_runs: int,
     dry_run: bool,
-    min_request_rate: int,
-    max_request_rate: int,
+    sla_variable: str,
+    min_value: int,
+    max_value: int,
     mode: Literal["window_left", "window_right", "binary"] = "binary",
 ):
     sla_data = list[dict[str, object]]()
 
-    request_rate_left: int
-    request_rate_right: int
+    left: int
+    right: int
     if mode == "window_left":
-        request_rate_left = max_request_rate
-        request_rate_right = max_request_rate
+        left = max_value
+        right = max_value
     elif mode == "window_right":
-        request_rate_left = min_request_rate
-        request_rate_right = min_request_rate
+        left = min_value
+        right = min_value
     elif mode == "binary":
-        request_rate_left = min_request_rate
-        request_rate_right = max_request_rate
+        left = min_value
+        right = max_value
     else:
         assert_never(mode)
 
     while True:
-        request_rate = (request_rate_left + request_rate_right) // 2
-        print(f"Testing request rate: {request_rate} req/s")
+        val = (left + right) // 2
+        print(f"Testing {sla_variable}: {val} req/s")
 
         iter_data = _run_sla(
             port,
             bench_cmd,
             serve_comb=serve_comb,
-            bench_comb={**bench_comb, "request_rate": request_rate},
-            iter_path=_get_sla_iter_path(base_path, request_rate),
+            bench_comb={**bench_comb, sla_variable: val},
+            iter_path=_get_sla_iter_path(base_path, sla_variable, val),
             num_runs=num_runs,
             dry_run=dry_run,
         )
 
-        if iter_data is not None:
-            sla_data.extend(iter_data)
-
-        if iter_data is None:
-            assert dry_run
-            print("Omitting SLA search iterations.")
-            break
+        assert iter_data is not None
+        sla_data.extend(iter_data)
 
         iter_data_mean = {
             k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
@@ -557,38 +554,38 @@ def _find_sla_request_rate(
             if mode == "window_left":
                 break
             elif mode == "window_right":
-                request_rate_left = request_rate * 2
-                request_rate_right = request_rate * 2
+                left = val * 2
+                right = val * 2
             elif mode == "binary":
-                request_rate_left = request_rate
+                left = val
             else:
                 assert_never(mode)
         else:
             print("SLA criteria are not met.")
 
             if mode == "window_left":
-                request_rate_left = request_rate // 2
-                request_rate_right = request_rate // 2
+                left = val // 2
+                right = val // 2
             elif mode == "window_right":
                 break
             elif mode == "binary":
-                request_rate_right = request_rate
+                right = val
             else:
                 assert_never(mode)
 
         if mode == "window_left":
-            if request_rate_left == min_request_rate:
+            if left == min_value:
                 break
         elif mode == "window_right":
-            if request_rate_right == max_request_rate:
+            if right == max_value:
                 break
         elif mode == "binary":
-            if request_rate_right - request_rate_left <= 1:
+            if right - left <= 1:
                 break
         else:
             assert_never(mode)
 
-    return sla_data, request_rate
+    return sla_data, val
 
 
 def _iter_sla(
@@ -598,8 +595,8 @@ def _iter_sla(
     serve_comb: dict[str, object],
     bench_comb: dict[str, object],
     sla_comb: dict[str, SLACriterionBase],
-    sla_init_request_rate: int,
-    sla_inf_request_rate: int = 8192,  # The request rate that represents infinite QPS
+    sla_variable: str,
+    sla_inf_value: int = 8192,  # The value that represents infinite QPS
     base_path: Path,
     num_runs: int,
     dry_run: bool,
@@ -607,43 +604,64 @@ def _iter_sla(
     print("[SLA START]")
     print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
 
-    sla_data_0, max_request_rate = _find_sla_request_rate(
+    sla_data_0 = _run_sla(
+        port,
+        bench_cmd,
+        serve_comb=serve_comb,
+        bench_comb={**bench_comb, sla_variable: sla_inf_value},
+        iter_path=_get_sla_iter_path(base_path, sla_variable, sla_inf_value),
+        num_runs=num_runs,
+        dry_run=dry_run,
+    )
+    if sla_data_0 is None:
+        print("Omitting SLA search iterations.")
+        print("[SLA END]")
+        return None
+
+    sla_init_value = int(
+        sum(float(item["request_throughput"]) for item in sla_data_0)  # type: ignore
+        / len(sla_data_0)
+    )
+
+    sla_data_1, max_value = _find_sla_value(
         port,
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb,
         sla_comb=sla_comb,
-        min_request_rate=sla_init_request_rate,
-        max_request_rate=sla_inf_request_rate,
         base_path=base_path,
         num_runs=num_runs,
         dry_run=dry_run,
+        sla_variable=sla_variable,
+        min_value=sla_init_value,
+        max_value=sla_inf_value,
         mode="window_right",
     )
-    print(f"Maximum request rate to search: {max_request_rate} req/s.")
+    print(f"Maximum {sla_variable} to search: {max_value} req/s.")
 
-    sla_data_1, sla_request_rate = _find_sla_request_rate(
+    sla_data_2, sla_value = _find_sla_value(
         port,
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb,
         sla_comb=sla_comb,
-        min_request_rate=0,
-        max_request_rate=max_request_rate,
         base_path=base_path,
         num_runs=num_runs,
         dry_run=dry_run,
+        sla_variable=sla_variable,
+        min_value=0,
+        max_value=max_value,
         mode="binary",
     )
 
-    sla_data = sla_data_0 + sla_data_1
-    print(f"Maximum request rate for SLA: {sla_request_rate} req/s.")
+    sla_data = sla_data_0 + sla_data_1 + sla_data_2
+    print(f"Maximum {sla_variable} for SLA: {sla_value} req/s.")
 
     if dry_run:
         print("[SLA END]")
         return None
 
-    with _get_sla_iter_path(base_path, request_rate=None).open("w") as f:
+    with _get_sla_iter_path(base_path, sla_variable, sla_value=None).open("w") as f:
         json.dump(sla_data, f)
 
     print("[SLA END]")
@@ -658,7 +676,7 @@ def run_slas(
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
-    sla_init_request_rate: int,
+    sla_variable: str,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
@@ -666,11 +684,11 @@ def run_slas(
     if any(
         k in bench_comb
         for bench_comb in bench_params
-        for k in _iter_param_key_candidates("request_rate")
+        for k in _iter_param_key_candidates(sla_variable)
     ):
         raise ValueError(
-            "You should not override `request_rate` in `bench_params` in SLA mode, "
-            "since `request_rate` is supposed to be determined automatically."
+            f"You should not override `{sla_variable}` in `bench_params` in SLA mode, "
+            "since it is supposed to be determined automatically."
         )
 
     all_data = list[dict[str, object]]()
@@ -681,7 +699,13 @@ def run_slas(
                 serve_overrides=serve_comb,
                 dry_run=dry_run,
             )
-            if _sla_needs_server(serve_comb, bench_params, sla_params, output_dir)
+            if _sla_needs_server(
+                serve_comb,
+                bench_params,
+                sla_params,
+                sla_variable,
+                output_dir,
+            )
             else contextlib.nullcontext()
         ) as port:
             for bench_comb in bench_params:
@@ -696,7 +720,7 @@ def run_slas(
                         serve_comb=serve_comb,
                         bench_comb=bench_comb,
                         sla_comb=sla_comb,
-                        sla_init_request_rate=sla_init_request_rate,
+                        sla_variable=sla_variable,
                         base_path=base_path,
                         num_runs=num_runs,
                         dry_run=dry_run,
@@ -721,7 +745,7 @@ def run_main(
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
-    sla_init_request_rate: int,
+    sla_variable: str,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
@@ -740,7 +764,7 @@ def run_main(
             serve_params=serve_params,
             bench_params=bench_params,
             sla_params=sla_params,
-            sla_init_request_rate=sla_init_request_rate,
+            sla_variable=sla_variable,
             output_dir=output_dir,
             num_runs=num_runs,
             dry_run=dry_run,
@@ -800,15 +824,16 @@ def main():
         'e.g.: `{"p99_e2el_ms": "<=500"}` means that '
         "the E2E latency should be less than 500ms 99% of the time. "
         "Setting this option runs this script in SLA mode, which searches for the "
-        "maximum request rate that satisfies the constraints for each combination "
+        "maximum `sla_variable` that satisfies the constraints for each combination "
         "of `serve_params`, `bench_params`, and `sla_params`.",
     )
     parser.add_argument(
-        "--sla-init-request-rate",
-        type=int,
-        default=512,
-        help="The initial request rate to consider when determining the "
-        "maximum request rate that satisfies the SLA constraints.",
+        "--sla-variable",
+        type=str,
+        choices=["request_rate", "max_concurrency"],
+        default="request_rate",
+        help="Whether to tune request rate or maximum concurrency to satisfy "
+        "the SLA constraints.",
     )
     parser.add_argument(
         "-o",
@@ -865,10 +890,6 @@ def main():
     else:
         sla_params = []
 
-    sla_init_request_rate = args.sla_init_request_rate
-    if sla_init_request_rate < 1:
-        raise ValueError("`sla_init_request_rate` should be at least 1.")
-
     num_runs = args.num_runs
     if num_runs < 1:
         raise ValueError("`num_runs` should be at least 1.")
@@ -879,7 +900,7 @@ def main():
         serve_params=serve_params,
         bench_params=bench_params,
         sla_params=sla_params,
-        sla_init_request_rate=sla_init_request_rate,
+        sla_variable=args.sla_variable,
         output_dir=Path(args.output_dir),
         num_runs=num_runs,
         dry_run=args.dry_run,
