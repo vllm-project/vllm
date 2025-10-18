@@ -23,12 +23,14 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
@@ -175,7 +177,12 @@ class MLPBlock(torch.nn.Module):
         if self.is_sequence_parallel:
             x = sequence_parallel_chunk(x)
 
-        g = self.router(x)
+        if current_platform.is_rocm():
+            g = rocm_unquantized_gemm(
+                x[:, : self.hidden_size], self.router.weight, self.router.bias
+            )
+        else:
+            g = self.router(x)
         x = self.experts(hidden_states=x, router_logits=g)
 
         if self.is_sequence_parallel:
