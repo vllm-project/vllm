@@ -568,8 +568,7 @@ def _find_sla_value(
             if mode == "window_left":
                 break
             elif mode == "window_right":
-                left = val * 2
-                right = val * 2
+                left = right = 1 if val == 0 else val * 2
             elif mode == "binary":
                 left = val
             else:
@@ -578,8 +577,7 @@ def _find_sla_value(
             print("SLA criteria are not met.")
 
             if mode == "window_left":
-                left = val // 2
-                right = val // 2
+                left = right = val // 2
             elif mode == "window_right":
                 break
             elif mode == "binary":
