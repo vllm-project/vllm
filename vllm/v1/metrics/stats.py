@@ -151,6 +151,7 @@ class SchedulerStats:
     kv_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
+    connector_prefix_cache_stats: PrefixCacheStats | None = None
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
