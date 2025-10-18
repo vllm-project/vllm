@@ -18,6 +18,7 @@ from vllm.utils.flashinfer import (
 
 logger = init_logger(__name__)
 
+CUTEDSL_MOE_NVFP4_DISPATCH = True
 
 def is_valid_flashinfer_cutedsl_fused_moe(
     hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
@@ -109,7 +110,12 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        output_shape = (local_num_experts, M, K)
+        if CUTEDSL_MOE_NVFP4_DISPATCH:
+            # since it sees quantized a1q
+            K_dim = K * 2
+        else:
+            K_dim = K
+        output_shape = (local_num_experts, M, K_dim)
         workspace2 = (local_num_experts, M, N)
         workspace1 = output_shape
         return (workspace1, workspace2, output_shape)
@@ -145,9 +151,10 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.w1_scale.ndim == 3
         assert self.w2_scale.ndim == 3
 
+        # TODO(shuw): replace True by CUTEDSL_MOE_NVFP4_DISPATCH
         flashinfer_cutedsl_moe_masked(
-            hidden_states=hidden_states,
-            input_global_scale=self.a1_gscale,
+            hidden_states=(hidden_states, a1q_scale) if CUTEDSL_MOE_NVFP4_DISPATCH else hidden_states,
+            input_global_scale=(None if CUTEDSL_MOE_NVFP4_DISPATCH else self.a1_gscale),
             w1=w1,
             w1_blockscale=self.w1_scale,
             w1_alpha=self.g1_alphas,
@@ -156,7 +163,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             w2_blockscale=self.w2_scale,
             w2_alpha=self.g2_alphas,
             masked_m=expert_num_tokens,
-            #workspace=workspace2,
+            workspace=workspace2,
             out=output,
         )
 
@@ -183,7 +190,7 @@ def flashinfer_cutedsl_moe_masked(
     w2_blockscale: torch.Tensor,
     w2_alpha,
     masked_m: torch.Tensor,
-    #workspace: torch.Tensor,
+    workspace: torch.Tensor,
     out: torch.Tensor,
 ):
     """
@@ -240,7 +247,8 @@ def flashinfer_cutedsl_moe_masked(
 
         aq = hidden_states[0].view(torch.uint8)
         aq_sf = hidden_states[1].view(torch.float8_e4m3fn)
-        m, k_by_2, num_experts = aq.shape
+        # m, k_by_2, num_experts = aq.shape
+        num_experts, m, k_by_2  = aq.shape
         k = k_by_2 * 2
     else:
         num_experts, m, k = hidden_states.shape
@@ -252,7 +260,7 @@ def flashinfer_cutedsl_moe_masked(
             num_experts,
         ), f"input_global_scale must be (l,), got {input_global_scale.shape}"
 
-        aq, aq_sf = scaled_fp4_grouped_quant(
+        aq, aq_sf = scaled_fp4_grouped_quantize(
             hidden_states,
             masked_m,
             input_global_scale,
@@ -279,6 +287,7 @@ def flashinfer_cutedsl_moe_masked(
     assert w2_alpha.shape == (num_experts,), (
         f"w2_alpha must be (l,), got {w2_alpha.shape}"
     )
+    # return
 
 #    aq, aq_sf = scaled_fp4_grouped_quantize(
 #        hidden_states,
@@ -301,6 +310,8 @@ def flashinfer_cutedsl_moe_masked(
     c_dtype = "bfloat16"
 
     # Gemm1
+    print(aq.shape, aq.dtype)
+    print(aq_sf.shape, aq_sf.dtype)
     flashinfer_cutedsl_grouped_gemm_nt_masked(
         (aq, aq_sf),
         (w1.permute(1, 2, 0), w1_blockscale),
@@ -320,19 +331,19 @@ def flashinfer_cutedsl_moe_masked(
         masked_m,
         a2_global_scale,
     )
-
+    return 
     # Gemm2
     out = out.permute(1, 2, 0)  # requirement of kernel
-    flashinfer_cutedsl_grouped_gemm_nt_masked(
-        (diq, diq_sf),
-        (w2.permute(1, 2, 0), w2_blockscale),
-        out,
-        masked_m,
-        ab_dtype=ab_dtype,
-        sf_dtype=sf_dtype,
-        c_dtype=c_dtype,
-        sf_vec_size=sf_vec_size,
-        alpha=w2_alpha.view(1, 1, num_experts),
-        alpha_dtype=get_cute_dtype(w2_alpha),
-    )  # in logical [m, k, l]
+    # flashinfer_cutedsl_grouped_gemm_nt_masked(
+    #     (diq, diq_sf),
+    #     (w2.permute(1, 2, 0), w2_blockscale),
+    #     out,
+    #     masked_m,
+    #     ab_dtype=ab_dtype,
+    #     sf_dtype=sf_dtype,
+    #     c_dtype=c_dtype,
+    #     sf_vec_size=sf_vec_size,
+    #     alpha=w2_alpha.view(1, 1, num_experts),
+    #     alpha_dtype=get_cute_dtype(w2_alpha),
+    # )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)

@@ -111,34 +111,46 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             x_fp8, x_scales = x
             x = dequant_fp8(x_fp8, x_scales).to(dtype=a1_dtype)
 
-        assert isinstance(x, torch.Tensor)
-
-        num_experts, max_tokens, hidden_dim = x.size()
-
-        # TODO (varun): Optimization - Use a batched version of quant
-        x = x.view((-1, hidden_dim))
+        assert isinstance(x, (torch.Tensor, tuple))
         q_dtype = quant_config.quant_dtype
 
-        if envs.VLLM_FLASHINFER_MOE_BACKEND == "cutedsl":
-            logger.info_once("do nvfp4 quant!!")
+        if q_dtype == "nvfp4":
+            assert isinstance(x, tuple)
+            # num_experts, max_tokens, hidden_dim_by_4 = x[0].size()
+            # print(f"nvfp4 quantization input shape: {x[0].size()}, {x[0].dtype}, {x[0].is_contiguous()}")
+            # print(f"nvfp4 quantization input shape: {x[1].size()}, {x[1].dtype}, {x[1].is_contiguous()}")
+            # print("after permute")
+            x_scales = x[1]
+            x = x[0].permute(2, 0, 1)
+            # print(f"nvfp4 quantization input shape: {x.size()}, {x.dtype}, {x.is_contiguous()}")
+            num_experts, max_tokens, hidden_dim_by_2 = x.shape
+            hidden_dim = hidden_dim_by_2 * 2
+            assert(envs.VLLM_FLASHINFER_MOE_BACKEND == "cutedsl")
+            logger.info_once("skip nvfp4 quant since done by deepep!!")      
             #            logger.info_once(
             #                "Skip quantization when using FlashInfer CUTEDSL for "
             #                "ModelOptNvFp4FusedMoE."
             #            )
-            #q_dtype = None
+        else:
+            assert isinstance(x, torch.Tensor)
+            num_experts, max_tokens, hidden_dim = x.size()
 
-        x, x_scales = moe_kernel_quantize_input(
-            x,
-            quant_config.a1_scale,
-            q_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-        )
-        x = x.view((num_experts, -1, hidden_dim))
+            # TODO (varun): Optimization - Use a batched version of quant
+            x = x.view((-1, hidden_dim))
+            x, x_scales = moe_kernel_quantize_input(
+                x,
+                quant_config.a1_scale,
+                q_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+            )
+            x = x.view((num_experts, -1, hidden_dim))
+    
 
         if q_dtype is not None:
             assert x_scales is not None
-            x_scales = normalize_batched_scales_shape(x_scales, num_experts)
+            if q_dtype != "nvfp4":
+                x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
         return x, x_scales
 
@@ -169,11 +181,15 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
 
         use_nvfp4 = False
-        if quant_config.a1_scale.numel()!=1:
+        # print("mm"*100, quant_config.quant_dtype)
+        if quant_config.quant_dtype == "nvfp4":
+            # print("gg"*100)
+            # print(quant_config.a1_gscale)
             use_nvfp4 = True
+        qc_a1_gscale_or_scale = quant_config.a1_gscale if quant_config.quant_dtype == "nvfp4" else quant_config.a1_scale
         has_per_token_scales = (
-            quant_config.a1_scale.numel() != 1
-            if quant_config.a1_scale is not None
+            qc_a1_gscale_or_scale.numel() != 1
+            if qc_a1_gscale_or_scale is not None
             else (
                 quant_config.a2_scale.numel() != 1
                 if quant_config.a2_scale is not None
@@ -194,6 +210,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
+        # print("qwerwqrq"*100, use_nvfp4, qc_a1_gscale_or_scale.shape, a1.shape, a1.dtype)
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
             a1,
             topk_ids,
@@ -202,8 +219,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             use_fp8=self.use_fp8_dispatch,
             **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
             **(
-                dict(x_global_scale=quant_config.a1_scale)
-                if quant_config.a1_scale is not None
+                dict(x_global_scale=qc_a1_gscale_or_scale)
+                if qc_a1_gscale_or_scale is not None
                 else dict()
             ),
             async_finish=False,
@@ -231,7 +248,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
-
+        
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None
         )
@@ -286,6 +303,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
+        # print("combine"*100)
+        # print(fused_expert_output.shape, fused_expert_output.dtype)
         _, _, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
             topk_ids,

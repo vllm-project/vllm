@@ -9,10 +9,11 @@ from torch.nn import functional as F
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
     flashinfer_cutedsl_moe_masked,
-    scaled_fp4_grouped_quant,
 )
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
+    scaled_fp4_grouped_quantize,
+    silu_and_mul_scaled_nvfp4_experts_quantize,
 )
 
 if torch.cuda.get_device_capability() < (10, 0):
@@ -219,16 +220,16 @@ def flashinfer_cutedsl_grouped_gemm_nt_masked(
 ):
     # hidden_states: [l, m, k]
     # weights: [l, n, k]
-    aq, aq_sf = scaled_fp4_grouped_quant(
+    aq, aq_sf = scaled_fp4_grouped_quantize(
         hidden_states,
-        input_global_scale,
         masked_m.to(hidden_states.device),
+        input_global_scale,
     )
     num_experts, n, k = weights.shape
-    bq, bq_sf = scaled_fp4_grouped_quant(
+    bq, bq_sf = scaled_fp4_grouped_quantize(
         weights,
-        w_global_scale,
         torch.full((num_experts,), n, device=weights.device, dtype=torch.int32),
+        w_global_scale,
     )
 
     out = torch.zeros(
@@ -316,15 +317,15 @@ def test_flashinfer_cutedsl_moe_masked(
         (num_experts,), dtype=torch.float32, device=hidden_states.device
     )  # assume intermediate scale is 1.0
 
-    w1_fp4, w1_blockscale = scaled_fp4_grouped_quant(
+    w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
         w1,
+        torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,        
         w1_global_scale,
-        torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,
     )
-    w2_fp4, w2_blockscale = scaled_fp4_grouped_quant(
+    w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
         w2,
+        torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,        
         w2_global_scale,
-        torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,
     )
 
     w1_alpha = 1.0 / (input_global_scale * w1_global_scale)
