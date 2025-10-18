@@ -429,7 +429,7 @@ def _get_sla_run_path(base_path: Path, run_number: int | None):
 
 def _get_sla_iter_path(run_path: Path, request_rate: int | None):
     if request_rate is None:
-        return run_path / "best.json"
+        return run_path / "summary.json"
 
     return run_path / f"request_rate={request_rate}.json"
 
