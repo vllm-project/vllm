@@ -467,9 +467,10 @@ class EngineCore:
         self,
         tensorizer_config,
     ) -> None:
-        self.model_executor.save_tensorized_model(
-            tensorizer_config=tensorizer_config,
-        )
+        if hasattr(self.model_executor, "save_tensorized_model"):
+            self.model_executor.save_tensorized_model(  # type: ignore[attr-defined]
+                tensorizer_config=tensorizer_config,
+            )
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
@@ -1089,6 +1090,7 @@ class DPEngineCoreProc(EngineCoreProc):
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
+        assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         if vllm_config.kv_transfer_config is not None:
@@ -1235,7 +1237,8 @@ class DPEngineCoreProc(EngineCoreProc):
             parallel_config.data_parallel_master_port
         )
 
-        self.model_executor.reinitialize_distributed(reconfig_request)
+        if hasattr(self.model_executor, "reinitialize_distributed"):
+            self.model_executor.reinitialize_distributed(reconfig_request)  # type: ignore[attr-defined]
         if reconfig_request.new_data_parallel_size > old_dp_size:
             assert self.available_gpu_memory_for_kv_cache > 0
             # pass available_gpu_memory_for_kv_cache from existing

@@ -47,7 +47,14 @@ class RequestOutputCollector:
         elif isinstance(self.output, (RequestOutput, PoolingRequestOutput)):
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
-            self.output.add(output, aggregate=self.aggregate)
+            if isinstance(self.output, RequestOutput) and isinstance(
+                output, RequestOutput
+            ):
+                self.output.add(output, aggregate=self.aggregate)
+            elif isinstance(self.output, PoolingRequestOutput) and isinstance(
+                output, PoolingRequestOutput
+            ):
+                self.output = output
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
@@ -407,7 +414,7 @@ class OutputProcessor:
         within the loop below.
         """
 
-        request_outputs: list[RequestOutput] | list[PoolingRequestOutput] = []
+        request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
