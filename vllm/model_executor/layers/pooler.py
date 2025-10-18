@@ -240,23 +240,23 @@ class AllPool(PoolingMethod):
 
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_param.hidden_states_cache
-        for pooling_param, hidden_states in zip(pooling_params, hidden_states_lst):
-            pooling_param.hidden_states_cache.append(hidden_states)
+        for pooling_param, hs_chunk in zip(pooling_params, hidden_states_lst):
+            pooling_param.hidden_states_cache.append(hs_chunk)
 
         # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
-        hidden_states = []
+        output_list = []
         for pooling_param, finished in zip(pooling_params, is_finished):
             if finished:
                 hidden_states_cache = pooling_param.hidden_states_cache
                 if len(hidden_states_cache) == 1:
-                    hidden_states.append(hidden_states_cache[0])
+                    output_list.append(hidden_states_cache[0])
                 else:
-                    hidden_states.append(torch.concat(hidden_states_cache, dim=0))
+                    output_list.append(torch.concat(hidden_states_cache, dim=0))
                 pooling_param.hidden_states_cache.clear()
             else:
-                hidden_states.append(None)
+                output_list.append(None)
 
-        return hidden_states
+        return output_list
 
 
 class MeanPool(PoolingMethod):
