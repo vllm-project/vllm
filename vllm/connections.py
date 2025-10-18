@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import requests
+import yarl
 
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -81,9 +82,12 @@ class HTTPConnection:
 
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
+        req = requests.Request("GET", url)
+        prepared_req = self.get_sync_client().prepare_request(req)
+        parsed_url = yarl.URL(prepared_req.url, encoded=True)
 
         return client.get(
-            url,
+            parsed_url,
             headers=self._headers(**extra_headers),
             timeout=timeout,
             allow_redirects=allow_redirects,
