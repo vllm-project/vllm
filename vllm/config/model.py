@@ -711,7 +711,16 @@ class ModelConfig:
             self.disable_sliding_window = True
 
         self.original_max_model_len = self.max_model_len
-        self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+        auto_max_model_len_requested = self.original_max_model_len == -1
+        max_model_len_for_verification = None
+        if not auto_max_model_len_requested:
+            max_model_len_for_verification = self.max_model_len
+
+        self.max_model_len = self.get_and_verify_max_len(max_model_len_for_verification)
+        if auto_max_model_len_requested:
+            self._auto_max_model_len_default = self.max_model_len
+        else:
+            self._auto_max_model_len_default = None
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
             if (
@@ -1744,6 +1753,12 @@ class ModelConfig:
         )
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
+    def uses_auto_max_model_len(self) -> bool:
+        return getattr(self, "original_max_model_len", None) == -1
+
+    def get_auto_max_model_len_default(self) -> int | None:
+        return getattr(self, "_auto_max_model_len_default", None)
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):

@@ -37,7 +37,8 @@ Dynamic quantization is also supported via the `quantization` option -- see [her
 ## Context length and batch size
 
 You can further reduce memory usage by limiting the context length of the model (`max_model_len` option)
-and the maximum batch size (`max_num_seqs` option).
+and the maximum batch size (`max_num_seqs` option). Setting `max_model_len=-1` lets vLLM automatically
+pick the largest context length that fits in GPU memory, up to the model's default maximum.
 
 ```python
 from vllm import LLM

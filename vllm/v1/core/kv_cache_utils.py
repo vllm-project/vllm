@@ -663,10 +663,39 @@ def check_enough_kv_cache_memory(
     needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
 
     if needed_memory > available_memory:
+        default_max_len = (
+            vllm_config.model_config.get_auto_max_model_len_default()
+            or max_model_len
+        )
         # Estimate the maximum model length that can fit in the available memory
         estimated_max_len = estimate_max_model_len(
             vllm_config, kv_cache_spec, available_memory
         )
+
+        if vllm_config.model_config.uses_auto_max_model_len():
+            if estimated_max_len <= 0:
+                raise ValueError(
+                    "Unable to automatically determine a max model length "
+                    "that fits in the available KV cache memory. Try "
+                    "increasing `gpu_memory_utilization` or setting an "
+                    "explicit --max-model-len value."
+                )
+
+            if estimated_max_len == default_max_len:
+                logger.info(
+                    "Automatic max model length fits available memory (%d tokens).",
+                    estimated_max_len,
+                )
+            else:
+                logger.info(
+                    "Automatic max model length capped at %d tokens to fit "
+                    "available memory (model default %d).",
+                    estimated_max_len,
+                    default_max_len,
+                )
+            vllm_config.recalculate_max_model_len(estimated_max_len)
+            return
+
         estimated_msg = ""
         if estimated_max_len > 0:
             estimated_msg = (

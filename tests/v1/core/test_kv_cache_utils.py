@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import importlib
 from collections.abc import Callable
 
@@ -20,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    check_enough_kv_cache_memory,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
@@ -1080,6 +1082,51 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         vllm_config, kv_cache_spec, 8 * GiB_bytes
     )
     assert estimated_max_len == want_estimated_max_len
+
+
+def test_auto_max_model_len_adjusts_to_available_memory():
+    model_id = "Qwen/Qwen1.5-7B"
+    model_config = ModelConfig(
+        model_id,
+        runner="generate",
+        dtype="float16",
+        max_model_len=-1,
+    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=32768)
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    kv_cache_spec = {}
+    for i in range(32):
+        layer_name = f"layer_{i}"
+        kv_cache_spec[layer_name] = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=32,
+            head_size=128,
+            dtype=torch.float16,
+        )
+
+    available_memory = 5 * GiB_bytes
+
+    expected_config = copy.deepcopy(vllm_config)
+    default_max_len = expected_config.model_config.max_model_len
+    expected_max_len = estimate_max_model_len(
+        expected_config, kv_cache_spec, available_memory
+    )
+    assert expected_max_len > 0
+    assert expected_max_len < default_max_len
+
+    check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+
+    assert vllm_config.model_config.max_model_len == expected_max_len
+    assert vllm_config.scheduler_config.max_model_len == expected_max_len
+    assert (
+        vllm_config.model_config.get_auto_max_model_len_default()
+        == default_max_len
+    )
 
 
 def test_get_max_concurrency_for_kv_cache_config():
