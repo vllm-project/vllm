@@ -37,6 +37,19 @@ __global__ void moe_lora_align_sum_kernel(
   int32_t* cumsum = shared_mem;
   token_cnts_t* tokens_cnts = (token_cnts_t*)(shared_mem + num_experts + 1);
 
+  // Initialize sorted_token_ids with numel
+  for (size_t it = threadIdx.x; it < max_num_tokens_padded; it += blockDim.x) {
+    sorted_token_ids[lora_id * max_num_tokens_padded + it] = numel;
+  }
+
+  // Initialize expert_ids with -1
+  for (size_t it = threadIdx.x; it < max_num_m_blocks; it += blockDim.x) {
+    expert_ids[lora_id * max_num_m_blocks + it] = -1;
+  }
+
+  // Initialize expert_ids with -1
+  total_tokens_post_pad[lora_id] = 0;
+
   for (int i = 0; i < num_experts; ++i) {
     tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
   }

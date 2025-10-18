@@ -307,18 +307,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
         if pad_sorted_ids:
             max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-        sorted_ids = torch.full(
+        sorted_ids = torch.empty(
             (max_loras * max_num_tokens_padded,),
-            topk_ids.numel(),
             dtype=torch.int32,
             device=topk_ids.device,
         )
         max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
         # Expert ids must be zeroed out to prevent index out of bounds error while
         # mapping global expert ids to local expert ids in expert parallelism.
-        expert_ids = torch.full(
+        expert_ids = torch.empty(
             (max_loras * max_num_m_blocks,),
-            -1,
             dtype=torch.int32,
             device=topk_ids.device,
         )

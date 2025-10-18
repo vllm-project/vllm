@@ -125,16 +125,15 @@ def use_fused_moe_lora_kernel(
     max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
 
     # init output tensors
-    sorted_token_ids = torch.full(
+    sorted_token_ids = torch.empty(
         (max_loras * max_num_tokens_padded,),
-        topk_ids.numel(),
         dtype=torch.int32,
         device="cuda",
     )
-    expert_ids = torch.full(
-        (max_loras * max_num_m_blocks,), -1, dtype=torch.int32, device="cuda"
+    expert_ids = torch.empty(
+        (max_loras * max_num_m_blocks,), dtype=torch.int32, device="cuda"
     )
-    num_tokens_post_padded = torch.zeros((max_loras,), dtype=torch.int32, device="cuda")
+    num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32, device="cuda")
 
     # call kernel
     ops.moe_lora_align_block_size(
