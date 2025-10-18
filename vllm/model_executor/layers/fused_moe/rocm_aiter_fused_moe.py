@@ -47,6 +47,11 @@ def is_rocm_aiter_moe_enabled() -> bool:
 
 
 @cache
+def use_mxfp4_aiter_moe() -> bool:
+    return current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+
+@cache
 def is_rocm_aiter_fusion_shared_expert_enabled() -> bool:
     return (
         envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS and is_rocm_aiter_moe_enabled()
@@ -487,6 +492,8 @@ def rocm_aiter_fused_experts(
             assert quant_config.w1_scale is not None
             assert quant_config.w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
+        elif quant_config.use_fp8_w8a8 and quant_config.per_out_ch_quant:
+            quant_method = QuantMethod.PER_TOKEN.value
         elif quant_config.use_fp8_w8a8:
             # Currently only per tensor quantization method is enabled.
             quant_method = QuantMethod.PER_TENSOR.value
