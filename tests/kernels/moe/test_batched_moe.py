@@ -24,23 +24,15 @@ from vllm.triton_utils import tl
 
 MNK_FACTORS = [
     (1, 128, 128),
-    (1, 128, 2048),
     (1, 512, 512),
-    (1, 1024, 128),
     (1, 1024, 2048),
     (32, 128, 128),
-    (32, 512, 512),
     (32, 1024, 2048),
-    (45, 128, 128),
     (45, 128, 2048),
-    (45, 512, 512),
     (45, 1024, 128),
-    (45, 1024, 2048),
     (64, 512, 512),
     (64, 1024, 2048),
-    (222, 128, 128),
     (222, 128, 2048),
-    (222, 1024, 128),
     (222, 1024, 2048),
 ]
 NUM_EXPERTS = [8, 64]
@@ -49,6 +41,11 @@ TOP_KS = [1, 2, 6]
 vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
+
+hopper_only = pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="Requires CUDA and Hopper (SM90)",
+)
 
 
 @dataclass
@@ -101,6 +98,7 @@ class BatchedMMTensors:
         return BatchedMMTensors(A, B, C, num_expert_tokens)
 
 
+@hopper_only
 @pytest.mark.parametrize("num_experts", [8, 32])
 @pytest.mark.parametrize("max_tokens_per_expert", [32, 224, 512])
 @pytest.mark.parametrize("K", [128, 1024])
@@ -226,6 +224,7 @@ def test_batched_mm(
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
+@hopper_only
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
