@@ -17,8 +17,6 @@ import regex as re
 #  add to this list if absolutely necessary and after careful security review.
 ALLOWED_FILES = {
     # pickle
-    "vllm/v1/serial_utils.py",
-    "vllm/v1/executor/multiproc_executor.py",
     "vllm/multimodal/hasher.py",
     "vllm/transformers_utils/config.py",
     "vllm/model_executor/models/registry.py",
@@ -37,11 +35,12 @@ ALLOWED_FILES = {
     "benchmarks/cutlass_benchmarks/w8a8_benchmarks.py",
     "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
     # cloudpickle
-    "vllm/executor/mp_distributed_executor.py",
-    "vllm/executor/ray_distributed_executor.py",
+    "vllm/v1/executor/multiproc_executor.py",
+    "vllm/v1/executor/ray_executor.py",
     "vllm/entrypoints/llm.py",
     "tests/utils.py",
     # pickle and cloudpickle
+    "vllm/v1/serial_utils.py",
     "vllm/utils/__init__.py",
 }
 

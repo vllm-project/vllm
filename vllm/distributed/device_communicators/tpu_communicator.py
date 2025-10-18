@@ -31,7 +31,7 @@ if not USE_TPU_INFERENCE:
         )
 
         if USE_RAY:
-            from vllm.executor import ray_utils
+            from vllm.v1.executor import ray_utils
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
