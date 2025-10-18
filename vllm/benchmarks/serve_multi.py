@@ -629,7 +629,7 @@ def _iter_sla(
     )
     if sla_data_0 is None:
         assert dry_run
-        print("Omitting SLA search iterations.")
+        print("Omitting SLA search.")
         print("[SLA END]")
         return None
 
