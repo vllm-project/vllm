@@ -462,15 +462,21 @@ def _iter_sla(
     run_path: Path,
     run_number: int,
     dry_run: bool,
+    init_request_rate: int = 1 << 20,
 ):
     print("[SLA START]")
     print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
 
     run_data = list[dict[str, object]]()
-    request_rate: int = 1 << 20
 
-    while request_rate > 0:
+    # Binary search
+    request_rate_left: int = 0
+    request_rate_right: int = init_request_rate
+
+    while request_rate_right > request_rate_left:
+        request_rate = (request_rate_left + request_rate_right) // 2
         print(f"Testing request rate: {request_rate} req/s")
+
         iter_path = _get_sla_iter_path(run_path, request_rate)
 
         iter_data = _run_benchmark(
@@ -490,23 +496,37 @@ def _iter_sla(
 
         if iter_data is None:
             assert dry_run
-            print("Omitting SLA iterations for brevity.")
+            print("Omitting binary search iterations.")
             break
 
         sla_results = [
             criterion.print_and_validate(iter_data, k)
             for k, criterion in sla_comb.items()
         ]
+
         if all(sla_results):
             print("SLA criteria has been met.")
+
+            if request_rate_right == init_request_rate:
+                print("SLA is satisfied even with unbounded request rate.")
+                break
+            else:
+                request_rate_left = request_rate
+        else:
+            print("SLA criteria has not been met.")
+
+            if request_rate_right == init_request_rate:
+                # Save some iterations
+                request_rate_right = math.ceil(
+                    float(iter_data["request_throughput"]) * 8  # type: ignore
+                )
+            else:
+                request_rate_right = request_rate
+
+        if abs(request_rate_left - request_rate_right) < 1:
+            print("Binary search has converged.")
+
             break
-
-        print("SLA criteria has not been met.")
-
-        request_rate = min(
-            math.ceil(float(iter_data["request_throughput"])),  # type: ignore
-            request_rate - 1,
-        )
 
     if dry_run:
         print("[SLA END]")
