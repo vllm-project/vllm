@@ -5,7 +5,10 @@
 import torch
 import torch.nn as nn
 
-from vllm.config.model import LogprobsMode
+from vllm.config import LogprobsMode
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              get_tp_group)
 from vllm.utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -134,12 +137,12 @@ class Sampler(nn.Module):
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
 
-    def sample(
+    def sample_single_rank(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Sample logits based on sampling metadata.
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Sample logits based on sampling metadata on a single rank.
 
         The various logits processing functions called in this method
         may update the logits tensor in-place.
@@ -190,8 +193,127 @@ class Sampler(nn.Module):
         )
         return sampled, processed_logprobs
 
-    @staticmethod
-    def compute_logprobs(logits: torch.Tensor) -> torch.Tensor:
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Sample logits based on sampling metadata.
+        Can parallelize sampling across tensor parallel ranks.
+
+        The various logits processing functions called in this method
+        may update the logits tensor in-place.
+        """
+        world_size = get_tensor_model_parallel_world_size()
+        assert logits.ndim == 2, f"Logits should be 2D, but got {logits.shape=}"
+        batch_size = logits.shape[0]
+
+        # Skip parallelization and fall back to single-rank sampling if:
+        # 1. world_size < 2: Only one TP rank, no benefit from parallelization
+        # 2. batch_size < 8: Too small batch, overhead outweighs benefits
+        # 3. Custom generators present: Per-request generators complicate
+        #    synchronization across ranks since different ranks would
+        #    need different generator states
+        has_generators = sampling_metadata.generators and len(
+            sampling_metadata.generators) > 0
+        is_even_chunks = batch_size % world_size == 0
+        # Uneven chunk sizes - fall back to single-rank sampling for now
+        # TODO: Implement proper uneven chunk distributed sampling
+        # This requires careful handling of different tensor sizes across ranks
+        use_single_rank = (world_size < 2 or batch_size < 8 or has_generators
+                           or not is_even_chunks)
+
+        if use_single_rank:
+            return self.sample_single_rank(logits, sampling_metadata)
+
+        # Calculate chunk size for distributing batch across TP ranks
+        # Use ceiling division to handle uneven splits
+        chunk_size = (batch_size + world_size - 1) // world_size
+
+        # Calculate start/end indices for each rank's chunk
+        start_indices = [
+            min(i * chunk_size, batch_size) for i in range(world_size)
+        ]
+        end_indices = [
+            min((i + 1) * chunk_size, batch_size) for i in range(world_size)
+        ]
+        rank = get_tensor_model_parallel_rank()
+        start_idx = start_indices[rank]
+        end_idx = end_indices[rank]
+
+        # Handle generator mapping for the local chunk
+        # Since we already checked that generators dict is empty above ,
+        # (condition 3) this will always result in an empty local_generators
+        # dict. However, we keep this logic for potential future use cases
+        # where we might allow parallelization with limited generator usage.
+        local_generators = {}
+        for key in sampling_metadata.generators:
+            if start_idx <= key < end_idx:
+                # Remap global generator index to local chunk index
+                local_generators[key -
+                                 start_idx] = sampling_metadata.generators[key]
+        # Create local sampling metadata for this rank's chunk by slicing
+        # all tensors to only include the portion this rank is responsible for
+        local_sampling_metadata = SamplingMetadata(
+            # Slice temperature tensor to local chunk size
+            temperature=sampling_metadata.temperature[start_idx:end_idx]
+            if sampling_metadata.temperature is not None else None,
+            # Copy boolean flags (apply to all chunks)
+            all_greedy=sampling_metadata.all_greedy,
+            all_random=sampling_metadata.all_random,
+            # Slice top_k tensor to local chunk size
+            top_k=sampling_metadata.top_k[start_idx:end_idx]
+            if sampling_metadata.top_k is not None else None,
+            # Slice top_p tensor to local chunk size
+            top_p=sampling_metadata.top_p[start_idx:end_idx]
+            if sampling_metadata.top_p is not None else None,
+            # Use remapped generators for local chunk
+            generators=local_generators,
+            # Keep global settings unchanged
+            max_num_logprobs=sampling_metadata.max_num_logprobs,
+            # Copy boolean flag (apply to all chunks)
+            no_penalties=sampling_metadata.no_penalties,
+            # Slice all penalty and token arrays to local chunk
+            prompt_token_ids=sampling_metadata.
+            prompt_token_ids[start_idx:end_idx]
+            if sampling_metadata.prompt_token_ids is not None else None,
+            frequency_penalties=sampling_metadata.
+            frequency_penalties[start_idx:end_idx]
+            if sampling_metadata.frequency_penalties is not None else None,
+            presence_penalties=sampling_metadata.
+            presence_penalties[start_idx:end_idx]
+            if sampling_metadata.presence_penalties is not None else None,
+            repetition_penalties=sampling_metadata.
+            repetition_penalties[start_idx:end_idx]
+            if sampling_metadata.repetition_penalties is not None else None,
+            # Slice output token ids list to local chunk
+            output_token_ids=sampling_metadata.
+            output_token_ids[start_idx:end_idx]
+            if sampling_metadata.output_token_ids is not None else None,
+            allowed_token_ids_mask=sampling_metadata.
+            allowed_token_ids_mask[start_idx:end_idx]
+            if sampling_metadata.allowed_token_ids_mask is not None else None,
+            # Keep global settings that apply to all chunks
+            bad_words_token_ids=sampling_metadata.bad_words_token_ids,
+            logitsprocs=sampling_metadata.logitsprocs,
+        )
+
+        # Sample tokens locally on this rank's chunk of the batch
+        tokens_local, _ = self.sample_single_rank(
+            logits[start_idx:end_idx],  # Only process this rank's logits slice
+            local_sampling_metadata,  # Use metadata with local chunk parameters
+        )
+        # Even chunk sizes - all ranks process identical chunk sizes
+        # The all_gather result is already in correct batch order,
+        # no reconstruction needed
+        tokens_all = get_tp_group().all_gather(tokens_local, 0)
+        # Return None for processed_logprobs since we're
+        # only gathering tokens, not logprobs
+        # This avoids inconsistency between tokens from all ranks
+        # and logprobs from one rank
+        return tokens_all, None
+
+    def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
 
     @staticmethod
