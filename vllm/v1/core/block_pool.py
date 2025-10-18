@@ -75,9 +75,9 @@ class BlockPool:
         self._recent_lifetimes: list[float] = []
 
     def get_cached_block(
-            self, block_hash: BlockHash,
-            kv_cache_group_ids: list[int]) -> Optional[list[KVCacheBlock]]:
-        """Get the cached block by the block hash for each group in 
+        self, block_hash: BlockHash, kv_cache_group_ids: list[int]
+    ) -> list[KVCacheBlock] | None:
+        """Get the cached block by the block hash for each group in
         `kv_cache_group_ids`, or None if cache miss for any group.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -124,7 +124,7 @@ class BlockPool:
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
         """
-        if num_cached_blocks == num_full_blocks:
+        if num_cached_blocks >= num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
@@ -157,14 +157,14 @@ class BlockPool:
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.
-                    all_token_ids[num_cached_blocks *
-                                  block_size:num_full_blocks * block_size],
+                    token_ids=request.all_token_ids[
+                        num_cached_blocks * block_size : num_full_blocks * block_size
+                    ],
                     block_size=block_size,
-                    lora_id=request.lora_request.id
-                    if request.lora_request else None,
+                    lora_id=request.lora_request.id if request.lora_request else None,
                     medium=MEDIUM_GPU,
-                ))
+                )
+            )
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -178,8 +178,7 @@ class BlockPool:
             A list of new block.
         """
         if num_blocks > self.get_num_free_blocks():
-            raise ValueError(
-                f"Cannot get {num_blocks} free blocks from the pool")
+            raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
@@ -234,7 +233,7 @@ class BlockPool:
                              medium=MEDIUM_GPU))
         return True
 
-    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: tuple[Sequence[KVCacheBlock], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -290,7 +289,9 @@ class BlockPool:
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks - 1)
+                "blocks (%d) are not freed yet",
+                num_used_blocks - 1,
+            )
             return False
 
         # Remove all hashes so that no new blocks will hit.
@@ -332,7 +333,7 @@ class BlockPool:
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.
-        
+
         Returns:
             A list of KV cache events.
         """

@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa: E501
-    SharedStorageConnectorMetadata)
+    SharedStorageConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_transfer_state import (
-    ensure_kv_transfer_initialized, get_kv_transfer_group)
+    ensure_kv_transfer_initialized,
+    get_kv_transfer_group,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.worker.kv_connector_model_runner_mixin import (
-    KVConnectorModelRunnerMixin)
+from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
 # Importing utils registers TestSharedStorageConnector with the factory
 from .utils import create_vllm_config
@@ -24,7 +26,7 @@ def _make_empty_scheduler_output():
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
         kv_connector_metadata=SharedStorageConnectorMetadata(),
     )
@@ -34,7 +36,7 @@ def test_kv_connector_mixin_clears_metadata():
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_connector = "TestSharedStorageConnector"
     vllm_config.kv_transfer_config.kv_role = "kv_both"
-    vllm_config.kv_transfer_config.kv_connector_extra_config["name"] = ("unit")
+    vllm_config.kv_transfer_config.kv_connector_extra_config["name"] = "unit"
 
     # Initialize the global connector instance
     ensure_kv_transfer_initialized(vllm_config)
@@ -46,7 +48,8 @@ def test_kv_connector_mixin_clears_metadata():
 
         # Invoke the no-forward path which uses the mixin context manager
         KVConnectorModelRunnerMixin.kv_connector_no_forward(
-            scheduler_output, vllm_config)
+            scheduler_output, vllm_config
+        )
 
         # Verify clear_connector_metadata was called on the connector
         connector = get_kv_transfer_group()

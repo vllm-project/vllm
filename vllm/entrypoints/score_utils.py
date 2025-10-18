@@ -1,56 +1,62 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union, cast
+from typing import Any, TypeAlias, cast
 
 from torch.nn import CosineSimilarity
-from typing_extensions import Required, TypeAlias, TypedDict
+from typing_extensions import Required, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
-    BaseMultiModalItemTracker, ChatCompletionContentPartImageEmbedsParam,
-    ChatCompletionContentPartImageParam, ChatCompletionContentPartTextParam,
-    MultiModalItemTracker, _ContentPart, _parse_chat_message_content_part)
+    BaseMultiModalItemTracker,
+    ChatCompletionContentPartImageEmbedsParam,
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartTextParam,
+    MultiModalItemTracker,
+    _ContentPart,
+    _parse_chat_message_content_part,
+)
 from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               PreTrainedTokenizer,
-                                               PreTrainedTokenizerFast)
+from vllm.transformers_utils.tokenizer import (
+    AnyTokenizer,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerFast,
+)
 
-ScoreContentPartParam: TypeAlias = Union[
-    ChatCompletionContentPartImageParam,
-    ChatCompletionContentPartImageEmbedsParam]
+ScoreContentPartParam: TypeAlias = (
+    ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
+)
 
 
 class ScoreMultiModalParam(TypedDict, total=False):
     """
     A specialized parameter type for scoring multimodal content
-    
+
     The reasons why don't reuse `CustomChatCompletionMessageParam` directly:
     1. Score tasks don't need the 'role' field (user/assistant/system) that's required in chat completions
     2. Including chat-specific fields would confuse users about their purpose in scoring
     3. This is a more focused interface that only exposes what's needed for scoring
-    """ # noqa: E501
+    """  # noqa: E501
+
     content: Required[list[ScoreContentPartParam]]
     """The multimodal contents"""
 
 
 def _cosine_similarity(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
     embed_1: list[PoolingRequestOutput],
     embed_2: list[PoolingRequestOutput],
 ) -> list[PoolingRequestOutput]:
-
     scorer = CosineSimilarity(0)
-    scores: Union[list[PoolingRequestOutput]] = []
+    scores: list[PoolingRequestOutput] = []
 
     for emb_1, emb_2 in zip(embed_1, embed_2):
         pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
 
         padding = []
-        if (pad_token_id := getattr(tokenizer, "pad_token_id",
-                                    None)) is not None:
+        if (pad_token_id := getattr(tokenizer, "pad_token_id", None)) is not None:
             padding = [pad_token_id]
 
         tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
@@ -60,14 +66,16 @@ def _cosine_similarity(
                 request_id=f"{emb_1.request_id}_{emb_2.request_id}",
                 outputs=pair_score,
                 prompt_token_ids=tokens,
-                finished=True))
+                finished=True,
+            )
+        )
 
     return scores
 
 
 def _validate_score_input_lens(
-    data_1: Union[list[str], list[ScoreContentPartParam]],
-    data_2: Union[list[str], list[ScoreContentPartParam]],
+    data_1: list[str] | list[ScoreContentPartParam],
+    data_2: list[str] | list[ScoreContentPartParam],
 ):
     len_1 = len(data_1)
     len_2 = len(data_2)
@@ -81,23 +89,22 @@ def _validate_score_input_lens(
 
 
 def parse_score_data(
-    data_1: Union[str, ScoreContentPartParam],
-    data_2: Union[str, ScoreContentPartParam],
+    data_1: str | ScoreContentPartParam,
+    data_2: str | ScoreContentPartParam,
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-) -> tuple[str, str, Optional[MultiModalDataDict]]:
+) -> tuple[str, str, MultiModalDataDict | None]:
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     content_1 = _parse_score_content(data_1, mm_tracker)
 
     content_2 = _parse_score_content(data_2, mm_tracker)
 
-    def ensure_str(content: Optional[_ContentPart]) -> str:
+    def ensure_str(content: _ContentPart | None) -> str:
         if content is not None and isinstance(content, str):
             return cast(str, content)
         else:
-            raise ValueError(
-                f"Only string content is supported, but got {content}.")
+            raise ValueError(f"Only string content is supported, but got {content}.")
 
     prompt_1 = ensure_str(content_1)
     prompt_2 = ensure_str(content_2)
@@ -106,10 +113,9 @@ def parse_score_data(
 
 
 def _parse_score_content(
-    data: Union[str, ScoreContentPartParam],
+    data: str | ScoreContentPartParam,
     mm_tracker: BaseMultiModalItemTracker,
-) -> Optional[_ContentPart]:
-
+) -> _ContentPart | None:
     if isinstance(data, str):
         data = ChatCompletionContentPartTextParam(type="text", text=data)
 
@@ -127,8 +133,10 @@ def _parse_score_content(
 
     mm_placeholder_storage = mm_parser.mm_placeholder_storage()
 
-    if len(mm_placeholder_storage) != 1 or len(
-            next(iter(mm_placeholder_storage.values()))) != 1:
+    if (
+        len(mm_placeholder_storage) != 1
+        or len(next(iter(mm_placeholder_storage.values()))) != 1
+    ):
         raise ValueError("Only one multi-modal item is supported")
 
     return next(iter(mm_placeholder_storage.values()))[0]
@@ -149,8 +157,7 @@ def apply_score_template(
             raise ValueError("Get empty score template from model")
         return full_prompt
 
-    raise ValueError(
-        f"Unsupported model architecture: {model_config.architecture}")
+    raise ValueError(f"Unsupported model architecture: {model_config.architecture}")
 
 
 def post_process_tokens(
@@ -159,7 +166,7 @@ def post_process_tokens(
 ) -> None:
     """
     Perform architecture-specific manipulations on the input tokens.
-    
+
     Note:
         This is an in-place operation.
     """
@@ -175,8 +182,8 @@ def get_score_prompt(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     tokenization_kwargs: dict[str, Any],
-    data_1: Union[str, ScoreContentPartParam],
-    data_2: Union[str, ScoreContentPartParam],
+    data_1: str | ScoreContentPartParam,
+    data_2: str | ScoreContentPartParam,
 ) -> tuple[str, TokensPrompt]:
     prompt_1, prompt_2, mm_data = parse_score_data(
         data_1,
@@ -192,9 +199,9 @@ def get_score_prompt(
         prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
     elif model_config.use_pad_token:
         # cross_encoder models defaults to using pad_token.
-        prompt_inputs = tokenizer(text=prompt_1,
-                                  text_pair=prompt_2,
-                                  **tokenization_kwargs)
+        prompt_inputs = tokenizer(
+            text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
+        )
         full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
     else:
         # `llm as reranker` models defaults to not using pad_token.
@@ -219,8 +226,10 @@ def compress_token_type_ids(token_type_ids: list[int]) -> int:
     if not found.
     """
     first_one = len(token_type_ids)
-    err_msg = "Token type ids are expected to be a sequence"\
-              " of zeros followed by a sequence of ones"
+    err_msg = (
+        "Token type ids are expected to be a sequence"
+        " of zeros followed by a sequence of ones"
+    )
     for i, type_id in enumerate(token_type_ids):
         if type_id == 0 and first_one < i:
             raise ValueError(err_msg)

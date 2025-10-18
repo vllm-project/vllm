@@ -3,15 +3,14 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, ClassVar, Literal
 
-import cv2
 import numpy as np
 import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 from .base import get_cache_dir
 
@@ -43,6 +42,8 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -65,18 +66,21 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 
     frames = np.stack(frames)
     if len(frames) < num_frames:
-        raise ValueError(f"Could not read enough frames from video file {path}"
-                         f" (expected {num_frames} frames, got {len(frames)})")
+        raise ValueError(
+            f"Could not read enough frames from video file {path}"
+            f" (expected {num_frames} frames, got {len(frames)})"
+        )
     return frames
 
 
-def video_to_pil_images_list(path: str,
-                             num_frames: int = -1) -> list[Image.Image]:
+def video_to_pil_images_list(path: str, num_frames: int = -1) -> list[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
     return [Image.fromarray(frame) for frame in frames]
 
 
 def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -136,10 +140,10 @@ class VideoAsset:
         ret = video_get_metadata(self.video_path, self.num_frames)
         return ret
 
-    def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:
+    def get_audio(self, sampling_rate: float | None = None) -> npt.NDArray:
         """
         Read audio data from the video asset, used in Qwen2.5-Omni examples.
-        
+
         See also: examples/offline_inference/qwen2_5_omni/only_thinker.py
         """
         return librosa.load(self.video_path, sr=sampling_rate)[0]

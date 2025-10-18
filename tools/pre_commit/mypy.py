@@ -20,14 +20,15 @@ Args:
 
 import subprocess
 import sys
-from typing import Optional
 
 import regex as re
 
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/distributed",
     "vllm/entrypoints",
+    "vllm/executor",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
@@ -43,9 +44,7 @@ SEPARATE_GROUPS = [
     "tests",
     "vllm/attention",
     "vllm/compilation",
-    "vllm/distributed",
     "vllm/engine",
-    "vllm/executor",
     "vllm/inputs",
     "vllm/lora",
     "vllm/model_executor",
@@ -94,11 +93,15 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     return file_groups
 
 
-def mypy(targets: list[str], python_version: Optional[str],
-         follow_imports: Optional[str], file_group: str) -> int:
+def mypy(
+    targets: list[str],
+    python_version: str | None,
+    follow_imports: str | None,
+    file_group: str,
+) -> int:
     """
     Run mypy on the given targets.
-    
+
     Args:
         targets: List of files or directories to check.
         python_version: Python version to use (e.g., "3.10") or None to use
@@ -131,8 +134,9 @@ def main():
     for file_group, changed_files in file_groups.items():
         follow_imports = None if ci and file_group == "" else "skip"
         if changed_files:
-            returncode |= mypy(changed_files, python_version, follow_imports,
-                               file_group)
+            returncode |= mypy(
+                changed_files, python_version, follow_imports, file_group
+            )
     return returncode
 
 

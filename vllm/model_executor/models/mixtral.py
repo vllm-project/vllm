@@ -23,10 +23,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
+
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -35,26 +35,41 @@ from transformers import MixtralConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import (get_ep_group, get_pp_group,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 
 class MixtralMoE(nn.Module):
@@ -66,17 +81,19 @@ class MixtralMoE(nn.Module):
     across ranks.
     """
 
-    def __init__(self,
-                 num_experts: int,
-                 top_k: int,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 tp_size: Optional[int] = None,
-                 dp_size: Optional[int] = None,
-                 prefix: str = "",
-                 enable_eplb: bool = False):
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        tp_size: int | None = None,
+        dp_size: int | None = None,
+        prefix: str = "",
+        enable_eplb: bool = False,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
 
@@ -91,38 +108,40 @@ class MixtralMoE(nn.Module):
 
         self.n_routed_experts = num_experts
         self.n_logical_experts = num_experts
-        self.n_redundant_experts = (
-            parallel_config.eplb_config.num_redundant_experts)
-        self.n_physical_experts = (self.n_logical_experts +
-                                   self.n_redundant_experts)
+        self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = (self.ep_rank *
-                                      self.n_local_physical_experts)
-        self.physical_expert_end = (self.physical_expert_start +
-                                    self.n_local_physical_experts)
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
 
         # Gate always runs at half / full precision for now.
 
-        self.gate = ReplicatedLinear(hidden_size,
-                                     num_experts,
-                                     bias=False,
-                                     params_dtype=params_dtype,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            hidden_size,
+            num_experts,
+            bias=False,
+            params_dtype=params_dtype,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
 
-        self.experts = FusedMoE(num_experts=num_experts,
-                                top_k=top_k,
-                                hidden_size=hidden_size,
-                                intermediate_size=intermediate_size,
-                                params_dtype=params_dtype,
-                                reduce_results=True,
-                                renormalize=True,
-                                quant_config=quant_config,
-                                tp_size=tp_size,
-                                dp_size=dp_size,
-                                prefix=f"{prefix}.experts",
-                                enable_eplb=self.enable_eplb,
-                                num_redundant_experts=self.n_redundant_experts)
+        self.experts = FusedMoE(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            params_dtype=params_dtype,
+            reduce_results=True,
+            renormalize=True,
+            quant_config=quant_config,
+            tp_size=tp_size,
+            dp_size=dp_size,
+            prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -135,7 +154,6 @@ class MixtralMoE(nn.Module):
 
 
 class MixtralAttention(nn.Module):
-
     def __init__(
         self,
         config: MixtralConfig,
@@ -144,8 +162,8 @@ class MixtralAttention(nn.Module):
         num_kv_heads: int,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -196,13 +214,15 @@ class MixtralAttention(nn.Module):
             base=int(self.rope_theta),
             is_neox_style=True,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -218,12 +238,11 @@ class MixtralAttention(nn.Module):
 
 
 class MixtralDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
@@ -240,7 +259,8 @@ class MixtralDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.self_attn")
+            prefix=f"{prefix}.self_attn",
+        )
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -248,40 +268,38 @@ class MixtralDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe",
-            enable_eplb=enable_eplb)
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+            enable_eplb=enable_eplb,
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.block_sparse_moe(hidden_states)
         return hidden_states, residual
 
 
 @support_torch_compile
 class MixtralModel(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -293,8 +311,11 @@ class MixtralModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
@@ -305,8 +326,7 @@ class MixtralModel(nn.Module):
         )
 
         self.enable_eplb = parallel_config.enable_eplb
-        self.num_redundant_experts = (
-            parallel_config.eplb_config.num_redundant_experts)
+        self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -317,12 +337,13 @@ class MixtralModel(nn.Module):
                 prefix=prefix,
                 enable_eplb=self.enable_eplb,
             ),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -331,9 +352,9 @@ class MixtralModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -347,10 +368,9 @@ class MixtralModel(nn.Module):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -362,10 +382,10 @@ class MixtralModel(nn.Module):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.num_local_experts,
-            num_redundant_experts=self.num_redundant_experts)
+            num_redundant_experts=self.num_redundant_experts,
+        )
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -377,25 +397,27 @@ class MixtralModel(nn.Module):
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if ((name.endswith(".bias") or name.endswith("_bias"))
-                        and name not in params_dict):
+                if (
+                    name.endswith(".bias") or name.endswith("_bias")
+                ) and name not in params_dict:
                     continue
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
@@ -424,20 +446,23 @@ class MixtralModel(nn.Module):
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
 
-                    if ((name_mapped.endswith(".bias")
-                         or name_mapped.endswith("_bias"))
-                            and name_mapped not in params_dict):
+                    if (
+                        name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
+                    ) and name_mapped not in params_dict:
                         continue
 
                     param = params_dict[name_mapped]
-                    weight_loader = typing.cast(Callable[..., bool],
-                                                param.weight_loader)
-                    success = weight_loader(param,
-                                            loaded_weight,
-                                            name_mapped,
-                                            shard_id=shard_id,
-                                            expert_id=expert_id,
-                                            return_success=True)
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
                     if success:
                         name = name_mapped
                         break
@@ -445,8 +470,9 @@ class MixtralModel(nn.Module):
                     if is_expert_weight:
                         continue
                     # Skip loading extra bias for GPTQ models.
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
@@ -457,15 +483,15 @@ class MixtralModel(nn.Module):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
-class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
-                         MixtureOfExperts):
+class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -492,8 +518,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         self.lora_config = lora_config
         self.quant_config = quant_config
 
-        self.model = MixtralModel(vllm_config=vllm_config,
-                                  prefix=maybe_prefix(prefix, "model"))
+        self.model = MixtralModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -504,16 +531,19 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            if not lora_config
+            else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size
+        )
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
         self.expert_weights = []
         self.moe_layers: list[FusedMoE] = []
@@ -524,7 +554,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 continue
             assert isinstance(layer, MixtralDecoderLayer)
             if hasattr(layer, "block_sparse_moe") and isinstance(
-                    layer.block_sparse_moe, MixtralMoE):
+                layer.block_sparse_moe, MixtralMoE
+            ):
                 example_moe = layer.block_sparse_moe
                 self.moe_layers.append(layer.block_sparse_moe.experts)
 
@@ -565,11 +596,11 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = (num_physical_experts -
-                                      self.num_logical_experts)
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
             if hasattr(layer, "block_sparse_moe") and isinstance(
-                    layer.block_sparse_moe, MixtralMoE):
+                layer.block_sparse_moe, MixtralMoE
+            ):
                 moe = layer.block_sparse_moe
                 moe.n_local_physical_experts = num_local_physical_experts
                 moe.n_physical_experts = num_physical_experts
@@ -583,22 +614,22 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

@@ -8,8 +8,9 @@ from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 
-StructuredOutputsBackend = Literal["auto", "xgrammar", "guidance", "outlines",
-                                   "lm-format-enforcer"]
+StructuredOutputsBackend = Literal[
+    "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
+]
 
 
 @config
@@ -34,6 +35,8 @@ class StructuredOutputsConfig:
     reasoning_parser: str = ""
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
+    enable_in_reasoning: bool = False
+    """Whether to use structured input for reasoning."""
 
     def compute_hash(self) -> str:
         """
@@ -50,15 +53,17 @@ class StructuredOutputsConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
-        if (self.disable_any_whitespace
-                and self.backend not in ("xgrammar", "guidance")):
-            raise ValueError("disable_any_whitespace is only supported for "
-                             "xgrammar and guidance backends.")
-        if (self.disable_additional_properties and self.backend != "guidance"):
-            raise ValueError("disable_additional_properties is only supported "
-                             "for the guidance backend.")
+        if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
+            raise ValueError(
+                "disable_any_whitespace is only supported for "
+                "xgrammar and guidance backends."
+            )
+        if self.disable_additional_properties and self.backend != "guidance":
+            raise ValueError(
+                "disable_additional_properties is only supported "
+                "for the guidance backend."
+            )

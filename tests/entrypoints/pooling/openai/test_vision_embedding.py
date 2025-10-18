@@ -14,7 +14,7 @@ from vllm.multimodal.utils import encode_image_base64, fetch_image
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
 MAXIMUM_IMAGES = 2
 
-vlm2vec_jinja_path = VLLM_PATH / "examples/template_vlm2vec.jinja"
+vlm2vec_jinja_path = VLLM_PATH / "examples/template_vlm2vec_phi3v.jinja"
 assert vlm2vec_jinja_path.exists()
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
@@ -50,16 +50,15 @@ def server():
 @pytest.fixture(scope="session")
 def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_url:
-        encode_image_base64(local_asset_server.get_image_asset(image_url))
+        image_url: encode_image_base64(local_asset_server.get_image_asset(image_url))
         for image_url in TEST_IMAGE_ASSETS
     }
 
 
 def get_hf_prompt_tokens(model_name, content, image_url):
-    processor = AutoProcessor.from_pretrained(model_name,
-                                              trust_remote_code=True,
-                                              num_crops=4)
+    processor = AutoProcessor.from_pretrained(
+        model_name, trust_remote_code=True, num_crops=4
+    )
 
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
@@ -71,39 +70,28 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
-async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
-                               image_url: str):
+async def test_image_embedding(
+    server: RemoteOpenAIServer, model_name: str, image_url: str
+):
     content_text = "Represent the given image."
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
-            },
-            {
-                "type": "text",
-                "text": content_text
-            },
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": content_text},
+            ],
+        }
+    ]
 
     response = requests.post(
         server.url_for("v1/embeddings"),
-        json={
-            "model": model_name,
-            "messages": messages,
-            "encoding_format": "float"
-        },
+        json={"model": model_name, "messages": messages, "encoding_format": "float"},
     )
     response.raise_for_status()
     embeddings = EmbeddingResponse.model_validate(response.json())
 
-    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text,
-                                            image_url)
+    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text, image_url)
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1

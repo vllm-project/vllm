@@ -8,7 +8,6 @@ import torch
 
 @dataclass
 class SpecDecodeMetadata:
-
     # [num_tokens]
     draft_token_ids: torch.Tensor
     # [batch_size]
@@ -36,22 +35,19 @@ class SpecDecodeMetadata:
         flattened_draft_token_ids = sum(draft_token_ids, [])
         num_tokens = len(flattened_draft_token_ids)
 
-        draft_token_ids_tensor = torch.tensor(flattened_draft_token_ids,
-                                              dtype=torch.int32,
-                                              device=device)
+        draft_token_ids_tensor = torch.tensor(
+            flattened_draft_token_ids, dtype=torch.int32, device=device
+        )
         cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
-        cu_num_draft_tokens_tensor = torch.from_numpy(cu_num_draft_tokens).to(
-            device)
+        cu_num_draft_tokens_tensor = torch.from_numpy(cu_num_draft_tokens).to(device)
 
-        target_logits_indices = torch.zeros(num_tokens,
-                                            dtype=torch.int32,
-                                            device=device)
-        bonus_logits_indices = torch.zeros(batch_size,
-                                           dtype=torch.int32,
-                                           device=device)
-        logits_indices = torch.zeros(num_tokens + batch_size,
-                                     dtype=torch.int32,
-                                     device=device)
+        target_logits_indices = torch.zeros(
+            num_tokens, dtype=torch.int32, device=device
+        )
+        bonus_logits_indices = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        logits_indices = torch.zeros(
+            num_tokens + batch_size, dtype=torch.int32, device=device
+        )
         return cls(
             draft_token_ids=draft_token_ids_tensor,
             num_draft_tokens=num_draft_tokens,

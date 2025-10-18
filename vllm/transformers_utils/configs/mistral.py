@@ -9,8 +9,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def adapt_config_dict(config_dict: dict[str, Any],
-                      **kwargs) -> PretrainedConfig:
+def adapt_config_dict(config_dict: dict[str, Any], **kwargs) -> PretrainedConfig:
     config_dict.update(kwargs)
     config_dict = _remap_general_mistral_args(config_dict)
 
@@ -25,15 +24,16 @@ def adapt_config_dict(config_dict: dict[str, Any],
     if bool(config_dict.get("yarn")):
         config_dict = _remap_mistral_yarn_args(config_dict)
 
-    is_vision = ((config_dict.get("multimodal")
-                  or {}).get("vision_encoder_args")
-                 or config_dict.get("vision_encoder"))
+    is_vision = (config_dict.get("multimodal") or {}).get(
+        "vision_encoder_args"
+    ) or config_dict.get("vision_encoder")
     is_audio = bool(
-        ((config_dict.get("multimodal") or {}).get("whisper_model_args")
-         or {}).get("encoder_args"))
+        ((config_dict.get("multimodal") or {}).get("whisper_model_args") or {}).get(
+            "encoder_args"
+        )
+    )
 
-    assert not (is_vision and is_audio), \
-        "Vision and audio are mutually exclusive"
+    assert not (is_vision and is_audio), "Vision and audio are mutually exclusive"
 
     if is_vision:
         config_dict = _remap_mistral_vision_args(config_dict)
@@ -77,7 +77,7 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
     config["rope_scaling"] = {
         "rope_type": "yarn",
         "mscale_all_dim": 1,  # We hardcoded this to 1
-        **renamed_yarn_config
+        **renamed_yarn_config,
     }
     return config
 
@@ -105,8 +105,7 @@ def _remap_general_mistral_args(config: dict) -> dict:
         if key in config:
             config[new_key] = config.pop(key)
 
-    for new_key, (key,
-                  default_value) in top_level_mapping_with_default.items():
+    for new_key, (key, default_value) in top_level_mapping_with_default.items():
         config[new_key] = config.pop(key, default_value)
 
     return config
@@ -116,16 +115,12 @@ def _remap_mistral_quantization_args(config: dict) -> dict:
     quantization = config.get("quantization", {})
     if quantization.get("qformat_weight") == "fp8_e4m3":
         # This maps to the FP8 static per-tensor quantization scheme
-        quantization_config = {
-            "quant_method": "fp8",
-            "activation_scheme": "static"
-        }
+        quantization_config = {"quant_method": "fp8", "activation_scheme": "static"}
     elif quantization.get("quant_method") == "compressed-tensors":
         # Pass through the quantization config to compressed-tensors
         quantization_config = quantization
     else:
-        raise ValueError(
-            f"Found unknown quantization='{quantization}' in config")
+        raise ValueError(f"Found unknown quantization='{quantization}' in config")
 
     config["quantization_config"] = quantization_config
 
@@ -139,13 +134,10 @@ def _remap_mistral_audio_args(config: dict) -> dict:
 
     quant_config = config.get("quantization_config")
     config = {
-        "model_type":
-        "whixtral",
+        "model_type": "whixtral",
         "architectures": ["VoxtralForConditionalGeneration"],
-        "text_config":
-        PretrainedConfig.from_dict(config),
-        "audio_config":
-        WhisperConfig(
+        "text_config": PretrainedConfig.from_dict(config),
+        "audio_config": WhisperConfig(
             num_mel_bins=encoder_args["audio_encoding_args"]["num_mel_bins"],
             window_size=encoder_args["audio_encoding_args"]["window_size"],
             sampling_rate=encoder_args["audio_encoding_args"]["sampling_rate"],
@@ -158,7 +150,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             vocab_size=encoder_args["vocab_size"],
             max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
-        )
+        ),
     }
     if quant_config:
         config["quantization_config"] = quant_config

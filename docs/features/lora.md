@@ -32,7 +32,7 @@ the third parameter is the path to the LoRA adapter.
     sampling_params = SamplingParams(
         temperature=0,
         max_tokens=256,
-        stop=["[/assistant]"]
+        stop=["[/assistant]"],
     )
 
     prompts = [
@@ -43,11 +43,11 @@ the third parameter is the path to the LoRA adapter.
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
+        lora_request=LoRARequest("sql_adapter", 1, sql_lora_path),
     )
     ```
 
-Check out <gh-file:examples/offline_inference/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+Check out [examples/offline_inference/multilora_inference.py](../../examples/offline_inference/multilora_inference.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
 
@@ -197,7 +197,7 @@ Alternatively, follow these example steps to implement your own plugin:
                 lora_request = LoRARequest(
                     lora_name=lora_name,
                     lora_path=local_path,
-                    lora_int_id=abs(hash(lora_name))
+                    lora_int_id=abs(hash(lora_name)),
                 )
                 return lora_request
         ```
@@ -296,10 +296,7 @@ To this end, we allow registration of default multimodal LoRAs to handle this au
         if has_audio:
             question = f"<|audio|>{question}"
         chat = [
-            {
-                "role": "user",
-                "content": question
-            }
+            {"role": "user", "content": question},
         ]
         return tokenizer.apply_chat_template(chat, tokenize=False)
 

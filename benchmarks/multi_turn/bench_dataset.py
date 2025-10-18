@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from statistics import mean
-from typing import Any, NamedTuple, Optional, Union
+from typing import Any, NamedTuple
 
 import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
@@ -35,8 +35,8 @@ class Distribution(ABC):
 class UniformDistribution(Distribution):
     def __init__(
         self,
-        min_val: Union[int, float],
-        max_val: Union[int, float],
+        min_val: int | float,
+        max_val: int | float,
         is_integer: bool = True,
     ) -> None:
         self.min_val = min_val
@@ -56,7 +56,7 @@ class UniformDistribution(Distribution):
 
 
 class ConstantDistribution(Distribution):
-    def __init__(self, value: Union[int, float]) -> None:
+    def __init__(self, value: int | float) -> None:
         self.value = value
         self.max_val = value
 
@@ -68,7 +68,7 @@ class ConstantDistribution(Distribution):
 
 
 class ZipfDistribution(Distribution):
-    def __init__(self, alpha: float, max_val: Optional[int] = None) -> None:
+    def __init__(self, alpha: float, max_val: int | None = None) -> None:
         self.alpha = alpha
         self.max_val = max_val
 
@@ -83,7 +83,7 @@ class ZipfDistribution(Distribution):
 
 
 class PoissonDistribution(Distribution):
-    def __init__(self, alpha: float, max_val: Optional[int] = None) -> None:
+    def __init__(self, alpha: float, max_val: int | None = None) -> None:
         self.alpha = alpha
         self.max_val = max_val
 
@@ -100,11 +100,11 @@ class PoissonDistribution(Distribution):
 class LognormalDistribution(Distribution):
     def __init__(
         self,
-        mean: Optional[float] = None,
-        sigma: Optional[float] = None,
-        average: Optional[int] = None,
-        median_ratio: Optional[float] = None,
-        max_val: Optional[int] = None,
+        mean: float | None = None,
+        sigma: float | None = None,
+        average: int | None = None,
+        median_ratio: float | None = None,
+        max_val: int | None = None,
     ) -> None:
         self.average = average
         self.median_ratio = median_ratio
