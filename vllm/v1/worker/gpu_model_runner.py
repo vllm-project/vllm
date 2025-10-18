@@ -3575,7 +3575,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_metadata = PoolingMetadata(
             prompt_lens=dummy_prompt_lens,
             prompt_token_ids=dummy_token_ids,
-            pooling_params=[dummy_pooling_params] * num_reqs,
+            pooling_params=[dummy_pooling_params.clone() for i in range(num_reqs)],
         )
 
         dummy_metadata.build_pooling_cursor(
