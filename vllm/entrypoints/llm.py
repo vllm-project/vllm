@@ -1068,6 +1068,9 @@ class LLM:
                 PoolingRequestOutput[Any](
                     request_id="",
                     outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
                     prompt_token_ids=[],
                     finished=True,
                 )
