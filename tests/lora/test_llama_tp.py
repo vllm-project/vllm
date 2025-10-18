@@ -3,7 +3,10 @@
 import subprocess
 import sys
 
+import pytest
+
 import vllm
+import vllm.config
 from vllm import LLM
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -100,7 +103,8 @@ def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: dict | None =
 
 
 @create_new_process_for_each_test()
-def test_llama_lora(sql_lora_files):
+@pytest.mark.parametrize("cudagraph_specialize_lora", [True, False])
+def test_llama_lora(sql_lora_files, cudagraph_specialize_lora: bool):
     llm = vllm.LLM(
         MODEL_PATH,
         tokenizer=sql_lora_files,
@@ -108,6 +112,9 @@ def test_llama_lora(sql_lora_files):
         # also test odd max_num_seqs
         max_num_seqs=13,
         max_loras=4,
+        compilation_config=vllm.config.CompilationConfig(
+            cudagraph_specialize_lora=cudagraph_specialize_lora,
+        ),
     )
     generate_and_test(llm, sql_lora_files)
 
