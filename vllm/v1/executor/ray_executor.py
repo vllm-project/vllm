@@ -247,9 +247,8 @@ class RayDistributedExecutor(Executor):
         sorted_worker_metadata = sorted(
             worker_metadata, key=sort_by_driver_then_worker_ip
         )
-        start_rank = 0
         for i, item in enumerate(sorted_worker_metadata):
-            item.adjusted_rank = i + start_rank
+            item.adjusted_rank = i
         self.workers = [item.worker for item in sorted_worker_metadata]
         rerank_mapping = {
             item.created_rank: item.adjusted_rank for item in sorted_worker_metadata

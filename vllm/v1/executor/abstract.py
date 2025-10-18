@@ -9,13 +9,13 @@ from typing import Any, Literal, TypeVar, overload
 
 from logger import init_logger
 from tasks import SupportedTask
-from vllm.v1.engine import ReconfigureDistributedRequest
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.lora.request import LoRARequest
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher as _ExecutorWithExternalLauncher,
 )
