@@ -93,8 +93,9 @@ def memory_plan_reuse_patched(self):
 # ===================================================
 # torch 2.9 Inductor get_graph_partition_signature monkeypatch
 # ===================================================
-# This change monkeypatches memory_plan_reuse in pytorch 2.9.0 to work around
-# a test failure for `tests/compile/test_fusions_e2e.py -sv -k test_attn_quant`.
+# This change monkeypatches get_graph_partition_signature in pytorch 2.9.0 to
+# work around a test failure for
+# `tests/compile/test_fusions_e2e.py::test_attn_quant`.
 # For more context, see https://github.com/pytorch/pytorch/pull/165815.
 
 
