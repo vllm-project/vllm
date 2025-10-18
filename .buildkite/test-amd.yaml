@@ -577,6 +577,15 @@ steps:
   commands:
   - bash scripts/run-benchmarks.sh
 
+- label: AMD LM Eval Large Models
+  mirror_hardwares: [amdproduction]
+  agent_pool: mi325_8
+  num_gpus: 8
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-mi300.txt --tp-size=8
+
 - label: Benchmarks CLI Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -1230,7 +1239,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
-
 ##### H200 test #####
 - label: Distrubted Tests (H200) # optional
   gpu: h200
