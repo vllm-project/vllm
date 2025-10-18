@@ -756,12 +756,12 @@ class StepPooler(Pooler):
         self,
         hidden_states: torch.Tensor | list[torch.Tensor],
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
+    ) -> PoolerOutput:
         pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
         pooling_params = get_pooling_params(pooling_metadata)
 
-        pooled_data = []
+        pooled_data: list[torch.Tensor | None] = []
         for data, token_id, pooling_param in zip(
             pooled_data_lst, prompt_token_ids, pooling_params
         ):
