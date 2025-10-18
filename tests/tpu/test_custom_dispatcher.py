@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.config import CompilationLevel
+from vllm.config import CompilationMode
 
 from ..utils import compare_two_settings
 
@@ -15,17 +15,20 @@ from ..utils import compare_two_settings
 def test_custom_dispatcher(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_RPC_TIMEOUT", "30000")
-        compare_two_settings("Qwen/Qwen2.5-1.5B-Instruct",
-                             arg1=[
-                                 "--max-model-len=256",
-                                 "--max-num-seqs=32",
-                                 "--enforce-eager",
-                                 f"-O{CompilationLevel.DYNAMO_ONCE}",
-                             ],
-                             arg2=[
-                                 "--max-model-len=256", "--max-num-seqs=32",
-                                 "--enforce-eager",
-                                 f"-O{CompilationLevel.DYNAMO_AS_IS}"
-                             ],
-                             env1={},
-                             env2={})
+        compare_two_settings(
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            arg1=[
+                "--max-model-len=256",
+                "--max-num-seqs=32",
+                "--enforce-eager",
+                f"-O{CompilationMode.DYNAMO_TRACE_ONCE}",
+            ],
+            arg2=[
+                "--max-model-len=256",
+                "--max-num-seqs=32",
+                "--enforce-eager",
+                f"-O{CompilationMode.STOCK_TORCH_COMPILE}",
+            ],
+            env1={},
+            env2={},
+        )

@@ -19,9 +19,9 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope="module")
 def server_args(request: pytest.FixtureRequest) -> list[str]:
-    """ Provide extra arguments to the server via indirect parametrization
+    """Provide extra arguments to the server via indirect parametrization
 
     Usage:
 
@@ -83,8 +83,10 @@ async def client(server):
     "server_args",
     [
         pytest.param([], id="default-frontend-multiprocessing"),
-        pytest.param(["--disable-frontend-multiprocessing"],
-                     id="disable-frontend-multiprocessing")
+        pytest.param(
+            ["--disable-frontend-multiprocessing"],
+            id="disable-frontend-multiprocessing",
+        ),
     ],
     indirect=True,
 )
@@ -100,8 +102,10 @@ async def test_show_version(server: RemoteOpenAIServer):
     "server_args",
     [
         pytest.param([], id="default-frontend-multiprocessing"),
-        pytest.param(["--disable-frontend-multiprocessing"],
-                     id="disable-frontend-multiprocessing")
+        pytest.param(
+            ["--disable-frontend-multiprocessing"],
+            id="disable-frontend-multiprocessing",
+        ),
     ],
     indirect=True,
 )
@@ -115,11 +119,13 @@ async def test_check_health(server: RemoteOpenAIServer):
 @pytest.mark.parametrize(
     "server_args",
     [
-        pytest.param(["--max-model-len", "10100"],
-                     id="default-frontend-multiprocessing"),
+        pytest.param(
+            ["--max-model-len", "10100"], id="default-frontend-multiprocessing"
+        ),
         pytest.param(
             ["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
-            id="disable-frontend-multiprocessing")
+            id="disable-frontend-multiprocessing",
+        ),
     ],
     indirect=True,
 )
@@ -134,14 +140,16 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # Request about 2 million tokens
     for _ in range(200):
         task = asyncio.create_task(
-            client.chat.completions.create(messages=chat_input,
-                                           model=MODEL_NAME,
-                                           max_tokens=10000,
-                                           extra_body={"min_tokens": 10000}))
+            client.chat.completions.create(
+                messages=chat_input,
+                model=MODEL_NAME,
+                max_tokens=10000,
+                extra_body={"min_tokens": 10000},
+            )
+        )
         tasks.append(task)
 
-    done, pending = await asyncio.wait(tasks,
-                                       return_when=asyncio.ALL_COMPLETED)
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
 
     # Make sure all requests were sent to the server and timed out
     # (We don't want to hide other errors like 400s that would invalidate this
@@ -154,16 +162,15 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # If the server had not cancelled all the other requests, then it would not
     # be able to respond to this one within the timeout
     client = server.get_async_client(timeout=5)
-    response = await client.chat.completions.create(messages=chat_input,
-                                                    model=MODEL_NAME,
-                                                    max_tokens=10)
+    response = await client.chat.completions.create(
+        messages=chat_input, model=MODEL_NAME, max_tokens=10
+    )
 
     assert len(response.choices) == 1
 
 
 @pytest.mark.asyncio
 async def test_request_wrong_content_type(server: RemoteOpenAIServer):
-
     chat_input = [{"role": "user", "content": "Write a long story"}]
     client = server.get_async_client()
 
@@ -172,17 +179,13 @@ async def test_request_wrong_content_type(server: RemoteOpenAIServer):
             messages=chat_input,
             model=MODEL_NAME,
             max_tokens=10000,
-            extra_headers={
-                "Content-Type": "application/x-www-form-urlencoded"
-            })
+            extra_headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
 
 @pytest.mark.parametrize(
     "server_args",
-    [
-        pytest.param(["--enable-server-load-tracking"],
-                     id="enable-server-load-tracking")
-    ],
+    [pytest.param(["--enable-server-load-tracking"], id="enable-server-load-tracking")],
     indirect=True,
 )
 @pytest.mark.asyncio
@@ -205,7 +208,8 @@ async def test_server_load(server: RemoteOpenAIServer):
 
     # Start the completion request in a background thread.
     completion_future = asyncio.create_task(
-        asyncio.to_thread(make_long_completion_request))
+        asyncio.to_thread(make_long_completion_request)
+    )
 
     # Give a short delay to ensure the request has started.
     await asyncio.sleep(0.1)

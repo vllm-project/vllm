@@ -1,29 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from __future__ import annotations
-
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
-from unittest.mock import MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from openai import OpenAI
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_models import (BaseModelPath,
-                                                    OpenAIServingModels)
+from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from ...utils import RemoteOpenAIServer
-
-if TYPE_CHECKING:
-    from openai import OpenAI
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -31,14 +25,17 @@ GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 @pytest.fixture(scope="module")
 def monkeypatch_module():
     from _pytest.monkeypatch import MonkeyPatch
+
     mpatch = MonkeyPatch()
     yield mpatch
     mpatch.undo()
 
 
-@pytest.fixture(scope="module",
-                params=[True, False],
-                ids=["with_tool_parser", "without_tool_parser"])
+@pytest.fixture(
+    scope="module",
+    params=[True, False],
+    ids=["with_tool_parser", "without_tool_parser"],
+)
 def with_tool_parser(request) -> bool:
     return request.param
 
@@ -56,21 +53,25 @@ def default_server_args(with_tool_parser: bool):
         "0.8",
     ]
     if with_tool_parser:
-        args.extend([
-            "--tool-call-parser",
-            "openai",
-            "--enable-auto-tool-choice",
-        ])
+        args.extend(
+            [
+                "--tool-call-parser",
+                "openai",
+                "--enable-auto-tool-choice",
+            ]
+        )
     return args
 
 
 @pytest.fixture(scope="module")
-def gptoss_server(monkeypatch_module: pytest.MonkeyPatch,
-                  default_server_args: list[str]):
+def gptoss_server(
+    monkeypatch_module: pytest.MonkeyPatch, default_server_args: list[str]
+):
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
-        with RemoteOpenAIServer(GPT_OSS_MODEL_NAME,
-                                default_server_args) as remote_server:
+        with RemoteOpenAIServer(
+            GPT_OSS_MODEL_NAME, default_server_args
+        ) as remote_server:
             yield remote_server
 
 
@@ -81,44 +82,41 @@ async def gptoss_client(gptoss_server):
 
 
 @pytest.mark.asyncio
-async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI,
-                                                with_tool_parser: bool):
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_current_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string"
+async def test_gpt_oss_chat_tool_call_streaming(
+    gptoss_client: OpenAI, with_tool_parser: bool
+):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                        },
                     },
-                    "state": {
-                        "type": "string"
-                    },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                    },
+                    "required": ["city", "state", "unit"],
                 },
-                "required": ["city", "state", "unit"],
             },
-        },
-    }]
+        }
+    ]
 
     messages = [
-        {
-            "role": "user",
-            "content": "What is the weather in Dallas, TX?"
-        },
+        {"role": "user", "content": "What is the weather in Dallas, TX?"},
     ]
 
     stream = await gptoss_client.chat.completions.create(
         model=GPT_OSS_MODEL_NAME,
         messages=messages,
         tools=tools if with_tool_parser else None,
-        stream=True)
+        stream=True,
+    )
 
     name = None
     args_buf = ""
@@ -143,43 +141,34 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI,
 
 
 @pytest.mark.asyncio
-async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
-                                       with_tool_parser: bool):
+async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI, with_tool_parser: bool):
     if not with_tool_parser:
         pytest.skip("skip non-tool for multi-turn tests")
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_current_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string"
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                        },
                     },
-                    "state": {
-                        "type": "string"
-                    },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                    },
+                    "required": ["city", "state", "unit"],
                 },
-                "required": ["city", "state", "unit"],
             },
-        },
-    }]
+        }
+    ]
 
     messages = [
-        {
-            "role": "system",
-            "content": "you are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": "What is the weather in Dallas, TX with celsius?"
-        },
+        {"role": "system", "content": "you are a helpful assistant"},
+        {"role": "user", "content": "What is the weather in Dallas, TX with celsius?"},
     ]
 
     first = await gptoss_client.chat.completions.create(
@@ -197,10 +186,9 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
     assert not first_msg.content
 
     messages.append({"role": "assistant", "content": args1})
-    messages.append({
-        "role": "user",
-        "content": "Now convert to celsius and return JSON only"
-    })
+    messages.append(
+        {"role": "user", "content": "Now convert to celsius and return JSON only"}
+    )
 
     second = await gptoss_client.chat.completions.create(
         model=GPT_OSS_MODEL_NAME,
@@ -209,8 +197,135 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
         temperature=0.0,
     )
     second_msg = second.choices[0].message
-    assert (second_msg.content is not None and len(second_msg.content) > 0) or \
-        (second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0)
+    assert (second_msg.content is not None and len(second_msg.content) > 0) or (
+        second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_gpt_oss_tool_message_array_content(
+    gptoss_client: OpenAI, with_tool_parser: bool
+):
+    """Test that tool messages support both string and array content formats."""
+    if not with_tool_parser:
+        pytest.skip("skip non-tool for array content tests")
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                    },
+                    "required": ["city", "state"],
+                },
+            },
+        }
+    ]
+
+    # Test 1: Tool message with string content
+    messages_string = [
+        {"role": "user", "content": "What's the weather in Paris?"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city": "Paris", "state": "TX"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "The weather in Paris, TX is sunny, 22°C"},
+    ]
+
+    response_string = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages_string,
+        tools=tools,
+        temperature=0.0,
+    )
+
+    assert response_string is not None
+    assert response_string.choices[0].message is not None
+
+    # Test 2: Tool message with array content
+    messages_array = [
+        {"role": "user", "content": "What's the weather in Dallas?"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_456",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city": "Dallas", "state": "TX"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "f2e897a7-2705-4337-8193-2a8f57b81618"}
+            ],
+        },
+    ]
+
+    response_array = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages_array,
+        tools=tools,
+        temperature=0.0,
+    )
+
+    assert response_array is not None
+    assert response_array.choices[0].message is not None
+
+    # Test 3: Tool message with multiple array content items
+    messages_multi_array = [
+        {"role": "user", "content": "Search for information"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_789",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city": "Austin", "state": "TX"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "Weather data: "},
+                {"type": "text", "text": "Austin, TX - Partly cloudy, 25°C"},
+                {"type": "text", "text": " with 60% humidity"},
+            ],
+        },
+    ]
+
+    response_multi_array = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages_multi_array,
+        tools=tools,
+        temperature=0.0,
+    )
+
+    assert response_multi_array is not None
+    assert response_multi_array.choices[0].message is not None
 
 
 MODEL_NAME = "openai-community/gpt2"
@@ -218,7 +333,7 @@ MODEL_NAME_SHORT = "gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
-    BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT)
+    BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
 ]
 
 
@@ -230,6 +345,7 @@ class MockHFConfig:
 @dataclass
 class MockModelConfig:
     task = "generate"
+    runner_type = "generate"
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -238,36 +354,66 @@ class MockModelConfig:
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
     logits_processor_pattern = None
-    diff_sampling_param: Optional[dict] = None
+    diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
-    allowed_media_domains: Optional[list[str]] = None
+    allowed_media_domains: list[str] | None = None
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    skip_tokenizer_init = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
 
+def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    serving_chat = OpenAIServingChat(
+        engine,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
+
+    async def _fake_process_inputs(
+        request_id,
+        engine_prompt,
+        sampling_params,
+        *,
+        lora_request,
+        trace_headers,
+        priority,
+    ):
+        return dict(engine_prompt), {}
+
+    serving_chat._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
+    return serving_chat
+
+
 @dataclass
 class MockEngine:
-
-    async def get_model_config(self):
-        return MockModelConfig()
+    model_config: MockModelConfig = field(default_factory=MockModelConfig)
+    processor: MagicMock = field(default_factory=MagicMock)
+    io_processor: MagicMock = field(default_factory=MagicMock)
 
 
 async def _async_serving_chat_init():
     engine = MockEngine()
-    model_config = await engine.get_model_config()
 
-    models = OpenAIServingModels(engine, model_config, BASE_MODEL_PATHS)
-    serving_completion = OpenAIServingChat(engine,
-                                           model_config,
-                                           models,
-                                           response_role="assistant",
-                                           chat_template=CHAT_TEMPLATE,
-                                           chat_template_content_format="auto",
-                                           request_logger=None)
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    serving_completion = OpenAIServingChat(
+        engine,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
     return serving_completion
 
 
@@ -281,17 +427,11 @@ async def test_serving_chat_returns_correct_model_name():
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
 
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=MockModelConfig())
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     MockModelConfig(),
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine)
     messages = [{"role": "user", "content": "what is 1+1?"}]
 
     async def return_model_name(*args):
@@ -317,24 +457,15 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
 
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=MockModelConfig())
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     MockModelConfig(),
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine)
 
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
     )
 
     with suppress(Exception):
@@ -359,26 +490,17 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine)
 
     # Test Case 1: No max_tokens specified in request
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
     )
 
     with suppress(Exception):
@@ -413,26 +535,17 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine)
 
     # Test case 1: No max_tokens specified, defaults to context_window
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
     )
 
     with suppress(Exception):
@@ -459,35 +572,25 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
 @pytest.mark.asyncio
 async def test_serving_chat_could_load_correct_generation_config():
-
     mock_model_config = MockModelConfig()
     mock_model_config.diff_sampling_param = {
         "temperature": 0.5,
-        "repetition_penalty": 1.05
+        "repetition_penalty": 1.05,
     }
 
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine)
 
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
     )
 
     with suppress(Exception):
@@ -524,35 +627,27 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
 
-    # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine)
 
     # Test cache_salt
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
     )
 
     # By default, cache_salt in the engine prompt is not set
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    assert "cache_salt" not in mock_engine.generate.call_args.args[0]
+    engine_prompt = serving_chat._process_inputs.await_args_list[0].args[1]
+    assert "cache_salt" not in engine_prompt
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    assert mock_engine.generate.call_args.args[0]["cache_salt"] == "test_salt"
+    engine_prompt = serving_chat._process_inputs.await_args_list[1].args[1]
+    assert engine_prompt.get("cache_salt") == "test_salt"

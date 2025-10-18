@@ -33,14 +33,13 @@ Traces can be visualized using <https://ui.perfetto.dev/>.
 
 #### Offline Inference
 
-Refer to <gh-file:examples/offline_inference/simple_profiling.py> for an example.
+Refer to [examples/offline_inference/simple_profiling.py](../../examples/offline_inference/simple_profiling.py) for an example.
 
 #### OpenAI Server
 
 ```bash
 VLLM_TORCH_PROFILER_DIR=./vllm_profile \
-    python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3-70B
+    vllm serve meta-llama/Meta-Llama-3-70B
 ```
 
 vllm bench command:
