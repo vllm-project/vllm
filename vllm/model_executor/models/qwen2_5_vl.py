@@ -609,15 +609,6 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
         if seqlen > self._seq_len_cached:
             seqlen *= 2
             self._seq_len_cached = seqlen
-            self.inv_freq = 1.0 / (
-                self.theta
-                ** (
-                    torch.arange(
-                        0, self.dim, 2, dtype=torch.float, device=self.inv_freq.device
-                    )
-                    / self.dim
-                )
-            )
             seq = torch.arange(
                 seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
             )
