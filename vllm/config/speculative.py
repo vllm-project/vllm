@@ -270,13 +270,15 @@ class SpeculativeConfig:
             elif self.prompt_lookup_min is None:
                 if self.prompt_lookup_max is None:
                     raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be provided when using the ngram method."
+                        "Either prompt_lookup_max or prompt_lookup_min must be "
+                        "provided when using the ngram method."
                     )
                 self.prompt_lookup_min = self.prompt_lookup_max
             elif self.prompt_lookup_max is None:
                 if self.prompt_lookup_min is None:
                     raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be provided when using the ngram method."
+                        "Either prompt_lookup_max or prompt_lookup_min must be "
+                        "provided when using the ngram method."
                     )
                 self.prompt_lookup_max = self.prompt_lookup_min
 
