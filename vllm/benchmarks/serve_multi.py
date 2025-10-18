@@ -461,7 +461,7 @@ def _iter_sla(
     run_path: Path,
     run_number: int,
     dry_run: bool,
-    init_request_rate: int = 8192,
+    init_request_rate: int = 4096,
 ):
     print("[SLA START]")
     print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
@@ -474,6 +474,7 @@ def _iter_sla(
 
     while request_rate_right > request_rate_left:
         request_rate = (request_rate_left + request_rate_right) // 2
+        print(f"Search bounds: [{request_rate_left}, {request_rate_right}] req/s")
         print(f"Testing request rate: {request_rate} req/s")
 
         iter_path = _get_sla_iter_path(run_path, request_rate)
@@ -516,7 +517,8 @@ def _iter_sla(
 
             request_rate_right = request_rate
 
-        if abs(request_rate_left - request_rate_right) < 1:
+        # Use `<= 1` because `(odd + even) // 2 == 1`
+        if abs(request_rate_left - request_rate_right) <= 1:
             print("Binary search has converged.")
 
             break
