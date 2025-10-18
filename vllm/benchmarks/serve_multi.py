@@ -414,7 +414,7 @@ def _get_sla_base_path(
             "bench",
             *(f"{k}={v}" for k, v in bench_comb.items()),
             "sla",
-            *(f"{k}={v.format_cond(k)}" for k, v in sla_comb.items()),
+            *(v.format_cond(k) for k, v in sla_comb.items()),
         )
     )
 
