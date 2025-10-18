@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -177,7 +178,7 @@ class MLPBlock(torch.nn.Module):
             x = sequence_parallel_chunk(x)
 
         if current_platform.is_rocm():
-            g = torch.ops.vllm.rocm_unquantized_gemm_impl(
+            g = rocm_unquantized_gemm(
                 x[:, : self.hidden_size], self.router.weight, self.router.bias
             )
         else:

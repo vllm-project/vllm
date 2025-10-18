@@ -133,7 +133,7 @@ def rocm_unquantized_gemm_impl(
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
-        return gemm_a16w16(x, weight, bias)
+        return gemm_a16w16(x, weight)
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
@@ -155,25 +155,24 @@ def rocm_unquantized_gemm_impl(
     return torch.nn.functional.linear(x, weight, bias)
 
 
-def rocm_unquantized_gemm_impl_fake(
+def rocm_unquantized_gemm_fake(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
     return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
 def rocm_unquantized_gemm(
-    layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
+    return torch.ops.vllm.rocm_unquantized_gemm(x, weight, bias)
 
 
 direct_register_custom_op(
-    op_name="rocm_unquantized_gemm_impl",
+    op_name="rocm_unquantized_gemm",
     op_func=rocm_unquantized_gemm_impl,
-    fake_impl=rocm_unquantized_gemm_impl_fake,
+    fake_impl=rocm_unquantized_gemm_fake,
 )
 
 
