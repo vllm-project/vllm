@@ -491,6 +491,20 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class Qwen2_5_VLMultiModalConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Update model config for Qwen2.5-VL to ensure correct behavior.
+        """
+        mm_config = vllm_config.model_config.multimodal_config
+        if mm_config is None:
+            return
+        # Set default dynamic kwargs to avoid rebuilding mm_processor
+        if mm_config.mm_processor_dynamic_kwargs is None:
+            mm_config.mm_processor_dynamic_kwargs = ["fps"]
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -508,4 +522,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "Qwen2_5_VLForConditionalGeneration": Qwen2_5_VLMultiModalConfig,
 }
