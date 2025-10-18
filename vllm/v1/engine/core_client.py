@@ -419,7 +419,9 @@ class BackgroundResources:
 
 
 class ClientGuard:
-    def __init__(self, fault_receiver_addr, cmd_addr, engine_registry):
+    def __init__(
+        self, fault_receiver_addr: str, cmd_addr: str, engine_registry: dict[int, str]
+    ):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
         self.fault_receiver_socket = make_zmq_socket(
@@ -432,9 +434,11 @@ class ClientGuard:
             ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
         )
 
-    def recv_fault_msg(self) -> tuple[None | str, None | str]:
+    def recv_msg(
+        self, socket: zmq.Socket | zmq.asyncio.Socket
+    ) -> tuple[None | str, None | str]:
         """
-        Receive fault messages from fault_receiver_socket in blocking mode
+        Receive messages from socket in blocking mode
 
         This function will block until a message is received
 
@@ -444,7 +448,7 @@ class ClientGuard:
         """
         try:
             # Use blocking receive - will wait until a message arrives
-            parts = self.fault_receiver_socket.recv_multipart()
+            parts = socket.recv_multipart()
 
             # Verify message format
             if len(parts) != 3:
@@ -610,7 +614,10 @@ class MPClient(EngineCoreClient):
             self.engine_registry = {}
             engine_ids = [i for i in range(dp_size)]
             engine_core_identities = generate_identity_group(
-                peer1="client", peer2="engine_core_guard", use="report|cmd", n=dp_size
+                peer1="client",
+                peer2="engine_core_guard",
+                use="report and cmd",
+                n=dp_size,
             )
             self.engine_registry = dict(zip(engine_ids, engine_core_identities))
             addresses.engine_core_guard_identities = self.engine_registry
