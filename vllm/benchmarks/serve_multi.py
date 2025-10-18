@@ -3,22 +3,25 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import shlex
 import signal
 import subprocess
+from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import requests
+from typing_extensions import override
 
 _BAD_PARAMS_TYPE_MSG = (
     "The parameters to vary should be expressed as a JSON list of dictionaries."
 )
 
 
-def _validate_params(params: list[dict[str, object]]):
+def _parse_params(params: list[dict[str, object]]):
     if not isinstance(params, list):
         raise TypeError(f"{_BAD_PARAMS_TYPE_MSG} Found JSON type {type(params)}")
 
@@ -29,11 +32,118 @@ def _validate_params(params: list[dict[str, object]]):
     return params
 
 
+class SLACriterionBase(ABC):
+    def __init__(self, target: float) -> None:
+        super().__init__()
+
+        self.target = target
+
+    @abstractmethod
+    def validate(self, actual: float) -> bool:
+        """Return `True` if this criterion is met; otherwise `False`."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def format_cond(self, lhs: str) -> str:
+        raise NotImplementedError
+
+    def print_and_validate(
+        self,
+        metrics: dict[str, object],
+        metrics_key: str,
+    ) -> bool:
+        metric = float(metrics[metrics_key])  # type: ignore
+        result = self.validate(metric)
+
+        cond = self.format_cond(f"{metrics_key} = {metric:.2f}")
+        print(f"Validating SLA: {cond} | " + ("PASSED" if result else "FAILED"))
+
+        return result
+
+
+class SLALessThan(SLACriterionBase):
+    @override
+    def validate(self, actual: float) -> bool:
+        return actual < self.target
+
+    @override
+    def format_cond(self, lhs: str) -> str:
+        return f"{lhs} < {self.target:.2f}"
+
+
+class SLALessThanOrEqual(SLACriterionBase):
+    @override
+    def validate(self, actual: float) -> bool:
+        return actual <= self.target
+
+    @override
+    def format_cond(self, lhs: str) -> str:
+        return f"{lhs} <= {self.target:.2f}"
+
+
+class SLAGreaterThan(SLACriterionBase):
+    @override
+    def validate(self, actual: float) -> bool:
+        return actual > self.target
+
+    @override
+    def format_cond(self, lhs: str) -> str:
+        return f"{lhs} > {self.target:.2f}"
+
+
+class SLAGreaterThanOrEqual(SLACriterionBase):
+    @override
+    def validate(self, actual: float) -> bool:
+        return actual >= self.target
+
+    @override
+    def format_cond(self, lhs: str) -> str:
+        return f"{lhs} >= {self.target:.2f}"
+
+
+# NOTE: The ordering is important! Match longer op_keys first
+SLA_CRITERIA: dict[str, type[SLACriterionBase]] = {
+    "<=": SLALessThanOrEqual,
+    ">=": SLAGreaterThanOrEqual,
+    "<": SLALessThan,
+    ">": SLAGreaterThan,
+}
+
+
+def _parse_sla_item(sla_item: dict[str, str]):
+    sla_criteria: dict[str, SLACriterionBase] = {}
+
+    for metric_key, metric_value in sla_item.items():
+        for op_key in SLA_CRITERIA:
+            if metric_value.startswith(op_key):
+                sla_criteria[metric_key] = SLA_CRITERIA[op_key](
+                    float(metric_value.removeprefix(op_key))
+                )
+                break
+        else:
+            raise ValueError(
+                f"Invalid operator for SLA constraint '{metric_key}={metric_value}'. "
+                f"Valid operators are: {set(SLA_CRITERIA)}",
+            )
+
+    return sla_criteria
+
+
+def _parse_sla(sla: list[dict[str, str]]):
+    return [_parse_sla_item(item) for item in sla]
+
+
+# In JSON, we prefer "_"
+def _iter_param_key_candidates(param_key: str):
+    yield param_key
+    yield param_key.replace("-", "_")
+    yield param_key.replace("_", "-")
+
+
+# In CLI, we prefer "-"
 def _iter_cmd_key_candidates(param_key: str):
-    # We prefer "-" instead of "_", but the user-inputted command may contain "_"
-    yield "--" + param_key.replace("_", "-")
-    yield "--" + param_key.replace("-", "_")
-    yield "--" + param_key
+    for k in reversed(tuple(_iter_param_key_candidates(param_key))):
+        yield "--" + k
 
 
 def _override_args(cmd: list[str], params: dict[str, object]):
@@ -61,43 +171,6 @@ def _override_args(cmd: list[str], params: dict[str, object]):
     return cmd
 
 
-def _get_path_one_comb(
-    output_dir: Path,
-    serve_comb: dict[str, object],
-    bench_comb: dict[str, object],
-):
-    return output_dir / "_".join(
-        (
-            *(f"s_{k}={v}" for k, v in serve_comb.items()),
-            *(f"b_{k}={v}" for k, v in bench_comb.items()),
-        )
-    )
-
-
-def _get_path_one_run(result_dir: Path, run_number: int):
-    return result_dir / f"run={run_number}.json"
-
-
-def _needs_server(
-    serve_comb: dict[str, object],
-    bench_combs: list[dict[str, object]],
-    output_dir: Path,
-    num_runs: int,
-):
-    for bench_comb in bench_combs:
-        result_dir = _get_path_one_comb(
-            output_dir,
-            serve_comb=serve_comb,
-            bench_comb=bench_comb,
-        )
-        for run_number in range(num_runs):
-            result_path = _get_path_one_run(result_dir, run_number)
-            if not result_path.exists():
-                return True
-
-    return False
-
-
 @contextlib.contextmanager
 def _run_server(
     serve_cmd: list[str],
@@ -114,13 +187,14 @@ def _run_server(
     else:
         port = 8000  # The default value in vllm serve
 
-    print("[Running Server]")
+    print("[BEGIN SERVER]")
     print(f"Server overrides: {serve_overrides}")
     print(f"Server command: {server_cmd}")
     print(f"Server port: {port}")
 
     if dry_run:
-        yield port
+        yield None
+        print("[END SERVER]")
         return
 
     # Create new process group for clean termination
@@ -140,12 +214,11 @@ def _run_server(
                 # We need to kill both API Server and Engine processes
                 os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
 
+        print("[END SERVER]")
 
-def _reset_caches(port: int, *, dry_run: bool):
+
+def _reset_caches(port: int):
     print("Resetting caches...")
-
-    if dry_run:
-        return
 
     res = requests.post(f"http://0.0.0.0:{port}/reset_prefix_cache")
     res.raise_for_status()
@@ -160,59 +233,130 @@ def _run_benchmark(
     serve_overrides: dict[str, object],
     bench_overrides: dict[str, object],
     run_number: int,
-    output_dir: Path,
+    output_path: Path,
     dry_run: bool,
 ):
-    result_dir = _get_path_one_comb(
-        output_dir,
-        serve_comb=serve_overrides,
-        bench_comb=bench_overrides,
-    )
-    result_path = _get_path_one_run(result_dir, run_number)
     benchmark_cmd = [
         *_override_args(bench_cmd, bench_overrides),
         "--save-result",
         "--result-dir",
-        str(result_dir),
+        str(output_path.parent),
         "--result-filename",
-        result_path.name,
+        output_path.name,
     ]
 
-    print("[Running Benchmark]")
+    print("[BEGIN BENCHMARK]")
     print(f"Benchmark overrides: {bench_overrides}")
     print(f"Run Number: {run_number}")
     print(f"Benchmark command: {benchmark_cmd}")
-    print(f"Output file: {result_path}")
+    print(f"Output file: {output_path}")
 
     run_data: dict[str, object]
 
-    if result_path.exists():
+    if output_path.exists():
         print("Found existing results. Skipping.")
 
-        with result_path.open("rb") as f:
+        with output_path.open("rb") as f:
             run_data = json.load(f)
             return run_data
 
     if dry_run:
+        print("[END BENCHMARK]")
         return None
 
-    result_dir.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     subprocess.run(benchmark_cmd, check=True)
 
-    with result_path.open("rb") as f:
+    with output_path.open("rb") as f:
         run_data = json.load(f)
 
     run_data["run_number"] = run_number
     run_data.update(serve_overrides)
 
-    with result_path.open("w") as f:
+    with output_path.open("w") as f:
         json.dump(run_data, f)
+
+    print("[END BENCHMARK]")
 
     return run_data
 
 
-def run_all(
+def _get_comb_base_path(
+    output_dir: Path,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+):
+    return output_dir / "_".join(
+        (
+            "serve__",
+            *(f"{k}={v}" for k, v in serve_comb.items()),
+            "bench__",
+            *(f"{k}={v}" for k, v in bench_comb.items()),
+        )
+    )
+
+
+def _get_comb_run_path(base_path: Path, run_number: int | None):
+    if run_number is None:
+        return base_path / "summary.json"
+
+    return base_path / f"run={run_number}.json"
+
+
+def _comb_needs_server(
+    serve_comb: dict[str, object],
+    bench_combs: list[dict[str, object]],
+    output_dir: Path,
+):
+    for bench_comb in bench_combs:
+        base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
+        if not _get_comb_run_path(base_path, run_number=None).exists():
+            return True
+
+    return False
+
+
+def _run_comb(
+    port: int | None,
+    bench_cmd: list[str],
+    *,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+    base_path: Path,
+    num_runs: int,
+    dry_run: bool,
+):
+    comb_data = list[dict[str, object]]()
+
+    for run_number in range(num_runs):
+        run_path = _get_comb_run_path(base_path, run_number)
+
+        run_data = _run_benchmark(
+            bench_cmd,
+            serve_overrides=serve_comb,
+            bench_overrides=bench_comb,
+            run_number=run_number,
+            output_path=run_path,
+            dry_run=dry_run,
+        )
+
+        if port is not None:
+            _reset_caches(port)
+
+        if run_data is not None:
+            comb_data.append(run_data)
+
+    if dry_run:
+        return None
+
+    with _get_comb_run_path(base_path, run_number=None).open("w") as f:
+        json.dump(comb_data, f)
+
+    return comb_data
+
+
+def run_combs(
     serve_cmd: list[str],
     bench_cmd: list[str],
     *,
@@ -221,46 +365,302 @@ def run_all(
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
+):
+    all_data = list[dict[str, object]]()
+    for serve_comb in serve_params:
+        with (
+            _run_server(
+                serve_cmd,
+                serve_overrides=serve_comb,
+                dry_run=dry_run,
+            )
+            if _comb_needs_server(serve_comb, bench_params, output_dir)
+            else contextlib.nullcontext()
+        ) as port:
+            for bench_comb in bench_params:
+                base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
+
+                comb_data = _run_comb(
+                    port,
+                    bench_cmd,
+                    serve_comb=serve_comb,
+                    bench_comb=bench_comb,
+                    base_path=base_path,
+                    num_runs=num_runs,
+                    dry_run=dry_run,
+                )
+
+                if comb_data is not None:
+                    all_data.extend(comb_data)
+
+    if dry_run:
+        return None
+
+    combined_df = pd.DataFrame.from_records(all_data)
+    combined_df.to_csv(output_dir / "summary.csv")
+
+    return combined_df
+
+
+def _get_sla_base_path(
+    output_dir: Path,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+    sla_comb: dict[str, SLACriterionBase],
+):
+    return output_dir / "_".join(
+        (
+            "serve__",
+            *(f"{k}={v}" for k, v in serve_comb.items()),
+            "bench__",
+            *(f"{k}={v}" for k, v in bench_comb.items()),
+            "sla__",
+            *(f"{k}={v}" for k, v in sla_comb.items()),
+        )
+    )
+
+
+def _get_sla_run_path(base_path: Path, run_number: int | None):
+    if run_number is None:
+        return base_path / "summary.json"
+
+    return base_path / f"run={run_number}"
+
+
+def _get_sla_iter_path(run_path: Path, request_rate: float | None):
+    if request_rate is None:
+        return run_path / "best.json"
+
+    return run_path / f"request_rate={int(request_rate)}.json"
+
+
+def _sla_needs_server(
+    serve_comb: dict[str, object],
+    bench_combs: list[dict[str, object]],
+    sla_combs: list[dict[str, SLACriterionBase]],
+    output_dir: Path,
+    num_runs: int,
+):
+    for bench_comb in bench_combs:
+        for sla_comb in sla_combs:
+            base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb, sla_comb)
+            for run_number in range(num_runs):
+                run_path = _get_sla_run_path(base_path, run_number)
+                if not _get_sla_iter_path(run_path, request_rate=None).exists():
+                    return True
+
+    return False
+
+
+def _iter_sla(
+    port: int | None,
+    bench_cmd: list[str],
+    *,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+    sla_comb: dict[str, SLACriterionBase],
+    run_path: Path,
+    run_number: int,
+    dry_run: bool,
+):
+    print("[SLA START]")
+    print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
+
+    run_data = list[dict[str, object]]()
+    request_rate: int = 1 << 20
+
+    while request_rate > 0:
+        print(f"Testing request rate: {request_rate} req/s")
+        iter_path = _get_sla_iter_path(run_path, run_number)
+
+        iter_data = _run_benchmark(
+            bench_cmd,
+            serve_overrides=serve_comb,
+            bench_overrides=bench_comb,
+            run_number=run_number,
+            output_path=iter_path,
+            dry_run=dry_run,
+        )
+
+        if port is not None:
+            _reset_caches(port)
+
+        if iter_data is not None:
+            run_data.append(iter_data)
+
+        if iter_data is None:
+            assert dry_run
+            print("Omitting SLA iterations for brevity.")
+            break
+
+        sla_results = [
+            criterion.print_and_validate(iter_data, k)
+            for k, criterion in sla_comb.items()
+        ]
+        if all(sla_results):
+            print("SLA criteria has been met.")
+            break
+
+        print("SLA criteria has not been met.")
+
+        request_rate = min(
+            math.ceil(float(iter_data["request_throughput"])),  # type: ignore
+            request_rate - 1,
+        )
+
+    if dry_run:
+        print("[SLA END]")
+        return None
+
+    with _get_sla_iter_path(run_path, request_rate=None).open("w") as f:
+        json.dump(run_data, f)
+
+    print("[SLA END]")
+
+    return run_data
+
+
+def _run_sla(
+    port: int | None,
+    bench_cmd: list[str],
+    *,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+    sla_comb: dict[str, SLACriterionBase],
+    base_path: Path,
+    num_runs: int,
+    dry_run: bool,
+):
+    comb_data = list[dict[str, object]]()
+
+    for run_number in range(num_runs):
+        run_path = _get_sla_run_path(base_path, run_number)
+
+        run_data = _iter_sla(
+            port,
+            bench_cmd,
+            serve_comb=serve_comb,
+            bench_comb=bench_comb,
+            sla_comb=sla_comb,
+            run_path=run_path,
+            run_number=run_number,
+            dry_run=dry_run,
+        )
+
+        if run_data is not None:
+            comb_data.extend(run_data)
+
+    if dry_run:
+        return None
+
+    with _get_sla_run_path(base_path, run_number=None).open("w") as f:
+        json.dump(comb_data, f)
+
+    return comb_data
+
+
+def run_sla(
+    serve_cmd: list[str],
+    bench_cmd: list[str],
+    *,
+    serve_params: list[dict[str, object]],
+    bench_params: list[dict[str, object]],
+    sla_params: list[dict[str, SLACriterionBase]],
+    output_dir: Path,
+    num_runs: int,
+    dry_run: bool,
+):
+    if any(
+        k in bench_comb
+        for bench_comb in bench_params
+        for k in _iter_param_key_candidates("request_rate")
+    ):
+        raise ValueError(
+            "You should not override `request_rate` in `bench_params` in SLA mode, "
+            "since `request_rate` is supposed to be determined automatically."
+        )
+
+    all_data = list[dict[str, object]]()
+    for serve_comb in serve_params:
+        with (
+            _run_server(
+                serve_cmd,
+                serve_overrides=serve_comb,
+                dry_run=dry_run,
+            )
+            if _sla_needs_server(
+                serve_comb, bench_params, sla_params, output_dir, num_runs
+            )
+            else contextlib.nullcontext()
+        ) as port:
+            for bench_comb in bench_params:
+                for sla_comb in sla_params:
+                    base_path = _get_sla_base_path(
+                        output_dir, serve_comb, bench_comb, sla_comb
+                    )
+
+                    comb_data = _run_sla(
+                        port,
+                        bench_cmd,
+                        serve_comb=serve_comb,
+                        bench_comb=bench_comb,
+                        sla_comb=sla_comb,
+                        base_path=base_path,
+                        num_runs=num_runs,
+                        dry_run=dry_run,
+                    )
+
+                    if comb_data is not None:
+                        all_data.extend(comb_data)
+
+    if dry_run:
+        return None
+
+    combined_df = pd.DataFrame.from_records(all_data)
+    combined_df.to_csv(output_dir / "summary.csv")
+
+    return combined_df
+
+
+def run_main(
+    serve_cmd: list[str],
+    bench_cmd: list[str],
+    *,
+    serve_params: list[dict[str, object]],
+    bench_params: list[dict[str, object]],
+    sla_params: list[dict[str, SLACriterionBase]],
+    output_dir: Path,
+    num_runs: int,
+    dry_run: bool,
     resume: str | None,
 ):
     timestamp = resume or datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = output_dir / timestamp
 
-    serve_combs = _validate_params(serve_params)
-    bench_combs = _validate_params(bench_params)
+    if resume and not output_dir.exists():
+        raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
 
-    all_data = list[dict[str, object]]()
-    for serve_comb in serve_combs:
-        if _needs_server(serve_comb, bench_combs, output_dir, num_runs):
-            with _run_server(
-                serve_cmd,
-                serve_overrides=serve_comb,
-                dry_run=dry_run,
-            ) as port:
-                for bench_comb in bench_combs:
-                    for run_number in range(num_runs):
-                        run_data = _run_benchmark(
-                            bench_cmd,
-                            serve_overrides=serve_comb,
-                            bench_overrides=bench_comb,
-                            run_number=run_number,
-                            output_dir=output_dir,
-                            dry_run=dry_run,
-                        )
-                        _reset_caches(port, dry_run=dry_run)
+    if sla_params:
+        return run_sla(
+            serve_cmd=serve_cmd,
+            bench_cmd=bench_cmd,
+            serve_params=serve_params,
+            bench_params=bench_params,
+            sla_params=sla_params,
+            output_dir=output_dir,
+            num_runs=num_runs,
+            dry_run=dry_run,
+        )
 
-                        if run_data is not None:
-                            all_data.append(run_data)
-
-    if dry_run:
-        assert len(all_data) == 0
-        return None
-
-    assert len(all_data) == len(serve_combs) * len(bench_combs)
-    combined_df = pd.DataFrame.from_records(all_data)
-    combined_df.to_csv(output_dir / "summary.csv")
-
-    return combined_df
+    return run_combs(
+        serve_cmd=serve_cmd,
+        bench_cmd=bench_cmd,
+        serve_params=serve_params,
+        bench_params=bench_params,
+        output_dir=output_dir,
+        num_runs=num_runs,
+        dry_run=dry_run,
+    )
 
 
 def main():
@@ -283,15 +683,31 @@ def main():
         "--serve-params",
         type=str,
         default=None,
-        help="Path to JSON file containing parameter combinations for the "
-        "`vllm serve` command.",
+        help="Path to JSON file containing a list of parameter combinations "
+        "for the `vllm serve` command. "
+        "If both `serve_params` and `bench_params` are given, "
+        "this script will iterate over their Cartesian product.",
     )
     parser.add_argument(
         "--bench-params",
         type=str,
         default=None,
-        help="Path to JSON file containing parameter combinations for the "
-        "`vllm bench serve` command.",
+        help="Path to JSON file containing a list of parameter combinations "
+        "for the `vllm bench serve` command. "
+        "If both `serve_params` and `bench_params` are given, "
+        "this script will iterate over their Cartesian product.",
+    )
+    parser.add_argument(
+        "--sla-params",
+        type=str,
+        default=None,
+        help="Path to JSON file containing a list of SLA constraints to satisfy. "
+        'Each constraint is expressed in `{"<KEY>": "<OP><VALUE>"}` format, '
+        'e.g.: `{"p99_e2el_ms": "<=500"}` means that '
+        "the E2E latency should be less than 500ms 99% of the time. "
+        "Setting this option runs this script in SLA mode, where the request rate "
+        "is iteratively reduced to satisfy the constraints for each combination "
+        "of `serve_params`, `bench_params`, and `sla_params`.",
     )
     parser.add_argument(
         "-o",
@@ -303,8 +719,9 @@ def main():
     parser.add_argument(
         "--num-runs",
         type=int,
-        default=3,
-        help="Number of runs per parameter combination",
+        default=None,
+        help="Number of runs per parameter combination. "
+        "Defaults to 3 (regular mode) or 1 (SLA mode).",
     )
     parser.add_argument(
         "--dry-run",
@@ -325,27 +742,44 @@ def main():
     serve_cmd = shlex.split(args.serve_cmd)
     bench_cmd = shlex.split(args.bench_cmd)
 
+    serve_params: list[dict[str, object]]
     if args.serve_params:
         with open(args.serve_params, "rb") as f:
-            serve_params = json.load(f)
+            serve_params = _parse_params(json.load(f))
     else:
         # i.e.: run serve_cmd without any modification
         serve_params = [{}]
 
+    bench_params: list[dict[str, object]]
     if args.bench_params:
         with open(args.bench_params, "rb") as f:
-            bench_params = json.load(f)
+            bench_params = _parse_params(json.load(f))
     else:
         # i.e.: run bench_cmd without any modification
         bench_params = [{}]
 
-    run_all(
+    sla_params: list[dict[str, SLACriterionBase]]
+    if args.sla_params:
+        with open(args.sla_params, "rb") as f:
+            sla_params = _parse_sla(json.load(f))
+
+        default_num_runs = 1
+    else:
+        sla_params = []
+        default_num_runs = 3
+
+    num_runs = default_num_runs if args.num_runs is None else args.num_runs
+    if num_runs < 1:
+        raise ValueError("`num_runs` should be at least 1.")
+
+    run_main(
         serve_cmd=serve_cmd,
         bench_cmd=bench_cmd,
         serve_params=serve_params,
         bench_params=bench_params,
+        sla_params=sla_params,
         output_dir=Path(args.output_dir),
-        num_runs=args.num_runs,
+        num_runs=num_runs,
         dry_run=args.dry_run,
         resume=args.resume,
     )
