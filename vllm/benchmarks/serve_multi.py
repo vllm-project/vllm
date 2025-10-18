@@ -287,11 +287,11 @@ def _get_comb_base_path(
     serve_comb: dict[str, object],
     bench_comb: dict[str, object],
 ):
-    return output_dir / "_".join(
+    return output_dir / "-".join(
         (
-            "serve__",
+            "serve",
             *(f"{k}={v}" for k, v in serve_comb.items()),
-            "bench__",
+            "bench",
             *(f"{k}={v}" for k, v in bench_comb.items()),
         )
     )
@@ -408,14 +408,14 @@ def _get_sla_base_path(
     bench_comb: dict[str, object],
     sla_comb: dict[str, SLACriterionBase],
 ):
-    return output_dir / "_".join(
+    return output_dir / "-".join(
         (
-            "serve__",
+            "serve",
             *(f"{k}={v}" for k, v in serve_comb.items()),
-            "bench__",
+            "bench",
             *(f"{k}={v}" for k, v in bench_comb.items()),
-            "sla__",
-            *(f"{k}={v}" for k, v in sla_comb.items()),
+            "sla",
+            *(f"{k}={v.format_cond(k)}" for k, v in sla_comb.items()),
         )
     )
 
