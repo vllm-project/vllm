@@ -12,9 +12,8 @@ from vllm import TokensPrompt
     "model",
     ["Qwen/Qwen3-Embedding-0.6B"],
 )
-@pytest.mark.parametrize("dtype", ["half"])
 @torch.inference_mode
-def test_embed_models(hf_runner, vllm_runner, model: str, dtype: str):
+def test_embed_models(hf_runner, vllm_runner, model: str):
     chunk_size = 10
     n_prompt_tokens = [55, 56, 57]
     token_prompts = [[1024 + i for i in range(n)] for n in n_prompt_tokens]
@@ -22,15 +21,15 @@ def test_embed_models(hf_runner, vllm_runner, model: str, dtype: str):
     with vllm_runner(
         model,
         runner="pooling",
-        long_prefill_token_threshold=chunk_size,
         max_model_len=128,
+        max_num_batched_tokens=chunk_size,
         enforce_eager=True,
+        # `enable_chunked_prefill`: Set to `False` instead of `None` in VllmRunner
         enable_chunked_prefill=True,
         # If enable_prefix_caching is enabled,
         # the output of all pooling will be less than n_prompt_tokens,
         # we need a method to disable prefix_caching at the request level.
         enable_prefix_caching=False,
-        max_num_batched_tokens=chunk_size,
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],

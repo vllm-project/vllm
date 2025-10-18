@@ -231,6 +231,7 @@ class RequestState:
                 request_id=request_id,
                 outputs=first_output,
                 prompt_token_ids=self.prompt_token_ids,
+                num_cached_tokens=self.num_cached_tokens,
                 finished=finished,
             )
         assert self.logprobs_processor is not None
