@@ -75,6 +75,7 @@ def _fused_moe_lora_kernel(
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
+    max_loras = tl.num_programs(axis=2)
 
     # calculate pid_m,pid_n
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
@@ -92,7 +93,7 @@ def _fused_moe_lora_kernel(
 
     # get the expert_id to process curr shard
     ind = lora_idx * stride_el + pid_m
-    expert_id = tl.load(expert_ids_ptr + ind, ind < top_k * stride_el, 0.0)
+    expert_id = tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, 0.0)
     if expert_id == -1:
         return
 
@@ -107,7 +108,7 @@ def _fused_moe_lora_kernel(
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
     token_ind = stride_tl * lora_idx + offs_token_id
     offs_token = tl.load(
-        sorted_token_ids_ptr + token_ind, token_ind < top_k * stride_tl, 0.0
+        sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0.0
     )
     token_mask = offs_token < num_valid_tokens
 
@@ -115,6 +116,7 @@ def _fused_moe_lora_kernel(
     a_ptrs = cur_a_ptr + (
         offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
     )
+
     b_ptrs = (
         cur_b_ptr
         + lora_idx * stride_bl
@@ -150,14 +152,18 @@ def _fused_moe_lora_kernel(
 
 @torch.inference_mode()
 def _fused_moe_lora(
-    output: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
+    output: torch.Tensor,  # (num_tokens, top_k_num, N*len(lora_a_stacked),)
+    qcurr_hidden_states: torch.Tensor,  # (num_tokens, K,)
+    lora_a_stacked: list[
+        torch.Tensor
+    ],  # [(max_loras, num_experts, max_lora_rank, K,),...]
+    lora_b_stacked: list[
+        torch.Tensor
+    ],  # [(max_loras, num_experts, N, max_lora_rank,),...]
+    topk_weights: torch.Tensor,  # (num_tokens, top_k_num)
+    sorted_token_ids: torch.Tensor,  # (max_loras, _)
+    expert_ids: torch.Tensor,  # (max_loras, _ ,)
+    num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     max_lora_rank: int,
     top_k_num: int,
     block_size_m: int,
@@ -166,7 +172,23 @@ def _fused_moe_lora(
     group_size_m: int,
     mul_routed_weight: bool = False,
 ) -> None:
-    assert len(lora_a_stacked) == len(lora_b_stacked)
+    assert len(lora_a_stacked) == len(lora_b_stacked) > 0
+    assert (
+        sorted_token_ids.dim()
+        == expert_ids.dim()
+        == topk_weights.dim()
+        == qcurr_hidden_states.dim()
+        == 2
+    )
+    assert (
+        sorted_token_ids.shape[0]
+        == expert_ids.shape[0]
+        == num_tokens_post_padded.shape[0]
+    )
+    assert len(lora_b_stacked) * lora_b_stacked[0].shape[-2] == output.shape[-1]
+    assert output.shape[0] == topk_weights.shape[0]
+    assert top_k_num == topk_weights.shape[1]
+
     device = qcurr_hidden_states.device
     num_slices = len(lora_a_stacked)
 
@@ -247,8 +269,12 @@ def _fused_moe_lora(
     K = max_lora_rank
     N = w1_output_dim_size
 
+    # a_intermediate_cache1 = a_intermediate_cache1.view(
+    #     M, -1, a_intermediate_cache1.shape[3]
+    # )
+
     a_intermediate_cache1 = a_intermediate_cache1.view(
-        M, -1, a_intermediate_cache1.shape[3]
+        -1, a_intermediate_cache1.shape[3]
     )
 
     grid = lambda META: (
@@ -269,8 +295,8 @@ def _fused_moe_lora(
         EM,
         num_tokens,
         num_experts,
+        a_intermediate_cache1.stride(0),
         a_intermediate_cache1.stride(1),
-        a_intermediate_cache1.stride(2),
         w1_lora_b_stacked.stride(0),
         w1_lora_b_stacked.stride(1),
         w1_lora_b_stacked.stride(3),
