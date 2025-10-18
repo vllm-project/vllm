@@ -430,7 +430,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=True,
+            inplace=True,  # TODO(bnell): make sure this is handled properly
             activation=activation,
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
