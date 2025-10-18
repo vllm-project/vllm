@@ -7,19 +7,14 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import Any, Literal, TypeVar, overload
 
-from logger import init_logger
-from tasks import SupportedTask
-
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.tasks import SupportedTask
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
-from vllm.v1.executor.uniproc_executor import (
-    ExecutorWithExternalLauncher as _ExecutorWithExternalLauncher,
-)
-from vllm.v1.executor.uniproc_executor import UniProcExecutor as _UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
@@ -29,10 +24,6 @@ logger = init_logger(__name__)
 _R = TypeVar("_R", default=Any)
 
 FailureCallback = Callable[[], None]
-
-# For backwards compatibility.
-UniProcExecutor = _UniProcExecutor
-ExecutorWithExternalLauncher = _ExecutorWithExternalLauncher
 
 
 class Executor(ABC):
@@ -59,9 +50,7 @@ class Executor(ABC):
                 )
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
-            from vllm.v1.executor.ray_distributed_executor import (  # noqa
-                RayDistributedExecutor,
-            )
+            from vllm.v1.executor.ray_executor import RayDistributedExecutor
 
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
@@ -69,6 +58,8 @@ class Executor(ABC):
 
             executor_class = MultiprocExecutor
         elif distributed_executor_backend == "uni":
+            from vllm.v1.executor.uniproc_executor import UniProcExecutor
+
             executor_class = UniProcExecutor
         elif distributed_executor_backend == "external_launcher":
             # TODO: make v1 scheduling deterministic
@@ -327,3 +318,15 @@ class Executor(ABC):
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         raise NotImplementedError
+
+
+from vllm.v1.executor.uniproc_executor import (  # noqa: E402
+    ExecutorWithExternalLauncher as _ExecutorWithExternalLauncher,
+)
+from vllm.v1.executor.uniproc_executor import (  # noqa: E402
+    UniProcExecutor as _UniProcExecutor,
+)
+
+# For backwards compatibility.
+UniProcExecutor = _UniProcExecutor
+ExecutorWithExternalLauncher = _ExecutorWithExternalLauncher
