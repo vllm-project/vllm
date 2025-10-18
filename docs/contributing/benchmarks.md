@@ -969,6 +969,7 @@ The basic purpose of this script is to evaluate vLLM under different settings. F
         }
     ]
     ```
+
 4. (Optional) If you would like to vary the settings of `vllm bench serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--bench-params`.
 
     - Example: Using different input/output lengths for random dataset:
@@ -989,6 +990,7 @@ The basic purpose of this script is to evaluate vLLM under different settings. F
         }
     ]
     ```
+
 5. Determine where you want to save the results, and pass that to `--output-dir`.
 
 Example command:
