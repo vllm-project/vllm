@@ -799,18 +799,20 @@ class FlexibleArgumentParser(ArgumentParser):
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
             elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
-                # allow -O flag to be used without space, e.g. -O3 or -Odecode
-                # -O.<...> handled later
-                # also handle -O=<mode> here
-                mode = arg[3:] if arg[2] == "=" else arg[2:]
-                processed_args.append(f"-O.mode={mode}")
+                # Check if this is an optimization level (-O0, -O1, -O2, -O3)
+                optimization_level = arg[2]
+                processed_args.append(f"--optimization-level={optimization_level}")
+
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
                 and args[i + 1] in {"0", "1", "2", "3"}
             ):
-                # Convert -O <n> to -O.mode <n>
-                processed_args.append("-O.mode")
+                # Convert -O <n> to --optimization-level <n>
+                optimization_level = args[i + 1]
+                processed_args.append("--optimization-level")
+                # Skip the next argument since we've processed it
+                i += 1
             else:
                 processed_args.append(arg)
 

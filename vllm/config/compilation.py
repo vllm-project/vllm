@@ -98,17 +98,17 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    enable_fusion: bool = False
+    enable_fusion: bool | None = None
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
+    enable_attn_fusion: bool | None = None
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = False
+    enable_noop: bool | None = None
     """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = False
+    enable_sequence_parallelism: bool | None = None
     """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = False
+    enable_async_tp: bool | None = None
     """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = False
+    enable_fi_allreduce_fusion: bool | None = None
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
@@ -367,7 +367,7 @@ class CompilationConfig:
     FULL_AND_PIECEWISE instead.
     """
 
-    use_inductor_graph_partition: bool = False
+    use_inductor_graph_partition: bool | None = None
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -854,3 +854,21 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def is_custom_op_enabled(self, op: str):
+        """
+        Determine if a custom op is enabled.
+
+        Args:
+            op: The name of the op.
+
+        Returns:
+            A flag indicating if the op is enabled.
+        """
+        if "all" in self.custom_ops:
+            if "-" + op not in self.custom_ops:
+                return True
+        else:
+            if "+" + op in self.custom_ops:
+                return True
+        return False
