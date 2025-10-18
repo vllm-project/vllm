@@ -4,14 +4,13 @@
 import os
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import cloudpickle
 
 import vllm.envs as envs
-from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_utils import RayWorkerWrapper, initialize_ray_cluster, ray
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -20,6 +19,16 @@ from vllm.utils import (
     get_ip,
     get_open_port,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.ray_utils import (
+    FutureWrapper,
+    RayWorkerWrapper,
+    initialize_ray_cluster,
+    ray,
+)
+from vllm.v1.outputs import ModelRunnerOutput
 
 if ray is not None:
     from ray.actor import ActorHandle
@@ -47,7 +56,7 @@ class RayWorkerMetaData:
     ip: str = ""
 
 
-class RayDistributedExecutor(ExecutorBase):
+class RayDistributedExecutor(Executor):
     """Ray-based distributed executor"""
 
     # These env vars are worker-specific, therefore are NOT copied
@@ -63,6 +72,7 @@ class RayDistributedExecutor(ExecutorBase):
     ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
 
     uses_ray: bool = True
+    supports_pp: bool = True
 
     def _init_executor(self) -> None:
         self.forward_dag: ray.dag.CompiledDAG | None = None
@@ -82,6 +92,18 @@ class RayDistributedExecutor(ExecutorBase):
 
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
+
+        # KV connector setup
+        self.has_connector = self.vllm_config.kv_transfer_config is not None
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        """Ray distributed executor supports pipeline parallelism,
+        meaning that it allows PP size batches to be executed concurrently.
+        """
+        if self.scheduler_config.async_scheduling:
+            return 2
+        return self.parallel_config.pipeline_parallel_size
 
     def shutdown(self) -> None:
         if logger:
@@ -354,12 +376,62 @@ class RayDistributedExecutor(ExecutorBase):
                 assert pp_rank < len(self.pp_tp_workers)
                 self.pp_tp_workers[pp_rank].append(self.workers[rank])
 
+    def reinitialize_distributed(
+        self, reconfig_request: ReconfigureDistributedRequest
+    ) -> None:
+        self._run_workers("reinitialize_distributed", reconfig_request)
+        if (
+            reconfig_request.new_data_parallel_rank
+            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        ):
+            self.shutdown()
+
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        """Execute the model on the Ray workers.
+
+        Args:
+            scheduler_output: The scheduler output to execute.
+            non_block: If True, the method will return a Future.
+
+        Returns:
+            The model runner output.
+        """
+        # Build the compiled DAG for the first time.
+        if self.forward_dag is None:  # type: ignore
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
+
+        refs = self.forward_dag.execute(scheduler_output)  # type: ignore
+
+        if not self.has_connector:
+            # Get output only from a single worker (output_rank)
+            # When PP is not used, we block here until the result is available.
+            if not non_block:
+                return refs[0].get()
+
+            # When PP is used, we return a FutureWrapper immediately so that
+            # the scheduler can yield to the next batch.
+            return FutureWrapper(refs)
+
+        # Get output from all workers when connector is present
+        if not non_block:
+            # Block and get results from all workers
+            outputs = [ref.get() for ref in refs]
+            return self.kv_output_aggregator.aggregate(outputs)
+
+        # Return a future that will aggregate outputs from all workers
+        return FutureWrapper(refs, self.kv_output_aggregator)
+
     def collective_rpc(
         self,
         method: str | Callable,
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        non_block: bool = False,
     ) -> list[Any]:
         """Runs the given method on all workers."""
         sent_method = method if isinstance(method, str) else cloudpickle.dumps(method)
@@ -375,6 +447,9 @@ class RayDistributedExecutor(ExecutorBase):
         ]
 
         # Get the results of the ray workers.
+        if non_block:
+            return [FutureWrapper((output,)) for output in ray_worker_outputs]
+
         return ray.get(ray_worker_outputs, timeout=timeout)
 
     def _check_ray_cgraph_installation(self):

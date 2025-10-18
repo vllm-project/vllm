@@ -511,7 +511,7 @@ class ParallelConfig:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
 
-            from vllm.executor import ray_utils
+            from vllm.v1.executor import ray_utils
 
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
@@ -584,7 +584,7 @@ class ParallelConfig:
                 " custom ExecutorBase subclass or its import path."
             )
         if self.use_ray:
-            from vllm.executor import ray_utils
+            from vllm.v1.executor import ray_utils
 
             ray_utils.assert_ray_available()
 

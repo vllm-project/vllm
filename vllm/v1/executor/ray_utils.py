@@ -4,11 +4,13 @@
 import os
 import time
 from collections import defaultdict
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -123,6 +125,31 @@ except ImportError as e:
     # prevent garbage collection in some cases
     ray_import_err = str(e)
     RayWorkerWrapper = None  # type: ignore
+
+
+class FutureWrapper(Future):
+    """A wrapper around Ray output reference to meet the interface
+    of .execute_model(): The top level (core busy loop) expects .result() api
+    to block and return a single output.
+
+    If aggregator is provided, the outputs from all workers are aggregated upon
+    the result() call. If not only the first worker's output is returned.
+    """
+
+    def __init__(self, refs, aggregator: KVOutputAggregator | None = None):
+        super().__init__()
+        self.refs = refs
+        self.aggregator = aggregator
+
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise NotImplementedError("timeout is not supported")
+
+        if self.aggregator is None:
+            return self.refs[0].get()
+
+        outputs = [ref.get() for ref in self.refs]
+        return self.aggregator.aggregate(outputs, output_rank=0)
 
 
 def ray_is_available() -> bool:
