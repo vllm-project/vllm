@@ -204,8 +204,11 @@ def _compare_cp_with_tp(
 
 
 CP_TEXT_GENERATION_MODELS = {
-    # [MLA attention only]
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+        CPTestSettings.detailed(),
+        CPTestSettings.detailed(tp_base=2),
+    ],
+    "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
     ],
@@ -215,6 +218,7 @@ CP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "bigcode/gpt_bigcode-santacoder",
 ]
 
 

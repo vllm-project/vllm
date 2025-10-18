@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
@@ -20,6 +21,7 @@ import zmq
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import is_global_first_rank
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -31,10 +33,10 @@ from vllm.utils import (
     decorate_logs,
     get_hash_fn_by_name,
     make_zmq_socket,
-    resolve_obj_by_qualname,
     set_process_title,
 )
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -76,8 +78,149 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
-class EngineCoreGuard:
-    def __init__(self):
+class EngineCoreGuard(threading.Thread):  # changed
+    """
+    A watchdog thread that monitors EngineCore execution.
+
+    - Listens for exceptions raised in `run_busy_loop`.
+    - Reports exceptions to the client via ZMQ sockets.
+    - Waits for client instructions (e.g., RESUME) and dispatches them.
+    """
+
+    def __init__(
+        self,
+        engine_index: int,
+        fault_report_addr,
+        client_cmd_addr,
+        worker_cmd_addr,
+        fault_signal_q,
+        cmd_q,
+        guard_identity,
+    ):
+        super().__init__(daemon=True, name=f"EngineCoreGuard_{engine_index}")
+        self.engine_index = engine_index
+        self.fault_signal_q = fault_signal_q
+        self.cmd_q = cmd_q
+        self.fault_report_addr = fault_report_addr
+        self.client_cmd_addr = client_cmd_addr
+        self.worker_cmd_addr = worker_cmd_addr
+
+        ctx = zmq.Context()
+        # Client <-> EngineCoreGuard sockets
+        self.fault_report_socket = make_zmq_socket(
+            ctx,
+            fault_report_addr,
+            zmq.DEALER,
+            bind=False,
+            identity=guard_identity,
+        )
+
+        self.client_cmd_socket = make_zmq_socket(
+            ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=guard_identity
+        )
+        # EngineCoreGuard <-> WorkerGuard sockets
+        self.worker_cmd_socket = make_zmq_socket(
+            ctx, worker_cmd_addr, zmq.ROUTER, bind=True
+        )
+        self.poller = zmq.Poller()
+
+    def run(self):
+        pass
+
+    def stop_engine_core_loop(self):
+        pass
+
+    def _send_msg(
+        self, src_socket: zmq.Socket, msg: Any, serialize: bool = True
+    ) -> tuple[bool, str | None]:
+        """
+        Send message to ROUTER via the specified DEALER socket.
+        Args:
+            src_socket: DEALER socket for sending messages
+            msg: Message content
+            serialize: Whether to encode/serialize the message (default: True)
+        Returns:
+            (success, error_msg)
+        """
+        try:
+            if serialize:
+                msg_bytes = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+            elif isinstance(msg, bytes):
+                msg_bytes = msg
+            elif isinstance(msg, str):
+                msg_bytes = msg.encode("utf-8")
+            else:
+                raise TypeError("Non-serialized messages must be str or bytes")
+
+            # DEALER 协议格式：[empty frame, message content]
+            src_socket.send_multipart([b"", msg_bytes])
+            logger.debug("Sent message via %s: %s", src_socket, msg)
+            return True, None
+
+        except (
+            zmq.ZMQError,
+            UnicodeEncodeError,
+            TypeError,
+            ValueError,
+            Exception,
+        ) as e:
+            error = f"Send message failed: {e}"
+            logger.error(error)
+            return False, error
+
+    def _recv_cmd(self, poll_timeout: int = 1000) -> tuple[bool, None | str]:
+        """
+        Receives client guard commands in non-blocking mode via ZMQ Poller.
+        Returns (False, None) on timeout, format error, or exception.
+        Message must follow DEALER format: [empty frame, content].
+
+        Args:
+            poll_timeout: Polling timeout in milliseconds (default: 1000)
+        Returns:
+            (Whether reception succeeded, decoded message string/None)
+        """
+        try:
+            # Use Poller for non-blocking reception
+            self.poller.register(self.client_cmd_socket, zmq.POLLIN)
+            socks = dict(self.poller.poll(poll_timeout))
+
+            # Check if a message has arrived
+            if (
+                self.client_cmd_socket in socks
+                and socks[self.client_cmd_socket] == zmq.POLLIN
+            ):
+                # DEALER message format: [empty frame, message content]
+                parts = self.client_cmd_socket.recv_multipart()
+
+                # Validate message format
+                assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
+
+                empty_frame, message_bytes = parts
+
+                # Validate empty frame
+                assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+
+                # Decode message content
+                message = message_bytes.decode("utf-8")
+                return (True, message)
+
+            # No message received within timeout
+            return (False, None)
+
+        except (zmq.ZMQError, UnicodeDecodeError, Exception) as e:
+            logger.error("error occurred while receiving message: %s", e)
+            return (False, None)
+
+    def _stop_worker_execution(self):
+        pass
+
+    def _notify_client_execption(self):
+        pass
+
+    def _execute_dispatch_cmd(self):
+        pass
+
+    def _notify_client_execution_result(self):
         pass
 
 
@@ -305,14 +448,11 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
-    def execute_model_with_error_logging(
-        self,
-        model_fn: Callable[[SchedulerOutput], ModelRunnerOutput],
-        scheduler_output: SchedulerOutput,
-    ) -> ModelRunnerOutput:
+    @contextmanager
+    def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
         try:
-            return model_fn(scheduler_output)
+            yield
         except Exception as err:
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
@@ -336,15 +476,16 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model_with_error_logging(
-            self.model_executor.execute_model,  # type: ignore
-            scheduler_output,
-        )
+
+        with self.log_error_detail(scheduler_output):
+            model_output = self.model_executor.execute_model(scheduler_output)
+
+        assert isinstance(model_output, ModelRunnerOutput)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
 
-        return (engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0)
+        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
         if self.use_spec_decode and model_executed:
@@ -401,14 +542,12 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output = batch_queue.pop()
-        model_output = self.execute_model_with_error_logging(
-            lambda _: future.result(), scheduler_output
-        )
+        with self.log_error_detail(scheduler_output):
+            model_output = future.result()
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-
         return engine_core_outputs, model_executed
 
     def shutdown(self):
@@ -532,6 +671,8 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        self.fault_signal_q = queue.Queue[str]()
+        self.cmd_q = queue.Queue[str]()
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -609,6 +750,22 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
+            if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                # Start a thread to monitor the execution of run_busy_loop,
+                # and perform fault tolerance.
+                engine_core_guard_ids = addresses.engine_core_guard_identities
+                assert engine_core_guard_ids is not None
+                guard_thread = EngineCoreGuard(
+                    engine_index=engine_index,
+                    fault_report_addr=addresses.fault_report_addr,
+                    client_cmd_addr=addresses.client_cmd_addr,
+                    worker_cmd_addr=addresses.engine_core_cmd_addr,
+                    fault_signal_q=self.fault_signal_q,
+                    cmd_q=self.cmd_q,
+                    guard_identity=engine_core_guard_ids[self.engine_index],
+                )
+                guard_thread.start()
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         gc.collect()
@@ -616,6 +773,10 @@ class EngineCoreProc(EngineCore):
 
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
+
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     @contextmanager
     def _perform_handshakes(

@@ -35,7 +35,8 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.utils import merge_async_iterators
+from vllm.tasks import SupportedTask
+from vllm.utils.asyncio import merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -62,6 +63,7 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
+        supported_tasks: tuple[SupportedTask, ...],
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -75,6 +77,7 @@ class OpenAIServingPooling(OpenAIServing):
             log_error_stack=log_error_stack,
         )
 
+        self.supported_tasks = supported_tasks
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
@@ -178,8 +181,17 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             pooling_params = request.to_pooling_params()
 
+            if "token_embed" in self.supported_tasks:
+                pooling_task = "token_embed"
+            elif "token_classify" in self.supported_tasks:
+                pooling_task = "token_classify"
+            else:
+                return self.create_error_response(
+                    f"pooling_task must be one of {self.supported_tasks}."
+                )
+
             try:
-                pooling_params.verify("encode", self.model_config)
+                pooling_params.verify(pooling_task, self.model_config)
             except ValueError as e:
                 return self.create_error_response(str(e))
 

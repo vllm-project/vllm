@@ -112,8 +112,8 @@ class KVCacheBlock:
     ref_cnt: int
 
     # The pointers to form a doubly linked list for the free queue.
-    prev_free_block: Optional["KVCacheBlock"] = None
-    next_free_block: Optional["KVCacheBlock"] = None
+    prev_free_block: "KVCacheBlock | None" = None
+    next_free_block: "KVCacheBlock | None" = None
 ```
 
 There are two design points to highlight:
