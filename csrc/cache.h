@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/all.h>
+#include <c10/util/Optional.h>
 
 #include <map>
 #include <vector>
@@ -72,3 +73,11 @@ void cp_gather_indexer_k_quant_cache(
     torch::Tensor& dst_scale,  // [num_tokens, head_dim / quant_block_size * 4]
     const torch::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::Tensor& cu_seq_lens);  // [batch_size + 1]
+
+torch::Tensor convert_req_index_to_global_index_and_upconvert_prefills(
+    torch::Tensor req_id, torch::Tensor block_table,
+    torch::Tensor token_indices, int64_t block_size,
+    const std::optional<torch::Tensor>& prefill_mask,
+    const std::optional<torch::Tensor>& prefill_seen,
+    const std::optional<torch::Tensor>& prefill_bf16_workspace,
+    const std::optional<torch::Tensor>& kv_cache);

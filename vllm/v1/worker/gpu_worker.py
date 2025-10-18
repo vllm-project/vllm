@@ -29,6 +29,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
+from vllm.v1.core.kv_cache_utils import UniformTypeKVCacheSpecs
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -41,6 +42,7 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.workspace import current_workspace_manager, init_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -212,6 +214,9 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
+        # Initialize workspace manager
+        init_workspace_manager(self.device, self.vllm_config)
+
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
             self.vllm_config, self.device
@@ -318,7 +323,31 @@ class Worker(WorkerBase):
         )
         gc.collect()
 
-        return int(self.available_kv_cache_memory_bytes)
+        available_memory = int(self.available_kv_cache_memory_bytes)
+
+        workspace_manager = current_workspace_manager()
+        if workspace_manager.requires_memory_adjustment():
+            kv_cache_specs = self.model_runner.get_kv_cache_spec()
+            page_size_bytes_set = set(
+                layer_spec.page_size_bytes for layer_spec in kv_cache_specs.values()
+            )
+            if len(page_size_bytes_set) == 1:
+                page_size_bytes = page_size_bytes_set.pop()
+            elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_specs):
+                page_size_bytes = uniform_spec.page_size_bytes
+            else:
+                raise ValueError("Cannot determine page size from kv cache specs")
+            num_layers = len(kv_cache_specs)
+
+            estimated_max_kv_tokens = (
+                available_memory // page_size_bytes // num_layers
+            ) * self.cache_config.block_size
+            available_memory = workspace_manager.adjust_available_kv_cache_memory(
+                available_memory,
+                estimated_max_kv_tokens,
+            )
+
+        return available_memory
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
