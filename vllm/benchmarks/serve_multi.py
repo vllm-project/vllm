@@ -659,7 +659,7 @@ def _find_sla_value(
         if right - left <= 1:
             break
 
-    return sla_data, val
+    return sla_data, left
 
 
 def _iter_sla(
