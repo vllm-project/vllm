@@ -65,6 +65,29 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
 
+_DEPRECATED_PROFILING = {"cprofile", "cprofile_context"}
+
+
+def __getattr__(name: str) -> Any:  # noqa: D401 - short deprecation docstring
+    """Module-level getattr to handle deprecated profiling utilities."""
+    if name in _DEPRECATED_PROFILING:
+        warnings.warn(
+            f"vllm.utils.{name} is deprecated and will be removed in a future version. "
+            f"Use vllm.utils.profiling.{name} instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        import vllm.utils.profiling as _prof
+
+        return getattr(_prof, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    # expose deprecated names in dir() for better UX/tab-completion
+    return sorted(list(globals().keys()) + list(_DEPRECATED_PROFILING))
+
+
 if TYPE_CHECKING:
     from argparse import Namespace
 
@@ -1930,51 +1953,7 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
     return cls
 
 
-@contextlib.contextmanager
-def cprofile_context(save_file: str | None = None):
-    """Run a cprofile
-
-    Args:
-        save_file: path to save the profile result. "1" or
-            None will result in printing to stdout.
-    """
-    import cProfile
-
-    prof = cProfile.Profile()
-    prof.enable()
-
-    try:
-        yield
-    finally:
-        prof.disable()
-        if save_file and save_file != "1":
-            prof.dump_stats(save_file)
-        else:
-            prof.print_stats(sort="cumtime")
-
-
-def cprofile(save_file: str | None = None, enabled: bool = True):
-    """Decorator to profile a Python method using cProfile.
-
-    Args:
-        save_file: Path to save the profile result.
-            If "1", None, or "", results will be printed to stdout.
-        enabled: Set to false to turn this into a no-op
-    """
-
-    def decorator(func: Callable):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            if not enabled:
-                # If profiling is disabled, just call the function directly.
-                return func(*args, **kwargs)
-
-            with cprofile_context(save_file):
-                return func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
+## moved to vllm.utils.profiling (imported at module top)
 
 
 # Only relevant for models using ALiBi (e.g, MPT)
