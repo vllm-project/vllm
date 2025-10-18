@@ -158,6 +158,8 @@ def test_fusion_silu_and_mul_quant(
 ):
     if model_class == TestSiluMulNvfp4QuantModel and cuda_force_torch:
         pytest.skip("Duplicate tests for NVFP4")
+    if not enable_quant_fp8_custom_op:
+        pytest.skip("enable_quant_fp8_custom_op is irrelevant for nvfp4 tests.")
 
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)

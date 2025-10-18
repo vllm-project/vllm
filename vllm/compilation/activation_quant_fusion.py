@@ -131,24 +131,22 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         def pattern(
             result: torch.Tensor,
             output_scale: torch.Tensor,
-            result_silu_mul: torch.Tensor,
             input: torch.Tensor,
             scale: torch.Tensor,
         ):
-            at1 = auto_functionalized(SILU_MUL_OP, result=result_silu_mul, input=input)
-            at2 = auto_functionalized(
+            result_silu_mul = self.silu_and_mul_matcher(input)
+            at = auto_functionalized(
                 self.QUANT_OP,
                 output=result,
-                input=at1[1],
+                input=result_silu_mul,
                 output_scale=output_scale,
                 input_scale=scale,
             )
-            return at2[1], at2[2]
+            return at[1], at[2]
 
         def replacement(
             result: torch.Tensor,
             output_scale: torch.Tensor,
-            result_silu_mul: torch.Tensor,
             input: torch.Tensor,
             scale: torch.Tensor,
         ):
@@ -164,7 +162,6 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         inputs = [
             self.empty_quant(5, 32),  # result
             empty_i32(128, 4),  # output_scale
-            empty_bf16(5, 64),  # result_silu_mul
             empty_bf16(5, 64),  # input
             empty_fp32(1, 1),  # scale
         ]
