@@ -194,11 +194,19 @@ async def test_function_tool_use(
         )
 
         output = []
+        reasoning = []
         async for chunk in output_stream:
-            if chunk.choices and chunk.choices[0].delta.tool_calls:
-                output.extend(chunk.choices[0].delta.tool_calls)
+            if chunk.choices:
+                if enable_thinking and getattr(
+                    chunk.choices[0].delta, "reasoning_content", None
+                ):
+                    reasoning.append(chunk.choices[0].delta.reasoning_content)
+                if chunk.choices[0].delta.tool_calls:
+                    output.extend(chunk.choices[0].delta.tool_calls)
 
         assert len(output) > 0
+        if enable_thinking:
+            assert len(reasoning) > 0
 
 
 @pytest.fixture(scope="module")
