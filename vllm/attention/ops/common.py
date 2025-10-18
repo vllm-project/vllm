@@ -205,6 +205,36 @@ def cp_lse_ag_out_rs(
     return out
 
 
+def cp_lse_ag_out_ar(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    ctx: CPTritonContext = None,
+):
+    """
+    cp_attn_out: [ B, H, D ]
+    cp_attn_lse: [ B, H ]
+    """
+    if cp_group.world_size == 1:
+        return cp_attn_out
+
+    if ctx is None:
+        ctx = CPTritonContext()
+
+    lses = torch.empty(
+        (cp_group.world_size,) + cp_attn_lse.shape,
+        dtype=cp_attn_lse.dtype,
+        device=cp_attn_lse.device,
+    )
+
+    cp_attn_lse = cp_attn_lse.contiguous()
+    lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
+    out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
+    assert out.is_contiguous()
+    out = cp_group.all_reduce(out)
+    return out
+
+
 @triton.jit
 def _pack_seq_kernel(
     x_ptr,  # [N, D]
