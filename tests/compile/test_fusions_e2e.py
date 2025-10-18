@@ -116,7 +116,7 @@ def test_attn_quant(
     allreduce_fusions: int,
     custom_ops: str,
     inductor_graph_partition: bool,
-    caplog_vllm,
+    caplog_mp_spawn,
     monkeypatch,
 ):
     if backend == _Backend.FLASHINFER and (
@@ -157,11 +157,14 @@ def test_attn_quant(
         inductor_compile_config={"force_disable_caches": True},
     )
 
-    with caplog_vllm.at_level(logging.DEBUG):
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
         run_model(compilation_config, model_name, **model_kwargs)
 
-    matches = re.findall(r"Fused quant onto (\d+) attention nodes", caplog_vllm.text)
-    assert len(matches) == 1, caplog_vllm.text
+    matches = re.findall(
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
+        log_holder.text,
+    )
+    assert len(matches) == 1, log_holder.text
     assert int(matches[0]) == attention_fusions
 
 
