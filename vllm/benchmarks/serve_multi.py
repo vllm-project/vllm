@@ -200,6 +200,7 @@ def _run_server(
     server_process = subprocess.Popen(
         server_cmd,
         start_new_session=True,
+        stdout=subprocess.DEVNULL,
         # Need VLLM_SERVER_DEV_MODE=1 for /reset_prefix_cache
         env={**os.environ, "VLLM_SERVER_DEV_MODE": "1"},
     )
@@ -265,7 +266,11 @@ def _run_benchmark(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    subprocess.run(benchmark_cmd, check=True)
+    subprocess.run(
+        benchmark_cmd,
+        stdout=subprocess.DEVNULL,
+        check=True,
+    )
 
     with output_path.open("rb") as f:
         run_data = json.load(f)
@@ -288,9 +293,9 @@ def _get_comb_base_path(
 ):
     return output_dir / "-".join(
         (
-            "serve",
+            "SERVE",
             *(f"{k}={v}" for k, v in serve_comb.items()),
-            "bench",
+            "BENCH",
             *(f"{k}={v}" for k, v in bench_comb.items()),
         )
     )
@@ -409,11 +414,11 @@ def _get_sla_base_path(
 ):
     return output_dir / "-".join(
         (
-            "serve",
+            "SERVE",
             *(f"{k}={v}" for k, v in serve_comb.items()),
-            "bench",
+            "BENCH",
             *(f"{k}={v}" for k, v in bench_comb.items()),
-            "sla",
+            "SLA",
             *(v.format_cond(k) for k, v in sla_comb.items()),
         )
     )
