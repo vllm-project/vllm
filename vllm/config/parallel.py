@@ -245,6 +245,15 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    _renderer_gpu_allocation: list[str] | None = None
+    """
+    The GPU allocated to the renderer of each API process.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set internally.
+    """
+
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:

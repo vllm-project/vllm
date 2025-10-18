@@ -57,6 +57,7 @@ def _mk_processor(
     class _MockMMConfig:
         def __init__(self, gb: float):
             self.mm_processor_cache_gb = gb
+            self.mm_processing_device = "cpu"
 
     model_config.multimodal_config = _MockMMConfig(mm_cache_gb)  # type: ignore[attr-defined]
     vllm_config = VllmConfig(
