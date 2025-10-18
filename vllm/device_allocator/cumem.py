@@ -137,6 +137,7 @@ class CuMemAllocator:
 
     instance: "CuMemAllocator" = None
     default_tag: str = "default"
+    graphs_tag: str = "graphs"
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
@@ -208,9 +209,9 @@ class CuMemAllocator:
             offloaded. The rest of the memory allocation will be discarded.
         """
         if offload_tags is None:
-            # by default, allocated tensors are offloaded
+            # by default, allocated tensors and graphs are offloaded
             # when the allocator sleeps
-            offload_tags = (CuMemAllocator.default_tag,)
+            offload_tags = (CuMemAllocator.default_tag, CuMemAllocator.graphs_tag)
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags,)
 
@@ -239,14 +240,14 @@ class CuMemAllocator:
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
             "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
-            "directly.",
+            "directly. %s",
             total_bytes / 1024**3,
             backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
+            ("Graph offloaded " if CuMemAllocator.graphs_tag in offload_tags else ""),
         )
 
         gc.collect()
-        torch.cuda.empty_cache()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
@@ -325,3 +326,45 @@ class CuMemAllocator:
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
+
+    def get_graph_pool_handle(self):
+        """
+        Get a graph pool handle that uses the CuMemAllocator for CUDA graphs.
+        This allows CUDA graphs to be managed with the same sleep/wake
+        mechanism as other tagged memory allocations.
+        """
+        if not hasattr(self, "_graph_pool_context"):
+            logger.info(
+                "CuMemAllocator: Creating graph pool with tag %s ",
+                CuMemAllocator.graphs_tag,
+            )
+
+            # Create a persistent memory pool context for graphs
+            self._graph_pool_context = self.use_memory_pool(
+                tag=CuMemAllocator.graphs_tag
+            )
+            self._graph_pool_context.__enter__()
+
+            # Get the actual memory pool from the context
+            mem_pool, _ = self.allocator_and_pools[CuMemAllocator.graphs_tag]
+            self._custom_graph_pool = mem_pool
+
+        return self._custom_graph_pool
+
+    def setup_graph_pool_for_sleep_mode(self) -> None:
+        """
+        Set up custom graph pool for sleep mode after graph capture.
+        This ensures graphs captured with the native pool can be properly
+        mangaged during sleep/wake cycles.
+        """
+        try:
+            # Initialize the custom graph pool context
+            graph_pool_handle = self.get_graph_pool_handle()
+
+            logger.info(
+                "CuMemAllocator: Successfully set up graph pool %s",
+                type(graph_pool_handle).__name__,
+            )
+
+        except Exception as e:
+            logger.warning("CuMemAllocator: Failed to set up graph pool %s", str(e))
