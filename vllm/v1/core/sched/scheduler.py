@@ -170,6 +170,8 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
+            pinned_prefix_cap_ratio=self.cache_config.pinned_prefix_cap_ratio,
+            enable_pinned_prefix=self.cache_config.enable_pinned_prefix,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
@@ -1236,6 +1238,14 @@ class Scheduler(SchedulerInterface):
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
+
+    def unpin_all_pinned_prefixes(self) -> int:
+        """Unpin all pinned KV blocks across all requests.
+
+        Returns:
+            int: Number of blocks unpinned.
+        """
+        return self.kv_cache_manager.unpin_all_pinned_prefixes()
 
     def make_stats(
         self,
