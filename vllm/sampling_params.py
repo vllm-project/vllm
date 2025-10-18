@@ -338,10 +338,10 @@ class SamplingParams(
         )
 
     def __post_init__(self) -> None:
-        # how we deal with `best_of``:
-        # if `best_of`` is not set, we default to `n`;
-        # if `best_of`` is set, we set `n`` to `best_of`,
-        # and set `_real_n`` to the original `n`.
+        # how we deal with `best_of`:
+        # if `best_of` is not set, we default to `n`;
+        # if `best_of` is set, we set `n` to `best_of`,
+        # and set `_real_n` to the original `n`.
         # when we return the result, we will check
         # if we need to return `n` or `_real_n` results
         if self.best_of:

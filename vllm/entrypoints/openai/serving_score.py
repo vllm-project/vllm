@@ -37,7 +37,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils.async_utils import make_async, merge_async_iterators
+from vllm.utils.asyncio import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
 

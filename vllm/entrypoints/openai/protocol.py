@@ -81,7 +81,8 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.utils import random_uuid, resolve_obj_by_qualname
+from vllm.utils import random_uuid
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 EMBED_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,

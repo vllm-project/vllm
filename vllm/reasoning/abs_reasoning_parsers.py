@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
-from vllm.utils import import_from_path, is_list_of
+from vllm.utils.collections import is_list_of
+from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.protocol import (
