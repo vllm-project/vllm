@@ -74,8 +74,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    DeviceMemoryProfiler,
-    GiB_bytes,
     cdiv,
     check_use_alibi,
     get_dtype_size,
@@ -85,6 +83,7 @@ from vllm.utils import (
     supports_dynamo,
 )
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.mem_utils import DeviceMemoryProfiler, GiB_bytes
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
