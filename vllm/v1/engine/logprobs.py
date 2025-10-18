@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -32,6 +33,12 @@ class LogprobsProcessor:
     num_logprobs: int | None
     num_prompt_logprobs: int | None
 
+    conf_grouped: float
+    conf_list: Optional[list[float]]
+    conf_group_list: Optional[deque[float]]
+    conf_group_size: int
+    conf_threshold: Optional[float]
+
     @classmethod
     def from_new_request(
         cls,
@@ -41,6 +48,23 @@ class LogprobsProcessor:
         assert request.sampling_params is not None
         num_logprobs = request.sampling_params.logprobs
         num_prompt_logprobs = request.sampling_params.prompt_logprobs
+
+        conf_list: Optional[list[float]] = None
+        conf_group_list: Optional[deque[float]] = None
+
+        if hasattr(request.sampling_params, "extra_args") \
+            and request.sampling_params.extra_args is not None \
+            and request.sampling_params.extra_args.get("enable_conf", False):
+            conf_group_size = request.sampling_params.extra_args.get(
+                "window_size", 2048)
+            conf_threshold = request.sampling_params.extra_args.get(
+                "threshold", 17)
+            conf_group_list = deque(maxlen=conf_group_size)
+            conf_list = []
+        else:
+            conf_group_size = -1
+            conf_threshold = None
+
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.0),
@@ -49,7 +73,24 @@ class LogprobsProcessor:
             prompt_logprobs=(None if num_prompt_logprobs is None else [None]),
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
+            conf_group_size=conf_group_size,
+            conf_grouped=0.0,
+            conf_list=conf_list,
+            conf_threshold=conf_threshold,
+            conf_group_list=conf_group_list,
         )
+
+    def check_conf_stop(self) -> bool:
+        """Return True if the confidence window triggers early stopping."""
+        if self.conf_threshold is None:
+            return False
+        if self.conf_group_list is None or len(self.conf_group_list) == 0:
+            return False
+        # Require a full window;
+        # trigger when the moving average is below threshold.
+        return (len(self.conf_group_list) >= self.conf_group_size \
+                and self.conf_grouped / len(self.conf_group_list) \
+                    < self.conf_threshold)
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
         """Update with sample logprobs from EngineCore.
@@ -90,6 +131,23 @@ class LogprobsProcessor:
                     self.num_logprobs,
                 )
             )
+
+            if self.conf_list is not None and self.conf_group_list is not None:
+                # logprobs[0] is the sampled token; use the remaining candidates
+                if len(logprobs) > 1:
+                    new_conf = -sum(logprobs[1:]) / len(logprobs[1:])
+                else:
+                    new_conf = 0.0
+
+                self.conf_list.append(new_conf)
+
+                if len(self.conf_group_list) < self.conf_group_size:
+                    self.conf_group_list.append(new_conf)
+                    self.conf_grouped += new_conf
+                else:
+                    self.conf_grouped -= self.conf_group_list.popleft()
+                    self.conf_group_list.append(new_conf)
+                    self.conf_grouped += new_conf
 
     def _update_prompt_logprobs(
         self,
