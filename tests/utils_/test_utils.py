@@ -23,24 +23,25 @@ from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 
 from vllm.utils import (
     FlexibleArgumentParser,
-    MemorySnapshot,
     bind_kv_cache,
-    common_broadcastable_dtype,
-    current_stream,
     get_open_port,
     get_tcp_uri,
-    is_lossless_cast,
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
-    memory_profiling,
     sha256,
     split_host_port,
     split_zmq_path,
     unique_filepath,
 )
+from vllm.utils.torch_utils import (
+    common_broadcastable_dtype,
+    current_stream,
+    is_lossless_cast,
+)
 
-from ..utils import create_new_process_for_each_test
+from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from ..utils import create_new_process_for_each_test, flat_product
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -409,7 +410,7 @@ def test_bind_kv_cache_non_attention():
 
 
 def test_bind_kv_cache_pp():
-    with patch("vllm.utils.cuda_device_count_stateless", lambda: 2):
+    with patch("vllm.utils.torch_utils.cuda_device_count_stateless", lambda: 2):
         # this test runs with 1 GPU, but we simulate 2 GPUs
         cfg = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=2))
     with set_current_vllm_config(cfg):
@@ -771,3 +772,25 @@ def test_unique_filepath():
         paths.add(path)
     assert len(paths) == 10
     assert len(list(Path(temp_dir).glob("*.txt"))) == 10
+
+
+def test_flat_product():
+    # Check regular itertools.product behavior
+    result1 = list(flat_product([1, 2, 3], ["a", "b"]))
+    assert result1 == [
+        (1, "a"),
+        (1, "b"),
+        (2, "a"),
+        (2, "b"),
+        (3, "a"),
+        (3, "b"),
+    ]
+
+    # check that the tuples get flattened
+    result2 = list(flat_product([(1, 2), (3, 4)], ["a", "b"], [(5, 6)]))
+    assert result2 == [
+        (1, 2, "a", 5, 6),
+        (1, 2, "b", 5, 6),
+        (3, 4, "a", 5, 6),
+        (3, 4, "b", 5, 6),
+    ]
