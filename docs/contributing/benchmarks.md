@@ -323,7 +323,7 @@ The following arguments can be used to control the ramp-up:
 
 vLLM's benchmark serving script provides sophisticated load pattern simulation capabilities through three key parameters that control request generation and concurrency behavior:
 
-**Load Pattern Control Parameters:**
+###### Load Pattern Control Parameters
 
 - `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
 - `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
