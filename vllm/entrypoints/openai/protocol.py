@@ -16,6 +16,7 @@ from openai.types.chat.chat_completion_audio import (
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from openai.types.responses import (
+    FunctionTool,
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
     ResponseCodeInterpreterCallCompletedEvent,
@@ -36,6 +37,7 @@ from openai.types.responses import (
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
+    ToolChoiceFunction,
 )
 from openai.types.responses import (
     ResponseCompletedEvent as OpenAIResponseCompletedEvent,
@@ -307,6 +309,91 @@ def get_logits_processors(
     return None
 
 
+def get_json_schema_from_tool(
+    tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
+    tools: list[FunctionTool | ChatCompletionToolsParam] | None,
+) -> str | dict | None:
+    if tool_choice in ("none", None) or tools is None:
+        return None
+    if (not isinstance(tool_choice, str)) and isinstance(
+        tool_choice, ToolChoiceFunction
+    ):
+        tool_name = tool_choice.name
+        tool_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
+        if tool_name not in tool_map:
+            raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
+        return tool_map[tool_name].parameters
+
+    if (not isinstance(tool_choice, str)) and isinstance(
+        tool_choice, ChatCompletionNamedToolChoiceParam
+    ):
+        tool_name = tool_choice.function.name
+        tool_map = {
+            tool.function.name: tool
+            for tool in tools
+            if isinstance(tool, ChatCompletionToolsParam)
+        }
+        if tool_name not in tool_map:
+            raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
+        return tool_map[tool_name].function.parameters
+
+    if tool_choice == "required":
+
+        def extract_tool_info(
+            tool: Tool | ChatCompletionToolsParam,
+        ) -> tuple[str, dict[str, Any] | None]:
+            if isinstance(tool, FunctionTool):
+                return tool.name, tool.parameters
+            elif isinstance(tool, ChatCompletionToolsParam):
+                return tool.function.name, tool.function.parameters
+            else:
+                raise TypeError(f"Unsupported tool type: {type(tool)}")
+
+        def get_tool_schema(tool: Tool | ChatCompletionToolsParam) -> dict:
+            name, params = extract_tool_info(tool)
+            params = params if params else {"type": "object", "properties": {}}
+            return {
+                "properties": {
+                    "name": {"type": "string", "enum": [name]},
+                    "parameters": params,
+                },
+                "required": ["name", "parameters"],
+            }
+
+        def get_tool_schema_defs(
+            tools: list[Tool | ChatCompletionToolsParam],
+        ) -> dict:
+            all_defs: dict[str, dict[str, Any]] = {}
+            for tool in tools:
+                _, params = extract_tool_info(tool)
+                if params is None:
+                    continue
+                defs = params.pop("$defs", {})
+                for def_name, def_schema in defs.items():
+                    if def_name in all_defs and all_defs[def_name] != def_schema:
+                        raise ValueError(
+                            f"Tool definition '{def_name}' has multiple schemas, "
+                            "which is not supported."
+                        )
+                    all_defs[def_name] = def_schema
+            return all_defs
+
+        json_schema = {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "anyOf": [get_tool_schema(tool) for tool in tools],
+            },
+        }
+        json_schema_defs = get_tool_schema_defs(tools)
+        if json_schema_defs:
+            json_schema["$defs"] = json_schema_defs
+        return json_schema
+
+    return None
+
+
 ResponseInputOutputItem: TypeAlias = (
     ResponseInputItemParam | ResponseReasoningItem | ResponseFunctionToolCall
 )
@@ -421,18 +508,7 @@ class ResponsesRequest(OpenAIBaseModel):
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        structured_outputs = None
-        if self.text is not None and self.text.format is not None:
-            response_format = self.text.format
-            if (
-                response_format.type == "json_schema"
-                and response_format.schema_ is not None
-            ):
-                structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_
-                )
-            elif response_format.type == "json_object":
-                raise NotImplementedError("json_object is not supported")
+        structured_outputs = self._get_structured_outputs()
 
         # TODO: add more parameters
         return SamplingParams.from_optional(
@@ -446,6 +522,29 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
         )
+
+    def _get_structured_outputs(self) -> StructuredOutputsParams | None:
+        # Structured output
+        structured_outputs = None
+        if self.text is not None and self.text.format is not None:
+            response_format = self.text.format
+            if (
+                response_format.type == "json_schema"
+                and response_format.schema_ is not None
+            ):
+                structured_outputs = StructuredOutputsParams(
+                    json=response_format.schema_
+                )
+            elif response_format.type == "json_object":
+                raise NotImplementedError("json_object is not supported")
+        # Function call
+        elif not (self.tool_choice == "none" or self.tools is None):
+            json_schema = get_json_schema_from_tool(
+                tools=self.tools, tool_choice=self.tool_choice
+            )
+            if json_schema is not None:
+                structured_outputs = StructuredOutputsParams(json=json_schema)
+        return structured_outputs
 
     def is_include_output_logprobs(self) -> bool:
         """Check if the request includes output logprobs."""
@@ -888,70 +987,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def _get_json_schema_from_tool(self) -> str | dict | None:
-        # user has chosen to not use any tool
-        if self.tool_choice == "none" or self.tools is None:
-            return None
-
-        # user has chosen to use a named tool
-        if type(self.tool_choice) is ChatCompletionNamedToolChoiceParam:
-            tool_name = self.tool_choice.function.name
-            tools = {tool.function.name: tool.function for tool in self.tools}
-            if tool_name not in tools:
-                raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-            tool = tools[tool_name]
-            return tool.parameters
-
-        if self.tool_choice == "required":
-            # Pydantic schema generation cannot be used since the JSON schema
-            # has to be constructed for a specific instantiation of a tool list
-            # so that parameters of a function are correctly generated
-            # based on the chosen function name
-            def get_tool_schema(tool: ChatCompletionToolsParam) -> dict:
-                return {
-                    "properties": {
-                        "name": {"type": "string", "enum": [tool.function.name]},
-                        # parameters are always generated as '{}' in the final
-                        # output if they are missing from the request
-                        # (i.e. are None or '{}') so the schema is
-                        # updated to produce an empty object in that case
-                        "parameters": tool.function.parameters
-                        if tool.function.parameters
-                        else {"type": "object", "properties": {}},
-                    },
-                    "required": ["name", "parameters"],
-                }
-
-            def get_tool_schema_defs(tools: list[ChatCompletionToolsParam]) -> dict:
-                all_defs = dict[str, dict[str, Any]]()
-                for tool in tools:
-                    if tool.function.parameters is None:
-                        continue
-                    defs = tool.function.parameters.pop("$defs", {})
-                    for def_name, def_schema in defs.items():
-                        if def_name in all_defs and all_defs[def_name] != def_schema:
-                            raise ValueError(
-                                f"Tool definition '{def_name}' has "
-                                "multiple schemas, which is not "
-                                "supported."
-                            )
-                        else:
-                            all_defs[def_name] = def_schema
-                return all_defs
-
-            json_schema = {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "anyOf": [get_tool_schema(tool) for tool in self.tools],
-                },
-            }
-            json_schema_defs = get_tool_schema_defs(self.tools)
-            if json_schema_defs:
-                json_schema["$defs"] = json_schema_defs
-            return json_schema
-
-        return None
+        return get_json_schema_from_tool(
+            tools=self.tools,
+            tool_choice=self.tool_choice,
+        )
 
     @model_validator(mode="before")
     @classmethod
