@@ -339,18 +339,6 @@ def fused_add_rms_norm(
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
-def poly_norm(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    epsilon: float,
-) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
-    input_contiguous = input.contiguous()
-    torch.ops._C.poly_norm(out, input_contiguous, weight, bias, epsilon)
-
-
 def apply_repetition_penalties_torch(
     logits: torch.Tensor,
     prompt_mask: torch.Tensor,
@@ -1507,7 +1495,7 @@ def scaled_fp8_quant(
                 output, input, scale, scale_ub
             )
         else:
-            scale = torch.empty(1, device=input.device, dtype=torch.float32)
+            scale = torch.empty((1, 1), device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         assert scale.numel() == 1, f"{scale.shape}"
@@ -1850,9 +1838,10 @@ def topk_softmax(
     topk_ids: torch.Tensor,
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
+    renormalize: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
-        topk_weights, topk_ids, token_expert_indices, gating_output
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
 

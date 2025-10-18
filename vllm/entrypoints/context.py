@@ -515,7 +515,7 @@ class StreamingHarmonyContext(HarmonyContext):
 
     def render_for_completion(self) -> list[int]:
         # now this list of tokens as next turn's starting tokens
-        # `<|start|>assistant``,
+        # `<|start|>assistant`,
         # we need to process them in parser.
         rendered_tokens = super().render_for_completion()
 

@@ -137,13 +137,20 @@ class Example:
             gh_file = (self.main_file.parent / relative_path).resolve()
             gh_file = gh_file.relative_to(ROOT_DIR)
 
-            return f"[{link_text}](gh-file:{gh_file})"
+            # Make GitHub URL
+            url = "https://github.com/vllm-project/vllm/"
+            url += "tree/main" if self.path.is_dir() else "blob/main"
+            gh_url = f"{url}/{gh_file}"
+
+            return f"[{link_text}]({gh_url})"
 
         return re.sub(link_pattern, replace_link, content)
 
     def generate(self) -> str:
         content = f"# {self.title}\n\n"
-        content += f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
+        url = "https://github.com/vllm-project/vllm/"
+        url += "tree/main" if self.path.is_dir() else "blob/main"
+        content += f"Source <{url}/{self.path.relative_to(ROOT_DIR)}>.\n\n"
 
         # Use long code fence to avoid issues with
         # included files containing code fences too
