@@ -10,9 +10,9 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-hopper_only = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
-    reason="Requires CUDA and Hopper (SM90)",
+skip_unsupported = pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    reason="Requires CUDA and >= Hopper (SM90)",
 )
 
 
@@ -74,7 +74,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     return base_prompt
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.timeout(1000)
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
     """
@@ -219,7 +219,7 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
@@ -434,7 +434,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
         pytest.fail(msg)
 
 
-@hopper_only
+@skip_unsupported
 def test_simple_generation():
     """
     Simple test that runs the model with a basic prompt and prints the output.
@@ -480,7 +480,7 @@ def test_simple_generation():
             llm.shutdown()
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.forked
 def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
@@ -707,7 +707,7 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
             os.environ["VLLM_BATCH_INVARIANT"] = old_value
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.forked
 def test_decode_logprobs_match_prefill_logprobs(backend):
