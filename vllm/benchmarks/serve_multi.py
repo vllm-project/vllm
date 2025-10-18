@@ -471,7 +471,7 @@ def _iter_sla(
 
     while request_rate > 0:
         print(f"Testing request rate: {request_rate} req/s")
-        iter_path = _get_sla_iter_path(run_path, run_number)
+        iter_path = _get_sla_iter_path(run_path, request_rate)
 
         iter_data = _run_benchmark(
             bench_cmd,
