@@ -535,11 +535,17 @@ def get_place_to_travel():
     return "Paris"
 
 
+def get_horoscope(sign):
+    return f"{sign}: Next Tuesday you will befriend a baby otter."
+
+
 def call_function(name, args):
     if name == "get_weather":
         return get_weather(**args)
     elif name == "get_place_to_travel":
         return get_place_to_travel()
+    elif name == "get_horoscope":
+        return get_horoscope(**args)
     else:
         raise ValueError(f"Unknown function: {name}")
 
@@ -828,3 +834,103 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
     assert response.status == "completed"
     assert len(response.input_messages) > 0
     assert len(response.output_messages) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_call_with_previous_input_messages(
+    client: OpenAI, model_name: str
+):
+    """Test function calling using previous_input_messages
+    for multi-turn conversation with a function call"""
+
+    # Define the get_horoscope tool
+    tools = [
+        {
+            "type": "function",
+            "name": "get_horoscope",
+            "description": "Get today's horoscope for an astrological sign.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sign": {"type": "string"},
+                },
+                "required": ["sign"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+
+    # Step 1: First call with the function tool
+    stream_response = await client.responses.create(
+        model=model_name,
+        input="What is the horoscope for Aquarius today?",
+        tools=tools,
+        extra_body={"enable_response_messages": True},
+        stream=True,
+    )
+
+    response = None
+    async for event in stream_response:
+        if event.type == "response.completed":
+            response = event.response
+
+    assert response is not None
+    assert response.status == "completed"
+
+    # Step 2: Parse the first output to find the function_call type
+    function_call = None
+    for item in response.output:
+        if item.type == "function_call":
+            function_call = item
+            break
+
+    assert function_call is not None, "Expected a function_call in the output"
+    assert function_call.name == "get_horoscope"
+    assert function_call.call_id is not None
+
+    # Verify the format matches expectations
+    args = json.loads(function_call.arguments)
+    assert "sign" in args
+
+    # Step 3: Call the get_horoscope function
+    result = call_function(function_call.name, args)
+    assert "Aquarius" in result
+    assert "baby otter" in result
+
+    # Get the input_messages and output_messages from the first response
+    first_input_messages = response.input_messages
+    first_output_messages = response.output_messages
+
+    # Construct the full conversation history using previous_input_messages
+    previous_messages = (
+        first_input_messages
+        + first_output_messages
+        + [
+            {
+                "role": "tool",
+                "name": "functions.get_horoscope",
+                "content": [{"type": "text", "text": str(result)}],
+                "content_type": "<|constrain|>json",
+            }
+        ]
+    )
+
+    # Step 4: Make another responses.create() call with previous_input_messages
+    response_2 = await client.responses.create(
+        model=model_name,
+        tools=tools,
+        input="",
+        extra_body={"previous_input_messages": previous_messages},
+    )
+
+    assert response_2 is not None
+    assert response_2.status == "completed"
+    assert response_2.output_text is not None
+
+    # Verify the output makes sense - should contain information about the horoscope
+    output_text = response_2.output_text.lower()
+    assert (
+        "aquarius" in output_text or "otter" in output_text or "tuesday" in output_text
+    )

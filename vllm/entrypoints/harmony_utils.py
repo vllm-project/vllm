@@ -228,7 +228,7 @@ def parse_response_input(
     return msg
 
 
-def parse_chat_input(chat_msg) -> list[Message]:
+def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     if not isinstance(chat_msg, dict):
         # Handle Pydantic models
         chat_msg = chat_msg.model_dump(exclude_none=True)
@@ -266,6 +266,13 @@ def parse_chat_input(chat_msg) -> list[Message]:
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{name}"), content
         ).with_channel("commentary")
+        return [msg]
+    # system message
+    if role == "system":
+        msg = Message.from_dict(chat_msg)
+        return [msg]
+    if role == "developer":
+        msg = Message.from_dict(chat_msg)
         return [msg]
 
     # Default: user/assistant/system messages with content
