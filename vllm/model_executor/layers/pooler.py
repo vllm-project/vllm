@@ -252,6 +252,7 @@ class AllPool(PoolingMethod):
                     hidden_states.append(hidden_states_cache[0])
                 else:
                     hidden_states.append(torch.concat(hidden_states_cache, dim=0))
+                pooling_param.hidden_states_cache.clear()
             else:
                 hidden_states.append(None)
 
