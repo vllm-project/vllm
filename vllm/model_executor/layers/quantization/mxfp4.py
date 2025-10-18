@@ -77,6 +77,7 @@ class Mxfp4Backend(Enum):
 def get_mxfp4_backend():
     # Backend Selection
     if current_platform.is_cuda():
+        return Mxfp4Backend.TRITON
         if (
             current_platform.is_device_capability(90)
             and has_flashinfer()
