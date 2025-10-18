@@ -27,7 +27,7 @@ from vllm.scalar_type import ScalarType, scalar_types
 
 
 def default_activation_func(
-    activation: str | None, output: torch.Tensor, input: torch.Tensor
+    activation: str, output: torch.Tensor, input: torch.Tensor
 ) -> None:
     if activation == "silu":
         torch.ops._C.silu_and_mul(output, input)
@@ -55,9 +55,9 @@ def fused_marlin_moe(
     quant_type_id: int,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    activation: str | None = "silu",
+    activation: str = "silu",
     activation_func: Callable[
-        [str | None, torch.Tensor, torch.Tensor], None
+        [str, torch.Tensor, torch.Tensor], None
     ] = default_activation_func,
     moe_sum: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     expert_map: torch.Tensor | None = None,
