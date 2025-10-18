@@ -63,19 +63,20 @@ class LlamaModel(nn.Module):
         # Temporarily modify vllm_config.quant_config for draft model layers
         original_quant_config = vllm_config.quant_config
         vllm_config.quant_config = quant_config
-
-        self.layers = nn.ModuleList(
-            [
-                Llama4DecoderLayer(
-                    vllm_config=vllm_config,
-                    prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                    config=self.config,
-                )
-                for i in range(self.config.num_hidden_layers)
-            ]
-        )
-        # Restore original quant_config
-        vllm_config.quant_config = original_quant_config
+        try:
+            self.layers = nn.ModuleList(
+                [
+                    Llama4DecoderLayer(
+                        vllm_config=vllm_config,
+                        prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                        config=self.config,
+                    )
+                    for i in range(self.config.num_hidden_layers)
+                ]
+            )
+        finally:
+            # Restore original quant_config
+            vllm_config.quant_config = original_quant_config
         self.fc = torch.nn.Linear(
             self.config.hidden_size * 2, self.config.hidden_size, bias=False
         )
