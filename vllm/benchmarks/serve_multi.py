@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import shlex
 import signal
@@ -618,7 +619,7 @@ def _iter_sla(
         print("[SLA END]")
         return None
 
-    sla_init_value = int(
+    sla_init_value = math.ceil(
         sum(float(item["request_throughput"]) for item in sla_data_0)  # type: ignore
         / len(sla_data_0)
     )
