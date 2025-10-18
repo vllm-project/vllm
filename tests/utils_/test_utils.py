@@ -23,7 +23,6 @@ from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 
 from vllm.utils import (
     FlexibleArgumentParser,
-    MemorySnapshot,
     bind_kv_cache,
     common_broadcastable_dtype,
     current_stream,
@@ -33,13 +32,13 @@ from vllm.utils import (
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
-    memory_profiling,
     sha256,
     split_host_port,
     split_zmq_path,
     unique_filepath,
 )
 
+from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from ..utils import create_new_process_for_each_test, flat_product
 
 
