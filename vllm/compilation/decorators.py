@@ -21,7 +21,8 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.utils import resolve_obj_by_qualname, supports_dynamo
+from vllm.utils import supports_dynamo
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .monitor import start_monitoring_torch_compile
 
@@ -137,8 +138,8 @@ def support_torch_compile(
     """
 
     def cls_decorator_helper(cls: _T) -> _T:
-        # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
-        # to avoid too much indentation for `_support_torch_compile``
+        # helper to pass `dynamic_arg_dims` to `_support_torch_compile`
+        # to avoid too much indentation for `_support_torch_compile`
         if not hasattr(cls, "forward"):
             raise TypeError("decorated class should have a forward method.")
         sig = inspect.signature(cls.forward)

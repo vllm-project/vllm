@@ -59,9 +59,6 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
     "Qwen2ForCausalLM": _ROCM_SWA_REASON,
     "MistralForCausalLM": _ROCM_SWA_REASON,
     "MixtralForCausalLM": _ROCM_SWA_REASON,
-    "PaliGemmaForConditionalGeneration": (
-        "ROCm flash attention does not yet fully support 32-bit precision on PaliGemma"
-    ),
     "Phi3VForCausalLM": (
         "ROCm Triton flash attention may run into compilation errors due to "
         "excessive use of shared memory. If this happens, disable Triton FA "
@@ -78,7 +75,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74bd": "AMD_Instinct_MI300X_HF",
 }
 
-# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
+# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
 if "HIP_VISIBLE_DEVICES" in os.environ:
     val = os.environ["HIP_VISIBLE_DEVICES"]
     if cuda_val := os.environ.get("CUDA_VISIBLE_DEVICES", None):
@@ -484,8 +481,8 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()
                 gpu_name = cls.get_device_name()
