@@ -351,7 +351,15 @@ class LlamaDecoderLayer(nn.Module):
         return vllm_config.quant_config
 
 
-@support_torch_compile
+def llama_model_invariants(
+    input_ids, positions, intermediate_tensors=None, inputs_embeds=None
+):
+    """Shape invariants for Llama model compilation"""
+    if input_ids is not None:
+        torch._check(positions.size()[0] == input_ids.size()[0])
+
+
+@support_torch_compile(shape_invariants=llama_model_invariants)
 class LlamaModel(nn.Module):
     def __init__(
         self,

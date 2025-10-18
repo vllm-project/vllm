@@ -17,8 +17,9 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import TorchCompileGuardsStripWrapper
 from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
+from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -83,6 +84,7 @@ def support_torch_compile(
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
+    shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
 ) -> Callable[[_T], _T] | _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -172,7 +174,9 @@ def support_torch_compile(
                 raise ValueError(
                     f"Argument {k} not found in the forward method of {cls}"
                 )
-        return _support_torch_compile(cls, inferred_dynamic_arg_dims, enable_if)
+        return _support_torch_compile(
+            cls, inferred_dynamic_arg_dims, enable_if, shape_invariants
+        )
 
     if cls is not None:
         # use `support_torch_compile` as a decorator without arguments
@@ -213,18 +217,19 @@ def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, int | list[int]],
     enable_if: Callable[[VllmConfig], bool] | None = None,
+    shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
     """
-    if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
+    if TorchCompileGuardsStripWrapper in cls.__bases__:
         # support decorating multiple times
         return cls
 
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
-    #  other than TorchCompileWrapperWithCustomDispatcher
-    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher,)
+    #  other than TorchCompileGuardsStripWrapper
+    cls.__bases__ = cls.__bases__ + (TorchCompileGuardsStripWrapper,)
 
     old_init = cls.__init__
 
@@ -233,11 +238,12 @@ def _support_torch_compile(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
+        self.compilation_config = self.vllm_config.compilation_config
         enable_compile = enable_if is None or enable_if(vllm_config)
         # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = (
-            vllm_config.compilation_config.mode
+            self.compilation_config.mode
             in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
             or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
@@ -246,12 +252,43 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
+        self._check_shape_invariants = shape_invariants
+
         compilation_counter.num_models_seen += 1
-        TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_mode=vllm_config.compilation_config.mode
-        )
+        self.compiled = False
+        TorchCompileGuardsStripWrapper.__init__(self)
 
     cls.__init__ = __init__
+
+    def _mark_dynamic_inputs(mod, dynamic_shapes_type, *args, **kwargs):
+        def mark_dynamic(arg, dims):
+            if dynamic_shapes_type == DynamicShapesType.UNBACKED:
+                torch._dynamo.decorators.mark_unbacked(arg, dims)
+            else:
+                torch._dynamo.mark_dynamic(arg, dims)
+
+        sig = inspect.signature(mod.__class__.forward)
+        bound_args = sig.bind(mod, *args, **kwargs)
+        bound_args.apply_defaults()
+        for k, dims in dynamic_arg_dims.items():
+            arg = bound_args.arguments.get(k)
+
+            if arg is not None:
+                dims = [dims] if isinstance(dims, int) else dims
+                if isinstance(arg, torch.Tensor):
+                    # In case dims is specified with negative indexing
+                    dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
+                    mark_dynamic(arg, dims)
+                elif isinstance(arg, IntermediateTensors):
+                    for tensor in arg.tensors.values():
+                        # In case dims is specified with negative indexing
+                        dims = [tensor.ndim + dim if dim < 0 else dim for dim in dims]
+                        mark_dynamic(tensor, dims)
+                else:
+                    raise ValueError(
+                        "Unsupported dynamic dimensions"
+                        f" {dims} for argument {k} with type {type(arg)}."
+                    )
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
@@ -260,9 +297,11 @@ def _support_torch_compile(
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
+        # if aot_compiled_fn is set, just call it.
         if getattr(self, "aot_compiled_fn", None) is not None:
             return self.aot_compiled_fn(self, *args, **kwargs)
 
+        ds_type = self.compilation_config.dynamic_shapes_config.dynamic_shapes_type
         cache_dir = None
         aot_compilation_path = None
         if envs.VLLM_USE_AOT_COMPILE:
@@ -277,6 +316,14 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
+            # Validate that AOT compile is not used with unbacked dynamic
+            # shapes. aot_compile re-allocates backed symbols post dynamo!
+            if ds_type == DynamicShapesType.UNBACKED:
+                raise ValueError(
+                    "AOT compilation is not compatible with UNBACKED dynamic shapes. "
+                    "Please use BACKED or BACKED_SIZE_OBLIVIOUS dynamic shapes type "
+                    "when VLLM_USE_AOT_COMPILE is enabled."
+                )
             from .caching import compilation_config_hash_factors
 
             factors: list[str] = compilation_config_hash_factors(self.vllm_config)
@@ -318,102 +365,87 @@ def _support_torch_compile(
                 )
                 return self.aot_compiled_fn(self, *args, **kwargs)
 
+        if self.compiled:
+            assert not envs.VLLM_USE_AOT_COMPILE
+            return TorchCompileGuardsStripWrapper.__call__(self, *args, **kwargs)
+
+        # This is the path for the first compilation.
+
         # the first compilation needs to have dynamic shapes marked
-        if len(self.compiled_codes) < 1:
-            sig = inspect.signature(self.__class__.forward)
-            bound_args = sig.bind(self, *args, **kwargs)
-            bound_args.apply_defaults()
-            for k, dims in dynamic_arg_dims.items():
-                arg = bound_args.arguments.get(k)
-                if arg is not None:
-                    dims = [dims] if isinstance(dims, int) else dims
-                    if isinstance(arg, torch.Tensor):
-                        # In case dims is specified with negative indexing
-                        dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                        torch._dynamo.mark_dynamic(arg, dims)
-                    elif isinstance(arg, IntermediateTensors):
-                        for tensor in arg.tensors.values():
-                            # In case dims is specified with negative indexing
-                            dims = [
-                                tensor.ndim + dim if dim < 0 else dim for dim in dims
-                            ]
-                            torch._dynamo.mark_dynamic(tensor, dims)
-                    else:
-                        raise ValueError(
-                            "Unsupported dynamic dimensions"
-                            f" {dims} for argument {k} with type {type(arg)}."
-                        )
-            # here, it is the starting point of the `torch.compile` process
-            start_monitoring_torch_compile(self.vllm_config)
-            logger.debug("Start compiling function %s", self.original_code_object)
+        _mark_dynamic_inputs(
+            self,
+            ds_type,
+            *args,
+            **kwargs,
+        )
 
-        # if we don't use custom dispatcher, we can directly call the
-        # compiled function and let torch.compile handle the dispatching,
-        # with the overhead of guard evaluation and recompilation.
-        if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
-            # it seems Dynamo reuse the compilation across instances,
-            # while we need to make sure the compiled code is not reused.
-            # we need to control all the compilation of the model.
-            torch._dynamo.eval_frame.remove_from_cache(self.original_code_object)
+        # here, it is the starting point of the `torch.compile` process
+        start_monitoring_torch_compile(self.vllm_config)
+        original_code_object = self.original_code_object()
+        logger.debug("Start compiling function %s", original_code_object)
 
-            # collect all relevant files traced by Dynamo,
-            # so that the compilation cache can trigger re-compilation
-            # properly when any of these files change.
+        # it seems Dynamo reuse the compilation across instances,
+        # while we need to make sure the compiled code is not reused.
+        # we need to control all the compilation of the model.
+        torch._dynamo.eval_frame.remove_from_cache(original_code_object)
 
-            # 1. the file containing the top-level forward function
-            self.vllm_config.compilation_config.traced_files.add(
-                self.original_code_object.co_filename
-            )
+        # collect all relevant files traced by Dynamo,
+        # so that the compilation cache can trigger re-compilation
+        # properly when any of these files change.
 
-            # 2. every time Dynamo sees a function call, it will inline
-            # the function by calling InliningInstructionTranslator.inline_call_
-            # we hijack this function to know all the functions called
-            # during Dynamo tracing, and their corresponding files
-            inline_call = InliningInstructionTranslator.inline_call_
+        # 1. the file containing the top-level forward function
+        self.compilation_config.traced_files.add(original_code_object.co_filename)
 
-            def patched_inline_call(self_):
-                code = self_.f_code
-                self.vllm_config.compilation_config.traced_files.add(code.co_filename)
-                return inline_call(self_)
+        # 2. every time Dynamo sees a function call, it will inline
+        # the function by calling InliningInstructionTranslator.inline_call_
+        # we hijack this function to know all the functions called
+        # during Dynamo tracing, and their corresponding files
+        inline_call = InliningInstructionTranslator.inline_call_
 
-            # Disable the C++ compilation of symbolic shape guards. C++-fication
-            # of symbolic shape guards can improve guard overhead. But, since
-            # vllm skip guards anyways, setting this flag to False can improve
-            # compile time.
-            dynamo_config_patches = {}
-            try:
-                _ = torch._dynamo.config.enable_cpp_symbolic_shape_guards
-                dynamo_config_patches["enable_cpp_symbolic_shape_guards"] = False
-            except AttributeError:
-                # Note: this config is not available in torch 2.6, we can skip
-                # if the config doesn't exist
-                logger.debug("enable_cpp_symbolic_shape_guards config not available")
+        def patched_inline_call(self_):
+            code = self_.f_code
+            self.compilation_config.traced_files.add(code.co_filename)
+            return inline_call(self_)
 
-            with (
-                patch.object(
-                    InliningInstructionTranslator, "inline_call_", patched_inline_call
-                ),
-                torch._dynamo.config.patch(**dynamo_config_patches),
-                maybe_use_cudagraph_partition_wrapper(self.vllm_config),
-                _torch27_patch_tensor_subclasses(),
-            ):
-                if envs.VLLM_USE_AOT_COMPILE:
-                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
-                    output = self.aot_compiled_fn(self, *args, **kwargs)
-                    assert aot_compilation_path is not None
-                    assert cache_dir is not None
-                    os.makedirs(cache_dir, exist_ok=True)
-                    self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
-                else:
-                    output = self.compiled_callable(*args, **kwargs)
-            return output
+        # Disable the C++ compilation of symbolic shape guards. C++-fication
+        # of symbolic shape guards can improve guard overhead. But, since
+        # vllm skip guards anyways, setting this flag to False can improve
+        # compile time.
+        dynamo_config_patches = {}
+        try:
+            _ = torch._dynamo.config.enable_cpp_symbolic_shape_guards
+            dynamo_config_patches["enable_cpp_symbolic_shape_guards"] = False
+        except AttributeError:
+            # Note: this config is not available in torch 2.6, we can skip
+            # if the config doesn't exist
+            logger.debug("enable_cpp_symbolic_shape_guards config not available")
 
-        # usually, capturing the model once is enough, and then we can
-        # dispatch to the compiled code directly, without going through
-        # the Dynamo guard mechanism.
-        with self.dispatch_to_code(0):
-            model_output = self.forward(*args, **kwargs)
-            return model_output
+        # Prepare backed_size_oblivious config patch if needed
+        fx_config_patches = {}
+        if ds_type == DynamicShapesType.BACKED_SIZE_OBLIVIOUS:
+            fx_config_patches["backed_size_oblivious"] = True
+
+        with (
+            patch.object(
+                InliningInstructionTranslator, "inline_call_", patched_inline_call
+            ),
+            torch._dynamo.config.patch(**dynamo_config_patches),
+            maybe_use_cudagraph_partition_wrapper(self.vllm_config),
+            torch.fx.experimental._config.patch(**fx_config_patches),
+            _torch27_patch_tensor_subclasses(),
+        ):
+            if envs.VLLM_USE_AOT_COMPILE:
+                self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                output = self.aot_compiled_fn(self, *args, **kwargs)
+                assert aot_compilation_path is not None
+                assert cache_dir is not None
+                os.makedirs(cache_dir, exist_ok=True)
+                self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
+            else:
+                output = TorchCompileGuardsStripWrapper.__call__(self, *args, **kwargs)
+
+        self.compiled = True
+        return output
 
     cls.__call__ = __call__
     return cls
