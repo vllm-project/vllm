@@ -73,8 +73,6 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (
-    DeviceMemoryProfiler,
-    GiB_bytes,
     cdiv,
     check_use_alibi,
     is_pin_memory_available,
@@ -82,6 +80,8 @@ from vllm.utils import (
     round_up,
 )
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_dtype_size,
