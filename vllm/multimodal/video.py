@@ -13,9 +13,12 @@ import numpy.typing as npt
 from PIL import Image
 
 from vllm import envs
+from vllm.logger import init_logger
 
 from .base import MediaIO
 from .image import ImageMediaIO
+
+logger = init_logger(__name__)
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -313,13 +316,13 @@ class OpenCVNemotronVideoBackend(OpenCVVideoBackend):
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Args:
-            num_frames (int): Maximum number of frames to load.
-            A total sampled number of frames will never be larger
-            than this value. Set it -1 to remove the upper limit.
+            num_frames (int): Maximum number of frames to load. A
+                total sampled number of frames will never be larger
+                than this value. Set it -1 to remove the upper limit.
 
             fps (int): Desired video sampling rate. A real samping
-            rate may be lower if we encounter long video and
-            num_frames upper limit is set to positive value.
+                rate may be lower if we encounter long video and
+                num_frames upper limit is set to positive value.
         """
         import cv2
 
@@ -332,26 +335,30 @@ class OpenCVNemotronVideoBackend(OpenCVVideoBackend):
         if total_frames_num == 0:
             raise ValueError("CAP_PROP_FRAME_COUNT returned 0")
 
-        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        original_fps = float(cap.get(cv2.CAP_PROP_FPS))
         if not (original_fps > 0):
-            print(
-                f"WARNING: CAP_PROP_FPS returned {original_fps}. "
-                f"We will use 30 FPS as default fallback."
+            logger.warning(
+                "CAP_PROP_FPS returned value %f. "
+                "We will use 30 FPS as default fallback.",
+                original_fps,
             )
-            original_fps = 30
+            original_fps = 30.0
 
-        duration = total_frames_num / original_fps
+        duration = float(total_frames_num / original_fps)
 
         frame_indices = cls._get_frame_indices_to_sample(
             total_frames_num, num_frames, fps, duration
         )
 
         effective_fps = len(frame_indices) / duration
-        print(
-            f"Video [{total_frames_num} fames]({duration:.2f}sec "
-            f"at {original_fps:.2f}fps) sampled "
-            f"into frame [{len(frame_indices)}] indexes {frame_indices} "
-            f"at {effective_fps:.2f}fps."
+        logger.debug(
+            "Video [%d frames](%.2f sec at %.2f fps) sampled "
+            "into frame [%d] indexes at %.2f fps.",
+            total_frames_num,
+            duration,
+            original_fps,
+            len(frame_indices),
+            effective_fps,
         )
 
         frames, frame_indices = cls._sample_frames_from_video(
