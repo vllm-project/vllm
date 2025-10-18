@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Annotated, Any, Optional
 
 import msgspec
+import torch
 
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
@@ -55,6 +56,8 @@ class PoolingParams(
     task: PoolingTask | None = None
     requires_token_ids: bool = False
     extra_kwargs: dict[str, Any] | None = None
+    # use in AllPool
+    hidden_states_cache: list[torch.Tensor] = []
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
     @property

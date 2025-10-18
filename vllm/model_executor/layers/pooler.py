@@ -204,22 +204,57 @@ class LastPool(PoolingMethod):
 
 
 class AllPool(PoolingMethod):
+    def __init__(self):
+        super().__init__()
+
+        vllm_config = get_current_vllm_config()
+        self.enable_chunked_prefill = (
+            vllm_config.scheduler_config.enable_chunked_prefill
+        )
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify"}
 
     def forward_all(
+        self, hidden_states: torch.Tensor, pooling_cursor: PoolingCursor
+    ) -> list[torch.Tensor] | torch.Tensor:
+        pass
+
+    def forward(
         self,
         hidden_states: torch.Tensor,
-        pooling_cursor: PoolingCursor,
+        pooling_metadata: PoolingMetadata,
     ) -> list[torch.Tensor] | torch.Tensor:
-        assert not pooling_cursor.is_partial_prefill(), (
-            "partial prefill not supported with ALL pooling"
-        )
+        pooling_cursor = pooling_metadata.pooling_cursor
+        pooling_params = get_pooling_params(pooling_metadata)
+        is_finished = pooling_cursor.is_finished()
 
         hidden_states_lst = list(
             hidden_states.split(pooling_cursor.num_scheduled_tokens_cpu.tolist())
         )
-        return [hidden_states_lst[i] for i in pooling_cursor.index]
+        hidden_states_lst = [hidden_states_lst[i] for i in pooling_cursor.index]
+
+        if not self.enable_chunked_prefill:
+            return hidden_states_lst
+
+        # If chunked_prefill is enabled
+        # 1. first store the chunked hidden_states in pooling_param.hidden_states_cache
+        for pooling_param, hidden_states in zip(pooling_params, hidden_states_lst):
+            pooling_param.hidden_states_cache.append(hidden_states)
+
+        # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
+        hidden_states = []
+        for pooling_param, finished in zip(pooling_params, is_finished):
+            if finished:
+                hidden_states_cache = pooling_param.hidden_states_cache
+                if len(hidden_states_cache) == 1:
+                    hidden_states.append(hidden_states_cache[0])
+                else:
+                    hidden_states.append(torch.concat(hidden_states_cache, dim=0))
+            else:
+                hidden_states.append(None)
+
+        return hidden_states
 
 
 class MeanPool(PoolingMethod):
@@ -610,8 +645,12 @@ class ClassifierPooler(Pooler):
 
 class TokenEmbeddingPoolerHead(EmbeddingPoolerHead):
     def forward(
-        self, pooled_data: torch.Tensor, pooling_param: PoolingParams
-    ) -> torch.Tensor:
+        self, pooled_data: torch.Tensor | None, pooling_param: PoolingParams
+    ) -> PoolerOutput:
+        # for unfinished chunked prefill
+        if pooled_data is None:
+            return None
+
         pooled_data = pooled_data.to(self.head_dtype)
         # pooled_data shape: [n_tokens, hidden_dimension]
 
@@ -654,9 +693,13 @@ class TokenClassifierPoolerHead(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | None,
         pooling_param: PoolingParams,
-    ) -> torch.Tensor:
+    ) -> PoolerOutput:
+        # for unfinished chunked prefill
+        if hidden_states is None:
+            return None
+
         hidden_states = hidden_states.to(self.head_dtype)
         # hidden_states shape: [n_token, hidden_size]
 
