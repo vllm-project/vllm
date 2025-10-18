@@ -386,6 +386,24 @@ async def get_server_load_metrics(request: Request):
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
 
 
+
+@router.get("/get_server_info")
+async def get_server_info(raw_request: Request):
+    """Returns server information including DP size for router"""
+    config = raw_request.app.state.vllm_config
+
+    # Extract dp_size from parallel_config
+    dp_size = 1  # Default value
+    if hasattr(config, 'parallel_config') and hasattr(config.parallel_config, 'data_parallel_size'):
+        dp_size = config.parallel_config.data_parallel_size
+
+    server_info = {
+        "vllm_config": str(config),
+        "dp_size": dp_size
+    }
+    return JSONResponse(content=server_info)
+
+
 @router.get("/ping", response_class=Response)
 @router.post("/ping", response_class=Response)
 async def ping(raw_request: Request) -> Response:
