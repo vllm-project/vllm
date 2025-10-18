@@ -59,7 +59,14 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
-        self._null_block = block_pool.null_block
+        self._null_block: KVCacheBlock | None = None
+
+    @property
+    def null_block(self) -> KVCacheBlock:
+        """Lazy access to null block. Only allocates when first accessed."""
+        if self._null_block is None:
+            self._null_block = self.block_pool.null_block
+        return self._null_block
 
     def get_num_blocks_to_allocate(
         self,
@@ -319,7 +326,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._null_block = block_pool.null_block
 
     @classmethod
     def find_longest_cache_hit(
@@ -396,14 +402,41 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         last_useful_block = last_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
+
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block:
+            if self._null_block is not None and blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
+
             removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
+
+            # Handle an edge case where no free blocks available
+            # but we haven't allocated the null block yet
+            if (
+                self._null_block is None
+                and len(removed_blocks) == 1
+                and self.block_pool.get_num_free_blocks() == 0
+            ):
+                # It's possible that another manager already allocated a null block
+                # in the shared block pool
+                if self.block_pool._null_block is not None:
+                    self._null_block = self.block_pool._null_block
+                else:
+                    # If not, repurpose the first removed block as the null block
+                    self.block_pool._null_block = removed_blocks[0]
+                    self.block_pool._null_block.is_null = True
+                    # Cache it in the manager as well
+                    self._null_block = self.block_pool._null_block
+                blocks[i] = self._null_block
+            else:
+                # Normal case: call the null_block property to allocate from free queue
+                blocks[i] = self.null_block
+
+        # Hold back the repurposed _null_block from being freed
+        if self._null_block in removed_blocks:
+            removed_blocks.remove(self._null_block)
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -422,7 +455,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
-        self._null_block = block_pool.null_block
 
     @classmethod
     def find_longest_cache_hit(
@@ -531,13 +563,39 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         removed_blocks: list[KVCacheBlock] = []
         # we need to keep the last block to get the previous hash key
         for i in range(first_useful_block_idx - 1, -1, -1):
-            if blocks[i] == self._null_block:
+            if self._null_block is not None and blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
+
             removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
+
+            # Handle an edge case where no free blocks available
+            # but we haven't allocated the null block yet
+            if (
+                self._null_block is None
+                and len(removed_blocks) == 1
+                and self.block_pool.get_num_free_blocks() == 0
+            ):
+                # It's possible that another manager already allocated a null block
+                # in the shared block pool
+                if self.block_pool._null_block is not None:
+                    self._null_block = self.block_pool._null_block
+                else:
+                    # If not, repurpose the first removed block as the null block
+                    self.block_pool._null_block = removed_blocks[0]
+                    self.block_pool._null_block.is_null = True
+                    # Cache it in the manager as well
+                    self._null_block = self.block_pool._null_block
+                blocks[i] = self._null_block
+            else:
+                # Normal case: call the null_block property to allocate from free queue
+                blocks[i] = self.null_block
+
+        # Hold back the repurposed _null_block from being freed
+        if self._null_block in removed_blocks:
+            removed_blocks.remove(self._null_block)
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
