@@ -12,6 +12,7 @@ class LoRAMapping:
     index_mapping: tuple[int, ...]
     prompt_mapping: tuple[int, ...]
     is_prefill: bool = False
+    is_mm_input: bool = False
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
