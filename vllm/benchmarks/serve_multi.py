@@ -535,7 +535,7 @@ def _estimate_sla_bounds(
 ):
     sla_data = list[dict[str, object]]()
 
-    assert init_value > 1 and gamma > 1
+    assert init_value >= 1 and gamma > 1
 
     val: int = init_value
 
@@ -567,7 +567,7 @@ def _estimate_sla_bounds(
 
         if all(sla_results):
             print("SLA criteria are met.")
-            val *= 2
+            val = 2 if val == 1 else math.ceil(val**gamma)
         else:
             print("SLA criteria are not met.")
             break
