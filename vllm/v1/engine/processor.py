@@ -29,7 +29,12 @@ from vllm.v1.structured_output.backend_lm_format_enforcer import (
 from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines,
 )
-from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+from vllm.v1.structured_output.utils import is_xgrammar_supported
+
+if is_xgrammar_supported():
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+else:
+    validate_xgrammar_grammar = None
 
 logger = init_logger(__name__)
 
