@@ -68,7 +68,7 @@ class SLALessThan(SLACriterionBase):
 
     @override
     def format_cond(self, lhs: str) -> str:
-        return f"{lhs} < {self.target:.2f}"
+        return f"{lhs}<{self.target:.2f}"
 
 
 class SLALessThanOrEqual(SLACriterionBase):
@@ -78,7 +78,7 @@ class SLALessThanOrEqual(SLACriterionBase):
 
     @override
     def format_cond(self, lhs: str) -> str:
-        return f"{lhs} <= {self.target:.2f}"
+        return f"{lhs}<={self.target:.2f}"
 
 
 class SLAGreaterThan(SLACriterionBase):
@@ -88,7 +88,7 @@ class SLAGreaterThan(SLACriterionBase):
 
     @override
     def format_cond(self, lhs: str) -> str:
-        return f"{lhs} > {self.target:.2f}"
+        return f"{lhs}>{self.target:.2f}"
 
 
 class SLAGreaterThanOrEqual(SLACriterionBase):
@@ -98,7 +98,7 @@ class SLAGreaterThanOrEqual(SLACriterionBase):
 
     @override
     def format_cond(self, lhs: str) -> str:
-        return f"{lhs} >= {self.target:.2f}"
+        return f"{lhs}>={self.target:.2f}"
 
 
 # NOTE: The ordering is important! Match longer op_keys first
