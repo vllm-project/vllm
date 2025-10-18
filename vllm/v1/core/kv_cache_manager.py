@@ -159,6 +159,10 @@ class KVCacheManager:
         """
         return self.block_pool.get_lifetime_stats()
 
+    def collect_recent_kv_cache_lifetimes(self) -> list[float]:
+        """Collect lifetimes recorded since the previous collection."""
+        return self.block_pool.collect_recent_lifetimes()
+
     def reset_kv_cache_lifetime_stats(self) -> None:
         """Reset the KV cache lifetime statistics."""
         self.block_pool.reset_lifetime_stats()

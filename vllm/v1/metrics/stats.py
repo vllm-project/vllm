@@ -35,8 +35,6 @@ class KVCacheLifetimeStats:
     total_lifetime_seconds: float = 0.0
     # Average lifetime of freed blocks (in seconds)
     average_lifetime_seconds: float = 0.0
-    # Pending lifetime samples to expose to Prometheus histogram observers
-    _pending_lifetimes: list[float] = field(default_factory=list)
 
     def add_block_lifetime(self, lifetime_seconds: float) -> None:
         """Add a new block lifetime to the statistics."""
@@ -44,20 +42,12 @@ class KVCacheLifetimeStats:
         self.total_lifetime_seconds += lifetime_seconds
         self.average_lifetime_seconds = (self.total_lifetime_seconds /
                                          self.total_blocks_freed)
-        self._pending_lifetimes.append(lifetime_seconds)
-
-    def drain_pending_lifetimes(self) -> list[float]:
-        """Return lifetime samples recorded since the last drain."""
-        pending = self._pending_lifetimes
-        self._pending_lifetimes = []
-        return pending
 
     def reset(self) -> None:
         """Reset all lifetime statistics."""
         self.total_blocks_freed = 0
         self.total_lifetime_seconds = 0.0
         self.average_lifetime_seconds = 0.0
-        self._pending_lifetimes.clear()
 
 
 @dataclass
@@ -78,9 +68,10 @@ class SchedulerStats:
 
     kv_cache_lifetime_stats: KVCacheLifetimeStats = field(
         default_factory=KVCacheLifetimeStats)
+    kv_cache_block_lifetimes: list[float] = field(default_factory=list)
 
-    spec_decoding_stats: Optional[SpecDecodingStats] = None
-    kv_connector_stats: Optional[dict[str, Any]] = None
+    spec_decoding_stats: SpecDecodingStats | None = None
+    kv_connector_stats: dict[str, Any] | None = None
 
     num_corrupted_reqs: int = 0
 
