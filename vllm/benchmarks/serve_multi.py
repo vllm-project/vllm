@@ -10,10 +10,11 @@ import subprocess
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 import requests
-from typing_extensions import override
+from typing_extensions import assert_never, override
 
 _BAD_PARAMS_TYPE_MSG = (
     "The parameters to vary should be expressed as a JSON list of dictionaries."
@@ -228,6 +229,7 @@ def _reset_caches(port: int):
 
 
 def _run_benchmark(
+    port: int | None,
     bench_cmd: list[str],
     *,
     serve_overrides: dict[str, object],
@@ -271,6 +273,9 @@ def _run_benchmark(
         stdout=subprocess.DEVNULL,
         check=True,
     )
+
+    if port is not None:
+        _reset_caches(port)
 
     with output_path.open("rb") as f:
         run_data = json.load(f)
@@ -334,19 +339,15 @@ def _run_comb(
     comb_data = list[dict[str, object]]()
 
     for run_number in range(num_runs):
-        run_path = _get_comb_run_path(base_path, run_number)
-
         run_data = _run_benchmark(
+            port,
             bench_cmd,
             serve_overrides=serve_comb,
             bench_overrides=bench_comb,
             run_number=run_number,
-            output_path=run_path,
+            output_path=_get_comb_run_path(base_path, run_number),
             dry_run=dry_run,
         )
-
-        if port is not None:
-            _reset_caches(port)
 
         if run_data is not None:
             comb_data.append(run_data)
@@ -466,19 +467,15 @@ def _run_sla(
     iter_data = list[dict[str, object]]()
 
     for run_number in range(num_runs):
-        run_path = _get_sla_run_path(iter_path, run_number)
-
         run_data = _run_benchmark(
+            port,
             bench_cmd,
             serve_overrides=serve_comb,
             bench_overrides=bench_comb,
             run_number=run_number,
-            output_path=run_path,
+            output_path=_get_sla_run_path(iter_path, run_number),
             dry_run=dry_run,
         )
-
-        if port is not None:
-            _reset_caches(port)
 
         if run_data is not None:
             iter_data.append(run_data)
@@ -492,7 +489,7 @@ def _run_sla(
     return iter_data
 
 
-def _iter_sla(
+def _find_sla_request_rate(
     port: int | None,
     bench_cmd: list[str],
     *,
@@ -502,43 +499,46 @@ def _iter_sla(
     base_path: Path,
     num_runs: int,
     dry_run: bool,
-    init_request_rate: int = 4096,
+    min_request_rate: int,
+    max_request_rate: int,
+    mode: Literal["window_left", "window_right", "binary"] = "binary",
 ):
-    print("[SLA START]")
-    print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
-
     sla_data = list[dict[str, object]]()
 
-    # Binary search
-    request_rate_left: int = 0
-    request_rate_right: int = init_request_rate * 2
+    request_rate_left: int
+    request_rate_right: int
+    if mode == "window_left":
+        request_rate_left = max_request_rate
+        request_rate_right = max_request_rate
+    elif mode == "window_right":
+        request_rate_left = min_request_rate
+        request_rate_right = min_request_rate
+    elif mode == "binary":
+        request_rate_left = min_request_rate
+        request_rate_right = max_request_rate
+    else:
+        assert_never(mode)
 
-    while request_rate_right > request_rate_left:
+    while True:
         request_rate = (request_rate_left + request_rate_right) // 2
-        print(f"Search bounds: [{request_rate_left}, {request_rate_right}] req/s")
         print(f"Testing request rate: {request_rate} req/s")
-
-        iter_path = _get_sla_iter_path(base_path, request_rate)
 
         iter_data = _run_sla(
             port,
             bench_cmd,
             serve_comb=serve_comb,
             bench_comb={**bench_comb, "request_rate": request_rate},
-            iter_path=iter_path,
+            iter_path=_get_sla_iter_path(base_path, request_rate),
             num_runs=num_runs,
             dry_run=dry_run,
         )
-
-        if port is not None:
-            _reset_caches(port)
 
         if iter_data is not None:
             sla_data.extend(iter_data)
 
         if iter_data is None:
             assert dry_run
-            print("Omitting binary search iterations.")
+            print("Omitting SLA search iterations.")
             break
 
         iter_data_mean = {
@@ -552,20 +552,92 @@ def _iter_sla(
         ]
 
         if all(sla_results):
-            if request_rate_right == init_request_rate:
-                print("SLA is satisfied even with unbounded request rate.")
+            print("SLA criteria are met.")
+
+            if mode == "window_left":
                 break
-
-            print("SLA criteria has been met.")
-            request_rate_left = request_rate
+            elif mode == "window_right":
+                request_rate_left = request_rate * 2
+                request_rate_right = request_rate * 2
+            elif mode == "binary":
+                request_rate_left = request_rate
+            else:
+                assert_never(mode)
         else:
-            print("SLA criteria has not been met.")
-            request_rate_right = request_rate
+            print("SLA criteria are not met.")
 
-        # Use `<= 1` because `(odd + even) // 2 == 1`
-        if abs(request_rate_left - request_rate_right) <= 1:
-            print("Binary search has converged.")
-            break
+            if mode == "window_left":
+                request_rate_left = request_rate // 2
+                request_rate_right = request_rate // 2
+            elif mode == "window_right":
+                break
+            elif mode == "binary":
+                request_rate_right = request_rate
+            else:
+                assert_never(mode)
+
+        if mode == "window_left":
+            if request_rate_left == min_request_rate:
+                break
+        elif mode == "window_right":
+            if request_rate_right == max_request_rate:
+                break
+        elif mode == "binary":
+            if request_rate_right - request_rate_left <= 1:
+                break
+        else:
+            assert_never(mode)
+
+    return sla_data, request_rate
+
+
+def _iter_sla(
+    port: int | None,
+    bench_cmd: list[str],
+    *,
+    serve_comb: dict[str, object],
+    bench_comb: dict[str, object],
+    sla_comb: dict[str, SLACriterionBase],
+    sla_init_request_rate: int,
+    sla_inf_request_rate: int = 8192,  # The request rate that represents infinite QPS
+    base_path: Path,
+    num_runs: int,
+    dry_run: bool,
+):
+    print("[SLA START]")
+    print(f"SLA criteria: {', '.join(v.format_cond(k) for k, v in sla_comb.items())}")
+
+    sla_data_0, max_request_rate = _find_sla_request_rate(
+        port,
+        bench_cmd,
+        serve_comb=serve_comb,
+        bench_comb=bench_comb,
+        sla_comb=sla_comb,
+        min_request_rate=sla_init_request_rate,
+        max_request_rate=sla_inf_request_rate,
+        base_path=base_path,
+        num_runs=num_runs,
+        dry_run=dry_run,
+        mode="window_right",
+    )
+    print(f"Maximum request rate to search: {max_request_rate} req/s.")
+
+    sla_data_1, sla_request_rate = _find_sla_request_rate(
+        port,
+        bench_cmd,
+        serve_comb=serve_comb,
+        bench_comb=bench_comb,
+        sla_comb=sla_comb,
+        min_request_rate=0,
+        max_request_rate=max_request_rate,
+        base_path=base_path,
+        num_runs=num_runs,
+        dry_run=dry_run,
+        mode="binary",
+    )
+
+    sla_data = sla_data_0 + sla_data_1
+    print(f"Maximum request rate for SLA: {sla_request_rate} req/s.")
 
     if dry_run:
         print("[SLA END]")
@@ -586,6 +658,7 @@ def run_slas(
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
+    sla_init_request_rate: int,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
@@ -623,6 +696,7 @@ def run_slas(
                         serve_comb=serve_comb,
                         bench_comb=bench_comb,
                         sla_comb=sla_comb,
+                        sla_init_request_rate=sla_init_request_rate,
                         base_path=base_path,
                         num_runs=num_runs,
                         dry_run=dry_run,
@@ -647,6 +721,7 @@ def run_main(
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
+    sla_init_request_rate: int,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
@@ -665,6 +740,7 @@ def run_main(
             serve_params=serve_params,
             bench_params=bench_params,
             sla_params=sla_params,
+            sla_init_request_rate=sla_init_request_rate,
             output_dir=output_dir,
             num_runs=num_runs,
             dry_run=dry_run,
@@ -723,9 +799,16 @@ def main():
         'Each constraint is expressed in `{"<KEY>": "<OP><VALUE>"}` format, '
         'e.g.: `{"p99_e2el_ms": "<=500"}` means that '
         "the E2E latency should be less than 500ms 99% of the time. "
-        "Setting this option runs this script in SLA mode, where the request rate "
-        "is iteratively reduced to satisfy the constraints for each combination "
+        "Setting this option runs this script in SLA mode, which searches for the "
+        "maximum request rate that satisfies the constraints for each combination "
         "of `serve_params`, `bench_params`, and `sla_params`.",
+    )
+    parser.add_argument(
+        "--sla-init-request-rate",
+        type=int,
+        default=512,
+        help="The initial request rate to consider when determining the "
+        "maximum request rate that satisfies the SLA constraints.",
     )
     parser.add_argument(
         "-o",
@@ -782,6 +865,10 @@ def main():
     else:
         sla_params = []
 
+    sla_init_request_rate = args.sla_init_request_rate
+    if sla_init_request_rate < 1:
+        raise ValueError("`sla_init_request_rate` should be at least 1.")
+
     num_runs = args.num_runs
     if num_runs < 1:
         raise ValueError("`num_runs` should be at least 1.")
@@ -792,6 +879,7 @@ def main():
         serve_params=serve_params,
         bench_params=bench_params,
         sla_params=sla_params,
+        sla_init_request_rate=sla_init_request_rate,
         output_dir=Path(args.output_dir),
         num_runs=num_runs,
         dry_run=args.dry_run,
