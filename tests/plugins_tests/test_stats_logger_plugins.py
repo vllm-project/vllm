@@ -34,6 +34,23 @@ def test_no_plugins_loaded_if_env_empty(monkeypatch: pytest.MonkeyPatch):
         assert factories == []
 
 
+def test_invalid_stat_logger_plugin_raises(monkeypatch: pytest.MonkeyPatch):
+    def fake_plugin_loader(group: str):
+        assert group == "vllm.stat_logger_plugins"
+        return {"bad": object()}
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "vllm.v1.metrics.loggers.load_plugins_by_group",
+            fake_plugin_loader,
+        )
+        with pytest.raises(
+            TypeError,
+            match="Stat logger plugin 'bad' must be a subclass of StatLoggerBase",
+        ):
+            load_stat_logger_plugin_factories()
+
+
 @pytest.mark.asyncio
 async def test_stat_logger_plugin_integration_with_engine(
     monkeypatch: pytest.MonkeyPatch,

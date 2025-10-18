@@ -64,12 +64,10 @@ def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
         if not isinstance(plugin_class, type) or not issubclass(
             plugin_class, StatLoggerBase
         ):
-            logger.warning(
-                "Stat logger plugin %s is not a valid subclass "
-                "of StatLoggerBase. Skipping.",
-                name,
+            raise TypeError(
+                f"Stat logger plugin {name!r} must be a subclass of "
+                f"StatLoggerBase (got {plugin_class!r})."
             )
-            continue
 
         factories.append(plugin_class)
 
