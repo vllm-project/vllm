@@ -322,7 +322,6 @@ class EngineCore:
         with self.log_error_detail(scheduler_output):
             model_output = self.model_executor.execute_model(scheduler_output)
 
-        assert isinstance(model_output, ModelRunnerOutput)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -364,7 +363,7 @@ class EngineCore:
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
             future = self.model_executor.execute_model(scheduler_output, non_block=True)
-            batch_queue.appendleft((future, scheduler_output))  # type: ignore[arg-type]
+            batch_queue.appendleft((future, scheduler_output))
 
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
             if (
