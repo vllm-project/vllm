@@ -250,6 +250,7 @@ def flashinfer_cutedsl_moe_masked(
         # m, k_by_2, num_experts = aq.shape
         num_experts, m, k_by_2  = aq.shape
         k = k_by_2 * 2
+        aq = aq.permute(1,2,0)
     else:
         num_experts, m, k = hidden_states.shape
 
@@ -296,9 +297,9 @@ def flashinfer_cutedsl_moe_masked(
 #    )
 
 #    workspace = workspace.permute(1, 2, 0)  # requirement of kernel
-    workspace = torch.empty(
-        (num_experts, m, n * 2), dtype=torch.bfloat16, device=aq.device
-    )
+    # workspace = torch.empty(
+    #     (num_experts, m, n * 2), dtype=torch.bfloat16, device=aq.device
+    # )
     workspace = workspace.permute(1, 2, 0)  # requirement of kernel
     sf_vec_size = 16
     assert aq_sf.dtype == torch.float8_e4m3fn
@@ -331,19 +332,19 @@ def flashinfer_cutedsl_moe_masked(
         masked_m,
         a2_global_scale,
     )
-    return 
+    # return 
     # Gemm2
     out = out.permute(1, 2, 0)  # requirement of kernel
-    # flashinfer_cutedsl_grouped_gemm_nt_masked(
-    #     (diq, diq_sf),
-    #     (w2.permute(1, 2, 0), w2_blockscale),
-    #     out,
-    #     masked_m,
-    #     ab_dtype=ab_dtype,
-    #     sf_dtype=sf_dtype,
-    #     c_dtype=c_dtype,
-    #     sf_vec_size=sf_vec_size,
-    #     alpha=w2_alpha.view(1, 1, num_experts),
-    #     alpha_dtype=get_cute_dtype(w2_alpha),
-    # )  # in logical [m, k, l]
+    flashinfer_cutedsl_grouped_gemm_nt_masked(
+        (diq, diq_sf),
+        (w2.permute(1, 2, 0), w2_blockscale),
+        out,
+        masked_m,
+        ab_dtype=ab_dtype,
+        sf_dtype=sf_dtype,
+        c_dtype=c_dtype,
+        sf_vec_size=sf_vec_size,
+        alpha=w2_alpha.view(1, 1, num_experts),
+        alpha_dtype=get_cute_dtype(w2_alpha),
+    )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)
