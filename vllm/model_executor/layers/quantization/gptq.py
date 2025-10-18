@@ -51,6 +51,7 @@ class GPTQConfig(QuantizationConfig):
         dynamic: dict[str, dict[str, int | bool]],
         autoround_version: str = "",
         modules_in_block_to_quantize: list[str] | None = None,
+        checkpoint_format: str = "",
     ) -> None:
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -88,11 +89,23 @@ class GPTQConfig(QuantizationConfig):
                 "Currently, only 2/3/4/8-bit weight quantization is "
                 f"supported for GPTQ, but got {self.weight_bits} bits."
             )
+        # Somehow gptq_gemm 4-bit is buggy, maybe fix it in the future.
+        # Currently we can disable it since gptq_marlin will be used by default.
+        if self.weight_bits == 4:
+            raise ValueError(
+                "Currently, the 4-bit gptq_gemm kernel for GPTQ is buggy. "
+                "Please switch to gptq_marlin or gptq_bitblas."
+            )
 
         self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
 
         # used to identify GPTQ model quantized by autoround
         self.autoround_version = autoround_version
+
+        # GPTQ v1 and v2 format deals with zero points differently.
+        # Currently GPTQModel stores v1 format checkpoints by default,
+        # but provides the option to set `format="gptq_v2"` in `QuantizeConfig`.
+        self.checkpoint_format = checkpoint_format
 
     def __repr__(self) -> str:
         return (
@@ -101,7 +114,8 @@ class GPTQConfig(QuantizationConfig):
             f"desc_act={self.desc_act}), "
             f"lm_head_quantized={self.lm_head_quantized}, "
             f"dynamic={self.dynamic}, "
-            f"modules_in_block_to_quantize={self.modules_in_block_to_quantize})"
+            f"modules_in_block_to_quantize={self.modules_in_block_to_quantize}), "
+            f"checkpoint_format={self.checkpoint_format})"
         )
 
     @classmethod
@@ -136,6 +150,9 @@ class GPTQConfig(QuantizationConfig):
         modules_in_block_to_quantize = cls.get_from_keys_or(
             config, ["modules_in_block_to_quantize"], default=None
         )
+        checkpoint_format = cls.get_from_keys_or(
+            config, ["checkpoint_format"], default=""
+        )
         return cls(
             weight_bits,
             group_size,
@@ -144,6 +161,7 @@ class GPTQConfig(QuantizationConfig):
             dynamic,
             autoround_version,
             modules_in_block_to_quantize,
+            checkpoint_format,
         )
 
     def get_quant_method(
@@ -153,6 +171,7 @@ class GPTQConfig(QuantizationConfig):
             # GPTQ MoE support: fall back to MoeWNA16 for broad compatibility
             from .moe_wna16 import MoeWNA16Config
 
+            # TODO: maybe update this for GPTQv2 format checkpoints
             config = {
                 "quant_method": "gptq",
                 "bits": self.weight_bits,
@@ -208,6 +227,9 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
+
+        # GPTQ v1 and v2 format deals with zero points differently
+        self.use_v2_format = quant_config.checkpoint_format == "gptq_v2"
 
     def create_weights(
         self,
@@ -350,6 +372,8 @@ class GPTQLinearMethod(LinearMethodBase):
         out_shape = x.shape[:-1] + (layer.qweight.shape[-1],)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
+        # GPTQ v1 and v2 format checkpoints deals with zero points differently,
+        # and require different gemm kernels.
         output = ops.gptq_gemm(
             reshaped_x,
             layer.qweight,
@@ -357,6 +381,7 @@ class GPTQLinearMethod(LinearMethodBase):
             layer.scales,
             layer.g_idx,
             layer.exllama_state == ExllamaState.READY,
+            self.use_v2_format,
             self.quant_config.weight_bits,
         )
         if bias is not None:
