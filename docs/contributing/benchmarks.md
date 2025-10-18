@@ -7,8 +7,8 @@ toc_depth: 4
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
 - **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Performance benchmarks][performance-benchmarks]**: Automated CI benchmarks for development
-- **[Nightly benchmarks][nightly-benchmarks]**: Comparative benchmarks against alternatives
+- **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
+- **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
 [Benchmark CLI]: #benchmark-cli
 
@@ -35,6 +35,7 @@ th {
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
 | RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| RandomForReranking | ✅ | ✅ | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
 | HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
@@ -67,13 +68,13 @@ Legend:
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-First start serving your model
+First start serving your model:
 
 ```bash
 vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 ```
 
-Then run the benchmarking script
+Then run the benchmarking script:
 
 ```bash
 # download dataset
@@ -87,7 +88,7 @@ vllm bench serve \
   --num-prompts 10
 ```
 
-If successful, you will see the following output
+If successful, you will see the following output:
 
 ```text
 ============ Serving Benchmark Result ============
@@ -125,7 +126,7 @@ If the dataset you want to benchmark is not supported yet in vLLM, even then you
 
 ```bash
 # start server
-VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
+vllm serve meta-llama/Llama-3.1-8B-Instruct
 ```
 
 ```bash
@@ -167,7 +168,7 @@ vllm bench serve \
 ##### InstructCoder Benchmark with Speculative Decoding
 
 ``` bash
-VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     --speculative-config $'{"method": "ngram",
     "num_speculative_tokens": 5, "prompt_lookup_max": 5,
     "prompt_lookup_min": 2}'
@@ -184,7 +185,7 @@ vllm bench serve \
 ##### Spec Bench Benchmark with Speculative Decoding
 
 ``` bash
-VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     --speculative-config $'{"method": "ngram",
     "num_speculative_tokens": 5, "prompt_lookup_max": 5,
     "prompt_lookup_min": 2}'
@@ -366,7 +367,6 @@ Total num output tokens:  1280
 
 ``` bash
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
-VLLM_USE_V1=1 \
 vllm bench throughput \
     --dataset-name=hf \
     --dataset-path=likaixin/InstructCoder \
@@ -661,8 +661,7 @@ Benchmark the performance of multi-modal requests in vLLM.
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"image": 1}' \
   --allowed-local-media-path /path/to/sharegpt4v/images
@@ -688,8 +687,7 @@ vllm bench serve \
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"video": 1}' \
   --allowed-local-media-path /path/to/sharegpt4video/videos
@@ -783,7 +781,148 @@ This should be seen as an edge case, and if this behavior can be avoided by sett
 
 </details>
 
-[](){ #performance-benchmarks }
+#### Embedding Benchmark
+
+Benchmark the performance of embedding requests in vLLM.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+##### Text Embeddings
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--backend openai-embeddings` and `--endpoint /v1/embeddings` to use the Embeddings API.
+
+You can use any text dataset to benchmark the model, such as ShareGPT.
+
+Start the server:
+
+```bash
+vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
+```
+
+Run the benchmark:
+
+```bash
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+vllm bench serve \
+  --model jinaai/jina-embeddings-v3 \
+  --backend openai-embeddings \
+  --endpoint /v1/embeddings \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+```
+
+##### Multi-modal Embeddings
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--endpoint /v1/embeddings` to use the Embeddings API. The backend to use depends on the model:
+
+- CLIP: `--backend openai-embeddings-clip`
+- VLM2Vec: `--backend openai-embeddings-vlm2vec`
+
+For other models, please add your own implementation inside [vllm/benchmarks/lib/endpoint_request_func.py](../../vllm/benchmarks/lib/endpoint_request_func.py) to match the expected instruction format.
+
+You can use any text or multi-modal dataset to benchmark the model, as long as the model supports it.
+For example, you can use ShareGPT and VisionArena to benchmark vision-language embeddings.
+
+Serve and benchmark CLIP:
+
+```bash
+# Run this in another process
+vllm serve openai/clip-vit-base-patch32
+
+# Run these one by one after the server is up
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+vllm bench serve \
+  --model openai/clip-vit-base-patch32 \
+  --backend openai-embeddings-clip \
+  --endpoint /v1/embeddings \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+
+vllm bench serve \
+  --model openai/clip-vit-base-patch32 \
+  --backend openai-embeddings-clip \
+  --endpoint /v1/embeddings \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat
+```
+
+Serve and benchmark VLM2Vec:
+
+```bash
+# Run this in another process
+vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
+  --trust-remote-code \
+  --chat-template examples/template_vlm2vec_phi3v.jinja
+
+# Run these one by one after the server is up
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+vllm bench serve \
+  --model TIGER-Lab/VLM2Vec-Full \
+  --backend openai-embeddings-vlm2vec \
+  --endpoint /v1/embeddings \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+
+vllm bench serve \
+  --model TIGER-Lab/VLM2Vec-Full \
+  --backend openai-embeddings-vlm2vec \
+  --endpoint /v1/embeddings \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat
+```
+
+</details>
+
+#### Reranker Benchmark
+
+Benchmark the performance of rerank requests in vLLM.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--backend vllm-rerank` and `--endpoint /v1/rerank` to use the Reranker API.
+
+For reranking, the only supported dataset is `--dataset-name random-rerank`
+
+Start the server:
+
+```bash
+vllm serve BAAI/bge-reranker-v2-m3
+```
+
+Run the benchmark:
+
+```bash
+vllm bench serve \
+  --model BAAI/bge-reranker-v2-m3 \
+  --backend vllm-rerank \
+  --endpoint /v1/rerank \
+  --dataset-name random-rerank \
+  --tokenizer BAAI/bge-reranker-v2-m3 \
+  --random-input-len 512 \
+  --num-prompts 10 \
+  --random-batch-size 5
+```
+
+For reranker models, this will create `num_prompts / random_batch_size` requests with
+`random_batch_size` "documents" where each one has close to `random_input_len` tokens.
+In the example above, this results in 2 rerank requests with 5 "documents" each where
+each document has close to 512 tokens.
+
+Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
+with an embedding model, also set `--no_reranker`. Because in this case the query is
+treated as a individual prompt by the server, here we send `random_batch_size - 1` documents
+to account for the extra prompt which is the query. The token accounting to report the
+throughput numbers correctly is also adjusted.
+
+</details>
 
 ## Performance Benchmarks
 
@@ -821,7 +960,7 @@ For more results visualization, check the [visualizing the results](https://gith
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
 
 ### Continuous Benchmarking
 
@@ -847,12 +986,10 @@ The benchmarking currently runs on a predefined set of models configured in the 
 
 All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-[](){ #nightly-benchmarks }
-
 ## Nightly Benchmarks
 
 These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lmdeploy`) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the `perf-benchmarks` and `nightly-benchmarks` labels.
 
 The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
 
-More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).
+More information on the nightly benchmarks and their parameters can be found [here](../../.buildkite/nightly-benchmarks/nightly-descriptions.md).

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
@@ -19,25 +18,27 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.lightning_attn import (
-    lightning_attention, linear_decode_forward_triton)
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+    lightning_attention,
+    linear_decode_forward_triton,
+)
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator, MambaStateShapeCalculator)
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
-
-import torch
-import torch.distributed
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
@@ -47,8 +48,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(int(hidden_size /
-                                                  self.tp_world)))
+        self.weight = nn.Parameter(torch.ones(int(hidden_size / self.tp_world)))
 
         self.weight.weight_loader = self.weight_loader
         self.variance_epsilon = eps
@@ -75,8 +75,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         x = x.to(torch.float32)
         variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
         if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(
-                variance) / self.tp_world
+            variance = tensor_model_parallel_all_reduce(variance) / self.tp_world
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = x.to(orig_dtype) * self.weight
         return x
@@ -84,24 +83,24 @@ class MiniMaxText01RMSNormTP(CustomOp):
     def forward(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert residual is None, "RMSNorm does not support residual connection."
         return self._forward(x)
 
 
 class MiniMaxText01LinearKernel:
-
     @staticmethod
-    def jit_linear_forward_prefix(q: torch.Tensor,
-                                  k: torch.Tensor,
-                                  v: torch.Tensor,
-                                  kv_caches: torch.Tensor,
-                                  slope_rate: torch.Tensor,
-                                  block_size: int,
-                                  layer_idx: Optional[int] = None,
-                                  **kwargs) -> torch.Tensor:
-
+    def jit_linear_forward_prefix(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        kv_caches: torch.Tensor,
+        slope_rate: torch.Tensor,
+        block_size: int,
+        layer_idx: int | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
         slope_rate = slope_rate.to(torch.float32)
         should_pad_dim = q.dim() == 3
         if should_pad_dim:
@@ -111,26 +110,22 @@ class MiniMaxText01LinearKernel:
         b, h, n, d = q.shape
         e = d
         kv_history = kv_caches.reshape(1, h, d, e).contiguous()
-        output, kv_history = lightning_attention(q,
-                                                 k,
-                                                 v,
-                                                 slope_rate,
-                                                 block_size=block_size,
-                                                 kv_history=kv_history)
+        output, kv_history = lightning_attention(
+            q, k, v, slope_rate, block_size=block_size, kv_history=kv_history
+        )
         kv_caches.copy_(kv_history[:, :, -1, :, :].reshape(h, d, e))
         assert output.shape[0] == 1, "batch size must be 1"
         return rearrange(output.squeeze(0), "h n d -> n (h d)")
 
 
 class MiniMaxText01LinearAttention(nn.Module, MambaBase):
-
     @property
     def mamba_type(self) -> str:
         return "linear_attention"
 
     def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.linear_attn import (
-            LinearAttentionBackend)
+        from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
+
         return LinearAttentionBackend
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
@@ -143,9 +138,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
     def get_state_shape(self) -> tuple[tuple[int, int, int], ...]:
         return MambaStateShapeCalculator.linear_attention_state_shape(
-            num_heads=self.num_heads,
-            tp_size=self.tp_size,
-            head_dim=self.head_dim)
+            num_heads=self.num_heads, tp_size=self.tp_size, head_dim=self.head_dim
+        )
 
     def __init__(
         self,
@@ -156,9 +150,9 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         max_position: int,
         block_size: int,
         num_hidden_layer: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         layer_idx: int = 0,
         linear_layer_idx: int = 0,
         prefix: str = "linear_attn",
@@ -209,16 +203,16 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             eps=1e-5,
         )
 
-        slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(
-            self.num_heads)
+        slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(self.num_heads)
         if num_hidden_layer <= 1:
             self.slope_rate = slope_rate * (1 + 1e-5)
         else:
-            self.slope_rate = slope_rate * (1 - layer_idx /
-                                            (num_hidden_layer - 1) + 1e-5)
-        self.tp_slope = self.slope_rate[self.tp_rank *
-                                        self.tp_heads:(self.tp_rank + 1) *
-                                        self.tp_heads].contiguous()
+            self.slope_rate = slope_rate * (
+                1 - layer_idx / (num_hidden_layer - 1) + 1e-5
+            )
+        self.tp_slope = self.slope_rate[
+            self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
+        ].contiguous()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -226,36 +220,36 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         compilation_config.static_forward_context[prefix] = self
 
     @staticmethod
-    def weight_direct_load(param: torch.Tensor,
-                           loaded_weight: torch.Tensor) -> None:
+    def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight)
         return
 
     @staticmethod
     def _build_slope_tensor(n_attention_heads: int):
-
         def get_slopes(n):
-
             def get_slopes_power_of_2(n):
-                start = 2**(-(2**-(math.log2(n) - 3)))
+                start = 2 ** (-(2 ** -(math.log2(n) - 3)))
                 ratio = start
                 return [start * ratio**i for i in range(n)]
 
             if math.log2(n).is_integer():
                 return get_slopes_power_of_2(n)
             else:
-                closest_power_of_2 = 2**math.floor(math.log2(n))
-                return (get_slopes_power_of_2(closest_power_of_2) + get_slopes(
-                    2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
+                closest_power_of_2 = 2 ** math.floor(math.log2(n))
+                return (
+                    get_slopes_power_of_2(closest_power_of_2)
+                    + get_slopes(2 * closest_power_of_2)[0::2][: n - closest_power_of_2]
+                )
 
-        slopes = torch.tensor(get_slopes(n_attention_heads),
-                              dtype=torch.float32).reshape(
-                                  n_attention_heads, 1, 1)
+        slopes = torch.tensor(
+            get_slopes(n_attention_heads), dtype=torch.float32
+        ).reshape(n_attention_heads, 1, 1)
         return slopes
 
-    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
-                               attn_metadata):
+    def _prefill_and_mix_infer(
+        self, q, k, v, kv_cache, state_indices_tensor, attn_metadata
+    ):
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
             if _prefill_idx >= len(attn_metadata.query_start_loc):
@@ -278,12 +272,13 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                 slice_layer_cache,
                 self.tp_slope,
                 self.BLOCK,
-                layer_idx=self.layer_idx)
+                layer_idx=self.layer_idx,
+            )
             hidden.append(out_slice.contiguous())
         if attn_metadata.num_decode_tokens > 0:
-            hidden_decode = self._decode_infer(q, k, v, kv_cache,
-                                               state_indices_tensor,
-                                               attn_metadata)
+            hidden_decode = self._decode_infer(
+                q, k, v, kv_cache, state_indices_tensor, attn_metadata
+            )
             hidden.insert(0, hidden_decode)
 
         if not hidden:
@@ -292,18 +287,19 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
-    def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
-                      attn_metadata):
-        q = q[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        k = k[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        v = v[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[:attn_metadata.num_decodes]
-        hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
-                                              slot_id, 32)
+    def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
+        q = q[: attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+        k = k[: attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+        v = v[: attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+        slot_id = state_indices_tensor[: attn_metadata.num_decodes]
+        hidden = linear_decode_forward_triton(
+            q, k, v, kv_cache, self.tp_slope, slot_id, 32
+        )
         return hidden
 
-    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
-                positions: torch.Tensor) -> None:
+    def forward(
+        self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
+    ) -> None:
         torch.ops.vllm.linear_attention(
             hidden_states,
             output,
@@ -311,16 +307,18 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             self.prefix,
         )
 
-    def _forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
-                 positions: torch.Tensor) -> None:
+    def _forward(
+        self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
+    ) -> None:
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, LinearAttentionMetadata)
-            num_actual_tokens = attn_metadata.num_prefill_tokens + \
-                attn_metadata.num_decode_tokens
+            num_actual_tokens = (
+                attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
+            )
         else:
             num_actual_tokens = hidden_states.shape[0]
 
@@ -335,35 +333,39 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
             num_prefills = getattr(attn_metadata, "num_prefills", 0)
             if num_prefills > 0:
-                num_decode_tokens = getattr(attn_metadata, "num_decode_tokens",
-                                            0)
+                num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
                 for prefill_idx in range(num_prefills):
-                    q_start = attn_metadata.query_start_loc[num_decode_tokens +
-                                                            prefill_idx]
-                    q_end = attn_metadata.query_start_loc[num_decode_tokens +
-                                                          prefill_idx + 1]
+                    q_start = attn_metadata.query_start_loc[
+                        num_decode_tokens + prefill_idx
+                    ]
+                    q_end = attn_metadata.query_start_loc[
+                        num_decode_tokens + prefill_idx + 1
+                    ]
                     query_len = q_end - q_start
-                    context_len = attn_metadata.seq_lens[
-                        num_decode_tokens + prefill_idx] - query_len
+                    context_len = (
+                        attn_metadata.seq_lens[num_decode_tokens + prefill_idx]
+                        - query_len
+                    )
                     if context_len == 0:
-                        block_to_clear = state_indices_tensor[num_decode_tokens
-                                                              + prefill_idx]
+                        block_to_clear = state_indices_tensor[
+                            num_decode_tokens + prefill_idx
+                        ]
                         kv_cache[block_to_clear, ...] = 0
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
         if attn_metadata is None:
-            hidden = torch.empty((q.shape[0], q.shape[1] * q.shape[2]),
-                                 device=q.device,
-                                 dtype=q.dtype)
+            hidden = torch.empty(
+                (q.shape[0], q.shape[1] * q.shape[2]), device=q.device, dtype=q.dtype
+            )
         else:
             if not decode_only:
-                hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
-                                                     state_indices_tensor,
-                                                     attn_metadata)
+                hidden = self._prefill_and_mix_infer(
+                    q, k, v, kv_cache, state_indices_tensor, attn_metadata
+                )
             else:
-                hidden = self._decode_infer(q, k, v, kv_cache,
-                                            state_indices_tensor,
-                                            attn_metadata)
+                hidden = self._decode_infer(
+                    q, k, v, kv_cache, state_indices_tensor, attn_metadata
+                )
         hidden = self.norm._forward(hidden)
         gate, _ = self.output_gate(hidden_states[:num_actual_tokens])
         hidden = F.sigmoid(gate) * hidden
@@ -380,9 +382,7 @@ def linear_attention(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._forward(hidden_states=hidden_states,
-                  output=output,
-                  positions=positions)
+    self._forward(hidden_states=hidden_states, output=output, positions=positions)
 
 
 def linear_attention_fake(
