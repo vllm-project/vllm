@@ -59,6 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
+    MixtureOfExperts,
     SupportsLoRA,
     SupportsPP,
     SupportsQuant,
@@ -694,7 +695,13 @@ class NemotronHModel(nn.Module):
 
 
 class NemotronHForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    MixtureOfExperts,
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
@@ -797,7 +804,7 @@ class NemotronHForCausalLM(
             self.expert_weights = []
             self.num_expert_groups = config.n_group
 
-            self.moe_layers: list[FusedMoE] = []
+            self.moe_layers: list[SharedFusedMoE] = []
             example_moe = None
             for layer in self.model.layers:
                 if isinstance(layer, NemotronHMoEDecoderLayer):
@@ -806,13 +813,13 @@ class NemotronHForCausalLM(
                     example_moe = layer.mixer
                     self.moe_layers.append(layer.mixer.experts)
 
+            self.num_moe_layers = len(self.moe_layers)
             self.num_logical_experts = example_moe.n_logical_experts
             self.num_physical_experts = example_moe.n_physical_experts
             self.num_local_physical_experts = example_moe.n_local_physical_experts  # noqa: E501
             self.num_routed_experts = example_moe.n_routed_experts
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
-            self.model.num_redundant_experts = self.num_redundant_experts
 
     def set_eplb_state(
         self,
@@ -839,7 +846,6 @@ class NemotronHForCausalLM(
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        self.model.num_redundant_experts = self.num_redundant_experts
         for layer in self.model.layers:
             if isinstance(layer, NemotronHMoEDecoderLayer):
                 moe = layer.mixer
