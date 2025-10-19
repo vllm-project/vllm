@@ -167,11 +167,11 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     //     smem_bc[state_idx] = B[state_idx * params.B_dstate_stride] * C[state_idx * params.C_dstate_stride];
     // }
 
-    constexpr int kChunkSize = kNThreads * kNItems;
+    const int kChunkSize = params.cache_enabled ? params.block_size : kNThreads * kNItems;
 
     // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
-    const int chunk_size = (params.cache_enabled && params.block_size > 0) ? params.block_size : 2048;
-    const int n_chunks = (seqlen + chunk_size - 1) / chunk_size;
+    const int iteration_chunk_size = params.cache_enabled ? params.block_size : 2048;
+    const int n_chunks = (seqlen + iteration_chunk_size - 1) / iteration_chunk_size;
 
     const int* batch_cache_indices = cache_indices != nullptr ?
                                      cache_indices + batch_id * params.cache_indices_stride : nullptr;
@@ -193,12 +193,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, seqlen - chunk * chunk_size);
+            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, seqlen - chunk * kChunkSize);
             if constexpr (!kDirectIO) { __syncthreads(); }
-            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, seqlen - chunk * chunk_size);
+            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, seqlen - chunk * kChunkSize);
         }
-        u += chunk_size;
-        delta += chunk_size;
+        u += kChunkSize;
+        delta += kChunkSize;
     
         float delta_vals[kNRows][kNItems], delta_u_vals[kNRows][kNItems], out_vals[kNRows][kNItems];
         #pragma unroll
@@ -232,7 +232,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             weight_t B_vals[kNItems], C_vals[kNItems];
             if constexpr (kIsVariableB) {
                 load_weight<Ktraits>(Bvar + state_idx * params.B_dstate_stride, B_vals,
-                    smem_load_weight, (seqlen - chunk * chunk_size) * (1));
+                    smem_load_weight, (seqlen - chunk * kChunkSize) * (1));
                 if constexpr (!kIsVariableC) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -243,7 +243,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (kIsVariableC) {
                 auto &smem_load_weight_C = !kIsVariableB ? smem_load_weight : smem_load_weight1;
                 load_weight<Ktraits>(Cvar + state_idx * params.C_dstate_stride, C_vals,
-                    smem_load_weight_C, (seqlen - chunk * chunk_size) * (1));
+                    smem_load_weight_C, (seqlen - chunk * kChunkSize) * (1));
                 if constexpr (!kIsVariableB) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -268,7 +268,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                                  !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
 
                     if (seqlen % (kNItems * kNThreads) != 0) {  // So that the last state is correct
-                        if (threadIdx.x * kNItems + i >= seqlen - chunk * chunk_size) {
+                        if (threadIdx.x * kNItems + i >= seqlen - chunk * kChunkSize) {
                             thread_data[i] = make_float2(1.f, 0.f);
                         }
                     }
@@ -333,38 +333,38 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
 
         input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
-            + dim_id * kNRows * params.out_d_stride + chunk * chunk_size;
+            + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
         __syncthreads();
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, seqlen - chunk * chunk_size);
+            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
         }
 
         if constexpr (kHasZ) {
             input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + sequence_start_index * params.z_batch_stride
-                + dim_id * kNRows * params.z_d_stride + chunk * chunk_size;
+                + dim_id * kNRows * params.z_d_stride + chunk * kChunkSize;
             input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + sequence_start_index * params.out_z_batch_stride
-                + dim_id * kNRows * params.out_z_d_stride + chunk * chunk_size;
+                + dim_id * kNRows * params.out_z_d_stride + chunk * kChunkSize;
             #pragma unroll
             for (int r = 0; r < kNRows; ++r) {
                 input_t z_vals[kNItems];
                 __syncthreads();
-                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, seqlen - chunk * chunk_size);
+                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, seqlen - chunk * kChunkSize);
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     float z_val = z_vals[i];
                     out_vals[r][i] *= z_val / (1 + expf(-z_val));
                 }
                 __syncthreads();
-                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, seqlen - chunk * chunk_size);
+                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
             }
         }
 
-        Bvar += chunk_size * 1;
-        Cvar += chunk_size * 1;
+        Bvar += kChunkSize * 1;
+        Cvar += kChunkSize * 1;
     }
 }
 
