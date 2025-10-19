@@ -181,7 +181,7 @@ class LoggingStatLogger(StatLoggerBase):
             self.prefix_caching_metrics.hit_rate * 100,
         ]
         if not self.connector_prefix_caching_metrics.empty:
-            log_parts.append("KV Connector prefix cache hit rate: %.1f%%")
+            log_parts.append("External prefix cache hit rate: %.1f%%")
             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
@@ -449,13 +449,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         #
-        # KV connector cache
+        # External - KV connector prefix cache
         #
+
         counter_connector_prefix_cache_queries = self._counter_cls(
-            name="vllm:connector_prefix_cache_queries",
+            name="vllm:external_prefix_cache_queries",
             documentation=(
-                "KV connector prefix cache queries, "
-                "in terms of number of queried tokens."
+                "External prefix cache queries from KV connector "
+                "cross-instance cache sharing, in terms of number of queried tokens."
             ),
             labelnames=labelnames,
         )
@@ -464,9 +465,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         counter_connector_prefix_cache_hits = self._counter_cls(
-            name="vllm:connector_prefix_cache_hits",
+            name="vllm:external_prefix_cache_hits",
             documentation=(
-                "KV connector prefix cache hits, in terms of number of cached tokens."
+                "External prefix cache hits from KV connector "
+                "cross-instance cache sharing, in terms of number of cached tokens."
             ),
             labelnames=labelnames,
         )
