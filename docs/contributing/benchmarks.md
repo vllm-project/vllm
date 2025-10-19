@@ -1057,7 +1057,7 @@ The algorithm for adjusting the SLA variable is as follows:
 
 1. Run the benchmark with infinite QPS, and use the corresponding metrics to determine the initial value of the variable.
     - For example, the initial request rate is set to the concurrency under infinite QPS.
-2. Keep doubling the value until the SLA is no longer satisfied. This gives a relatively narrow window that contains the point where the SLA is barely satisfied.
+2. If the SLA is still satisfied, keep doubling the value until the SLA is no longer satisfied. This gives a relatively narrow window that contains the point where the SLA is barely satisfied.
 3. Apply binary search over the window to find the maximum value that still satisfies the SLA.
 
 !!! important

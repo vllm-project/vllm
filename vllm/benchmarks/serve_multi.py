@@ -595,11 +595,11 @@ def _estimate_sla_bounds(
     sla_variable: SLAVariable,
     init_value: int,
     max_value: int,
-    gamma: float = 2.0,
 ):
     sla_data = list[dict[str, object]]()
 
-    assert init_value >= 1 and gamma > 1
+    max_passing: int = 0
+    min_failing: int = 0
 
     val: int = init_value
 
@@ -631,15 +631,17 @@ def _estimate_sla_bounds(
 
         if all(sla_results):
             print("SLA criteria are met.")
-            val = 2 if val == 1 else math.ceil(val**gamma)
+            max_passing = val
+            val = 2 if val <= 1 else val * 2
         else:
             print("SLA criteria are not met.")
+            min_failing = val
             break
 
         if val >= max_value:
             break
 
-    return sla_data, (int(val ** (1 / gamma)), val)
+    return sla_data, (min_failing, max_passing)
 
 
 def _find_sla_value(
