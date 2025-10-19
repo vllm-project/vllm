@@ -1021,7 +1021,7 @@ def main():
         "--bench-cmd",
         type=str,
         required=True,
-        help="The command used to run the benchmark: `vllm bench serve...`",
+        help="The command used to run the benchmark: `vllm bench serve ...`",
     )
     parser.add_argument(
         "--after-bench-cmd",
