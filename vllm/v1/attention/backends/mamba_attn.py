@@ -7,6 +7,7 @@ from typing import ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -38,11 +39,35 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.vllm_config.scheduler_config.max_num_seqs,
             self.compilation_config.max_capture_size,
         )
-        self.state_indices_tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.int32,
-            device=device,
-        )
+
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            self.state_indices_tensor = torch.empty(
+                (
+                    self.decode_cudagraph_max_bs,
+                    cdiv(
+                        self.vllm_config.model_config.max_model_len,
+                        self.kv_cache_spec.block_size,
+                    ),
+                ),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_last_scheduled_token = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_last_computed_token = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            self.state_indices_tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata

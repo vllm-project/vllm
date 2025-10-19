@@ -53,27 +53,6 @@ class Mamba1AttentionMetadataBuilder(
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         assert isinstance(kv_cache_spec, MambaSpec)
-        if self.vllm_config.cache_config.enable_prefix_caching:
-            self.state_indices_tensor = torch.empty(
-                (
-                    self.decode_cudagraph_max_bs,
-                    cdiv(
-                        vllm_config.model_config.max_model_len, kv_cache_spec.block_size
-                    ),
-                ),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_scheduled_token = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_computed_token = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
 
     def build(
         self,
