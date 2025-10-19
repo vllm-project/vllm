@@ -423,7 +423,7 @@ class Qwen2VisionAttention(nn.Module):
         q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
 
-        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
+        q, k, v = (rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
         if rotary_pos_emb is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)

@@ -10,7 +10,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
