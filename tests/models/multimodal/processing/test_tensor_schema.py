@@ -4,12 +4,13 @@ import tempfile
 from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import partial
-from typing import Any, Union
+from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
 import torch.nn as nn
-from mistral_common.protocol.instruct.messages import ImageChunk, TextChunk, UserMessage
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
@@ -25,7 +26,6 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     supports_multimodal,
@@ -34,7 +34,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils import is_list_of
+from vllm.utils.collections import is_list_of
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
@@ -47,22 +48,21 @@ ARCH_NEEDS_EXTRAS = [
     "Idefics3ForConditionalGeneration",
     "LlavaForConditionalGeneration",
     "MiniCPMV",
-    "PaliGemmaForConditionalGeneration",
 ]
 REPO_ID_TO_SKIP = {
     "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
 }
 
 ImageInput = list[Image.Image]
-VideoInput = Union[
-    list[Image.Image], list[np.ndarray], list[tuple[np.ndarray, dict[str, Any]]]
-]
+VideoInput: TypeAlias = (
+    list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
+)
 AudioInput = list[tuple[np.ndarray, int]]
 
 
 def _resize_data(
-    _data: Union[Image.Image, np.ndarray], size_factor: float
-) -> Union[Image.Image, np.ndarray]:
+    _data: Image.Image | np.ndarray, size_factor: float
+) -> Image.Image | np.ndarray:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
@@ -87,8 +87,8 @@ def _resize_data(
 
 
 def resize_mm_data(
-    data: Union[ImageInput, VideoInput, AudioInput], size_factors: tuple[float, ...]
-) -> Union[ImageInput, VideoInput, AudioInput]:
+    data: ImageInput | VideoInput | AudioInput, size_factors: tuple[float, ...]
+) -> ImageInput | VideoInput | AudioInput:
     size_factors = size_factors[: len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]

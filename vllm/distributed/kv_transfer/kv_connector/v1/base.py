@@ -14,11 +14,12 @@ The class provides the following primitives:
             temporary buffer alloc by the CacheManager.
         update_connector_output() - update KVConnector state after
             output is received from worker-side connectors.
-        request_finished() - called when a request is finished, with
-            the computed kv cache blocks for the request.
-            Returns whether KV cache should be freed now or will be
-            freed asynchronously and optionally returns KV transfer
-            params.
+        request_finished() - called once when a request is finished,
+            with the computed kv cache blocks for the request.
+            Returns whether KV cache should be freed now or if the
+            connector now assumes responsibility for freeing the
+            the blocks asynchronously. Also optionally returns KV
+            transfer params.
         take_events() - returns new KV events that were collected
             by the connector since the last call.
 
@@ -36,8 +37,8 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 
@@ -92,8 +93,12 @@ class KVConnectorBase_V1(ABC):
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design."
         )
-        self._connector_metadata: Optional[KVConnectorMetadata] = None
+        self._connector_metadata: KVConnectorMetadata | None = None
         self._vllm_config = vllm_config
+        if vllm_config.kv_transfer_config is not None:
+            self._kv_transfer_config = vllm_config.kv_transfer_config
+        else:
+            raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._role = role
 
     @property
@@ -221,7 +226,7 @@ class KVConnectorBase_V1(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -280,7 +285,7 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -360,9 +365,13 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
-        Called when a request has finished, before its blocks are freed.
+        Called exactly once when a request has finished, before its blocks are
+        freed.
+
+        The connector may assumes responsibility for freeing the the blocks
+        asynchronously by returning True.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -383,7 +392,7 @@ class KVConnectorBase_V1(ABC):
         return ()
 
     @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> Optional[str]:
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """
         Get the required KV cache layout for this connector.
         Args:
@@ -401,7 +410,7 @@ class KVConnectorBase_V1(ABC):
             )
         return None
 
-    def get_finished_count(self) -> Optional[int]:
+    def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations
         via this connector.
@@ -414,7 +423,7 @@ class KVConnectorBase_V1(ABC):
 
     @classmethod
     def build_kv_connector_stats(
-        cls, data: Optional[dict[str, Any]] = None
+        cls, data: dict[str, Any] | None = None
     ) -> Optional["KVConnectorStats"]:
         """
         KVConnectorStats resolution method. This method allows dynamically

@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampler layer implementing TPU supported operations."""
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
@@ -42,7 +40,11 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         temp: torch.Tensor,
+        all_random: bool = False,
     ) -> torch.Tensor:
+        # Avoid division by zero for greedy sampling (temperature ~ 0.0).
+        if not all_random:
+            temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
         return logits.div_(temp.unsqueeze(dim=1))
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
@@ -58,7 +60,9 @@ class Sampler(nn.Module):
         assert sampling_metadata.temperature is not None
 
         # Apply temperature.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        logits = self.apply_temperature(
+            logits, sampling_metadata.temperature, sampling_metadata.all_random
+        )
 
         # Apply min_p.
         if sampling_metadata.min_p is not None:
@@ -166,8 +170,8 @@ class Sampler(nn.Module):
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     Apply top-k and top-p optimized for TPU.

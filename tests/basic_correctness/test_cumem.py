@@ -6,7 +6,7 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 
 from ..utils import create_new_process_for_each_test
 
@@ -117,73 +117,64 @@ def test_cumem_with_cudagraph():
 
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
-    "model, use_v1",
+    "model",
     [
         # sleep mode with safetensors
-        ("meta-llama/Llama-3.2-1B", True),
+        "hmellor/tiny-random-LlamaForCausalLM",
         # sleep mode with pytorch checkpoint
-        ("facebook/opt-125m", True),
+        "facebook/opt-125m",
     ],
 )
-def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
-    with monkeypatch.context() as m:
-        assert use_v1
-        m.setenv("VLLM_USE_V1", "1")
-        free, total = torch.cuda.mem_get_info()
-        used_bytes_baseline = total - free  # in case other process is running
-        llm = LLM(model, enable_sleep_mode=True)
-        prompt = "How are you?"
-        sampling_params = SamplingParams(temperature=0, max_tokens=10)
-        output = llm.generate(prompt, sampling_params)
+def test_end_to_end(model: str):
+    free, total = torch.cuda.mem_get_info()
+    used_bytes_baseline = total - free  # in case other process is running
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
 
-        # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
-        # which is difficult to measure in the test. therefore, we only
-        # test sleep level 1 here.
-        llm.sleep(level=1)
+    # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
+    # which is difficult to measure in the test. therefore, we only
+    # test sleep level 1 here.
+    llm.sleep(level=1)
 
-        free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
-        used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
-        # now the memory usage is mostly cudagraph memory pool,
-        # and it should be less than the model weights (1B model, 2GiB weights)
+    free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
+    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+    # now the memory usage is mostly cudagraph memory pool,
+    # and it should be less than the model weights (1B model, 2GiB weights)
 
-        # NOTE: In V1, the memory buffer for logits (max_num_reqs x vocab_size)
-        # is captured but cannot be releasesd from PyTorch due to a known bug,
-        # therefore high memory usage after `llm.sleep` is called is expected.
-        # FIXME(youkaichao & ywang96): Fix memory buffer issue with sleep mode
-        # in V1.
-        if use_v1:
-            assert used_bytes < 7 * GiB_bytes
-        else:
-            assert used_bytes < 2 * GiB_bytes
+    # NOTE: In V1, the memory buffer for logits (max_num_reqs x vocab_size)
+    # is captured but cannot be releasesd from PyTorch due to a known bug,
+    # therefore high memory usage after `llm.sleep` is called is expected.
+    # FIXME(youkaichao & ywang96): Fix memory buffer issue with sleep mode
+    # in V1.
+    assert used_bytes < 7 * GiB_bytes
 
-        llm.wake_up()
-        output2 = llm.generate(prompt, sampling_params)
-        # cmp output
-        assert output[0].outputs[0].text == output2[0].outputs[0].text
+    llm.wake_up()
+    output2 = llm.generate(prompt, sampling_params)
+    # cmp output
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
 
-        llm.sleep(level=1)
-        llm.wake_up(tags=["weights"])
+    llm.sleep(level=1)
+    llm.wake_up(tags=["weights"])
 
-        free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
-        used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
+    free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
+    used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
 
-        # should just reallocate memory for weights (1B model, ~2GiB weights)
-        if use_v1:
-            assert used_bytes < 10 * GiB_bytes
-        else:
-            assert used_bytes < 6 * GiB_bytes
+    # should just reallocate memory for weights (1B model, ~2GiB weights)
+    assert used_bytes < 10 * GiB_bytes
 
-        # now allocate kv cache memory
-        llm.wake_up(tags=["kv_cache"])
-        output3 = llm.generate(prompt, sampling_params)
+    # now allocate kv cache memory
+    llm.wake_up(tags=["kv_cache"])
+    output3 = llm.generate(prompt, sampling_params)
 
-        # cmp output
-        assert output[0].outputs[0].text == output3[0].outputs[0].text
+    # cmp output
+    assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
 @create_new_process_for_each_test()
 def test_deep_sleep():
-    model = "Qwen/Qwen3-0.6B"
+    model = "hmellor/tiny-random-LlamaForCausalLM"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM(model, enable_sleep_mode=True)

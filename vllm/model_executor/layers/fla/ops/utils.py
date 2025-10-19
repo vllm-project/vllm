@@ -11,8 +11,9 @@ import contextlib
 import functools
 import logging
 import os
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import torch
 
@@ -43,8 +44,8 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
             A wrapped version of the input function with single-entry caching.
     """
 
-    cache_entries: tuple[Optional[tuple], Optional[dict], Any] = []
-    cache_size = 4
+    cache_entries: tuple[tuple | None, dict | None, Any] = []
+    cache_size = 8
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:

@@ -4,15 +4,17 @@
 
 import copy
 import os
-from collections import defaultdict, deque
-from collections.abc import Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NewType, Optional, Union
+from typing import Any, NewType, TypeAlias
 
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256_cbor
+from vllm.utils import cdiv
+from vllm.utils.hashing import sha256_cbor
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -23,29 +25,28 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 # BlockHash represents the hash of a single KV-cache block used for
-# prefix caching.  Treating it as a distinct type from ``bytes`` helps
+# prefix caching.  Treating it as a distinct type from `bytes` helps
 # catch accidental misuse when passing around raw byte strings.
 BlockHash = NewType("BlockHash", bytes)
 
-# ``BlockHashWithGroupId`` combines a ``BlockHash`` with its KV cache group ID.
+# `BlockHashWithGroupId` combines a `BlockHash` with its KV cache group ID.
 # It is represented as raw bytes for compactness and efficiency. The helper
-# functions below pack/unpack the ``BlockHash`` and group id into/from the key.
+# functions below pack/unpack the `BlockHash` and group id into/from the key.
 BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 
 # ExternalBlockHash is used for reproducible prefix-cache block hashing.
-# It's a union of ``bytes`` and ``int`` to keep backward compatibility
+# It's a union of `bytes` and `int` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
-ExternalBlockHash = Union[bytes, int]
+ExternalBlockHash: TypeAlias = bytes | int
 
 
 def make_block_hash_with_group_id(
     block_hash: BlockHash, group_id: int
 ) -> BlockHashWithGroupId:
-    """Pack a ``BlockHash`` and group id into a ``BlockHashWithGroupId``.
+    """Pack a `BlockHash` and group id into a `BlockHashWithGroupId`.
 
     The group id is encoded using 4 bytes in big-endian order and appended to
     the block hash bytes.  This representation avoids creating tuples while
@@ -55,12 +56,12 @@ def make_block_hash_with_group_id(
 
 
 def get_block_hash(key: BlockHashWithGroupId) -> BlockHash:
-    """Extract the ``BlockHash`` from a ``BlockHashWithGroupId``."""
+    """Extract the `BlockHash` from a `BlockHashWithGroupId`."""
     return BlockHash(key[:-4])
 
 
 def get_group_id(key: BlockHashWithGroupId) -> int:
-    """Extract the group id from a ``BlockHashWithGroupId``."""
+    """Extract the group id from a `BlockHashWithGroupId`."""
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
@@ -101,78 +102,6 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
-class PrefixCachingMetrics:
-    """Metrics for prefix caching with a hit rate of the max recent N requests.
-
-    Args:
-        max_recent_requests: The number of the max recent requests to aggregate.
-            Defaults to 1000.
-    """
-
-    def __init__(self, max_recent_requests: int = 1000):
-        self.max_recent_requests = max_recent_requests
-        # The current aggregated values.
-        self.aggregated_requests = 0
-        self.aggregated_query_total = 0
-        self.aggregated_query_hit = 0
-        # A deque of (requests, queries, hits) for the most recent requests.
-        self.query_queue: deque[tuple[int, int, int]] = deque()
-
-    def observe(self, stats: PrefixCacheStats):
-        """Observe the prefix caching for a set of requests.
-
-        This function is called with information gathered when new requests
-        are being scheduled and are looking for computed blocks.
-
-        When there are more than `max_recent_requests` requests, the oldest set
-        of requests are removed from the metrics.
-
-        Args:
-            stats: The prefix cache stats.
-        """
-        # reset_prefix_cache was invoked before the current update.
-        # Reset the metrics before aggregating the current stats.
-        if stats.reset:
-            self.reset()
-
-        # DO NOT appending empty stats to avoid helpful info get kicked out
-        # due to sliding window.
-        if stats.requests == 0:
-            return
-
-        # Update the metrics.
-        self.query_queue.append((stats.requests, stats.queries, stats.hits))
-        self.aggregated_requests += stats.requests
-        self.aggregated_query_total += stats.queries
-        self.aggregated_query_hit += stats.hits
-
-        # Remove the oldest stats until number of requests does not exceed
-        # the limit.
-        # NOTE: We preserve the latest added stats regardless.
-        while (
-            len(self.query_queue) > 1
-            and self.aggregated_requests > self.max_recent_requests
-        ):
-            old_requests, old_queries, old_hits = self.query_queue.popleft()
-            self.aggregated_requests -= old_requests
-            self.aggregated_query_total -= old_queries
-            self.aggregated_query_hit -= old_hits
-
-    def reset(self):
-        """Reset the metrics."""
-        self.aggregated_requests = 0
-        self.aggregated_query_total = 0
-        self.aggregated_query_hit = 0
-        self.query_queue.clear()
-
-    @property
-    def hit_rate(self) -> float:
-        """Calculate the hit rate for the past N requests."""
-        if self.aggregated_query_total == 0:
-            return 0.0
-        return self.aggregated_query_hit / self.aggregated_query_total
-
-
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
@@ -183,18 +112,18 @@ class KVCacheBlock:
     ref_cnt: int = 0
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
-    _block_hash: Optional[BlockHashWithGroupId] = None
+    _block_hash: BlockHashWithGroupId | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
-    prev_free_block: Optional["KVCacheBlock"] = None
-    next_free_block: Optional["KVCacheBlock"] = None
+    prev_free_block: "KVCacheBlock | None" = None
+    next_free_block: "KVCacheBlock | None" = None
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
     @property
-    def block_hash(self) -> Optional[BlockHashWithGroupId]:
+    def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
 
     @block_hash.setter
@@ -534,7 +463,7 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
 
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
-) -> tuple[Optional[tuple[Any, ...]], int]:
+) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
 
@@ -566,9 +495,9 @@ def generate_block_hash_extra_keys(
 
 def hash_block_tokens(
     hash_function: Callable[[Any], bytes],
-    parent_block_hash: Optional[BlockHash],
+    parent_block_hash: BlockHash | None,
     curr_block_token_ids: Sequence[int],
-    extra_keys: Optional[tuple[Any, ...]] = None,
+    extra_keys: tuple[Any, ...] | None = None,
 ) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -17,9 +17,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import DeepseekV2DecoderLayer, get_spec_layer_idx_from_weight_name
+from .deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    get_spec_layer_idx_from_weight_name,
+)
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
@@ -29,7 +33,7 @@ class SharedHead(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -56,6 +60,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
 
+        self.device = current_platform.device_type
+
         self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
             topk_tokens = config.index_topk
@@ -63,7 +69,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 topk_tokens,
                 dtype=torch.int32,
-                device="cuda",
+                device=self.device,
             )
         else:
             topk_indices_buffer = None
@@ -83,7 +89,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
@@ -135,7 +141,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
@@ -162,6 +168,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return logits
 
 
+@support_torch_compile
 class DeepSeekMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -178,8 +185,8 @@ class DeepSeekMTP(nn.Module, SupportsPP):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(
@@ -191,7 +198,7 @@ class DeepSeekMTP(nn.Module, SupportsPP):
         self,
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

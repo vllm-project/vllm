@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -80,7 +80,7 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
     ) -> None:
         """Finish the requests in the scheduler's internal queue. If the request
