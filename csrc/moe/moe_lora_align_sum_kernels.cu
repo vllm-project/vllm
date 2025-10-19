@@ -48,7 +48,9 @@ __global__ void moe_lora_align_sum_kernel(
   }
 
   // Initialize total_tokens_post_pad with 0
-  total_tokens_post_pad[lora_id] = 0;
+  if (threadIdx.x == 0) {
+    total_tokens_post_pad[lora_id] = 0;
+  }
 
   for (int i = 0; i < num_experts; ++i) {
     tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
