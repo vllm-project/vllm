@@ -154,9 +154,6 @@ class Mamba1AttentionMetadataBuilder(
             and num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.full_cuda_graph
         ):
-            self.state_indices_tensor[:num_decodes].copy_(
-                state_indices_tensor, non_blocking=True
-            )
             padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
