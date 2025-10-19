@@ -29,17 +29,16 @@ from vllm.utils import (
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
-    sha256,
     split_host_port,
     split_zmq_path,
     unique_filepath,
 )
+from vllm.utils.hashing import sha256
 from vllm.utils.torch_utils import (
     common_broadcastable_dtype,
     current_stream,
     is_lossless_cast,
 )
-
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from ..utils import create_new_process_for_each_test, flat_product
 
