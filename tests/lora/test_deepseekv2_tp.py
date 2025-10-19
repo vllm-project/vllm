@@ -11,7 +11,7 @@ MODEL_PATH = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 PROMPT_TEMPLATE = "<｜begin▁of▁sentence｜>You are a helpful assistant.\n\nUser: {context}\n\nAssistant:"  # noqa: E501
 
 
-def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
+def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int):
     prompts = [
         PROMPT_TEMPLATE.format(context="Who are you?"),
     ]
