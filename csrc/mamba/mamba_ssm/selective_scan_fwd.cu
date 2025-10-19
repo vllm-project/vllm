@@ -266,7 +266,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 for (int i = 0; i < kNItems; ++i) {
                     thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
                                                  !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
-
                     if (seqlen % (kNItems * kNThreads) != 0) {  // So that the last state is correct
                         if (threadIdx.x * kNItems + i >= seqlen - chunk * kChunkSize) {
                             thread_data[i] = make_float2(1.f, 0.f);
@@ -331,7 +330,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 }
             }
         }
-
         input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
             + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
         __syncthreads();
