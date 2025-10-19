@@ -2348,9 +2348,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        if self.speculative_config and isinstance(self.drafter, SuffixDecodingProposer):
-            self.drafter.update(self.input_batch, valid_sampled_token_ids)
-
         return (
             num_nans_in_logits,
             logprobs_lists,

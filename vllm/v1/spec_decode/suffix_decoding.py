@@ -29,44 +29,6 @@ class SuffixDecodingProposer:
             max_cached_requests=config.suffix_decoding_max_cached_requests,
         )
 
-    def update(
-        self,
-        input_batch: InputBatch,
-        sampled_token_ids: list[list[int]],
-    ):
-        """
-        Update suffix cache with the newly sampled token ids for each active request.
-        Assumes that request ids not in `input_batch.req_ids` is no longer active and
-        should be stopped (i.e. deletes the per-prompt tree for that request id).
-        """
-        seen_req_ids = set()
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            req_id = input_batch.req_ids[i]
-            seen_req_ids.add(req_id)
-
-            if not sampled_ids:
-                # No sampled ids for partial prefills.
-                continue
-
-            index = input_batch.req_id_to_index[req_id]
-            if req_id not in self.suffix_cache.active_requests:
-                if req_id in self.suffix_cache.cached_requests:
-                    # Reset the suffix cache for this request.
-                    self.suffix_cache.evict_cached_response(req_id)
-                num_prompt_tokens = input_batch.num_prompt_tokens[index]
-                prompt_token_ids = input_batch.token_ids_cpu[index, :num_prompt_tokens]
-                prompt_token_ids = prompt_token_ids.tolist()
-                # Start a new request, this will build the suffix tree for that prompt.
-                self.suffix_cache.start_request(req_id, prompt_token_ids)
-
-            # Append the newly sampled ids to the suffix cache for this request.
-            self.suffix_cache.add_active_response(req_id, sampled_ids)
-
-        # Stop requests that are not seen in the input batch.
-        for req_id in list(self.suffix_cache.active_requests):
-            if req_id not in seen_req_ids:
-                self.suffix_cache.stop_request(req_id)
-
     def propose(
         self,
         input_batch: InputBatch,
@@ -77,18 +39,16 @@ class SuffixDecodingProposer:
         will speculate a dynamic number of tokens for each request every decoding step,
         so each entry in the returned list may have different lengths.
         """
-        req_ids = input_batch.req_ids
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
+            if not sampled_ids:
                 # Skip speculative decoding for partial prefills.
                 draft_token_ids.append([])
                 continue
 
             # Skip requests that require sampling parameters that are not
             # supported with speculative decoding.
-            req_id = req_ids[i]
+            req_id = input_batch.req_ids[i]
             if req_id in input_batch.spec_decode_unsupported_reqs:
                 draft_token_ids.append([])
                 continue
@@ -99,9 +59,21 @@ class SuffixDecodingProposer:
                 draft_token_ids.append([])
                 continue
 
+            index = input_batch.req_id_to_index[req_id]
+            if req_id not in self.suffix_cache.active_requests:
+                if req_id in self.suffix_cache.cached_requests:
+                    # Reset the suffix cache for this request.
+                    self.suffix_cache.evict_cached_response(req_id)
+                num_prompt_tokens = input_batch.num_prompt_tokens[index]
+                prompt_token_ids = input_batch.token_ids_cpu[index, :num_prompt_tokens]
+                # Start a new request, this will build the suffix tree for that prompt.
+                self.suffix_cache.start_request(req_id, prompt_token_ids)
+
+            # Append the newly sampled ids to the suffix cache for this request.
+            self.suffix_cache.add_active_response(req_id, sampled_ids)
+
             start = max(0, num_tokens - self.max_tree_depth)
             pattern = input_batch.token_ids_cpu[i, start:num_tokens]
-            pattern = pattern.tolist()
             draft = self.suffix_cache.speculate(
                 req_id,
                 pattern,
@@ -113,6 +85,11 @@ class SuffixDecodingProposer:
             )
 
             draft_token_ids.append(draft.token_ids)
+
+        # Stop requests that were not seen in the input batch.
+        for req_id in (self.suffix_cache.active_requests -
+                       input_batch.req_id_to_index.keys()):
+            self.suffix_cache.stop_request(req_id)
 
         return draft_token_ids
 
