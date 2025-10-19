@@ -637,7 +637,7 @@ def _estimate_sla_bounds(
         if val >= max_value:
             break
 
-    return sla_data, (min_failing, max_passing)
+    return sla_data, (max_passing, min_failing)
 
 
 def _find_sla_value(
