@@ -29,6 +29,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
@@ -67,14 +68,14 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
-
-from .utils import is_pp_missing_parameter
 
 
 class NemotronHMLP(nn.Module):
@@ -85,6 +86,7 @@ class NemotronHMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         reduce_results: bool = True,
+        is_sequence_parallel: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -94,6 +96,7 @@ class NemotronHMLP(nn.Module):
             output_size=intermediate_size,
             bias=bias,
             quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -102,6 +105,7 @@ class NemotronHMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = ReLUSquaredActivation()
@@ -131,6 +135,8 @@ class NemotronHMoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.n_routed_experts,
@@ -157,25 +163,6 @@ class NemotronHMoE(nn.Module):
         )
 
         if config.n_shared_experts is None or config.n_shared_experts == 0:
-            self.experts = FusedMoE(
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts",
-                scoring_func="sigmoid",
-                e_score_correction_bias=self.gate.e_score_correction_bias,
-                activation=activation_without_mul(config.mlp_hidden_act),
-                is_act_and_mul=False,  # non-gated MoE
-                enable_eplb=self.enable_eplb,
-                num_redundant_experts=self.n_redundant_experts,
-            )
             self.shared_experts = None
         else:
             intermediate_size = (
@@ -187,33 +174,38 @@ class NemotronHMoE(nn.Module):
                 intermediate_size=intermediate_size,
                 quant_config=quant_config,
                 reduce_results=False,
+                is_sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.shared_experts",
             )
 
-            self.experts = SharedFusedMoE(
-                shared_experts=self.shared_experts,
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts",
-                scoring_func="sigmoid",
-                e_score_correction_bias=self.gate.e_score_correction_bias,
-                activation=activation_without_mul(config.mlp_hidden_act),
-                is_act_and_mul=False,  # non-gated MoE
-                enable_eplb=self.enable_eplb,
-                num_redundant_experts=self.n_redundant_experts,
-            )
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func="sigmoid",
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            activation=activation_without_mul(config.mlp_hidden_act),
+            is_act_and_mul=False,  # non-gated MoE
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
@@ -222,11 +214,7 @@ class NemotronHMoE(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = fused_moe_out
-        else:
-            shared_output = None
-            final_hidden_states = fused_moe_out
+        shared_output, final_hidden_states = fused_moe_out
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
@@ -240,7 +228,12 @@ class NemotronHMoE(nn.Module):
             assert shared_output is not None
             final_hidden_states += shared_output
 
-        if self.tp_size > 1:
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states
             )
