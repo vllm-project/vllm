@@ -42,6 +42,7 @@ ALLOWED_FILES = {
     "vllm/executor/ray_distributed_executor.py",
     "vllm/entrypoints/llm.py",
     "vllm/utils/__init__.py",
+    "tests/utils.py",
 }
 
 PICKLE_RE = re.compile(
