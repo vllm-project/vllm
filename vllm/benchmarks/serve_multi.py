@@ -183,24 +183,27 @@ class ServerWrapper:
         server_cmd: list[str],
         after_bench_cmd: list[str],
         *,
-        capture_output: bool,
+        show_stdout: bool,
     ) -> None:
         super().__init__()
 
         self.server_cmd = server_cmd
         self.after_bench_cmd = after_bench_cmd
-        self.capture_output = capture_output
+        self.show_stdout = show_stdout
+
+    def run_subcommand(self, cmd: list[str]):
+        return subprocess.run(
+            cmd,
+            stdout=None if self.show_stdout else subprocess.DEVNULL,
+            check=True,
+        )
 
     def after_bench(self) -> None:
         if not self.after_bench_cmd:
             self.reset_caches()
             return
 
-        subprocess.run(
-            self.after_bench_cmd,
-            capture_output=self.capture_output,
-            check=True,
-        )
+        self.run_subcommand(self.after_bench_cmd)
 
     def _get_vllm_server_address(self) -> str:
         server_cmd = self.server_cmd
@@ -252,7 +255,7 @@ def _run_server(
     serve_cmd: list[str],
     after_bench_cmd: list[str],
     *,
-    capture_output: bool,
+    show_stdout: bool,
     serve_overrides: dict[str, object],
     dry_run: bool,
 ):
@@ -271,8 +274,7 @@ def _run_server(
     server_process = subprocess.Popen(
         server_cmd,
         start_new_session=True,
-        stdout=subprocess.PIPE if capture_output else None,
-        stderr=subprocess.PIPE if capture_output else None,
+        stdout=None if show_stdout else subprocess.DEVNULL,
         # Need VLLM_SERVER_DEV_MODE=1 for `_reset_caches`
         env={**os.environ, "VLLM_SERVER_DEV_MODE": "1"},
     )
@@ -281,7 +283,7 @@ def _run_server(
         yield ServerWrapper(
             server_cmd,
             after_bench_cmd,
-            capture_output=capture_output,
+            show_stdout=show_stdout,
         )
     finally:
         if server_process.poll() is None:
@@ -334,14 +336,8 @@ def _run_benchmark(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    subprocess.run(
-        benchmark_cmd,
-        capture_output=server.capture_output,
-        check=True,
-    )
-
-    if server is not None:
-        server.after_bench()
+    server.run_subcommand(benchmark_cmd)
+    server.after_bench()
 
     with output_path.open("rb") as f:
         run_data = json.load(f)
@@ -432,7 +428,7 @@ def run_combs(
     bench_cmd: list[str],
     after_bench_cmd: list[str],
     *,
-    capture_output: bool,
+    show_stdout: bool,
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     output_dir: Path,
@@ -445,7 +441,7 @@ def run_combs(
             _run_server(
                 serve_cmd,
                 after_bench_cmd,
-                capture_output=capture_output,
+                show_stdout=show_stdout,
                 serve_overrides=serve_comb,
                 dry_run=dry_run,
             )
@@ -859,7 +855,7 @@ def run_slas(
     bench_cmd: list[str],
     after_bench_cmd: list[str],
     *,
-    capture_output: bool,
+    show_stdout: bool,
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
@@ -884,7 +880,7 @@ def run_slas(
             _run_server(
                 serve_cmd,
                 after_bench_cmd,
-                capture_output=capture_output,
+                show_stdout=show_stdout,
                 serve_overrides=serve_comb,
                 dry_run=dry_run,
             )
@@ -932,7 +928,7 @@ def _run_main(
     bench_cmd: list[str],
     after_bench_cmd: list[str],
     *,
-    capture_output: bool,
+    show_stdout: bool,
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
@@ -946,7 +942,7 @@ def _run_main(
             serve_cmd=serve_cmd,
             bench_cmd=bench_cmd,
             after_bench_cmd=after_bench_cmd,
-            capture_output=capture_output,
+            show_stdout=show_stdout,
             serve_params=serve_params,
             bench_params=bench_params,
             sla_params=sla_params,
@@ -960,7 +956,7 @@ def _run_main(
         serve_cmd=serve_cmd,
         bench_cmd=bench_cmd,
         after_bench_cmd=after_bench_cmd,
-        capture_output=capture_output,
+        show_stdout=show_stdout,
         serve_params=serve_params,
         bench_params=bench_params,
         output_dir=output_dir,
@@ -974,7 +970,7 @@ def run_main(
     bench_cmd: list[str],
     after_bench_cmd: list[str],
     *,
-    capture_output: bool,
+    show_stdout: bool,
     serve_params: list[dict[str, object]],
     bench_params: list[dict[str, object]],
     sla_params: list[dict[str, SLACriterionBase]],
@@ -995,7 +991,7 @@ def run_main(
             serve_cmd=serve_cmd,
             bench_cmd=bench_cmd,
             after_bench_cmd=after_bench_cmd,
-            capture_output=capture_output,
+            show_stdout=show_stdout,
             serve_params=serve_params,
             bench_params=bench_params,
             sla_params=sla_params,
@@ -1035,9 +1031,9 @@ def main():
         "default `ServerWrapper.clear_cache()`.",
     )
     parser.add_argument(
-        "--no-capture-output",
+        "--show-stdout",
         action="store_true",
-        help="If set, refrains from capturing the output of subcommands. "
+        help="If set, logs the standard output of subcommands. "
         "Useful for debugging but can be quite spammy.",
     )
     parser.add_argument(
@@ -1144,7 +1140,7 @@ def main():
         serve_cmd=serve_cmd,
         bench_cmd=bench_cmd,
         after_bench_cmd=after_bench_cmd,
-        capture_output=not args.no_capture_output,
+        show_stdout=args.show_stdout,
         serve_params=serve_params,
         bench_params=bench_params,
         sla_params=sla_params,
