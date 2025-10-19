@@ -994,6 +994,16 @@ if envs.VLLM_SERVER_DEV_MODE:
         await engine_client(raw_request).reset_prefix_cache(device)
         return Response(status_code=200)
 
+    @router.post("/reset_mm_cache")
+    async def reset_mm_cache(raw_request: Request):
+        """
+        Reset the multi-modal cache. Note that we currently do not check if the
+        multi-modal cache is successfully reset in the API server.
+        """
+        logger.info("Resetting multi-modal cache...")
+        await engine_client(raw_request).reset_mm_cache()
+        return Response(status_code=200)
+
     @router.post("/sleep")
     async def sleep(raw_request: Request):
         # get POST params
