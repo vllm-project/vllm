@@ -420,7 +420,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
             if base_chunk_size is None:
-                # Mamba1 does not have a chunk notion, use 2048 as the block size as the SSM Kernel uses it for chunking
+                # Mamba1 does not have a chunk notion, use 2048 as the block size
+                # because the SSM Kernel uses it for chunking
                 attn_block_size = 2048 * cdiv(attn_tokens_per_mamba_state, 2048)
             else:
                 chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)

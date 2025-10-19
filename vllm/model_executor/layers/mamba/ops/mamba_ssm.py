@@ -415,11 +415,14 @@ def selective_scan_fn(
     block_size: int
         The block size to align the cached states to
     block_idx_first_scheduled_token: (batch,), dtype int32
-        The pointer into cache_indices, where the first cache block to be filled is located.
+        The pointer into cache_indices, where the first
+        cache block to be filled is located.
     block_idx_last_scheduled_token: (batch,), dtype int32
-        The pointer into cache_indices, where the last cache block to be filled is located.
+        The pointer into cache_indices, where the last cache block
+        to be filled is located.
     initial_state_idx: (batch,), dtype int32
-        The pointer into cache_indices, where the cache block containing the initial state is located.
+        The pointer into cache_indices, where the cache block
+        containing the initial state is located.
     returns
         output: (dim, total_length) for varlen or (batch, dim, seqlen)
                 supports inplace replacement
@@ -466,7 +469,6 @@ def selective_scan_fn(
         initial_state_idx,
     )
 
-    # Always return just the output (no intermediate_states to return)
     if z is None:
         return delta  # output written inplace to delta
     else:

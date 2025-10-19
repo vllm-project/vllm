@@ -134,8 +134,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
 
-    // For APC mode, we don't offset ssm_states by cache_index since we'll use absolute cache slots
-    // For non-APC mode, we still use cache_index as before
     typename Ktraits::state_t *ssm_states;
     if (params.cache_enabled) {
         // APC mode: ssm_states points to the base, we'll use absolute cache slots later
@@ -170,6 +168,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     // }
 
     constexpr int kChunkSize = kNThreads * kNItems;
+
     // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
     const int chunk_size = (params.cache_enabled && params.block_size > 0) ? params.block_size : 2048;
     const int n_chunks = (seqlen + chunk_size - 1) / chunk_size;
@@ -186,7 +185,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
-        const int chunk_start_pos = chunk * chunk_size;
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
         __syncthreads();
@@ -281,7 +279,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
                 } else {
                     // Load initial state
-                    if (params.cache_enabled && has_initial_state && batch_cache_indices != nullptr && initial_state_idx != nullptr) {
+                    if (params.cache_enabled && has_initial_state && batch_cache_indices != nullptr) {
                         int state_offset = load_cache_slot * params.ssm_states_batch_stride +
                                          r * params.ssm_states_dim_stride +
                                          state_idx * params.ssm_states_dstate_stride;
@@ -306,7 +304,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
                     // Store state at the end of each chunk when cache is enabled
                     if (params.cache_enabled && batch_cache_indices != nullptr) {
-                        // Get the cache slot for this chunk
+
                         int cache_slot;
                         if (chunk == n_chunks - 1) {
                             cache_slot = batch_cache_indices[block_idx_last_scheduled[batch_id]];
@@ -314,14 +312,13 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                             cache_slot = batch_cache_indices[block_idx_first_scheduled[batch_id] + chunk];
                         }
 
-                        // Note: ssm_states is already offset by dim_id in APC mode, don't double-count
                         int state_offset = cache_slot * params.ssm_states_batch_stride +
                                          r * params.ssm_states_dim_stride +
                                          state_idx * params.ssm_states_dstate_stride;
 
                         ssm_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     } else if (!params.cache_enabled && chunk == n_chunks - 1) {
-                        // Non-cached mode: store only final state at current batch position
+                        // Non-APC mode: store only final state at current batch position
                         ssm_states[state_idx * params.ssm_states_dstate_stride] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
                 }
@@ -336,7 +333,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
 
         input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
-            + dim_id * kNRows * params.out_d_stride + chunk_start_pos;
+            + dim_id * kNRows * params.out_d_stride + chunk * chunk_size;
         __syncthreads();
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
@@ -348,9 +345,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
         if constexpr (kHasZ) {
             input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + sequence_start_index * params.z_batch_stride
-                + dim_id * kNRows * params.z_d_stride + chunk_start_pos;
+                + dim_id * kNRows * params.z_d_stride + chunk * chunk_size;
             input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + sequence_start_index * params.out_z_batch_stride
-                + dim_id * kNRows * params.out_z_d_stride + chunk_start_pos;
+                + dim_id * kNRows * params.out_z_d_stride + chunk * chunk_size;
             #pragma unroll
             for (int r = 0; r < kNRows; ++r) {
                 input_t z_vals[kNItems];
@@ -407,7 +404,7 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
 
     #ifndef USE_ROCM
         if (params.cache_enabled && params.block_size == 1024) {
-            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream); // Forces kChunkSize = 1024
+            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 128) {
             selective_scan_fwd_launch<32, 4, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 256) {
@@ -421,7 +418,7 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
         }
     #else
         if (params.cache_enabled && params.block_size == 1024) {
-            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream); // Forces kChunkSize = 1024
+            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 256) {
             selective_scan_fwd_launch<64, 4, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 512) {
@@ -583,7 +580,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
         params.ssm_states_dim_stride = ssm_states.stride(1);
         params.ssm_states_dstate_stride = ssm_states.stride(2);
 
-        // Set cache_indices stride for APC
         params.cache_indices_stride = cache_indices.has_value() ? cache_indices.value().stride(0) : 0;
 
     }
@@ -619,7 +615,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
         params.ssm_states_dim_stride = ssm_states.stride(1);
         params.ssm_states_dstate_stride = ssm_states.stride(2);
 
-        // Set cache_indices stride for APC
         params.cache_indices_stride = cache_indices.has_value() ? cache_indices.value().stride(0) : 0;
     }
 }

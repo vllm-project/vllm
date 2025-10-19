@@ -69,7 +69,6 @@ struct SSMParamsBase {
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
 
-    // For direct writing to ssm_states cache in APC mode
     void *__restrict__ block_idx_first_scheduled_token_ptr;  // (batch,) - first block to write
     void *__restrict__ block_idx_last_scheduled_token_ptr;   // (batch,) - last block to write
     void *__restrict__ initial_state_idx_ptr;  // (batch,) - index of the initial state to use

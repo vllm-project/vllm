@@ -346,6 +346,7 @@ class MambaMixer(MambaBase, CustomOp):
             )
             time_proj_bias = self._time_proj_bias()
 
+            # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_out_p = selective_scan_fn(
                 conv_out_p,
                 ssm_state,
@@ -360,14 +361,11 @@ class MambaMixer(MambaBase, CustomOp):
                 cache_indices=state_indices_tensor_p,
                 has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p,
-                return_intermediate_states=prefix_caching_enabled,
                 block_size=mamba_block_size,
-                # Pass block indices for direct writing to ssm_states
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
             )
-
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
