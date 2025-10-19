@@ -13,7 +13,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def is_rocm_aiter_rmsnorm_enabled() -> bool:
@@ -56,22 +56,6 @@ def fused_add_rms_norm(
         variance_epsilon,
     )
     return x, residual
-
-
-def poly_norm(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    from vllm import _custom_ops as ops
-
-    out = torch.empty_like(x)
-    ops.poly_norm(
-        out,
-        x,
-        weight,
-        bias,
-        variance_epsilon,
-    )
-    return out
 
 
 def rocm_aiter_rms_norm_impl(
@@ -383,53 +367,6 @@ class GemmaRMSNorm(CustomOp):
             )
             self._is_compiled = True
         return self.forward_native(x, residual)
-
-
-@CustomOp.register("poly_norm")
-class PolyNorm(CustomOp):
-    """Polynomial normalization.
-
-    Computes x -> w_0 * RMSNorm(x^3) + w_1 * RMSNorm(x^2) + w_2 * RMSNorm(x) + b
-    where w_n is the learned weight and b is the bias.
-    Refer to https://arxiv.org/html/2411.03884v1
-    """
-
-    def __init__(
-        self,
-        eps: float = 1e-6,
-    ) -> None:
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.ones(3) / 3)
-        self.bias = torch.nn.Parameter(torch.zeros(1))
-        self.variance_epsilon = eps
-
-    def _norm(self, x):
-        return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon)
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward().
-
-        Refer to https://github.com/BryceZhuo/PolyCom?tab=readme-ov-file/README.md
-        """
-
-        orig_dtype = x.dtype
-        x_float = x.to(torch.float32)
-        output = (
-            self.weight[0] * self._norm(x_float**3)
-            + self.weight[1] * self._norm(x_float**2)
-            + self.weight[2] * self._norm(x_float)
-            + self.bias
-        )
-        return output.to(orig_dtype)
-
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        return poly_norm(x, self.weight, self.bias, self.variance_epsilon)
 
 
 class LayerNorm(nn.Module):

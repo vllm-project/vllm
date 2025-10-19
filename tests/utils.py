@@ -46,10 +46,10 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (
     FlexibleArgumentParser,
-    GB_bytes,
-    cuda_device_count_stateless,
     get_open_port,
 )
+from vllm.utils.mem_constants import GB_bytes
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if current_platform.is_rocm():
     from amdsmi import (

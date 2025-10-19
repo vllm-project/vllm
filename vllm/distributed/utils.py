@@ -29,7 +29,8 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_tcp_uri, is_torch_equal_or_newer
+from vllm.utils import get_tcp_uri
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -276,7 +277,7 @@ class StatelessProcessGroup:
             # Check for timeout
             cur_time = time.time()
             if cur_time - start_time > timeout:
-                raise RuntimeError("Barrier timed out after %f seconds", timeout)
+                raise RuntimeError(f"Barrier timed out after {timeout:.2f} seconds")
 
             # Check for each process
             for i in range(self.world_size):
@@ -323,7 +324,9 @@ class StatelessProcessGroup:
         while len(processes_departed) < self.world_size:
             # Check for timeout
             if time.time() - start_time > timeout:
-                raise RuntimeError("Barrier departure timed out after %f s", timeout)
+                raise RuntimeError(
+                    f"Barrier departure timed out after {timeout:.2f} seconds"
+                )
 
             # Check for each process
             for i in range(self.world_size):

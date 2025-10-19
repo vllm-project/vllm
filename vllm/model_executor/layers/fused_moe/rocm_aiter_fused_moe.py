@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class QuantMethod(IntEnum):
@@ -44,6 +44,11 @@ def is_rocm_aiter_moe_enabled() -> bool:
         and envs.VLLM_ROCM_USE_AITER_MOE
         and envs.VLLM_ROCM_USE_AITER
     )
+
+
+@cache
+def use_mxfp4_aiter_moe() -> bool:
+    return current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
 
 
 @cache
@@ -487,6 +492,8 @@ def rocm_aiter_fused_experts(
             assert quant_config.w1_scale is not None
             assert quant_config.w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
+        elif quant_config.use_fp8_w8a8 and quant_config.per_out_ch_quant:
+            quant_method = QuantMethod.PER_TOKEN.value
         elif quant_config.use_fp8_w8a8:
             # Currently only per tensor quantization method is enabled.
             quant_method = QuantMethod.PER_TENSOR.value
