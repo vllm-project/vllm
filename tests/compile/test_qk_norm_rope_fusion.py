@@ -5,12 +5,13 @@ import pytest  # type: ignore
 import torch
 
 from tests.compile.backend import LazyInitPass, TestBackend
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.compilation.qk_norm_rope_fusion import (
     FUSED_QK_ROPE_OP,
-    QKNormRoPEFusionPass,
     RMS_OP,
+    QKNormRoPEFusionPass,
 )
 from vllm.config import (
     CompilationConfig,
@@ -21,8 +22,8 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.attention import Attention, AttentionType
 from vllm.platforms import current_platform
+
 
 class QKNormRoPETestModel(torch.nn.Module):
     """A minimal model that exercises the unfused Q/K RMSNorm + RoPE pattern.
@@ -73,15 +74,11 @@ class QKNormRoPETestModel(torch.nn.Module):
         # Unfused baseline: split, per-head RMS, then RoPE
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q_by_head = q.view(
-            *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-        )
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
 
-        k_by_head = k.view(
-            *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-        )
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
 
@@ -93,7 +90,8 @@ class QKNormRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("T", [17])
 @pytest.mark.parametrize("num_heads, num_kv_heads, head_dim", [(16, 2, 128)])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test on CUDA and ROCm",
+    not current_platform.is_cuda_alike(),
+    reason="Only test on CUDA and ROCm",
 )
 def test_qk_norm_rope_fusion(dtype, T, num_heads, num_kv_heads, head_dim):
     torch.set_default_device("cuda")

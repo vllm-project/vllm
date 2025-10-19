@@ -631,8 +631,6 @@ class CompilationConfig:
 
         if self.backend == "":
             self.backend = current_platform.simple_compile_backend
-        
-
 
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """

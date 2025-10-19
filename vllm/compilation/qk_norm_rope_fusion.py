@@ -15,8 +15,8 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-from .inductor_pass import enable_fake_mode
 from .fusion import empty_bf16, empty_i64
+from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -93,10 +93,12 @@ class QkNormRopePattern:
             v = operator.getitem(split_tuple, 2)
 
             # Q path: view -> (optional contiguous) -> RMS -> view back to q.shape
-            # q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            # q_by_head=q.view(*q.shape[:-1],q.shape[-1]//self.head_dim,self.head_dim)
             # q_out = torch.empty_like(q_by_head)
             # q_by_head_contiguous = q_by_head.contiguous()
-            q_by_head = VIEW_OP(q, (*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim))
+            q_by_head = VIEW_OP(
+                q, (*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            )
             q_out = EMPTY_LIKE_OP(q_by_head)
             q_by_head_contiguous = CONTIGUOUS_OP(q_by_head)
 
@@ -113,10 +115,12 @@ class QkNormRopePattern:
             q_flat = VIEW_OP(q_normed_by_head, q.shape)
 
             # K path: view -> (optional contiguous) -> RMS -> view back to k.shape
-            # k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            # k_by_head=k.view(*k.shape[:-1],k.shape[-1]//self.head_dim,self.head_dim)
             # k_out = torch.empty_like(k_by_head)
             # k_by_head_contiguous = k_by_head.contiguous()
-            k_by_head = VIEW_OP(k, (*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim))
+            k_by_head = VIEW_OP(
+                k, (*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            )
             k_out = EMPTY_LIKE_OP(k_by_head)
             k_by_head_contiguous = CONTIGUOUS_OP(k_by_head)
             kn = auto_functionalized(
@@ -130,7 +134,7 @@ class QkNormRopePattern:
 
             # k_flat = k_normed_by_head.view(k.shape)
             k_flat = VIEW_OP(k_normed_by_head, k.shape)
-    
+
             # RoPE: apply to flattened q/k
             rope = auto_functionalized(
                 self.rope_op,
@@ -143,7 +147,6 @@ class QkNormRopePattern:
             )
             return rope[1], rope[2], v
 
-
         def replacement(
             qkv: torch.Tensor,
             positions: torch.Tensor,
@@ -155,7 +158,7 @@ class QkNormRopePattern:
             pos_flat = RESHAPE_OP(positions, [-1])
 
             # Run fused op (mutates qkv)
-            auto_functionalized(
+            result = auto_functionalized(
                 FUSED_QK_ROPE_OP,
                 qkv=qkv,
                 num_heads_q=self.num_heads,
@@ -169,10 +172,11 @@ class QkNormRopePattern:
                 is_neox=self.is_neox,
                 position_ids=pos_flat,
             )
+            result_qkv = result[1]
 
             # Split back to q,k,v and return
             split_tuple = SPLIT_SIZES_OP(
-                qkv, [self.q_size, self.kv_size, self.kv_size], -1
+                result_qkv, [self.q_size, self.kv_size, self.kv_size], -1
             )
             return (
                 operator.getitem(split_tuple, 0),
@@ -180,7 +184,7 @@ class QkNormRopePattern:
                 operator.getitem(split_tuple, 2),
             )
 
-        # Sample inputs to help pattern tracing (sizes don't have to be exact at runtime)
+        # Sample inputs to help pattern tracing
         T = 5
         qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
         positions = empty_i64(T)
@@ -229,9 +233,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         )
 
         if not current_platform.is_cuda_alike():
-            logger.debug(
-                "QK Norm+RoPE fusion not enabled: unsupported platform"
-            )
+            logger.debug("QK Norm+RoPE fusion not enabled: unsupported platform")
             return
 
         # Register a pattern per attention layer, as sizes differ by shard
@@ -255,7 +257,8 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                         ).register(self.patterns)
                     except Exception as e:
                         logger.debug(
-                            "Skipping QkNormRopePattern registration with eps=%s is_neox=%s: %s",
+                            "Skipping QkNormRopePattern register with eps=%s "
+                            "is_neox=%s: %s",
                             epsilon,
                             neox,
                             e,
