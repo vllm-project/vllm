@@ -110,8 +110,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             return at[1]
 
         inputs = [
-            # input, weight
-            *self.silu_and_mul_matcher.inputs(),
+            *self.silu_and_mul_matcher.inputs(),  # input
             self.quant_matcher.inputs()[1],  # scale
         ]
         pattern(*inputs)

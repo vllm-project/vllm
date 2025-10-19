@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+import itertools
 
 import pytest
 import torch
@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
-    cutlass_fp8_supported,
     maybe_create_device_identity,
 )
 from vllm.platforms import current_platform
@@ -123,43 +122,38 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         return [FUSED_OPS[kNvfp4Quant]]
 
 
+test_cases: list[
+    tuple[type[TestSiluMulFp8QuantModel | TestSiluMulNvfp4QuantModel], bool, bool]
+] = [
+    *list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False])),
+    (TestSiluMulNvfp4QuantModel, False, False),
+]
+
+
 @pytest.mark.parametrize("num_tokens", [32, 64])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
-@pytest.mark.parametrize("enable_quant_fp8_custom_op", [True, False])
 @pytest.mark.parametrize(
-    "model_class",
-    cast(
-        list[type],
-        (
-            [TestSiluMulFp8QuantModel, TestSiluMulNvfp4QuantModel]
-            if is_nvfp4_supported()
-            else [TestSiluMulFp8QuantModel]
-        ),
-    ),
+    "model_class, enable_quant_fp8_custom_op, cuda_force_torch",
+    test_cases,
 )
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
-@pytest.mark.parametrize(
-    "cuda_force_torch", [True, False] if cutlass_fp8_supported() else [True]
-)
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
 def test_fusion_silu_and_mul_quant(
-    num_tokens,
-    hidden_size,
-    dtype,
-    model_class,
-    enable_silu_mul_custom_op,
-    enable_quant_fp8_custom_op,
-    cuda_force_torch,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    model_class: type[TestSiluMulFp8QuantModel | TestSiluMulNvfp4QuantModel],
+    enable_silu_mul_custom_op: bool,
+    enable_quant_fp8_custom_op: bool,
+    cuda_force_torch: bool,
 ):
-    if model_class == TestSiluMulNvfp4QuantModel and cuda_force_torch:
-        pytest.skip("Duplicate tests for NVFP4")
-    if not enable_quant_fp8_custom_op:
-        pytest.skip("enable_quant_fp8_custom_op is irrelevant for nvfp4 tests.")
+    if model_class == TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
+        pytest.skip("NVFP4 is not supported on this GPU.")
 
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
