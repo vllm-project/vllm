@@ -122,7 +122,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         return [FUSED_OPS[kNvfp4Quant]]
 
 
-test_cases: list[
+test_params: list[
     tuple[type[TestSiluMulFp8QuantModel | TestSiluMulNvfp4QuantModel], bool, bool]
 ] = [
     *list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False])),
@@ -136,7 +136,7 @@ test_cases: list[
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
 @pytest.mark.parametrize(
     "model_class, enable_quant_fp8_custom_op, cuda_force_torch",
-    test_cases,
+    test_params,
 )
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
