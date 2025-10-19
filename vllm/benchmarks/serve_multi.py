@@ -598,6 +598,7 @@ def _estimate_sla_bounds(
     min_failing: int = 0
 
     val: int = init_value
+    assert val > 0
 
     while True:
         print(f"Testing {sla_variable}: {val} req/s")
@@ -628,7 +629,7 @@ def _estimate_sla_bounds(
         if all(sla_results):
             print("SLA criteria are met.")
             max_passing = val
-            val = 2 if val <= 1 else val * 2
+            val *= 2
         else:
             print("SLA criteria are not met.")
             min_failing = val
