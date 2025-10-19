@@ -181,7 +181,6 @@ class ServerWrapper:
     def __init__(
         self,
         server_cmd: list[str],
-        server_address: str,
         after_bench_cmd: list[str],
         *,
         capture_output: bool,
@@ -189,7 +188,6 @@ class ServerWrapper:
         super().__init__()
 
         self.server_cmd = server_cmd
-        self.server_address = server_address
         self.after_bench_cmd = after_bench_cmd
         self.capture_output = capture_output
 
@@ -204,24 +202,49 @@ class ServerWrapper:
             check=True,
         )
 
+    def _get_vllm_server_address(self) -> str:
+        server_cmd = self.server_cmd
+
+        for host_key in ("--host",):
+            if host_key in server_cmd:
+                host = server_cmd[server_cmd.index(host_key) + 1]
+                break
+        else:
+            host = "localhost"
+
+        for port_key in ("-p", "--port"):
+            if port_key in server_cmd:
+                port = int(server_cmd[server_cmd.index(port_key) + 1])
+                break
+        else:
+            port = 8000  # The default value in vllm serve
+
+        return f"http://{host}:{port}"
+
     def reset_caches(self) -> None:
+        server_cmd = self.server_cmd
+
         # Use `.endswith()` to match `/bin/...`
-        if self.server_cmd[0].endswith("vllm"):
-            print("Resetting caches...")
+        if server_cmd[0].endswith("vllm"):
+            server_address = self._get_vllm_server_address()
+            print(f"Resetting caches at {server_address}")
 
-            res = requests.post(f"{self.server_address}/reset_prefix_cache")
+            res = requests.post(f"{server_address}/reset_prefix_cache")
             res.raise_for_status()
 
-            res = requests.post(f"{self.server_address}/reset_mm_cache")
+            res = requests.post(f"{server_address}/reset_mm_cache")
             res.raise_for_status()
-        elif self.server_cmd[0].endswith("infinity_emb"):
-            if "--vector-disk-cache" in self.server_cmd:
+        elif server_cmd[0].endswith("infinity_emb"):
+            if "--vector-disk-cache" in server_cmd:
                 raise NotImplementedError(
                     "Infinity server uses caching but does not expose a method "
                     "to reset the cache"
                 )
         else:
-            raise NotImplementedError(self.server_cmd[0])
+            raise NotImplementedError(
+                f"No implementation of `reset_caches` for `{server_cmd[0]}` server. "
+                "Please specify a custom command via `--after-bench-cmd`."
+            )
 
 
 @contextlib.contextmanager
@@ -235,26 +258,9 @@ def _run_server(
 ):
     server_cmd = _override_args(serve_cmd, serve_overrides)
 
-    for host_key in ("--host",):
-        if host_key in server_cmd:
-            host = server_cmd[server_cmd.index(host_key) + 1]
-            break
-    else:
-        host = "localhost"
-
-    for port_key in ("-p", "--port"):
-        if port_key in server_cmd:
-            port = int(server_cmd[server_cmd.index(port_key) + 1])
-            break
-    else:
-        port = 8000  # The default value in vllm serve
-
-    server_address = f"http://{host}:{port}"
-
     print("[BEGIN SERVER]")
     print(f"Server overrides: {serve_overrides}")
     print(f"Server command: {server_cmd}")
-    print(f"Server address: {server_address}")
 
     if dry_run:
         yield None
@@ -274,7 +280,6 @@ def _run_server(
     try:
         yield ServerWrapper(
             server_cmd,
-            server_address,
             after_bench_cmd,
             capture_output=capture_output,
         )
@@ -336,7 +341,7 @@ def _run_benchmark(
     )
 
     if server is not None:
-        server.reset_caches()
+        server.after_bench()
 
     with output_path.open("rb") as f:
         run_data = json.load(f)
@@ -889,13 +894,13 @@ def run_slas(
                 output_dir,
             )
             else contextlib.nullcontext()
-        ) as server_address:
+        ) as server:
             for bench_comb in bench_params:
                 for sla_comb in sla_params:
                     base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb)
 
                     comb_data = _search_sla(
-                        server_address,
+                        server,
                         bench_cmd,
                         serve_comb=serve_comb,
                         bench_comb=bench_comb,
