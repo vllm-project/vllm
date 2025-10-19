@@ -25,8 +25,8 @@ from typing_extensions import TypeVar, assert_never
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer, decode_tokens, encode_tokens
-from vllm.utils.collections import flatten_2d_lists, full_groupby
-from vllm.utils.functools import get_allowed_kwarg_only_overrides
+from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 from .hasher import MultiModalHasher
@@ -486,7 +486,7 @@ _M = TypeVar("_M", bound=_HasModalityAttr | _HasModalityProp)
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
     """
     Convenience function to apply
-    [`full_groupby`][vllm.utils.collections.full_groupby]
+    [`full_groupby`][vllm.utils.collection_utils.full_groupby]
     based on modality.
     """
     return full_groupby(values, key=lambda x: x.modality)

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from vllm.utils.collections import swap_dict_values
+from vllm.utils.collection_utils import swap_dict_values
 
 
 @pytest.mark.parametrize(

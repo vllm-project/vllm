@@ -15,7 +15,7 @@ import torch.nn as nn
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
-from vllm.utils.functools import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

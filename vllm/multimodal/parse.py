@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from typing_extensions import assert_never
 
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler

@@ -31,7 +31,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
 )
-from vllm.utils.functools import run_once
+from vllm.utils.func_utils import run_once
 
 logger = init_logger(__name__)
 
