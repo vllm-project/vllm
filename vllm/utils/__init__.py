@@ -1150,9 +1150,6 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
     )
 
 
-## moved to vllm.utils.hashing
-
-
 @cache
 def _has_module(module_name: str) -> bool:
     """Return True if *module_name* can be found in the current environment.
