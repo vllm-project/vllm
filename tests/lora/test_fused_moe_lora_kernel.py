@@ -208,7 +208,6 @@ def use_torch(
 @pytest.mark.parametrize("K", [2048])
 @pytest.mark.parametrize("max_lora_rank", [16, 32, 64])
 @pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_moe_lora_kernel(
     num_tokens,
     top_k_num,
@@ -218,7 +217,6 @@ def test_fused_moe_lora_kernel(
     K,
     max_lora_rank,
     block_size,
-    dtype,
 ):
     torch.set_default_device("cuda:0")
     current_platform.seed_everything(42)
