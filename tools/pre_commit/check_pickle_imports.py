@@ -43,6 +43,7 @@ ALLOWED_FILES = {
     "tests/utils.py",
     # pickle and cloudpickle
     "vllm/utils/__init__.py",
+    "vllm/utils/hashing.py",
 }
 
 PICKLE_RE = re.compile(
