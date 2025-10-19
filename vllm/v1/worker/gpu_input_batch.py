@@ -379,6 +379,18 @@ class InputBatch:
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
         self.is_token_ids[req_index, start_idx:end_idx] = True
+
+        # SELF-SPEC: Also copy pending_output_tokens to token_ids_cpu
+        # The model needs to see ALL tokens (verified + pending) for the forward pass.
+        # However, only verified tokens are in output_token_ids for sampling penalties.
+        if hasattr(request, 'pending_output_tokens') and request.pending_output_tokens:
+            pending_start_idx = end_idx
+            pending_end_idx = pending_start_idx + len(request.pending_output_tokens)
+            self.token_ids_cpu[req_index,
+                               pending_start_idx:pending_end_idx] = request.pending_output_tokens
+            self.is_token_ids[req_index, pending_start_idx:pending_end_idx] = True
+            # Update end_idx to include pending tokens
+            end_idx = pending_end_idx
         # Number of token ids in prompt (token_ids_cpu or prompt_embeds).
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
@@ -632,7 +644,7 @@ class InputBatch:
                     self.allowed_token_ids_mask_cpu_tensor[i1]
 
         # Swap self-spec buffers
-        tmp_selective_kv = self.selective_kv_indices_cpu_tensor[i1, ...].copy()
+        tmp_selective_kv = self.selective_kv_indices_cpu_tensor[i1, ...]
         self.selective_kv_indices_cpu_tensor[i1, ...] = \
             self.selective_kv_indices_cpu_tensor[i2, ...]
         self.selective_kv_indices_cpu_tensor[i2, ...] = tmp_selective_kv

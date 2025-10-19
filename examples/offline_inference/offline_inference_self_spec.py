@@ -6,7 +6,7 @@ import random
 import numpy as np
 import torch
 import sys
-sys.path.append("benchmarks")
+from vllm.inputs import TokensPrompt
 
 #from benchmark_dataset import AIMODataset
 # Set environment variables
@@ -28,44 +28,13 @@ def load_prompts(args, tokenizer):
 
     if dataset_name == "debug":
         prompts = [
-            "The future of AI is", "The future of technology is",
+            #"The future of AI is", 
+            #"The future of technology is",
             "The mission of a PhD student is",
-            "9 out of 10 cheerleaders are 64 tall.  The 10th cheerleader is 60 tall.  If they build a human pyramid, where 4 girls are on the bottom,  3 stand on top of the 4, 2 stand on top of the 3 and the shortest girl is at the top, how tall is the human pyramid in feet?"
+            #"9 out of 10 cheerleaders are 64 tall.  The 10th cheerleader is 60 tall.  If they build a human pyramid, where 4 girls are on the bottom,  3 stand on top of the 4, 2 stand on top of the 3 and the shortest girl is at the top, how tall is the human pyramid in feet?"
         ]
         return prompts[:args.num_prompts]
 
-    if dataset_name == "aimo":
-        dataset_path = "AI-MO/aimo-validation-aime"
-        input_requests = AIMODataset(
-            dataset_path=dataset_path,
-            dataset_subset=None,
-            dataset_split="train",
-            random_seed=42,
-        ).sample(
-            num_requests=args.num_prompts,
-            tokenizer=tokenizer,
-            output_len=None,
-        )
-        prompts = [req.prompt for req in input_requests]
-        return prompts
-
-    if dataset_name == "cropped_aimo":
-        if not args.input_file:
-            raise ValueError(
-                "An input file must be provided for the cropped_aimo dataset.")
-        prompts = []
-        with open(args.input_file, "r") as f:
-            for line in f:
-                entry = json.loads(line)
-                prompt_ids = tokenizer.apply_chat_template([{"role": "user", "content": "Solve the following math problem step-by-step. " + entry["prompt"]}],
-                add_generation_prompt=True)
-                generated_text = "\n\n" + entry["generated_text"]
-                generated_text_ids = tokenizer.encode(generated_text)
-                if len(prompt_ids) + len(generated_text_ids) < 4096:
-                    continue
-                prompt_with_partial_output = prompt_ids + generated_text_ids[:4096-len(prompt_ids)]
-                prompts.append(prompt_with_partial_output)
-        return prompts[:args.num_prompts]
 
     raise ValueError(f"Unknown dataset name: {dataset_name}")
 
@@ -86,9 +55,9 @@ def parse_args():
     parser.add_argument("--enforce_eager", action="store_true", help="Enforce eager execution")
     parser.add_argument("--enable_chunked_prefill", action="store_true", help="Enable chunked prefill")
     parser.add_argument("--max_num_batched_tokens", type=int, default=8192, help="Maximum batched tokens")
-    parser.add_argument("--temp", type=float, default=0.6, help="Sampling temperature")
+    parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
     parser.add_argument("--enable_sspec", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--num_speculative_tokens", type=int, default=16, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--num_speculative_tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--disable_log_stats", action="store_true", help="Disable log stats")
@@ -121,8 +90,8 @@ def main():
         torch.cuda.manual_seed_all(42)
     args = parse_args()
 
-    model_dir = "Qwen/Qwen2.5-Math-7B-Instruct"
-    max_model_len = 4096
+    model_dir = "Qwen/Qwen3-8B"
+    max_model_len = 40960
     # Load tokenizer and prepare prompts
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     prompts = load_prompts(args, tokenizer)
@@ -174,7 +143,7 @@ def main():
     llm = LLM(**llm_kwargs)
 
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=4096, top_p=1.0, ignore_eos=False)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=64, top_p=1.0, ignore_eos=False)
 
 
     # Generate outputs
@@ -182,7 +151,10 @@ def main():
     import time
     start_time = time.time()
     #llm.start_profile()
-    outputs = llm.generate(prompt_token_ids=prompt_ids, sampling_params=sampling_params)
+    outputs = llm.generate(
+        [TokensPrompt(prompt_token_ids=x) for x in prompt_ids], 
+        sampling_params=sampling_params
+    )
     #llm.stop_profile()
     end_time = time.time()
     print(f"Generation time: {end_time - start_time} seconds")
@@ -204,6 +176,7 @@ def main():
             print(f"Generated: {generated_text}")
             print(f"Prompt length: {len(prompt_ids)}")
             print(f"Generated length: {len(generated_ids)}")
+            print(f"Generated IDs: {generated_ids}")
             print(f"Finish Reason: {finish_reason}")
 
          # Print metrics if available
@@ -249,46 +222,46 @@ def main():
                 print(f"  Avg verifying requests: {avg_verifying:.2f}")
                 print()
 
-            # Show iteration-by-iteration breakdown (first 10 and last 10 iterations)
-            print("ITERATION-BY-ITERATION BREAKDOWN:")
-            print(f"{'Iter':<6} {'Tokens':<8} {'Total':<7} {'Accum':<7} {'Verify':<8} {'Normal':<8} {'Accum%':<8} {'Verify%':<9} {'Normal%':<8}")
-            print("-" * 80)
+            # # Show iteration-by-iteration breakdown (first 10 and last 10 iterations)
+            # print("ITERATION-BY-ITERATION BREAKDOWN:")
+            # print(f"{'Iter':<6} {'Tokens':<8} {'Total':<7} {'Accum':<7} {'Verify':<8} {'Normal':<8} {'Accum%':<8} {'Verify%':<9} {'Normal%':<8}")
+            # print("-" * 80)
 
-            # Show first 10 iterations
-            show_iterations = min(10, len(total_reqs_history))
-            for i in range(show_iterations):
-                tokens = total_tokens_history[i]
-                total_reqs = total_reqs_history[i]
-                accumulating = accumulating_history[i]
-                verifying = verifying_history[i]
-                normal = total_reqs - accumulating - verifying
+            # # Show first 10 iterations
+            # show_iterations = min(10, len(total_reqs_history))
+            # for i in range(show_iterations):
+            #     tokens = total_tokens_history[i]
+            #     total_reqs = total_reqs_history[i]
+            #     accumulating = accumulating_history[i]
+            #     verifying = verifying_history[i]
+            #     normal = total_reqs - accumulating - verifying
 
-                accum_pct = (accumulating / total_reqs * 100) if total_reqs > 0 else 0
-                verify_pct = (verifying / total_reqs * 100) if total_reqs > 0 else 0
-                normal_pct = (normal / total_reqs * 100) if total_reqs > 0 else 0
+            #     accum_pct = (accumulating / total_reqs * 100) if total_reqs > 0 else 0
+            #     verify_pct = (verifying / total_reqs * 100) if total_reqs > 0 else 0
+            #     normal_pct = (normal / total_reqs * 100) if total_reqs > 0 else 0
 
-                print(f"{i+1:<6} {tokens:<8} {total_reqs:<7} {accumulating:<7} {verifying:<8} {normal:<8} {accum_pct:<7.1f}% {verify_pct:<8.1f}% {normal_pct:<7.1f}%")
+            #     print(f"{i+1:<6} {tokens:<8} {total_reqs:<7} {accumulating:<7} {verifying:<8} {normal:<8} {accum_pct:<7.1f}% {verify_pct:<8.1f}% {normal_pct:<7.1f}%")
 
-            # Show last 10 iterations if there are more than 10 total
-            if len(total_reqs_history) > 10:
-                # if len(total_reqs_history) > 20:
-                #     print("  ...")
-                #start_idx = max(10, len(total_reqs_history) - 10)
-                start_idx = 10
-                for i in range(start_idx, len(total_reqs_history)):
-                    tokens = total_tokens_history[i]
-                    total_reqs = total_reqs_history[i]
-                    accumulating = accumulating_history[i]
-                    verifying = verifying_history[i]
-                    normal = total_reqs - accumulating - verifying
+            # # Show last 10 iterations if there are more than 10 total
+            # if len(total_reqs_history) > 10:
+            #     # if len(total_reqs_history) > 20:
+            #     #     print("  ...")
+            #     #start_idx = max(10, len(total_reqs_history) - 10)
+            #     start_idx = 10
+            #     for i in range(start_idx, len(total_reqs_history)):
+            #         tokens = total_tokens_history[i]
+            #         total_reqs = total_reqs_history[i]
+            #         accumulating = accumulating_history[i]
+            #         verifying = verifying_history[i]
+            #         normal = total_reqs - accumulating - verifying
 
-                    accum_pct = (accumulating / total_reqs * 100) if total_reqs > 0 else 0
-                    verify_pct = (verifying / total_reqs * 100) if total_reqs > 0 else 0
-                    normal_pct = (normal / total_reqs * 100) if total_reqs > 0 else 0
+            #         accum_pct = (accumulating / total_reqs * 100) if total_reqs > 0 else 0
+            #         verify_pct = (verifying / total_reqs * 100) if total_reqs > 0 else 0
+            #         normal_pct = (normal / total_reqs * 100) if total_reqs > 0 else 0
 
-                    print(f"{i+1:<6} {tokens:<8} {total_reqs:<7} {accumulating:<7} {verifying:<8} {normal:<8} {accum_pct:<7.1f}% {verify_pct:<8.1f}% {normal_pct:<7.1f}%")
+            #         print(f"{i+1:<6} {tokens:<8} {total_reqs:<7} {accumulating:<7} {verifying:<8} {normal:<8} {accum_pct:<7.1f}% {verify_pct:<8.1f}% {normal_pct:<7.1f}%")
 
-            print("="*80)
+            # print("="*80)
             print_metrics(metrics)
         except AssertionError:
             print("\nNo metrics available")

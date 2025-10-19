@@ -1062,7 +1062,7 @@ class Scheduler(SchedulerInterface):
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted)
-
+                
             # SELF-SPEC: Finishing verification, reset state to normal
             if self.use_self_specs and request.self_spec_state == SelfSpecState.VERIFYING:
                 # Flush the processed spec_token_ids
@@ -1077,10 +1077,13 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
+            should_flip_to_accumulating = False
             if new_token_ids:
-                new_token_ids, stopped = self._update_request_with_output(
+                new_token_ids, stopped, should_flip_to_accumulating = self._update_request_with_output(
                     request, new_token_ids)
-
+                # print(f"[update_from_output] request {request.request_id}: {request.self_spec_state}")
+                # print(f"[update_from_output] request {request.request_id}: {request.output_token_ids}")
+                #breakpoint()
             # Stop checking for pooler models.
             pooler_output = None
             if pooler_outputs:
@@ -1115,14 +1118,19 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None \
+
+            # SELF-SPEC: Filter tokens for output based on state
+            # During ACCUMULATING, don't send unverified tokens to user
+            output_token_ids = [] if request.self_spec_state == SelfSpecState.ACCUMULATING else new_token_ids
+
+            if output_token_ids or pooler_output is not None \
                 or kv_transfer_params:
 
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        new_token_ids=new_token_ids,
+                        new_token_ids=output_token_ids,  # Use filtered version
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
@@ -1133,7 +1141,25 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
-            else:
+
+            # SELF-SPEC: Transition to ACCUMULATING after output is created
+            # This ensures the current output reflects the NORMAL state tokens
+            if should_flip_to_accumulating and not stopped:
+                request.self_spec_state = SelfSpecState.ACCUMULATING
+                # Update sparse KV indices when transitioning to ACCUMULATING
+                all_kv_indices = self.kv_cache_manager.get_block_ids(request.request_id)[0][:request.num_computed_tokens]
+                if self.sink_size + self.recent_size >= len(all_kv_indices):
+                    selective_kv_indices = all_kv_indices
+                else:
+                    selective_kv_indices = (
+                        all_kv_indices[:self.sink_size] +
+                        all_kv_indices[-self.recent_size:]
+                    )
+                self.req_to_sparse_selected_kv_indices[request.request_id] = selective_kv_indices
+                self.req_to_full_kv_start_offset[request.request_id] = request.num_computed_tokens
+                logger.debug(f"Request {request.request_id}: transitioned to ACCUMULATING state")
+
+            if not (new_token_ids or pooler_output is not None or kv_transfer_params):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
@@ -1196,7 +1222,7 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         new_token_ids: list[int],
-    ) -> tuple[list[int], bool]:
+    ) -> tuple[list[int], bool, bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -1226,38 +1252,9 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
 
-        # SELF-SPEC: Update sparse KV indices when transitioning to ACCUMULATING
-        if (not stopped and request.self_spec_state == SelfSpecState.NORMAL
-                and flip_from_normal_to_accumulating):
-            # Get all KV indices for this request
-            all_kv_indices = self.kv_cache_manager.get_block_ids(request.request_id)[0][:request.num_computed_tokens]
-
-            # Select sink + recent tokens for sparse attention
-            # Handle edge case: if sink_size + recent_size >= total tokens, use all tokens
-            if self.sink_size + self.recent_size >= len(all_kv_indices):
-                selective_kv_indices = all_kv_indices
-            else:
-                # Take first sink_size tokens + last recent_size tokens
-                selective_kv_indices = (
-                    all_kv_indices[:self.sink_size] +
-                    all_kv_indices[-self.recent_size:]
-                )
-
-            self.req_to_sparse_selected_kv_indices[request.request_id] = selective_kv_indices
-            self.req_to_full_kv_start_offset[request.request_id] = request.num_computed_tokens
-
-            logger.debug(
-                f"Request {request.request_id}: sparse KV indices updated "
-                f"(sink={self.sink_size}, recent={self.recent_size}, "
-                f"total_selected={len(selective_kv_indices)}/{len(all_kv_indices)})"
-            )
-
-        # SELF-SPEC: Transition from NORMAL to ACCUMULATING after committing a token
-        if flip_from_normal_to_accumulating:
-            request.self_spec_state = SelfSpecState.ACCUMULATING
-            logger.debug(f"Request {request.request_id}: transitioned to ACCUMULATING state")
-
-        return new_token_ids, stopped
+        # SELF-SPEC: Return flag to caller for delayed state transition
+        # This allows the state transition to happen after EngineCoreOutput is created
+        return new_token_ids, stopped, flip_from_normal_to_accumulating
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = (
