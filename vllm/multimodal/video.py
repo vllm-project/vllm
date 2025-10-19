@@ -127,7 +127,7 @@ class OpenCVVideoBackend(VideoLoader):
             num_frames_to_sample = min(num_frames, total_frames_num)
         if fps > 0:
             num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
-        num_frames_to_sample = max(1, num_frames_to_sample) # at least one sample
+        num_frames_to_sample = max(1, num_frames_to_sample)  # at least one sample
 
         if num_frames_to_sample == total_frames_num:
             frame_idx = list(range(0, num_frames_to_sample))
