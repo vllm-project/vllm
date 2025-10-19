@@ -169,6 +169,48 @@ class XPUWorker(Worker):
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(self.local_rank)
 
+        # Set process title and log prefix EARLY, before initializing
+        # the distributed environment, for better debugging
+        from vllm.utils import (
+            calculate_ranks_from_config,
+            decorate_logs,
+            set_process_title,
+        )
+
+        try:
+            # Calculate ranks from scratch without needing distributed init
+            dp_rank, pp_rank, tp_rank, ep_rank = calculate_ranks_from_config(
+                rank=self.rank,
+                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                pipeline_parallel_size=self.parallel_config.pipeline_parallel_size,
+                data_parallel_size=self.parallel_config.data_parallel_size,
+            )
+
+            dp_size = self.parallel_config.data_parallel_size
+            pp_size = self.parallel_config.pipeline_parallel_size
+            tp_size = self.parallel_config.tensor_parallel_size
+            # EP size is DP * TP when expert parallelism is enabled
+            ep_size = dp_size * tp_size
+
+            process_name = "Worker"
+            if dp_size > 1:
+                process_name += f"_DP{dp_rank}"
+            if pp_size > 1:
+                process_name += f"_PP{pp_rank}"
+            if tp_size > 1:
+                process_name += f"_TP{tp_rank}"
+
+            # Check if expert parallelism is enabled
+            if self.parallel_config.enable_expert_parallel and ep_size > 1:
+                process_name += f"_EP{ep_rank}"
+
+            set_process_title(name=process_name)
+            decorate_logs(process_name)
+        except Exception:
+            # If we fail to set process title for some reason
+            # continue without setting it to ensure we don't break initialization.
+            pass
+
         init_worker_distributed_environment(
             self.vllm_config,
             self.rank,
