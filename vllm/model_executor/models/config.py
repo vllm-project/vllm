@@ -329,6 +329,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
+    _MAMBA1_BLOCK_SIZE = 2048
+
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
@@ -416,18 +418,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             def lcm(a, b):
                 return a * b // gcd(a, b)
 
-            base_chunk_size = model_config.get_mamba_chunk_size()
+            base_chunk_size = (
+                model_config.get_mamba_chunk_size() or cls._MAMBA1_BLOCK_SIZE
+            )
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
-            if base_chunk_size is None:
-                # Mamba1 does not have a chunk notion, use 2048 as the block size
-                # because the SSM Kernel uses it for chunking
-                attn_block_size = 2048 * cdiv(attn_tokens_per_mamba_state, 2048)
-            else:
-                chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-                attn_block_size = chunk_size * cdiv(
-                    attn_tokens_per_mamba_state, chunk_size
-                )
+            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
+            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
 
             cache_config.mamba_block_size = attn_block_size
         else:
