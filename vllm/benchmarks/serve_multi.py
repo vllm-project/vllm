@@ -707,7 +707,7 @@ def _search_sla(
     bench_comb: dict[str, object],
     sla_comb: dict[str, SLACriterionBase],
     sla_variable: SLAVariable,
-    sla_inf_value: int = 8192,  # The value that represents infinite QPS
+    sla_inf_value: int = 65536,  # The value that represents infinite QPS
     base_path: Path,
     num_runs: int,
     dry_run: bool,
