@@ -13,7 +13,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -30,8 +29,8 @@ from vllm.entrypoints.openai.serving_engine import (
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.utils import (
+    EMBED_DTYPE_TO_TORCH_DTYPE,
     encoding_pooling_output,
-    response_compression_pooling_output,
 )
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -136,7 +135,10 @@ class EmbeddingMixin(OpenAIServing):
                 item = EmbeddingResponseData(
                     index=idx,
                     embedding=encoding_pooling_output(
-                        final_res, ctx.request.encoding_format, ctx.request.embed_dtype
+                        final_res,
+                        encoding_format=ctx.request.encoding_format,
+                        embed_dtype=ctx.request.embed_dtype,
+                        endianness=ctx.request.endianness,
                     ),
                 )
                 prompt_token_ids = final_res.prompt_token_ids
@@ -187,6 +189,9 @@ class EmbeddingMixin(OpenAIServing):
                 "usage": usage,
             }
 
+            print(metadata)
+
+            """
             streaming_response = response_compression_pooling_output(
                 metadata=metadata,
                 tensers=tensers,
@@ -197,6 +202,7 @@ class EmbeddingMixin(OpenAIServing):
             return StreamingResponse(
                 streaming_response, media_type="application/octet-stream"
             )
+            """
 
     def _get_max_position_embeddings(self) -> int:
         """Get the model's effective maximum sequence length for chunking."""

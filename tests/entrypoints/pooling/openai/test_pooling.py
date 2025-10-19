@@ -10,7 +10,12 @@ import torch
 
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import EMBED_DTYPE_TO_TORCH_DTYPE, PoolingResponse
+from vllm.entrypoints.openai.protocol import PoolingResponse
+from vllm.entrypoints.openai.utils import (
+    EMBED_DTYPE_TO_TORCH_DTYPE,
+    ENDIANNESS,
+    binary2tenser,
+)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
@@ -251,7 +256,9 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_base64_embed_dtype(server: RemoteOpenAIServer, model_name: str):
+async def test_base64_embed_dtype_and_endianness(
+    server: RemoteOpenAIServer, model_name: str
+):
     input_texts = [
         "The best thing about vLLM is that it supports many different models",
     ]
@@ -268,37 +275,37 @@ async def test_base64_embed_dtype(server: RemoteOpenAIServer, model_name: str):
     responses_float = PoolingResponse.model_validate(float_response.json())
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
 
-    for embed_dtype, torch_dtype in EMBED_DTYPE_TO_TORCH_DTYPE.items():
-        responses_base64 = requests.post(
-            url,
-            json={
-                "model": model_name,
-                "input": input_texts,
-                "encoding_format": "base64",
-                "embed_dtype": embed_dtype,
-            },
-        )
-
-        base64_data = []
-        for data in responses_base64.json()["data"]:
-            base64_data.append(
-                torch.frombuffer(base64.b64decode(data["data"]), dtype=torch_dtype)
-                .to(torch.float32)
-                .tolist()
+    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+        for endianness in ENDIANNESS:
+            responses_base64 = requests.post(
+                url,
+                json={
+                    "model": model_name,
+                    "input": input_texts,
+                    "encoding_format": "base64",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                },
             )
 
-        check_embeddings_close(
-            embeddings_0_lst=float_data,
-            embeddings_1_lst=base64_data,
-            name_0="float_data",
-            name_1="base64_data",
-            tol=1e-2,
-        )
+            base64_data = []
+            for data in responses_base64.json()["data"]:
+                binary = base64.b64decode(data["data"])
+                tenser = binary2tenser(binary, (-1,), embed_dtype, endianness)
+                base64_data.append(tenser.to(torch.float32).tolist())
+
+            check_embeddings_close(
+                embeddings_0_lst=float_data,
+                embeddings_1_lst=base64_data,
+                name_0="float_data",
+                name_1="base64_data",
+                tol=1e-2,
+            )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_base64_embed_dtype_not_supported(
+async def test_base64_embed_dtype_and_endianness_not_supported(
     server: RemoteOpenAIServer, model_name: str
 ):
     input_texts = [
@@ -306,7 +313,6 @@ async def test_base64_embed_dtype_not_supported(
     ]
 
     bad_embed_dtype = "bad_embed_dtype"
-
     responses_base64 = requests.post(
         server.url_for("pooling"),
         json={
@@ -321,6 +327,22 @@ async def test_base64_embed_dtype_not_supported(
     assert responses_base64.json()["error"]["message"].startswith(
         f"embed_dtype={bad_embed_dtype!r} is not supported."
     )
+
+    ##################
+
+    bad_endianness = "bad_endianness"
+    responses_base64 = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": input_texts,
+            "encoding_format": "base64",
+            "endianness": bad_endianness,
+        },
+    )
+
+    assert responses_base64.status_code == 400
+    assert "literal_error" in responses_base64.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

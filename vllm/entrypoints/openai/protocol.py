@@ -84,18 +84,6 @@ from vllm.sampling_params import (
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-EMBED_DTYPE_TO_TORCH_DTYPE = {
-    "float32": torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    # I'm not sure if other platforms' CPUs support the fp8 data format.
-    # EMBED_DTYPE only uses the fp8 data representation,
-    # does not use fp8 computation, and only occurs on the CPU.
-    # Apologize for any possible break.
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-}
-
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
@@ -1551,16 +1539,21 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     embed_dtype: str = Field(
         default="float32",
         description=(
-            "What dtype to use for base64 encoding. Default to using "
-            "float32 for base64 encoding to match the OpenAI python client behavior."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Literal["native", "big", "little"] = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
     binary_response: bool = Field(
         default=False, description="Whether to use binary response."
-    )
-    endianness: Literal["big-endian", "little-endian"] = Field(
-        default="big-endian",
-        description="Binary response endianness. Use big-endian by default.",
     )
     # --8<-- [end:embedding-extra-params]
 
@@ -1644,16 +1637,21 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     embed_dtype: str = Field(
         default="float32",
         description=(
-            "Which dtype to use for base64 encoding. Defaults to float32 "
-            "to match OpenAI API."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Literal["native", "big", "little"] = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
     binary_response: bool = Field(
         default=False, description="Whether to use binary response."
-    )
-    endianness: Literal["big-endian", "little-endian"] = Field(
-        default="big-endian",
-        description="Binary response endianness. Use big-endian by default.",
     )
     # --8<-- [end:chat-embedding-extra-params]
 
@@ -1702,9 +1700,21 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     embed_dtype: str = Field(
         default="float32",
         description=(
-            "What dtype to use for base64 encoding. Default to using "
-            "float32 for base64 encoding to match the OpenAI python client behavior."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
         ),
+    )
+    endianness: Literal["native", "big", "little"] = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    binary_response: bool = Field(
+        default=False, description="Whether to use binary response."
     )
 
     def to_pooling_params(self):
