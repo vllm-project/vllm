@@ -65,6 +65,18 @@ class TestOciModelLoader:
         )
         assert loader.DEFAULT_REGISTRY == "docker.io"
 
+    def test_go_client_initialization(self):
+        """Test that Go client initializes successfully."""
+        load_config = LoadConfig(load_format="oci")
+        try:
+            loader = OciModelLoader(load_config)
+            assert loader.go_client is not None
+        except RuntimeError as e:
+            # If the Go library is not built, skip this test
+            if "OCI Go library not found" in str(e):
+                pytest.skip("OCI Go library not built")
+            raise
+
     def test_download_oci_model_if_needed_config_only(self):
         """Test that download_oci_model_if_needed with download_weights=False
         only downloads config."""

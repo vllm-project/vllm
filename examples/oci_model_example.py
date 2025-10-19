@@ -130,6 +130,34 @@ def example_caching_behavior():
     print("Cache location: ~/.cache/vllm/oci/ (by default)")
 
 
+def example_private_registry_with_auth():
+    """Example using a private registry with authentication."""
+    print("=" * 80)
+    print("Example 5: Private Registry with Authentication")
+    print("=" * 80)
+
+    # Before running this example, authenticate with docker login:
+    # $ docker login ghcr.io
+    # Enter your username and password/token
+
+    print("Loading model from private registry...")
+    print("Make sure you have run 'docker login ghcr.io' first")
+    
+    llm = LLM(
+        model="ghcr.io/myorg/private-model:latest",
+        load_format="oci",
+    )
+
+    # Use the model
+    prompt = "Hello, world!"
+    sampling_params = SamplingParams(temperature=0.8, max_tokens=50)
+    outputs = llm.generate([prompt], sampling_params)
+
+    print(f"Prompt: {prompt!r}")
+    print(f"Generated: {outputs[0].outputs[0].text!r}")
+    print("\nNote: Authentication is handled automatically via Docker config")
+
+
 def main():
     """Run all examples."""
     print("\n")
@@ -144,6 +172,7 @@ def main():
     print("To run these examples:")
     print("1. Ensure you have access to an OCI registry with model artifacts")
     print("2. Modify the model references to point to your models")
+    print("3. For private registries, run 'docker login <registry>' first")
     print("4. Run: python examples/oci_model_example.py")
     print("\n")
 
@@ -152,6 +181,7 @@ def main():
     # example_explicit_registry()
     # example_with_digest()
     # example_caching_behavior()
+    # example_private_registry_with_auth()
 
     print("Examples completed successfully!")
 

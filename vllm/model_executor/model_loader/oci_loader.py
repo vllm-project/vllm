@@ -8,7 +8,6 @@ import tarfile
 from collections.abc import Generator
 from typing import Optional
 
-import requests
 import torch
 from torch import nn
 
@@ -17,6 +16,7 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.oci_go_client import OciGoClient
 from vllm.model_executor.model_loader.weight_utils import safetensors_weights_iterator
 
 logger = init_logger(__name__)
@@ -44,7 +44,7 @@ class OciModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
-        self.session = requests.Session()
+        self.go_client = OciGoClient()
 
     def _normalize_oci_reference(self, model_ref: str) -> str:
         """Normalize OCI reference to include registry.
@@ -86,62 +86,7 @@ class OciModelLoader(BaseModelLoader):
 
         return cache_dir
 
-    def _get_auth_token(
-        self, registry: str, repository: str, www_authenticate: str
-    ) -> Optional[str]:
-        """Get authentication token using OCI-compliant auth discovery.
 
-        This method parses the Www-Authenticate header to discover the
-        authentication service and obtains a token dynamically, making it
-        compatible with any OCI-compliant registry.
-
-        Args:
-            registry: Registry hostname
-            repository: Repository name
-            www_authenticate: Value of Www-Authenticate header from 401 response
-
-        Returns:
-            Authentication token, or None if no authentication is required
-        """
-        # Parse Www-Authenticate header
-        # Format: Bearer realm="https://auth.example.com/token",service="registry.example.com",scope="repository:user/repo:pull"
-        if not www_authenticate.startswith("Bearer "):
-            logger.warning("Unsupported authentication scheme: %s", www_authenticate)
-            return None
-
-        auth_params = {}
-        # Extract parameters from the header
-        parts = www_authenticate[7:].split(",")  # Skip "Bearer "
-        for part in parts:
-            if "=" in part:
-                key, value = part.strip().split("=", 1)
-                # Remove quotes
-                auth_params[key] = value.strip('"')
-
-        realm = auth_params.get("realm")
-        if not realm:
-            logger.warning("No realm found in Www-Authenticate header")
-            return None
-
-        # Build token request parameters
-        token_params = {}
-        if "service" in auth_params:
-            token_params["service"] = auth_params["service"]
-        if "scope" in auth_params:
-            token_params["scope"] = auth_params["scope"]
-        else:
-            # If no scope provided, use repository pull scope
-            token_params["scope"] = f"repository:{repository}:pull"
-
-        # Request token from auth service
-        try:
-            response = self.session.get(realm, params=token_params)
-            response.raise_for_status()
-            token_data = response.json()
-            return token_data.get("token") or token_data.get("access_token")
-        except Exception as e:
-            logger.warning("Failed to obtain auth token: %s", e)
-            return None
 
     def _parse_oci_reference(self, model_ref: str) -> tuple[str, str, str]:
         """Parse OCI reference into registry, repository, and tag/digest.
@@ -166,57 +111,7 @@ class OciModelLoader(BaseModelLoader):
 
         return registry, repository, reference
 
-    def _normalize_registry(self, registry: str) -> str:
-        """Normalize registry hostname for API calls.
 
-        Docker Hub uses registry-1.docker.io for API calls instead of docker.io.
-
-        Args:
-            registry: Registry hostname
-
-        Returns:
-            Normalized registry hostname
-        """
-        if registry == "docker.io":
-            return "registry-1.docker.io"
-        return registry
-
-    def _authenticated_request(
-        self,
-        url: str,
-        registry: str,
-        repository: str,
-        headers: dict[str, str],
-        stream: bool = False,
-    ) -> requests.Response:
-        """Make an authenticated request to OCI registry.
-
-        Handles authentication by trying without auth first, then obtaining
-        and using a token if a 401 response is received.
-
-        Args:
-            url: Request URL
-            registry: Registry hostname
-            repository: Repository name
-            headers: Request headers
-            stream: Whether to stream the response
-
-        Returns:
-            Response object
-        """
-        # Try without authentication first
-        response = self.session.get(url, headers=headers, stream=stream)
-
-        # If we get 401, parse Www-Authenticate and get token
-        if response.status_code == 401:
-            www_auth = response.headers.get("Www-Authenticate", "")
-            if www_auth:
-                token = self._get_auth_token(registry, repository, www_auth)
-                if token:
-                    headers["Authorization"] = f"Bearer {token}"
-                    response = self.session.get(url, headers=headers, stream=stream)
-
-        return response
 
     def _pull_oci_manifest(
         self, model_ref: str, cache_dir: str
@@ -232,29 +127,15 @@ class OciModelLoader(BaseModelLoader):
         """
         logger.info("Pulling OCI manifest for %s", model_ref)
 
-        # Parse reference
-        registry, repository, reference = self._parse_oci_reference(model_ref)
-        registry = self._normalize_registry(registry)
-
-        # Use standard OCI registry URL format
-        manifest_url = f"https://{registry}/v2/{repository}/manifests/{reference}"
-        headers = {
-            "Accept": "application/vnd.oci.image.manifest.v1+json, "
-            "application/vnd.docker.distribution.manifest.v2+json"
-        }
-
-        # Make authenticated request
+        # Use Go client to pull manifest (supports docker login authentication)
         try:
-            response = self._authenticated_request(
-                manifest_url, registry, repository, headers
-            )
-            response.raise_for_status()
-            manifest = response.json()
+            manifest = self.go_client.pull_manifest(model_ref)
         except Exception as e:
             raise ValueError(
                 f"Failed to pull manifest for {model_ref}. "
                 f"Please ensure the image exists and is accessible. "
-                f"Error: {e}"
+                f"If this is a private image, make sure you have run 'docker login' "
+                f"for the registry. Error: {e}"
             ) from e
 
         if not manifest:
@@ -300,25 +181,15 @@ class OciModelLoader(BaseModelLoader):
 
         logger.info("Downloading layer %s (%.2f MB)", digest, size / (1024 * 1024))
 
-        # Parse reference
-        registry, repository, _ = self._parse_oci_reference(model_ref)
-        registry = self._normalize_registry(registry)
-
-        # Use standard OCI registry URL format
-        blob_url = f"https://{registry}/v2/{repository}/blobs/{digest}"
-        headers: dict[str, str] = {}
-
-        # Make authenticated request
-        response = self._authenticated_request(
-            blob_url, registry, repository, headers, stream=True
-        )
-        response.raise_for_status()
-
-        # Write to file
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        # Use Go client to download blob (supports docker login authentication)
+        try:
+            self.go_client.pull_blob(model_ref, digest, output_path)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download layer {digest}. "
+                f"If this is a private image, make sure you have run 'docker login'. "
+                f"Error: {e}"
+            ) from e
 
         logger.info("Downloaded layer to %s", output_path)
 

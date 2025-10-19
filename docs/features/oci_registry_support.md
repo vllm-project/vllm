@@ -142,7 +142,48 @@ llm = LLM(
 
 ## Installation
 
-OCI Registry support is built into vLLM and uses the standard `requests` library for HTTP operations. No additional dependencies are required beyond the standard vLLM installation.
+OCI Registry support is built into vLLM and uses the [go-containerregistry](https://github.com/google/go-containerregistry) library for robust OCI operations. The Go library is statically linked into vLLM during installation.
+
+### Requirements
+
+- Go 1.24 or later (for building from source)
+- Docker CLI (for authentication via `docker login`)
+
+No additional dependencies are required beyond the standard vLLM installation.
+
+## Authentication
+
+OCI Registry support includes full authentication capabilities using Docker config:
+
+### Using Docker Login
+
+For private registries, authenticate using the standard Docker CLI:
+
+```bash
+# Docker Hub
+docker login
+
+# GitHub Container Registry
+docker login ghcr.io
+
+# Google Container Registry
+docker login gcr.io
+
+# Azure Container Registry
+docker login myregistry.azurecr.io
+
+# Custom registry
+docker login registry.example.com
+```
+
+vLLM will automatically use the credentials stored in `~/.docker/config.json` when pulling images.
+
+### Credential Helpers
+
+The go-containerregistry library supports Docker credential helpers, allowing integration with:
+- Cloud provider credential helpers (AWS ECR, GCR, ACR)
+- Password managers
+- Custom credential stores
 
 ## Caching
 

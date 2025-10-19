@@ -278,6 +278,9 @@ class cmake_build_ext(build_ext):
             subprocess.check_call(install_args, cwd=self.build_temp)
 
     def run(self):
+        # Build the Go OCI client library before building extensions
+        self.build_go_oci_client()
+        
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
@@ -296,6 +299,46 @@ class cmake_build_ext(build_ext):
             print(f"Copying {file} to {dst_file}")
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
+    
+    def build_go_oci_client(self):
+        """Build the Go OCI client library."""
+        # Check if Go is available
+        try:
+            subprocess.check_output(["go", "version"])
+        except (OSError, subprocess.CalledProcessError):
+            logger.warning(
+                "Go compiler not found. Skipping OCI Go client library build. "
+                "OCI registry support will not be available."
+            )
+            return
+        
+        oci_go_dir = os.path.join(ROOT_DIR, "vllm", "model_executor", "model_loader", "oci_go")
+        build_script = os.path.join(oci_go_dir, "build.sh")
+        
+        if not os.path.exists(build_script):
+            logger.warning(
+                "OCI Go client build script not found at %s. "
+                "Skipping OCI Go client library build.",
+                build_script
+            )
+            return
+        
+        logger.info("Building OCI Go client library...")
+        try:
+            subprocess.check_call(["bash", build_script], cwd=oci_go_dir)
+            logger.info("OCI Go client library built successfully")
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                "Failed to build OCI Go client library: %s. "
+                "OCI registry support will not be available.",
+                e
+            )
+        except Exception as e:
+            logger.warning(
+                "Unexpected error building OCI Go client library: %s. "
+                "OCI registry support will not be available.",
+                e
+            )
 
 
 class precompiled_build_ext(build_ext):
@@ -648,6 +691,9 @@ package_data = {
         "py.typed",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
+        "model_executor/model_loader/oci_go/liboci.so",
+        "model_executor/model_loader/oci_go/liboci.dylib",
+        "model_executor/model_loader/oci_go/liboci.a",
     ]
 }
 
