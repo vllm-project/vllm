@@ -142,7 +142,6 @@ if TYPE_CHECKING:
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: bool | None = None
-    VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
@@ -1066,13 +1065,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
     ),
-    # Whether to turn on the outlines cache for V0
-    # This cache is unbounded and on disk, so it's not safe to use in
-    # an environment with potentially malicious users.
-    "VLLM_V0_USE_OUTLINES_CACHE": lambda: os.environ.get(
-        "VLLM_V0_USE_OUTLINES_CACHE", "0"
-    )
-    == "1",
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
