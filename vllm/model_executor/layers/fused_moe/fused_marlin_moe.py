@@ -184,21 +184,6 @@ def _fused_marlin_moe(
     return output
 
 
-def default_activation_func(
-    activation: str, output: torch.Tensor, input: torch.Tensor
-) -> None:
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(output, input)
-    elif activation == "swigluoai":
-        # alpha = 1.702, limit = 7.0
-        torch.ops._C.swigluoai_and_mul(output, input)
-    else:
-        raise ValueError(
-            f"Unsupported activation: {activation}. "
-            "Only silu and swigluoai activations are supported."
-        )
-
-
 def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
