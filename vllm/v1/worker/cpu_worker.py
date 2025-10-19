@@ -128,7 +128,7 @@ class CPUWorker(Worker):
             "Please try to bind threads manually."
         )
 
-        # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]``
+        # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]`
         selected_numa_node = allowed_numa_nodes[self.local_rank]  # type: ignore
         logical_cpu_list = [
             x for x in logical_cpu_list if x.numa_node == selected_numa_node

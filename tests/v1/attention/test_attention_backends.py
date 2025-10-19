@@ -18,7 +18,8 @@ from tests.v1.attention.utils import (
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
+from vllm.utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     set_kv_cache_layout,
@@ -423,14 +424,15 @@ def _test_backend_correctness(
     for backend_name in backend_to_test:
         # FlashAttentionm + FlexAttention:
         #   [2, num_blocks, block_size, num_kv_heads, head_size]
-        # FlashInfer:
+        # FlashInfer + Triton:
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
         reset_kv_cache_layout = False
-        if backend_name == _Backend.FLASHINFER:
+        if backend_name in (_Backend.FLASHINFER, _Backend.TRITON_ATTN):
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
+        if backend_name == _Backend.FLASHINFER:
             # For FlashInfer default to HND layout and
             kv_cache_for_backend = (
                 kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
@@ -438,7 +440,7 @@ def _test_backend_correctness(
             set_kv_cache_layout("HND")
             reset_kv_cache_layout = True
         elif backend_name == _Backend.TRITON_ATTN:
-            kv_cache_for_backend = kv_cache.transpose(0, 1).contiguous()
+            kv_cache_for_backend = kv_cache_for_backend.contiguous()
 
         try:
             backend_output = run_attention_backend(
