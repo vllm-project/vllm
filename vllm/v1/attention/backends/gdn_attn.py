@@ -13,6 +13,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    ReorderSpec,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
@@ -61,7 +62,7 @@ class GDNAttentionMetadata:
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: int = 1
+    reorder_spec: ReorderSpec = ReorderSpec(1)
 
     def __init__(
         self,

@@ -44,6 +44,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    ReorderSpec,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -275,7 +276,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 
-    reorder_batch_threshold: int = 1
+    reorder_spec: ReorderSpec = ReorderSpec(1)
 
     def __init__(
         self,
@@ -469,10 +470,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> FlashInferMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
+        assert self.reorder_spec.reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                decode_threshold=self.reorder_spec.reorder_batch_threshold,
                 require_uniform=True,
             )
         )
@@ -550,7 +552,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_last_page_len_np,
         )
 
-        uses_spec_reorder = self.reorder_batch_threshold > 1
+        uses_spec_reorder = self.reorder_spec.reorder_batch_threshold > 1
         prefill_use_trtllm = use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,

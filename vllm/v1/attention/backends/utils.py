@@ -6,6 +6,7 @@ import functools
 from abc import abstractmethod
 from collections import deque
 from dataclasses import dataclass, field, fields, make_dataclass
+from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -48,6 +49,52 @@ PAD_SLOT_ID = -1
 
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
+
+class QueryLenSupport(Enum):
+    """Defines the level of query length support for an attention backend's
+    decode pipeline.
+
+    - SINGLE_ONLY: Decode pipeline only supports single-token queries
+                   (query_len=1)
+    - UNIFORM: Decode pipeline supports uniform multi-token queries
+               (all requests must have same query_len > 1)
+    - VARLEN: Decode pipeline supports variable-length queries
+              (mixed query lengths in same batch)
+    """
+
+    SINGLE_ONLY = "single_only"
+    UNIFORM = "uniform"
+    VARLEN = "varlen"
+
+
+@dataclass
+class ReorderSpec:
+    """
+    The ReorderSpec should be hold by the attention metadata builder of the
+    attention backend, used to decide how to reorder the input request in
+    model_runner before execution on model. If multiple attention backend
+    have different ReorderSpec in a single model, high tolerance one will
+    be selected."""
+
+    reorder_batch_threshold: int | None = None
+    """The threshold for reordering the batch into decode and prefill 
+    requests. If `reorder_batch_threshold` is not None, prefill and 
+    decode request will be reordered according to this value. query 
+    length <= threshold will be considered as decode"""
+
+    split_extend: bool = False
+    """Whether to further split the prefill requests into pure prefill 
+    (query_len == context_len) and extend prefill (query length < context_len)
+    in a single batch. Once this flag is set, the request will be reordered to 
+    [decode:extend_prefill:pure_prefill]"""
+
+    query_len_support: QueryLenSupport = QueryLenSupport.SINGLE_ONLY
+    """Defines the level of query length support for this backend.
+    - SINGLE_ONLY: Only single-token queries (no spec decode support)
+    - UNIFORM: Supports uniform multi-token queries (spec decode with uniform lengths)
+    - VARLEN: Supports variable-length queries (spec decode with mixed lengths)
+    If set to UNIFORM or VARLEN, this will increase `reorder_batch_threshold` when
+    speculative decoding is enabled."""
 
 
 @dataclass
@@ -246,10 +293,11 @@ class AttentionCGSupport(enum.Enum):
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
-    # Does this backend/builder reorder the batch?
-    # If not, set this to None. Otherwise set it to the query
-    # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: int | None = None
+    # reorder_batch_threshold: int | None = None
+    # Attention backend's reorder spec which controls if and
+    # how to reorder the request before actually execute the
+    # model (default: no reorder)
+    reorder_spec: ReorderSpec = ReorderSpec(None)
 
     @abstractmethod
     def __init__(
@@ -267,8 +315,11 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     def _init_reorder_batch_threshold(
         self, reorder_batch_threshold: int = 1, supports_spec_as_decode: bool = False
     ) -> None:
-        self.reorder_batch_threshold = reorder_batch_threshold
-        if self.reorder_batch_threshold is not None and supports_spec_as_decode:
+        self.reorder_spec.reorder_batch_threshold = reorder_batch_threshold
+        if (
+            self.reorder_spec.reorder_batch_threshold is not None
+            and supports_spec_as_decode
+        ):
             # If the backend supports spec-as-decode kernels, then we can set
             # the reorder_batch_threshold based on the number of speculative
             # tokens from the config.
@@ -277,8 +328,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                self.reorder_batch_threshold = max(
-                    self.reorder_batch_threshold,
+                self.reorder_spec.reorder_batch_threshold = max(
+                    self.reorder_spec.reorder_batch_threshold,
                     1 + speculative_config.num_speculative_tokens,
                 )
 
@@ -349,6 +400,10 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         dcp_world_size: int,
     ) -> bool:
         return False
+
+    @classmethod
+    def reset_reorder_spec(cls, reorder_sepc):
+        cls.reorder_spec = reorder_sepc
 
 
 @functools.lru_cache
@@ -729,7 +784,7 @@ def subclass_attention_backend(
     )
 
 
-def split_decodes_prefills_and_chunk(
+def split_decodes_prefills_and_extends(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
 ) -> tuple[int, int, int, int, int, int]:
@@ -765,32 +820,37 @@ def split_decodes_prefills_and_chunk(
     first_prefill = is_prefill.int().argmax(dim=-1).item()
     assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
+
     num_decodes = first_prefill
     num_decode_tokens = query_start_loc[first_prefill].item()
 
     query_lens_prefill = query_lens[first_prefill:]
     seq_lens_prefill = seq_lens[first_prefill:]
-    is_pure_prefill = seq_lens_prefill == query_lens_prefill
+    is_extend = seq_lens_prefill != query_lens_prefill
 
-    if torch.all(is_pure_prefill):
-        num_pure_prefills = num_reqs - num_decodes
-        num_pure_prefill_tokens = num_tokens - num_decode_tokens
-        return (num_decodes, 0, num_pure_prefills, num_decode_tokens, 0,
-                num_pure_prefill_tokens)
+    if torch.all(is_extend):
+        num_extends = num_reqs - num_decodes
+        num_extend_tokens = num_tokens - num_decode_tokens
+        return (num_decodes, num_extends, 0, num_decode_tokens, num_extend_tokens, 0)
 
     num_prefills = num_reqs - num_decodes
-    first_chunk_prefill = is_pure_prefill.int().argmax(dim=-1).item()
+    first_extend = is_extend.int().argmax(dim=-1).item()
 
-    num_chunk_prefills = first_chunk_prefill
-    num_pure_prefills = num_prefills - first_chunk_prefill
+    num_extends = first_extend
+    num_pure_prefills = num_prefills - first_extend
 
-    num_chunk_prefill_tokens = query_start_loc[
-        num_chunk_prefills + num_decodes].item() - num_decode_tokens
-    num_pure_prefill_tokens = num_tokens - num_decode_tokens - \
-        num_chunk_prefill_tokens
-    return (num_decodes, num_chunk_prefills, num_pure_prefills,
-            num_decode_tokens, num_chunk_prefill_tokens,
-            num_pure_prefill_tokens)
+    num_extend_tokens = (
+        query_start_loc[num_extends + num_decodes].item() - num_decode_tokens
+    )
+    num_pure_prefill_tokens = num_tokens - num_decode_tokens - num_extend_tokens
+    return (
+        num_decodes,
+        num_extends,
+        num_pure_prefills,
+        num_decode_tokens,
+        num_extend_tokens,
+        num_pure_prefill_tokens,
+    )
 
 
 def split_decodes_and_prefills(
@@ -848,51 +908,43 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
-def reorder_batch_to_split_decodes_prefills_and_chunks(
+def reorder_batch_to_split_decodes_prefills_and_extends(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
 ) -> bool:
     """
-    Reorders the batch to split into prefill, chunk_prefill 
-    and decode requests; places all requests in the order of 
-    [decodes:chunked_prefills:pure_prefills].
+    Reorders the batch to split into prefill, extend
+    and decode requests; places all requests in the order of
+    [decodes:extend:prefill].
 
     Returns:
         True if the batch was modified, False otherwise.
     """
 
-    # We assume most of the request is already in the order of what
-    # we desired since this function should only be opened after the
-    # `SchedulerConfig.split_prefill_from_chunk` is True. So we only
-    # need to spot all mismatched request and swap their positions
-    # for efficiency.
-
     decodes = []
     prefills = []
-    chunk_prefills = []
+    extends = []
 
     for i, req_id in enumerate(input_batch.req_ids):
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
         if num_tokens <= decode_threshold:
             decodes.append(i)
         elif input_batch.num_computed_tokens_cpu[i] > 0:
-            chunk_prefills.append(i)
+            extends.append(i)
         else:
             prefills.append(i)
 
     num_decodes = len(decodes)
-    num_chunk_prefills = len(chunk_prefills)
+    num_extends = len(extends)
     # We define the reorder matrix here to help on the request reorder
     # reorder_matrix[(i, j)] means the id the the requests that suppose
     # to be in zone i but actually spot on zone j
-    # The decode, chunk prefill and pure prefill are separated into 3
-    # different zone here, 0 for decode, 1 for chunk prefill and 2 for
-    # pure prefill
+    # The decode, extend and prefill are separated into 3
+    # different zone here, 0 for decode, 1 for extend and 2 for
+    # prefill
     reorder_matrix: dict[tuple[int, int], deque[int]] = {
-        (i, j): deque()
-        for i in range(3)
-        for j in range(3) if i != j
+        (i, j): deque() for i in range(3) for j in range(3) if i != j
     }
 
     # collect mismatch
@@ -901,11 +953,11 @@ def reorder_batch_to_split_decodes_prefills_and_chunks(
         if idx < num_decodes:
             # decode as zone 0
             return 0
-        elif idx < num_decodes + num_chunk_prefills:
-            # chunk prefill as zone 1
+        elif idx < num_decodes + num_extends:
+            # extend as zone 1
             return 1
         else:
-            # pure prefill as zone 2
+            # prefill as zone 2
             return 2
 
     def fill_reorder_matrix(request_lists, reorder_sequence):
@@ -931,8 +983,11 @@ def reorder_batch_to_split_decodes_prefills_and_chunks(
     def indirect_zone_swap(zone_list):
         assert len(zone_list) == 3
         modified_batch = False
-        while reorder_matrix[zone_list[0]] and reorder_matrix[
-                zone_list[1]] and reorder_matrix[zone_list[2]]:
+        while (
+            reorder_matrix[zone_list[0]]
+            and reorder_matrix[zone_list[1]]
+            and reorder_matrix[zone_list[2]]
+        ):
             swap_req1 = reorder_matrix[zone_list[0]].pop()
             swap_req2 = reorder_matrix[zone_list[1]].pop()
             swap_req3 = reorder_matrix[zone_list[2]].pop()
@@ -942,13 +997,13 @@ def reorder_batch_to_split_decodes_prefills_and_chunks(
             modified_batch = True
         return modified_batch
 
-    fill_reorder_matrix([decodes, chunk_prefills, prefills], [0, 1, 2])
+    fill_reorder_matrix([decodes, extends, prefills], [0, 1, 2])
 
     modified_batch = False
     # do directly swap for
-    modified_batch |= direct_zone_swap(0, 1)  # decode <--> chunk prefill
-    modified_batch |= direct_zone_swap(0, 2)  # decode <--> pure prefill
-    modified_batch |= direct_zone_swap(1, 2)  # chunk prefill <--> pure prefill
+    modified_batch |= direct_zone_swap(0, 1)  # decode <--> extend
+    modified_batch |= direct_zone_swap(0, 2)  # decode <--> prefill
+    modified_batch |= direct_zone_swap(1, 2)  # extend <--> prefill
 
     modified_batch |= indirect_zone_swap(((0, 1), (1, 2), (2, 0)))
     modified_batch |= indirect_zone_swap(((2, 1), (0, 2), (1, 0)))
@@ -960,7 +1015,6 @@ def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
-    reorder_append_prefills: bool = False,
 ) -> bool:
     """
     Reorders the batch to split into prefill and decode requests; places all

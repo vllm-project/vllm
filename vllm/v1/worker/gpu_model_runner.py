@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from itertools import product
+from itertools import product, reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -90,10 +90,12 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    ReorderSpec,
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills,
-    reorder_batch_to_split_decodes_prefills_and_chunks,
-    split_attn_metadata)
+    reorder_batch_to_split_decodes_prefills_and_extends,
+    split_attn_metadata,
+)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -486,7 +488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None
         )
 
-        self.reorder_batch_threshold: int | None = None
+        self.reorder_spec: ReorderSpec = ReorderSpec(None)
 
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the
@@ -580,7 +582,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        if self.reorder_batch_threshold is not None:
+        if self.reorder_spec.reorder_batch_threshold is not None:
             # NOTE(lucas): currently no backend supports the custom masking
             #  required for DCP with q_len > 1, so we assert here. Remove this
             #  assert once the custom mask is support is added to FA3.
@@ -588,19 +590,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.dcp_world_size > 1
                 and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN_MLA"
             ):
-                assert self.reorder_batch_threshold == 1, (
+                assert self.reorder_spec.reorder_batch_threshold == 1, (
                     "DCP not support reorder_batch_threshold > 1 now."
                 )
-            if self.scheduler_config.split_prefill_from_chunk:
-                reorder_batch_to_split_decodes_prefills_and_chunks(
+            if self.reorder_spec.split_extend:
+                reorder_batch_to_split_decodes_prefills_and_extends(
                     self.input_batch,
                     scheduler_output,
-                    decode_threshold=self.reorder_batch_threshold)
+                    decode_threshold=self.reorder_spec.reorder_batch_threshold,
+                )
             else:
                 reorder_batch_to_split_decodes_and_prefills(
                     self.input_batch,
                     scheduler_output,
-                    decode_threshold=self.reorder_batch_threshold)
+                    decode_threshold=self.reorder_spec.reorder_batch_threshold,
+                )
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -808,7 +812,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
-
             self.input_batch.add_request(request)
 
         # Condense the batched states if there are gaps left by removed requests
@@ -3979,8 +3982,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
             self.attn_groups.append(create_attn_groups(attn_backends))
 
-        # Calculate reorder batch threshold (if needed)
-        self.calculate_reorder_batch_threshold()
+        # Calculate reorder spec
+        self.calculate_reorder_spec()
 
     def initialize_cudagraph_capture(self) -> None:
         """
@@ -4105,28 +4108,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.compilation_config.cudagraph_mode, self.uniform_decode_query_len
         )
 
-    def calculate_reorder_batch_threshold(self) -> None:
+    def calculate_reorder_spec(self) -> None:
         """
         Check that if any backends reorder batches; that the reordering
         is compatible (e.g., decode threshold is the same)
         """
-        for group in self._attn_group_iterator():
-            attn_metadata_builder_i = group.get_metadata_builder()
 
-            # check that if any backends reorder batches; that the reordering
-            # is compatible (e.g., decode threshold is the same)
-            reorder_batch_threshold_i = attn_metadata_builder_i.reorder_batch_threshold
-            if reorder_batch_threshold_i is not None:
-                if self.reorder_batch_threshold is not None:
-                    if reorder_batch_threshold_i != self.reorder_batch_threshold:
-                        raise ValueError(
-                            f"Attention backend reorders decodes with "
-                            f"threshold {reorder_batch_threshold_i} but other "
-                            f"backend uses threshold "
-                            f"{self.reorder_batch_threshold}"
-                        )
-                else:
-                    self.reorder_batch_threshold = reorder_batch_threshold_i
+        specs = [
+            group.get_metadata_builder().reorder_spec
+            for group in self._attn_group_iterator()
+        ]
+
+        def min_none_high(a, b):
+            if a is None:
+                return b
+            if b is None:
+                return a
+            return min(a, b)
+
+        self.reorder_spec = reduce(
+            lambda a, b: ReorderSpec(
+                reorder_batch_threshold=min_none_high(
+                    a.reorder_batch_threshold, b.reorder_batch_threshold
+                ),
+                split_extend=a.split_extend or b.split_extend,
+            ),
+            specs,
+        )
+        # Write back the Calculated spec to the AttentionMetadataBuilder
+        for group in self._attn_group_iterator():
+            group.get_metadata_builder().reset_reorder_spec(self.reorder_spec)
 
     def _find_compatible_block_sizes(
         self,

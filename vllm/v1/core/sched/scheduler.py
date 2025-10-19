@@ -539,8 +539,10 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
-                if num_computed_tokens > 0 and \
-                    self.scheduler_config.split_prefill_from_chunk:
+                if (
+                    num_computed_tokens > 0
+                    and self.scheduler_config.split_prefill_from_chunk
+                ):
                     new_reqs_for_chunk_prefill.append(request)
                 else:
                     new_reqs_for_pure_preill.append(request)
@@ -578,8 +580,9 @@ class Scheduler(SchedulerInterface):
         # reorder the request during scheduling, put chunked prefill
         # at the top of the scheduled_new_reqs to make sure the actual
         # reorder in model runner happens as less as possible.
-        assert running_req_cnt == len(new_reqs_for_chunk_prefill) + \
-            len(new_reqs_for_pure_preill) + len(self.running)
+        assert running_req_cnt == len(new_reqs_for_chunk_prefill) + len(
+            new_reqs_for_pure_preill
+        ) + len(self.running)
 
         new_reqs_for_chunk_prefill.extend(new_reqs_for_pure_preill)
         for req in new_reqs_for_chunk_prefill:

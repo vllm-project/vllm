@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    ReorderSpec,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -33,7 +34,7 @@ class LinearAttentionMetadata:
 
 
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
-    reorder_batch_threshold: int = 1
+    reorder_spec: ReorderSpec = ReorderSpec(1)
 
     def __init__(
         self,
@@ -56,9 +57,11 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
+        assert self.reorder_spec.reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata,
+                decode_threshold=self.reorder_spec.reorder_batch_threshold,
             )
         )
 

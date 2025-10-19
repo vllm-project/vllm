@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    ReorderSpec,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -348,7 +349,7 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
-    reorder_batch_threshold: int = 1
+    reorder_spec: ReorderSpec = ReorderSpec(1)
 
     def __init__(
         self,
@@ -384,10 +385,11 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_start_loc_np = query_start_loc_cpu.numpy()
 
+        assert self.reorder_spec.reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                decode_threshold=self.reorder_spec.reorder_batch_threshold,
                 require_uniform=True,
             )
         )

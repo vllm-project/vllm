@@ -13,9 +13,8 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backends.utils import AttentionCGSupport, ReorderSpec, QueryLenSupport
 
 logger = init_logger(__name__)
 
@@ -23,8 +22,10 @@ FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+
+    # enable full CUDA Graph support for decode-only capture
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1, query_len_support=QueryLenSupport.UNIFORM)
 
 
 class FlashInferMLABackend(MLACommonBackend):
