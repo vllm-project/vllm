@@ -7,9 +7,12 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.lora.ops.triton_ops import fused_moe_lora
+from vllm.platforms import current_platform
 
-torch.manual_seed(42)
-random.seed(42)
+
+@pytest.fixture(autouse=True)
+def reset_device(reset_default_device):
+    pass
 
 
 def round_up(x, base):
@@ -57,7 +60,7 @@ def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
 
         start = end
 
-    return token_lora_mapping.to("cuda")
+    return token_lora_mapping
 
 
 def assign_experts_to_tokens(num_tokens: int, num_experts: int, top_k_num: int):
@@ -89,7 +92,7 @@ def assign_experts_to_tokens(num_tokens: int, num_experts: int, top_k_num: int):
     expert_weights = torch.rand((num_tokens, top_k_num), dtype=torch.float32)
     expert_weights = expert_weights / expert_weights.sum(dim=1, keepdim=True)
 
-    return expert_indices.to("cuda"), expert_weights.to("cuda")
+    return expert_indices, expert_weights
 
 
 def sample_data(
@@ -128,12 +131,9 @@ def use_fused_moe_lora_kernel(
     sorted_token_ids = torch.empty(
         (max_loras * max_num_tokens_padded,),
         dtype=torch.int32,
-        device="cuda",
     )
-    expert_ids = torch.empty(
-        (max_loras * max_num_m_blocks,), dtype=torch.int32, device="cuda"
-    )
-    num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32, device="cuda")
+    expert_ids = torch.empty((max_loras * max_num_m_blocks,), dtype=torch.int32)
+    num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32)
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -208,9 +208,20 @@ def use_torch(
 @pytest.mark.parametrize("K", [2048])
 @pytest.mark.parametrize("max_lora_rank", [16, 32, 64])
 @pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_moe_lora_kernel(
-    num_tokens, top_k_num, num_experts, max_loras, N, K, max_lora_rank, block_size
+    num_tokens,
+    top_k_num,
+    num_experts,
+    max_loras,
+    N,
+    K,
+    max_lora_rank,
+    block_size,
+    dtype,
 ):
+    torch.set_default_device("cuda:0")
+    current_platform.seed_everything(42)
     # the number of randomly generated sentences.
     num_sequences = 10
     # generate data
@@ -228,7 +239,6 @@ def test_fused_moe_lora_kernel(
                 K,
             ),
             dtype=torch.bfloat16,
-            device="cuda",
         )
     ]
     lora_b_stacked = [
@@ -240,7 +250,6 @@ def test_fused_moe_lora_kernel(
                 max_lora_rank,
             ),
             dtype=torch.bfloat16,
-            device="cuda",
         )
     ]
     hidden_states = torch.rand(
@@ -249,13 +258,10 @@ def test_fused_moe_lora_kernel(
             K,
         ),
         dtype=torch.bfloat16,
-        device="cuda",
     )
 
     # fused_moe_lora_kernel output
-    output = torch.zeros(
-        (num_tokens, top_k_num, N), dtype=torch.bfloat16, device="cuda"
-    )
+    output = torch.zeros((num_tokens, top_k_num, N), dtype=torch.bfloat16)
     use_fused_moe_lora_kernel(
         topk_ids,
         topk_weights,
