@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
@@ -13,7 +13,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -71,7 +71,7 @@ class AriaImagePixelInputs(TensorSchema):
     ]
 
     pixel_mask: Annotated[
-        Optional[torch.Tensor],
+        torch.Tensor | None,
         TensorShape("bn", "h", "w"),
     ]
 
@@ -82,7 +82,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(config, quant_config=quant_config, prefix=prefix)
@@ -180,7 +180,7 @@ class AriaProjector(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, num_patches = x.shape[0], x.shape[1]
 
@@ -206,7 +206,7 @@ class AriaProjector(nn.Module):
         return out
 
 
-class AriaFusedMoE(FusedMoE):
+class AriaFusedMoE(SharedFusedMoE):
     def weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
     ) -> None:
@@ -250,7 +250,7 @@ class AriaTextMoELayer(nn.Module):
     def __init__(
         self,
         config: AriaTextConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -260,7 +260,16 @@ class AriaTextMoELayer(nn.Module):
             torch.empty((self.config.moe_num_experts, self.config.hidden_size))
         )
 
+        self.shared_experts = LlamaMLP(
+            config.hidden_size,
+            config.intermediate_size * config.moe_num_shared_experts,
+            "silu",
+            quant_config=quant_config,
+            bias=config.mlp_bias,
+        )
+
         self.experts = AriaFusedMoE(
+            shared_experts=self.shared_experts,
             num_experts=config.moe_num_experts,
             top_k=config.moe_topk,
             hidden_size=config.hidden_size,
@@ -268,13 +277,6 @@ class AriaTextMoELayer(nn.Module):
             quant_config=quant_config,
             reduce_results=True,
             prefix=f"{prefix}.experts",
-        )
-        self.shared_experts = LlamaMLP(
-            config.hidden_size,
-            config.intermediate_size * config.moe_num_shared_experts,
-            "silu",
-            quant_config=quant_config,
-            bias=config.mlp_bias,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -291,12 +293,12 @@ class AriaTextMoELayer(nn.Module):
 
         router_output = torch.nn.functional.linear(hidden_states, self.router_weight)
 
-        hidden_states_copy = hidden_states.clone()
-        # NOTE: hidden_states will be modified inplace by `FusedMoE`
         sparse_expert_output = self.experts(hidden_states, router_output)
-        shared_expert_output = self.shared_experts(hidden_states_copy)
 
-        return sparse_expert_output + shared_expert_output
+        if self.shared_experts is not None:
+            return sparse_expert_output[0] + sparse_expert_output[1]
+        else:
+            return sparse_expert_output
 
 
 class AriaTextDecoderLayer(LlamaDecoderLayer):
@@ -413,7 +415,7 @@ class AriaProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(AriaProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(self) -> int:
@@ -434,7 +436,7 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         vision_config = self.info.get_vision_config()
 
@@ -515,7 +517,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|fim_prefix|><|img|><|fim_suffix|>"
 
@@ -560,7 +562,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[AriaImagePixelInputs]:
+    ) -> AriaImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         pixel_mask = kwargs.pop("pixel_mask", None)
 
@@ -575,8 +577,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _create_patch_attention_mask(
         self,
-        pixel_mask: Optional[torch.Tensor],
-    ) -> Optional[torch.Tensor]:
+        pixel_mask: torch.Tensor | None,
+    ) -> torch.Tensor | None:
         if pixel_mask is None:
             return None
 
@@ -626,10 +628,10 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(

@@ -7,15 +7,16 @@ import dataclasses
 import functools
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
+from types import UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    Callable,
     Literal,
-    Optional,
+    TypeAlias,
     TypeVar,
     Union,
     cast,
@@ -27,6 +28,7 @@ import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -79,7 +81,9 @@ from vllm.transformers_utils.config import (
     maybe_override_with_speculators,
 )
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
+from vllm.utils import FlexibleArgumentParser, is_in_ray_actor
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.network_utils import get_ip
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -97,8 +101,8 @@ logger = init_logger(__name__)
 
 # object is used to allow for special typing forms
 T = TypeVar("T")
-TypeHint = Union[type[Any], object]
-TypeHintT = Union[type[T], object]
+TypeHint: TypeAlias = type[Any] | object
+TypeHintT: TypeAlias = type[T] | object
 
 
 def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
@@ -113,8 +117,8 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
     return _parse_type
 
 
-def optional_type(return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
-    def _optional_type(val: str) -> Optional[T]:
+def optional_type(return_type: Callable[[str], T]) -> Callable[[str], T | None]:
+    def _optional_type(val: str) -> T | None:
         if val == "" or val == "None":
             return None
         return parse_type(return_type)(val)
@@ -122,7 +126,7 @@ def optional_type(return_type: Callable[[str], T]) -> Callable[[str], Optional[T
     return _optional_type
 
 
-def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
+def union_dict_and_str(val: str) -> str | dict[str, str] | None:
     if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
@@ -160,6 +164,31 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
     return {"type": option_type, kwarg: sorted(options)}
 
 
+def collection_to_kwargs(type_hints: set[TypeHint], type: TypeHint) -> dict[str, Any]:
+    type_hint = get_type(type_hints, type)
+    types = get_args(type_hint)
+    elem_type = types[0]
+
+    # Handle Ellipsis
+    assert all(t is elem_type for t in types if t is not Ellipsis), (
+        f"All non-Ellipsis elements must be of the same type. Got {types}."
+    )
+
+    # Handle Union types
+    if get_origin(elem_type) in {Union, UnionType}:
+        # Union for Union[X, Y] and UnionType for X | Y
+        assert str in get_args(elem_type), (
+            "If element can have multiple types, one must be 'str' "
+            f"(i.e. 'list[int | str]'). Got {elem_type}."
+        )
+        elem_type = str
+
+    return {
+        "type": elem_type,
+        "nargs": "+" if type is not tuple or Ellipsis in types else len(types),
+    }
+
+
 def is_not_builtin(type_hint: TypeHint) -> bool:
     """Check if the class is not a built-in type."""
     return type_hint.__module__ != "builtins"
@@ -173,7 +202,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 
     if origin is Annotated:
         type_hints.update(get_type_hints(args[0]))
-    elif origin is Union:
+    elif origin in {Union, UnionType}:
+        # Union for Union[X, Y] and UnionType for X | Y
         for arg in args:
             type_hints.update(get_type_hints(arg))
     else:
@@ -194,7 +224,7 @@ NEEDS_HELP = (
 
 
 @functools.lru_cache(maxsize=30)
-def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
+def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
     cls_docs = get_attr_docs(cls) if NEEDS_HELP else {}
     kwargs = {}
@@ -209,6 +239,13 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
+            # Handle pydantic.Field defaults
+            if isinstance(default, FieldInfo):
+                default = (
+                    default.default
+                    if default.default_factory is None
+                    else default.default_factory()
+                )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -241,25 +278,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, Literal):
             kwargs[name].update(literal_to_kwargs(type_hints))
         elif contains_type(type_hints, tuple):
-            type_hint = get_type(type_hints, tuple)
-            types = get_args(type_hint)
-            tuple_type = types[0]
-            assert all(t is tuple_type for t in types if t is not Ellipsis), (
-                "All non-Ellipsis tuple elements must be of the same "
-                f"type. Got {types}."
-            )
-            kwargs[name]["type"] = tuple_type
-            kwargs[name]["nargs"] = "+" if Ellipsis in types else len(types)
+            kwargs[name].update(collection_to_kwargs(type_hints, tuple))
         elif contains_type(type_hints, list):
-            type_hint = get_type(type_hints, list)
-            types = get_args(type_hint)
-            list_type = types[0]
-            if get_origin(list_type) is Union:
-                msg = "List type must contain str if it is a Union."
-                assert str in get_args(list_type), msg
-                list_type = str
-            kwargs[name]["type"] = list_type
-            kwargs[name]["nargs"] = "+"
+            kwargs[name].update(collection_to_kwargs(type_hints, list))
+        elif contains_type(type_hints, set):
+            kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
@@ -302,7 +325,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
     return kwargs
 
 
-def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     """Return argparse kwargs for the given Config dataclass.
 
     If `--help` or `mkdocs` are not present in the command line command, the
@@ -320,46 +343,47 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
-    served_model_name: Optional[Union[str, list[str]]] = ModelConfig.served_model_name
-    tokenizer: Optional[str] = ModelConfig.tokenizer
-    hf_config_path: Optional[str] = ModelConfig.hf_config_path
+    served_model_name: str | list[str] | None = ModelConfig.served_model_name
+    tokenizer: str | None = ModelConfig.tokenizer
+    hf_config_path: str | None = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
-    task: Optional[TaskOption] = ModelConfig.task
+    task: TaskOption | None = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
-    allowed_media_domains: Optional[list[str]] = ModelConfig.allowed_media_domains
-    download_dir: Optional[str] = LoadConfig.download_dir
+    allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
+    download_dir: str | None = LoadConfig.download_dir
     safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
-    load_format: Union[str, LoadFormats] = LoadConfig.load_format
+    load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-    seed: Optional[int] = ModelConfig.seed
-    max_model_len: Optional[int] = ModelConfig.max_model_len
+    seed: int | None = ModelConfig.seed
+    max_model_len: int | None = ModelConfig.max_model_len
     cuda_graph_sizes: list[int] = get_field(SchedulerConfig, "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
-    distributed_executor_backend: Optional[
-        Union[str, DistributedExecutorBackend, type[ExecutorBase]]
-    ] = ParallelConfig.distributed_executor_backend
+    distributed_executor_backend: (
+        str | DistributedExecutorBackend | type[ExecutorBase] | None
+    ) = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
-    data_parallel_rank: Optional[int] = None
-    data_parallel_start_rank: Optional[int] = None
-    data_parallel_size_local: Optional[int] = None
-    data_parallel_address: Optional[str] = None
-    data_parallel_rpc_port: Optional[int] = None
+    data_parallel_rank: int | None = None
+    data_parallel_start_rank: int | None = None
+    data_parallel_size_local: int | None = None
+    data_parallel_address: str | None = None
+    data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    all2all_backend: str | None = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
@@ -377,11 +401,11 @@ class EngineArgs:
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
     eplb_log_balancedness: bool = EPLBConfig.log_balancedness
-    max_parallel_loading_workers: Optional[int] = (
+    max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: Optional[BlockSize] = CacheConfig.block_size
-    enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
+    block_size: BlockSize | None = CacheConfig.block_size
+    enable_prefix_caching: bool | None = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
@@ -390,63 +414,63 @@ class EngineArgs:
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
-    kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
-    max_num_batched_tokens: Optional[int] = SchedulerConfig.max_num_batched_tokens
+    kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    max_num_batched_tokens: int | None = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
+    max_num_seqs: int | None = SchedulerConfig.max_num_seqs
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
-    revision: Optional[str] = ModelConfig.revision
-    code_revision: Optional[str] = ModelConfig.code_revision
+    aggregate_engine_logging: bool = False
+    revision: str | None = ModelConfig.revision
+    code_revision: str | None = ModelConfig.code_revision
     rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
-    rope_theta: Optional[float] = ModelConfig.rope_theta
-    hf_token: Optional[Union[bool, str]] = ModelConfig.hf_token
+    rope_theta: float | None = ModelConfig.rope_theta
+    hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
-    tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
-    quantization: Optional[QuantizationMethods] = ModelConfig.quantization
+    tokenizer_revision: str | None = ModelConfig.tokenizer_revision
+    quantization: QuantizationMethods | None = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = get_field(
+    limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str, Any]] = get_field(
         MultiModalConfig, "media_io_kwargs"
     )
-    mm_processor_kwargs: Optional[dict[str, Any]] = MultiModalConfig.mm_processor_kwargs
+    mm_processor_kwargs: dict[str, Any] | None = MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
-    mm_processor_cache_type: Optional[MMCacheType] = (
+    mm_processor_cache_type: MMCacheType | None = (
         MultiModalConfig.mm_processor_cache_type
     )
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
-    io_processor_plugin: Optional[str] = None
+    io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
-    default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
+    default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
-    max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
-    lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
+    max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
+    lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
-    num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
+    num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
-    ignore_patterns: Optional[Union[str, list[str]]] = LoadConfig.ignore_patterns
+    ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
-    enable_chunked_prefill: Optional[bool] = SchedulerConfig.enable_chunked_prefill
+    enable_chunked_prefill: bool | None = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     disable_hybrid_kv_cache_manager: bool = (
@@ -457,36 +481,37 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+
     # Deprecated guided decoding fields
-    guided_decoding_backend: Optional[str] = None
-    guided_decoding_disable_fallback: Optional[bool] = None
-    guided_decoding_disable_any_whitespace: Optional[bool] = None
-    guided_decoding_disable_additional_properties: Optional[bool] = None
+    guided_decoding_backend: str | None = None
+    guided_decoding_disable_fallback: bool | None = None
+    guided_decoding_disable_any_whitespace: bool | None = None
+    guided_decoding_disable_additional_properties: bool | None = None
 
-    logits_processor_pattern: Optional[str] = ModelConfig.logits_processor_pattern
+    logits_processor_pattern: str | None = ModelConfig.logits_processor_pattern
 
-    speculative_config: Optional[dict[str, Any]] = None
+    speculative_config: dict[str, Any] | None = None
 
-    show_hidden_metrics_for_version: Optional[str] = (
+    show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
     )
-    otlp_traces_endpoint: Optional[str] = ObservabilityConfig.otlp_traces_endpoint
-    collect_detailed_traces: Optional[list[DetailedTraceModules]] = (
+    otlp_traces_endpoint: str | None = ObservabilityConfig.otlp_traces_endpoint
+    collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: Union[str, type[object]] = SchedulerConfig.scheduler_cls
+    scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
 
-    pooler_config: Optional[PoolerConfig] = ModelConfig.pooler_config
-    override_pooler_config: Optional[Union[dict, PoolerConfig]] = (
+    pooler_config: PoolerConfig | None = ModelConfig.pooler_config
+    override_pooler_config: dict | PoolerConfig | None = (
         ModelConfig.override_pooler_config
     )
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
-    kv_transfer_config: Optional[KVTransferConfig] = None
-    kv_events_config: Optional[KVEventsConfig] = None
+    kv_transfer_config: KVTransferConfig | None = None
+    kv_events_config: KVEventsConfig | None = None
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -508,7 +533,7 @@ class EngineArgs:
     # DEPRECATED
     enable_multimodal_encoder_data_parallel: bool = False
 
-    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = (
+    logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
     )
     """Custom logitproc types"""
@@ -752,6 +777,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
         )
+        parallel_group.add_argument(
+            "--all2all-backend", **parallel_kwargs["all2all_backend"]
+        )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -908,7 +936,6 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             help="If True, enable handling of LoRA adapters.",
         )
-        lora_group.add_argument("--enable-lora-bias", **lora_kwargs["bias_enabled"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
@@ -1034,6 +1061,12 @@ class EngineArgs:
             help="Disable logging statistics.",
         )
 
+        parser.add_argument(
+            "--aggregate-engine-logging",
+            action="store_true",
+            help="Log aggregate rather than per-engine statistics "
+            "when using data parallelism.",
+        )
         return parser
 
     @classmethod
@@ -1181,7 +1214,7 @@ class EngineArgs:
         target_parallel_config: ParallelConfig,
         enable_chunked_prefill: bool,
         disable_log_stats: bool,
-    ) -> Optional["SpeculativeConfig"]:
+    ) -> SpeculativeConfig | None:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
 
@@ -1208,7 +1241,7 @@ class EngineArgs:
 
     def create_engine_config(
         self,
-        usage_context: Optional[UsageContext] = None,
+        usage_context: UsageContext | None = None,
         headless: bool = False,
     ) -> VllmConfig:
         """
@@ -1261,7 +1294,8 @@ class EngineArgs:
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
             CpuArchEnum.POWERPC,
             CpuArchEnum.S390X,
@@ -1274,9 +1308,16 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
+
         assert self.enable_chunked_prefill is not None
 
-        sliding_window: Optional[int] = None
+        sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
             # window. Otherwise CacheConfig.sliding_window will override the
@@ -1319,7 +1360,13 @@ class EngineArgs:
             import ray
 
             ray_runtime_env = ray.get_runtime_context().runtime_env
-            logger.info("Using ray runtime env: %s", ray_runtime_env)
+            # Avoid logging sensitive environment variables
+            sanitized_env = ray_runtime_env.to_dict() if ray_runtime_env else {}
+            if "env_vars" in sanitized_env:
+                sanitized_env["env_vars"] = {
+                    k: "***" for k in sanitized_env["env_vars"]
+                }
+            logger.info("Using ray runtime env (env vars redacted): %s", sanitized_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
@@ -1367,8 +1414,15 @@ class EngineArgs:
                 "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
             )
 
-            # Local DP size defaults to global DP size if not set.
-            data_parallel_size_local = self.data_parallel_size
+            if self.data_parallel_backend == "ray" and (
+                envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
+            ):
+                # Data parallel size defaults to 1 if DP ranks are spanning
+                # multiple nodes
+                data_parallel_size_local = 1
+            else:
+                # Otherwise local DP size defaults to global DP size if not set
+                data_parallel_size_local = self.data_parallel_size
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
@@ -1397,13 +1451,6 @@ class EngineArgs:
         )
 
         if self.async_scheduling:
-            # Async scheduling does not work with the uniprocess backend.
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "mp"
-                logger.info(
-                    "Defaulting to mp-based distributed executor "
-                    "backend for async scheduling."
-                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Async scheduling is not supported with pipeline-parallel-size > 1."
@@ -1439,6 +1486,7 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
+            all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
@@ -1458,6 +1506,15 @@ class EngineArgs:
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
+
+        if self.async_scheduling and (
+            parallel_config.distributed_executor_backend not in ("mp", "uni")
+        ):
+            raise ValueError(
+                "Currently, async scheduling only supports `mp` or `uni` "
+                "distributed executor backend, but you choose "
+                f"`{parallel_config.distributed_executor_backend}`."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1501,7 +1558,6 @@ class EngineArgs:
 
         lora_config = (
             LoRAConfig(
-                bias_enabled=self.enable_lora_bias,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
@@ -1577,13 +1633,6 @@ class EngineArgs:
         if self.logits_processor_pattern != EngineArgs.logits_processor_pattern:
             _raise_or_fallback(
                 feature_name="--logits-processor-pattern", recommend_to_remove=False
-            )
-            return False
-
-        # No Mamba or Encoder-Decoder so far.
-        if not model_config.is_v1_compatible:
-            _raise_or_fallback(
-                feature_name=model_config.architectures, recommend_to_remove=False
             )
             return False
 
@@ -1675,7 +1724,7 @@ class EngineArgs:
     ) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # V1 always uses chunked prefills and prefix caching
+        # V1 uses chunked prefills and prefix caching by default
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
@@ -1715,11 +1764,6 @@ class EngineArgs:
             if self.enable_prefix_caching is None:
                 self.enable_prefix_caching = incremental_prefill_supported
                 logger.info("(%s) prefix caching by default", action)
-
-        # V1 should use the new scheduler by default.
-        # Swap it only if this arg is set to the original V0 default
-        if self.scheduler_cls == EngineArgs.scheduler_cls:
-            self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
         # When no user override, set the default values based on the usage
         # context.

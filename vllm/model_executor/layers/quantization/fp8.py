@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.nn import Module
@@ -13,6 +14,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEActivationFormat,
@@ -25,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -36,6 +41,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -89,9 +95,11 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
+    fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
+    should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.flashinfer import has_flashinfer_moe
 
@@ -173,8 +181,8 @@ class Fp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
-        ignored_layers: Optional[list[str]] = None,
-        weight_block_size: Optional[list[int]] = None,
+        ignored_layers: list[str] | None = None,
+        weight_block_size: list[int] | None = None,
     ) -> None:
         super().__init__()
 
@@ -298,7 +306,7 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
-    def get_cache_scale(self, name: str) -> Optional[str]:
+    def get_cache_scale(self, name: str) -> str | None:
         """
         Check whether the param name matches the format for k/v cache scales
         in compressed-tensors. If this is the case, return its equivalent
@@ -350,6 +358,8 @@ class Fp8LinearMethod(LinearMethodBase):
         )
         # Disable marlin for rocm
         if current_platform.is_rocm():
+            self.use_marlin = False
+        if vllm_is_batch_invariant():
             self.use_marlin = False
 
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
@@ -530,8 +540,115 @@ class Fp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
+        # we will use BF16 dequant when DeepGEMM is not supported.
+        if vllm_is_batch_invariant():
+            if self.block_quant and should_use_deepgemm_for_fp8_linear(
+                torch.bfloat16, layer.weight, None
+            ):
+                # use group quant consistent with block size across K
+                assert self.act_q_group_shape is not None
+                q_input, input_scale = QuantFP8(
+                    False,
+                    self.act_q_group_shape,
+                    column_major_scales=True,
+                )(x)
+
+                output_2d = torch.empty(
+                    (q_input.shape[0], layer.weight.shape[0]),
+                    dtype=torch.bfloat16,
+                    device=q_input.device,
+                )
+                fp8_gemm_nt(
+                    (q_input, input_scale),
+                    (layer.weight, layer.weight_scale),
+                    output_2d,
+                )
+                if bias is not None:
+                    output_2d = output_2d + bias
+                return output_2d
+
+            # Dequantize FP8 weights to BF16
+            weight_fp8 = layer.weight.to(torch.bfloat16)
+            weight_scale = layer.weight_scale.to(torch.bfloat16)
+
+            # Handle different quantization granularities
+            if self.block_quant:
+                # Block-wise quantization:
+                # - Weight is NOT transposed, shape is [N, K] (output_size, input_size)
+                # - Scale has shape [num_blocks_k, num_blocks_n] (TRANSPOSED!)
+                assert self.weight_block_size is not None
+                block_n, block_k = self.weight_block_size  # Note: order is [N, K]
+
+                N, K = weight_fp8.shape
+
+                # determine expected number of blocks along N and K
+                num_blocks_n = (N + block_n - 1) // block_n
+                num_blocks_k = (K + block_k - 1) // block_k
+
+                # scale layout may be [num_blocks_n, num_blocks_k]
+                # or [num_blocks_k, num_blocks_n] depending on backend
+                if weight_scale.dim() != 2:
+                    raise RuntimeError(
+                        f"FP8 block scale must be 2D, got {tuple(weight_scale.shape)}"
+                    )
+
+                scale_rows, scale_cols = weight_scale.shape
+                if (scale_rows, scale_cols) == (num_blocks_k, num_blocks_n):
+                    if num_blocks_n == num_blocks_k:
+                        # ambiguous square case, warn and skip transpose
+                        logger.warning(
+                            "Batch-invariant FP8: square block-scale %dx%d; "
+                            "skipping transpose to avoid misorientation.",
+                            scale_rows,
+                            scale_cols,
+                        )
+                    else:
+                        # clear KN -> transpose to NK
+                        weight_scale = weight_scale.t()
+
+                # Expand scale to match weight dimensions
+                # scale_expanded should have shape [N, K]
+                scale_expanded = weight_scale.repeat_interleave(
+                    block_n, dim=0
+                ).repeat_interleave(block_k, dim=1)
+                # Trim to exact weight size (in case of padding)
+                scale_expanded = scale_expanded[:N, :K]
+                weight_bf16 = weight_fp8 * scale_expanded
+            else:
+                # Per-tensor quantization: weight IS transposed to [K, N]
+                # scale should be scalar or [1] or per-output-channel [N]
+                if weight_scale.numel() == 1:
+                    # Per-tensor: simple scalar multiplication
+                    weight_bf16 = weight_fp8 * weight_scale
+                else:
+                    # Multiple scales (fused modules like QKV)
+                    # Try to infer correct broadcasting
+                    # weight is [K, N], scale could be [num_logical_weights]
+                    # Need to figure out how to broadcast - for now just try
+                    # direct multiplication
+                    if (
+                        weight_scale.dim() == 1
+                        and weight_scale.shape[0] == weight_fp8.shape[0]
+                    ):
+                        # Per-row scaling
+                        weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
+                    else:
+                        # Fallback
+                        weight_bf16 = weight_fp8 * weight_scale
+
+            # For block quant, weight is [N, K], for per-tensor it's [K, N]
+            # F.linear expects weight to be [N, K], so:
+            if self.block_quant:
+                # Already in correct shape [N, K]
+                output = torch.nn.functional.linear(x, weight_bf16, bias)
+            else:
+                # Need to transpose back: [K, N] -> [N, K]
+                output = torch.nn.functional.linear(x, weight_bf16.t(), bias)
+            return output
+
         if self.use_marlin:
             return apply_fp8_marlin_linear(
                 input=x,
@@ -584,12 +701,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
 
-        self.fused_experts: Optional[mk.FusedMoEModularKernel] = None  # type: ignore
+        self.fused_experts: mk.FusedMoEModularKernel | None = None  # type: ignore
 
         self.fp8_backend = get_fp8_moe_backend(self.block_quant)
 
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
-        self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
+        self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
@@ -740,6 +857,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+        self.rocm_aiter_moe_enabled = False
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
@@ -968,7 +1087,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w2_weight_scale_inv
                 )
 
-    def maybe_make_prepare_finalize(self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
             self.rocm_aiter_moe_enabled
             or self.use_marlin
@@ -1041,7 +1160,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         if self.use_marlin:
             return None
 
@@ -1067,21 +1186,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -1165,6 +1284,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=global_num_experts,
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         #
@@ -1193,7 +1313,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."
             assert self.fused_experts is None
-            result = torch.ops.vllm.fused_marlin_moe(
+            result = fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
