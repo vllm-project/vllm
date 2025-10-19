@@ -36,7 +36,7 @@ from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.tasks import SupportedTask
-from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
 

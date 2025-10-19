@@ -10,7 +10,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
 
@@ -103,7 +103,7 @@ class SymmMemCommunicator:
             return
         self.force_multimem = force_multimem
         self.disabled = False
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             self.disabled = True
 
     def should_use_symm_mem(self, inp: torch.Tensor):
