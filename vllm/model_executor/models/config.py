@@ -402,7 +402,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
-            # mamba SSD kernel uses a chunk_size, e.g. 256
+            # Mamba2 SSD kernel uses a chunk_size, e.g. 256
             # Align the block to the kernel: use lowest multiple of chunk_size
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
