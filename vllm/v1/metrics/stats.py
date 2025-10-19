@@ -126,6 +126,19 @@ class PrefixCacheStats(BaseCacheStats):
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
 
+    def record(self, num_tokens: int, num_hits: int, preempted: bool) -> None:
+        """Aggregate request information into the stats."""
+        if preempted:
+            # Previously preempted request
+            self.preempted_requests += 1
+            self.preempted_queries += num_tokens
+            self.preempted_hits += num_hits
+        else:
+            # New request
+            self.requests += 1
+            self.queries += num_tokens
+            self.hits += num_hits
+
 
 @dataclass
 class MultiModalCacheStats(BaseCacheStats):

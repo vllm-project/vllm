@@ -529,7 +529,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens,
                     )
                     self._update_connector_prefix_cache_stats(
-                        request.num_tokens, num_external_computed_tokens
+                        request, num_external_computed_tokens
                     )
 
                 # Request was already popped from self.waiting
@@ -1290,13 +1290,16 @@ class Scheduler(SchedulerInterface):
     ########################################################################
 
     def _update_connector_prefix_cache_stats(
-        self, request_num_tokens: int, num_external_tokens: int
+        self, request: Request, num_external_tokens: int
     ) -> None:
         if self.connector_prefix_cache_stats is None:
             return
-        self.connector_prefix_cache_stats.requests += 1
-        self.connector_prefix_cache_stats.queries += request_num_tokens
-        self.connector_prefix_cache_stats.hits += num_external_tokens
+
+        self.connector_prefix_cache_stats.record(
+            num_tokens=request.num_tokens,
+            num_hits=num_external_tokens,
+            preempted=request.num_preemptions > 0,
+        )
 
     def _make_connector_prefix_cache_stats(self) -> PrefixCacheStats | None:
         if self.connector_prefix_cache_stats is None:
