@@ -1201,6 +1201,9 @@ def make_zmq_socket(
     if socket_type == zmq.XPUB:
         socket.setsockopt(zmq.XPUB_VERBOSE, True)
 
+    if socket_type == zmq.ROUTER:
+        socket.setsockopt(zmq.ROUTER_HANDOVER, True)
+
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
     scheme, host, _ = split_zmq_path(path)
