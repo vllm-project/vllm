@@ -1122,9 +1122,6 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
     return cls
 
 
-## moved to vllm.utils.profiling (imported at module top)
-
-
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
     cfg = model_config.hf_text_config
@@ -1148,9 +1145,6 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
             )
         )
     )
-
-
-## moved to vllm.utils.hashing
 
 
 @cache

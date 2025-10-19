@@ -23,7 +23,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.utils.asyncio import in_loop
+from vllm.utils.async_utils import in_loop
 from vllm.utils.network_utils import (
     close_sockets,
     get_open_port,
