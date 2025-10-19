@@ -927,7 +927,7 @@ def run_slas(
     return combined_df
 
 
-def run_main(
+def _run_main(
     serve_cmd: list[str],
     bench_cmd: list[str],
     after_bench_cmd: list[str],
@@ -940,14 +940,7 @@ def run_main(
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
-    resume: str | None,
 ):
-    timestamp = resume or datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = output_dir / timestamp
-
-    if resume and not output_dir.exists():
-        raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
-
     if sla_params:
         return run_slas(
             serve_cmd=serve_cmd,
@@ -974,6 +967,48 @@ def run_main(
         num_runs=num_runs,
         dry_run=dry_run,
     )
+
+
+def run_main(
+    serve_cmd: list[str],
+    bench_cmd: list[str],
+    after_bench_cmd: list[str],
+    *,
+    capture_output: bool,
+    serve_params: list[dict[str, object]],
+    bench_params: list[dict[str, object]],
+    sla_params: list[dict[str, SLACriterionBase]],
+    sla_variable: SLAVariable,
+    output_dir: Path,
+    num_runs: int,
+    dry_run: bool,
+    resume: str | None,
+):
+    timestamp = resume or datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = output_dir / timestamp
+
+    if resume and not output_dir.exists():
+        raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
+
+    try:
+        return _run_main(
+            serve_cmd=serve_cmd,
+            bench_cmd=bench_cmd,
+            after_bench_cmd=after_bench_cmd,
+            capture_output=capture_output,
+            serve_params=serve_params,
+            bench_params=bench_params,
+            sla_params=sla_params,
+            sla_variable=sla_variable,
+            output_dir=output_dir,
+            num_runs=num_runs,
+            dry_run=dry_run,
+        )
+    except BaseException as exc:
+        raise RuntimeError(
+            f"The script was terminated early. Use `--resume {timestamp}` "
+            f"to continue the script from its last checkpoint."
+        ) from exc
 
 
 def main():
