@@ -51,10 +51,10 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (
     direct_register_custom_op,
-    get_distributed_init_method,
     supports_custom_op,
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.network_utils import get_distributed_init_method
 
 
 @dataclass

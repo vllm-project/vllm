@@ -26,18 +26,20 @@ from vllm.utils import (
     bind_kv_cache,
     common_broadcastable_dtype,
     current_stream,
-    get_open_port,
-    get_tcp_uri,
     is_lossless_cast,
-    join_host_port,
-    make_zmq_path,
-    make_zmq_socket,
     sha256,
-    split_host_port,
-    split_zmq_path,
     unique_filepath,
 )
 
+from vllm.utils.network_utils import (
+    split_zmq_path,
+    join_host_port,
+    make_zmq_path,
+    make_zmq_socket,
+    get_open_port,
+    get_tcp_uri,
+    split_host_port,
+)
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from ..utils import create_new_process_for_each_test, flat_product
 

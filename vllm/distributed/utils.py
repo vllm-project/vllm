@@ -29,7 +29,8 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_tcp_uri, is_torch_equal_or_newer
+from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.network_utils import get_tcp_uri
 
 logger = init_logger(__name__)
 
