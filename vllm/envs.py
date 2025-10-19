@@ -217,6 +217,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_DISTRIBUTED_INIT_METHOD_OVERRIDE: str | None = None
 
 
 def get_default_cache_root():
@@ -1418,6 +1419,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Override the torch.distributed init method.
+    "VLLM_DISTRIBUTED_INIT_METHOD_OVERRIDE": lambda: os.getenv("VLLM_DISTRIBUTED_INIT_METHOD_OVERRIDE", None),
 }
 
 # --8<-- [end:env-vars-definition]
