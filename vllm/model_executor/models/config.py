@@ -292,9 +292,10 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        # Set mamba block size to max_model_len (this may get
+        # Set mamba block size to max_model_len if not set in engine args (this may get
         # override by prefix caching logic later)
-        cache_config.mamba_block_size = model_config.max_model_len
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(@tdoublep) find a better way to do this than whitelist
         MAMBA_MODELS = [
@@ -421,7 +422,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 return a * b // gcd(a, b)
 
             base_chunk_size = (
-                model_config.get_mamba_chunk_size() or cls._MAMBA1_BLOCK_SIZE
+                cache_config.mamba_block_size
+                or model_config.get_mamba_chunk_size()
+                or cls._MAMBA1_BLOCK_SIZE
             )
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
