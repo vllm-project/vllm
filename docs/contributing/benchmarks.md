@@ -6,8 +6,8 @@ toc_depth: 4
 
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
-- **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Batch Scripts]**: Run `vllm bench` against multiple configurations conveniently
+- **[Benchmark CLI](#benchmark-cli)**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
+- **[Batch Scripts](#batch-scripts)**: Run `vllm bench` against multiple configurations conveniently
 - **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
 - **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
