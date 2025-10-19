@@ -19,12 +19,12 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (
+from vllm.utils.asyncio import make_async
+from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
     get_open_port,
 )
-from vllm.utils.asyncio import make_async
 from vllm.v1.outputs import SamplerOutput
 
 if ray is not None:
