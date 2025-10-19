@@ -482,7 +482,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         mul_routed_weight=False,
     ):
         """
-        Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
+        Performs a fused forward computation for LoRA of
+        Mixture-of-Experts (MoE) layer.
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
