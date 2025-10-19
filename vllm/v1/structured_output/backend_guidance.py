@@ -11,7 +11,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -252,7 +252,7 @@ def serialize_guidance_grammar(
 def validate_guidance_grammar(
     sampling_params: SamplingParams, tokenizer: llguidance.LLTokenizer | None = None
 ) -> None:
-    tp, grm = get_structured_output_key(sampling_params)
+    tp, grm = get_structured_output_key(sampling_params.structured_outputs)
     guidance_grm = serialize_guidance_grammar(tp, grm)
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
     if err:

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import hashlib
 import importlib.metadata
 import os
@@ -13,7 +15,7 @@ from diskcache import Cache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import outlines_core as oc
@@ -47,7 +49,6 @@ def apply_grammar_bitmask(
     scheduler_output: SchedulerOutput,
     input_batch: InputBatch,
     logits: torch.Tensor,
-    device: torch.device,
 ) -> None:
     """
     Apply grammar bitmask to output logits of the model with xgrammar function.
@@ -56,7 +57,6 @@ def apply_grammar_bitmask(
         scheduler_output (SchedulerOutput): The result of engine scheduling.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
-        device (torch.device): The device that model runner running on.
     """
     grammar_bitmask = scheduler_output.grammar_bitmask
     if grammar_bitmask is None:
@@ -91,10 +91,7 @@ def apply_grammar_bitmask(
         dtype=grammar_bitmask.dtype,
     )
     cumulative_index = 0
-    seq = sorted(
-        scheduler_output.structured_output_request_ids.items(), key=lambda x: x[1]
-    )
-    for req_id, _ in seq:
+    for req_id in scheduler_output.structured_output_request_ids:
         num_spec_tokens = len(
             scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
         )
@@ -117,7 +114,7 @@ def apply_grammar_bitmask(
 
     xgr.apply_token_bitmask_inplace(
         logits,
-        grammar_bitmask.to(device, non_blocking=True),
+        grammar_bitmask.to(logits.device, non_blocking=True),
         indices=out_indices if not skip_out_indices else None,
     )
 

@@ -4,7 +4,7 @@
 import fnmatch
 from typing import TYPE_CHECKING, Optional
 
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 if TYPE_CHECKING:
     from botocore.client import BaseClient

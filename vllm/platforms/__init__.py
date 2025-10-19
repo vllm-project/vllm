@@ -6,8 +6,9 @@ from itertools import chain
 from typing import TYPE_CHECKING
 
 from vllm import envs
-from vllm.plugins import load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname, supports_xccl
+from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -188,7 +189,7 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
-    platform_plugins = load_plugins_by_group("vllm.platform_plugins")
+    platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []
 

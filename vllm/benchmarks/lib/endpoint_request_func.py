@@ -64,7 +64,7 @@ class StreamedResponseHandler:
 class RequestFuncInput:
     """The input for the request function."""
 
-    prompt: str
+    prompt: str | list[str]
     api_url: str
     prompt_len: int
     output_len: int
@@ -484,7 +484,7 @@ async def async_request_openai_audio(
     return output
 
 
-async def _run_openai_embeddings(
+async def _run_pooling_request(
     session: aiohttp.ClientSession,
     api_url: str,
     payload: dict[str, Any],
@@ -497,7 +497,7 @@ async def _run_openai_embeddings(
     try:
         async with session.post(url=api_url, headers=headers, json=payload) as response:
             if response.status == 200:
-                output.latency = time.perf_counter() - st
+                output.ttft = output.latency = time.perf_counter() - st
                 data = await response.json()
                 output.success = True
                 output.generated_text = ""
@@ -527,6 +527,9 @@ async def async_request_openai_embeddings(
         if request_func_input.model_name
         else request_func_input.model,
         "input": request_func_input.prompt,
+        # Many embedding models have short context length,
+        # this is to avoid dropping some of the requests.
+        "truncate_prompt_tokens": -1,
     }
     _update_payload_common(payload, request_func_input)
 
@@ -536,7 +539,46 @@ async def async_request_openai_embeddings(
     }
     _update_headers_common(headers, request_func_input)
 
-    return await _run_openai_embeddings(
+    return await _run_pooling_request(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
+async def async_request_vllm_rerank(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "vLLM score API", "rerank")
+
+    assert (
+        isinstance(request_func_input.prompt, list)
+        and len(request_func_input.prompt) > 1
+    )
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "query": request_func_input.prompt[0],
+        "documents": request_func_input.prompt[1:],
+        # Many reranker models have short context length,
+        # this is to avoid dropping some of the requests.
+        "truncate_prompt_tokens": -1,
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
         session,
         api_url,
         payload=payload,
@@ -563,6 +605,9 @@ async def async_request_openai_embeddings_chat(
         "messages": [
             {"role": "user", "content": content},
         ],
+        # Many embedding models have short context length,
+        # this is to avoid dropping some of the requests.
+        "truncate_prompt_tokens": -1,
     }
     _update_payload_common(payload, request_func_input)
 
@@ -572,7 +617,7 @@ async def async_request_openai_embeddings_chat(
     }
     _update_headers_common(headers, request_func_input)
 
-    return await _run_openai_embeddings(
+    return await _run_pooling_request(
         session,
         api_url,
         payload=payload,
@@ -597,13 +642,6 @@ def _preprocess_clip(request_func_input: RequestFuncInput):
     if request_func_input.multi_modal_content:
         # Image input
         request_func_input.prompt = ""
-
-    # max_model_len=77 is too short for most datasets,
-    # so by default we truncate the prompt to max_model_len
-    if request_func_input.extra_body is None:
-        request_func_input.extra_body = {}
-    if "truncate_prompt_tokens" not in request_func_input.extra_body:
-        request_func_input.extra_body["truncate_prompt_tokens"] = -1
 
 
 def _preprocess_vlm2vec(request_func_input: RequestFuncInput):
@@ -685,7 +723,7 @@ async def async_request_infinity_embeddings(
     }
     _update_headers_common(headers, request_func_input)
 
-    return await _run_openai_embeddings(
+    return await _run_pooling_request(
         session,
         api_url,
         payload=payload,
@@ -722,6 +760,7 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "infinity-embeddings": async_request_infinity_embeddings,
     "infinity-embeddings-clip": async_request_infinity_embeddings_clip,
     # (Infinity embedding server does not support vlm2vec)
+    "vllm-rerank": async_request_vllm_rerank,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

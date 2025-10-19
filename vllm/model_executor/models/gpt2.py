@@ -50,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from ..layers.pooler import DispatchPooler, Pooler
-from .interfaces import SupportsPP
+from .interfaces import SupportsCrossEncoding, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -321,7 +321,7 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         return loader.load_weights(weights)
 
 
-class GPT2ForSequenceClassification(nn.Module):
+class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """GPT2 Model for sequence classification.
 
     This class expands GPT2Model with pooling and score functions - last token
@@ -353,10 +353,20 @@ class GPT2ForSequenceClassification(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
-                "classify": Pooler.for_classify(pooler_config, classifier=self.score),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.score
+                ),
+                "classify": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="classify"
+                ),
+                "score": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="score"
+                ),
             }
         )
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
-from functools import cache
+from functools import cache, lru_cache
 
 import torch
 
@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class QuantMethod(IntEnum):
@@ -44,6 +44,74 @@ def is_rocm_aiter_moe_enabled() -> bool:
         and envs.VLLM_ROCM_USE_AITER_MOE
         and envs.VLLM_ROCM_USE_AITER
     )
+
+
+@cache
+def use_mxfp4_aiter_moe() -> bool:
+    return current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+
+@cache
+def is_rocm_aiter_fusion_shared_expert_enabled() -> bool:
+    return (
+        envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS and is_rocm_aiter_moe_enabled()
+    )
+
+
+aiter_topK_meta_data = None
+
+
+@lru_cache(maxsize=1)
+def init_aiter_topK_meta_data(
+    n_routed_experts: int,
+    n_shared_experts: int,
+    top_k: int,
+    tp_rank: int,
+    tp_size: int,
+    shared_experts_score: float = 1.0,
+    max_num_tokens: int = 32768,
+    is_EP: bool = False,
+):
+    global aiter_topK_meta_data
+    fake_expertid = n_routed_experts + n_shared_experts
+
+    # all layers reuse same buffer
+    # This extra element when EP is enabled is used as a sentinel
+    # to mask out shared expert processing for tokens not owned by
+    # the current EP rank. This is necessary to avoid double-processing
+    # of shared experts.
+    total_topk_ids = torch.empty(
+        (max_num_tokens, top_k + n_shared_experts + is_EP),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    ns_topk_ids, s_topk_ids = total_topk_ids.split(
+        [top_k, n_shared_experts + is_EP], dim=1
+    )
+    shared_expert_ids = [n_routed_experts + i for i in range(n_shared_experts + is_EP)]
+    if is_EP:
+        s_topk_ids_list = [
+            [fake_expertid] * (n_shared_experts + is_EP)
+        ] * max_num_tokens
+        for i in range(tp_rank, max_num_tokens, tp_size):
+            s_topk_ids_list[i] = shared_expert_ids
+    else:
+        s_topk_ids_list = [
+            list(range(n_routed_experts, fake_expertid))
+        ] * max_num_tokens
+    s_topk_ids[:] = torch.tensor(s_topk_ids_list, dtype=torch.int32, device="cuda")
+
+    total_topk_weights = torch.empty(
+        (max_num_tokens, top_k + n_shared_experts + is_EP),
+        dtype=torch.float32,
+        device="cuda",
+    )
+    ns_topk_weights, s_topk_weights = total_topk_weights.split(
+        [top_k, n_shared_experts + is_EP], dim=1
+    )
+    s_topk_weights.fill_(shared_experts_score)
+    assert aiter_topK_meta_data is None, "AITER topK meta data is already initialized"
+    aiter_topK_meta_data = (total_topk_weights, total_topk_ids)
 
 
 def rocm_aiter_asm_moe_tkw1_impl(
@@ -300,11 +368,33 @@ def rocm_aiter_grouped_topk(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
+    num_fused_shared_experts: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     token = hidden_states.shape[0]
     device = hidden_states.device
-    topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
-    topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
+    if is_rocm_aiter_fusion_shared_expert_enabled() and num_fused_shared_experts > 0:
+        assert aiter_topK_meta_data is not None, (
+            "AITER topK meta data is not initialized. "
+            "Please ensure that init_aiter_topK_meta_data "
+            "is called before this function."
+        )
+        total_topk_weights, total_topk_ids = aiter_topK_meta_data
+        assert total_topk_weights.shape[0] >= token, (
+            f"AITER topK meta data support {total_topk_weights.shape[0]} "
+            f"tokens which is determined by max_num_batched_tokens, "
+            f"but got {token} tokens now."
+        )
+        total_topk_weights = total_topk_weights[:token]
+        total_topk_ids = total_topk_ids[:token]
+        topk_weights, _ = total_topk_weights.split(
+            [topk, total_topk_weights.shape[1] - topk], dim=1
+        )
+        topk_ids, _ = total_topk_ids.split(
+            [topk, total_topk_ids.shape[1] - topk], dim=1
+        )
+    else:
+        topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+        topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
 
     if e_score_correction_bias is not None:
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
@@ -315,6 +405,7 @@ def rocm_aiter_grouped_topk(
             num_expert_group,
             topk_group,
             renormalize,
+            routed_scaling_factor=routed_scaling_factor,
         )
     else:
         assert scoring_func == "softmax" or scoring_func == "sigmoid"
@@ -326,10 +417,11 @@ def rocm_aiter_grouped_topk(
             topk_group,
             renormalize,
             scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
-    if routed_scaling_factor != 1.0:
-        topk_weights = topk_weights * routed_scaling_factor
+    if is_rocm_aiter_fusion_shared_expert_enabled() and num_fused_shared_experts > 0:
+        return total_topk_weights, total_topk_ids
     return topk_weights, topk_ids
 
 
@@ -354,7 +446,7 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
-    expert_mask = (expert_map > -1).to(torch.int32) if expert_map is not None else None
+    expert_mask = expert_map if expert_map is not None else None
 
     # w8a8 per-channel quantization
     if (
@@ -400,6 +492,8 @@ def rocm_aiter_fused_experts(
             assert quant_config.w1_scale is not None
             assert quant_config.w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
+        elif quant_config.use_fp8_w8a8 and quant_config.per_out_ch_quant:
+            quant_method = QuantMethod.PER_TOKEN.value
         elif quant_config.use_fp8_w8a8:
             # Currently only per tensor quantization method is enabled.
             quant_method = QuantMethod.PER_TENSOR.value

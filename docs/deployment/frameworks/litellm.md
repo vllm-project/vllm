@@ -36,15 +36,16 @@ pip install vllm litellm
     ```python
     import litellm 
 
-    messages = [{ "content": "Hello, how are you?","role": "user"}]
+    messages = [{"content": "Hello, how are you?", "role": "user"}]
 
     # hosted_vllm is prefix key word and necessary
     response = litellm.completion(
-                model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
-                messages=messages,
-                api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
-                temperature=0.2,
-                max_tokens=80)
+        model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
+        messages=messages,
+        api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
+        temperature=0.2,
+        max_tokens=80,
+    )
 
     print(response)
     ```

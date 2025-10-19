@@ -9,7 +9,7 @@ before returning them.
 !!! note
     We currently support pooling models primarily as a matter of convenience. This is not guaranteed to have any performance improvement over using HF Transformers / Sentence Transformers directly.
 
-    We are now planning to optimize pooling models in vLLM. Please comment on <gh-issue:21796> if you have any suggestions!
+    We are now planning to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
 ## Configuration
 
@@ -98,7 +98,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/basic/embed.py>
+A code example can be found here: [examples/offline_inference/basic/embed.py](../../examples/offline_inference/basic/embed.py)
 
 ### `LLM.classify`
 
@@ -115,7 +115,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/basic/classify.py>
+A code example can be found here: [examples/offline_inference/basic/classify.py](../../examples/offline_inference/basic/classify.py)
 
 ### `LLM.score`
 
@@ -130,14 +130,16 @@ It is designed for embedding models and cross-encoder models. Embedding models u
 from vllm import LLM
 
 llm = LLM(model="BAAI/bge-reranker-v2-m3", runner="pooling")
-(output,) = llm.score("What is the capital of France?",
-                      "The capital of Brazil is Brasilia.")
+(output,) = llm.score(
+    "What is the capital of France?",
+    "The capital of Brazil is Brasilia.",
+)
 
 score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/basic/score.py>
+A code example can be found here: [examples/offline_inference/basic/score.py](../../examples/offline_inference/basic/score.py)
 
 ### `LLM.reward`
 
@@ -154,7 +156,7 @@ data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/basic/reward.py>
+A code example can be found here: [examples/offline_inference/basic/reward.py](../../examples/offline_inference/basic/reward.py)
 
 ### `LLM.encode`
 
@@ -183,10 +185,10 @@ print(f"Data: {data!r}")
 
 Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
-- [Pooling API][pooling-api] is similar to `LLM.encode`, being applicable to all types of pooling models.
-- [Embeddings API][embeddings-api] is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for embedding models.
-- [Classification API][classification-api] is similar to `LLM.classify` and is applicable to sequence classification models.
-- [Score API][score-api] is similar to `LLM.score` for cross-encoder models.
+- [Pooling API](../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
+- [Embeddings API](../serving/openai_compatible_server.md#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for embedding models.
+- [Classification API](../serving/openai_compatible_server.md#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
+- [Score API](../serving/openai_compatible_server.md#score-api) is similar to `LLM.score` for cross-encoder models.
 
 ## Matryoshka Embeddings
 
@@ -209,7 +211,7 @@ For models that support Matryoshka Embeddings but not recognized by vLLM, please
 
 Here is an example to serve a model with Matryoshka Embeddings enabled.
 
-```text
+```bash
 vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf-overrides '{"matryoshka_dimensions":[256]}'
 ```
 
@@ -220,27 +222,31 @@ You can change the output dimensions of embedding models that support Matryoshka
 ```python
 from vllm import LLM, PoolingParams
 
-llm = LLM(model="jinaai/jina-embeddings-v3",
-          runner="pooling",
-          trust_remote_code=True)
-outputs = llm.embed(["Follow the white rabbit."],
-                    pooling_params=PoolingParams(dimensions=32))
+llm = LLM(
+    model="jinaai/jina-embeddings-v3",
+    runner="pooling",
+    trust_remote_code=True,
+)
+outputs = llm.embed(
+    ["Follow the white rabbit."],
+    pooling_params=PoolingParams(dimensions=32),
+)
 print(outputs[0].outputs)
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/pooling/embed_matryoshka_fy.py>
+A code example can be found here: [examples/offline_inference/pooling/embed_matryoshka_fy.py](../../examples/offline_inference/pooling/embed_matryoshka_fy.py)
 
 ### Online Inference
 
 Use the following command to start vllm server.
 
-```text
+```bash
 vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
 ```
 
 You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter.
 
-```text
+```bash
 curl http://127.0.0.1:8000/v1/embeddings \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
@@ -258,4 +264,4 @@ Expected output:
 {"id":"embd-5c21fc9a5c9d4384a1b021daccaf9f64","object":"list","created":1745476417,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-0.3828125,-0.1357421875,0.03759765625,0.125,0.21875,0.09521484375,-0.003662109375,0.1591796875,-0.130859375,-0.0869140625,-0.1982421875,0.1689453125,-0.220703125,0.1728515625,-0.2275390625,-0.0712890625,-0.162109375,-0.283203125,-0.055419921875,-0.0693359375,0.031982421875,-0.04052734375,-0.2734375,0.1826171875,-0.091796875,0.220703125,0.37890625,-0.0888671875,-0.12890625,-0.021484375,-0.0091552734375,0.23046875]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0,"prompt_tokens_details":null}}
 ```
 
-An OpenAI client example can be found here: <gh-file:examples/online_serving/pooling/openai_embedding_matryoshka_fy.py>
+An OpenAI client example can be found here: [examples/online_serving/pooling/openai_embedding_matryoshka_fy.py](../../examples/online_serving/pooling/openai_embedding_matryoshka_fy.py)

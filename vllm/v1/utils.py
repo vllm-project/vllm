@@ -345,13 +345,17 @@ def report_usage_stats(
 
     parallel_config = vllm_config.parallel_config
 
+    # Prepare KV connector string if applicable
+    kv_connector = None
+    if vllm_config.kv_transfer_config is not None:
+        kv_connector = vllm_config.kv_transfer_config.kv_connector
+
     usage_message.report_usage(
         get_architecture_class_name(vllm_config.model_config),
         usage_context,
         extra_kvs={
             # Common configuration
             "dtype": str(vllm_config.model_config.dtype),
-            "tensor_parallel_size": parallel_config.tensor_parallel_size,
             "block_size": vllm_config.cache_config.block_size,
             "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
@@ -363,6 +367,15 @@ def report_usage_stats(
             "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
             "enforce_eager": vllm_config.model_config.enforce_eager,
             "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
+            # Distributed parallelism settings
+            "tensor_parallel_size": parallel_config.tensor_parallel_size,
+            "data_parallel_size": parallel_config.data_parallel_size,
+            "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
+            "enable_expert_parallel": parallel_config.enable_expert_parallel,
+            # All2All backend for MoE expert parallel
+            "all2all_backend": parallel_config.all2all_backend,
+            # KV connector used
+            "kv_connector": kv_connector,
         },
     )
 

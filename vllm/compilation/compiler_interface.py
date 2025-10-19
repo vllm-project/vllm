@@ -16,7 +16,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 class CompilerInterface:
@@ -575,7 +575,7 @@ class InductorAdaptor(CompilerInterface):
 
         Because it is re-entrant, we always set it (even if entering via Dynamo
         and the context was already entered). We might want to revisit if it
-        should be set at a different level of compilation.
+        should be set at a different mode of compilation.
 
         This is likely a bug in PyTorch: public APIs should not rely on
         manually setting up internal contexts. But we also rely on non-public

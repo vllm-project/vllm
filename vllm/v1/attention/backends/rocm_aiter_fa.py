@@ -29,7 +29,7 @@ if current_platform.is_rocm():
     import aiter
 
     from vllm.triton_utils import tl, triton
-    from vllm.utils import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     @triton.jit
     def _vllm_layout_trans_kernel(
@@ -485,7 +485,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

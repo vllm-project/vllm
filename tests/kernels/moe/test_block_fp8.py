@@ -22,12 +22,12 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 )
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
+)
 
 dg_available = has_deep_gemm()
-
-if dg_available:
-    from deep_gemm import get_m_alignment_for_contiguous_layout
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
@@ -218,8 +218,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     torch.manual_seed(seed)
 
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
-    block_m = get_m_alignment_for_contiguous_layout()
-    block_size = [block_m, block_m]
+    block_size = get_mk_alignment_for_contiguous_layout()
     dtype = torch.bfloat16
 
     a = torch.randn((M, K), dtype=dtype) / 10

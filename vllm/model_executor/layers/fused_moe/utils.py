@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from math import prod
 
 import torch
@@ -22,8 +23,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, is_torch_equal_or_newer
+from vllm.utils import cdiv
 from vllm.utils.flashinfer import flashinfer_fp4_quantize
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 @triton.jit
@@ -325,5 +327,6 @@ def activation_without_mul(activation: str) -> str:
 # Torch custom ops can't deal with outputs aliasing inputs so we need to
 # disable inplace for torch >= 2.9.
 # See https://github.com/vllm-project/vllm/issues/26378
+@functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")

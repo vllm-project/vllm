@@ -6,7 +6,7 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 
 from ..utils import create_new_process_for_each_test
 
@@ -120,7 +120,7 @@ def test_cumem_with_cudagraph():
     "model",
     [
         # sleep mode with safetensors
-        "meta-llama/Llama-3.2-1B",
+        "hmellor/tiny-random-LlamaForCausalLM",
         # sleep mode with pytorch checkpoint
         "facebook/opt-125m",
     ],
@@ -174,7 +174,7 @@ def test_end_to_end(model: str):
 
 @create_new_process_for_each_test()
 def test_deep_sleep():
-    model = "Qwen/Qwen3-0.6B"
+    model = "hmellor/tiny-random-LlamaForCausalLM"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM(model, enable_sleep_mode=True)

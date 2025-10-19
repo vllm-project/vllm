@@ -8,7 +8,7 @@ from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
-from ..utils import create_new_process_for_each_test
+from ..utils import multi_gpu_test
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
@@ -88,7 +88,7 @@ def test_minicpmv_lora(minicpmv_lora_files):
     current_platform.is_rocm(),
     reason="MiniCPM-V dependency xformers incompatible with ROCm",
 )
-@create_new_process_for_each_test()
+@multi_gpu_test(num_gpus=4)
 def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -112,7 +112,7 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
     current_platform.is_rocm(),
     reason="MiniCPM-V dependency xformers incompatible with ROCm",
 )
-@create_new_process_for_each_test()
+@multi_gpu_test(num_gpus=4)
 def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,

@@ -7,8 +7,8 @@ toc_depth: 4
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
 - **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Performance benchmarks][performance-benchmarks]**: Automated CI benchmarks for development
-- **[Nightly benchmarks][nightly-benchmarks]**: Comparative benchmarks against alternatives
+- **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
+- **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
 [Benchmark CLI]: #benchmark-cli
 
@@ -35,6 +35,7 @@ th {
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
 | RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| RandomForReranking | ✅ | ✅ | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
 | HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
@@ -821,7 +822,7 @@ you should set `--endpoint /v1/embeddings` to use the Embeddings API. The backen
 - CLIP: `--backend openai-embeddings-clip`
 - VLM2Vec: `--backend openai-embeddings-vlm2vec`
 
-For other models, please add your own implementation inside <gh-file:vllm/benchmarks/lib/endpoint_request_func.py> to match the expected instruction format.
+For other models, please add your own implementation inside [vllm/benchmarks/lib/endpoint_request_func.py](../../vllm/benchmarks/lib/endpoint_request_func.py) to match the expected instruction format.
 
 You can use any text or multi-modal dataset to benchmark the model, as long as the model supports it.
 For example, you can use ShareGPT and VisionArena to benchmark vision-language embeddings.
@@ -878,7 +879,50 @@ vllm bench serve \
 
 </details>
 
-[](){ #performance-benchmarks }
+#### Reranker Benchmark
+
+Benchmark the performance of rerank requests in vLLM.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--backend vllm-rerank` and `--endpoint /v1/rerank` to use the Reranker API.
+
+For reranking, the only supported dataset is `--dataset-name random-rerank`
+
+Start the server:
+
+```bash
+vllm serve BAAI/bge-reranker-v2-m3
+```
+
+Run the benchmark:
+
+```bash
+vllm bench serve \
+  --model BAAI/bge-reranker-v2-m3 \
+  --backend vllm-rerank \
+  --endpoint /v1/rerank \
+  --dataset-name random-rerank \
+  --tokenizer BAAI/bge-reranker-v2-m3 \
+  --random-input-len 512 \
+  --num-prompts 10 \
+  --random-batch-size 5
+```
+
+For reranker models, this will create `num_prompts / random_batch_size` requests with
+`random_batch_size` "documents" where each one has close to `random_input_len` tokens.
+In the example above, this results in 2 rerank requests with 5 "documents" each where
+each document has close to 512 tokens.
+
+Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
+with an embedding model, also set `--no_reranker`. Because in this case the query is
+treated as a individual prompt by the server, here we send `random_batch_size - 1` documents
+to account for the extra prompt which is the query. The token accounting to report the
+throughput numbers correctly is also adjusted.
+
+</details>
 
 ## Performance Benchmarks
 
@@ -916,7 +960,7 @@ For more results visualization, check the [visualizing the results](https://gith
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
 
 ### Continuous Benchmarking
 
@@ -942,12 +986,10 @@ The benchmarking currently runs on a predefined set of models configured in the 
 
 All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-[](){ #nightly-benchmarks }
-
 ## Nightly Benchmarks
 
 These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lmdeploy`) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the `perf-benchmarks` and `nightly-benchmarks` labels.
 
 The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
 
-More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).
+More information on the nightly benchmarks and their parameters can be found [here](../../.buildkite/nightly-benchmarks/nightly-descriptions.md).
