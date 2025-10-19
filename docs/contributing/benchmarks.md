@@ -1006,6 +1006,7 @@ python vllm/benchmarks/serve_multi.py \
 
 !!! important
     If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
+    You can use `--dry-run` to preview the commands to be run.
 
     We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
     Between each benchmark run, we call the `/reset_prefix_cache` and `/reset_mm_cache` endpoints to get a clean slate for the next run.

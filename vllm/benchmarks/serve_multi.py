@@ -1059,7 +1059,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="If set, prints the commands to run and then exits without running them.",
+        help="If set, prints the commands to run then exits without running them.",
     )
     parser.add_argument(
         "--resume",
