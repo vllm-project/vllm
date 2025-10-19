@@ -329,6 +329,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
+    # Mamba1 does not have a chunk notion, use 2048 as the block size
+    # because the SSM Kernel uses it for chunking
     _MAMBA1_BLOCK_SIZE = 2048
 
     @classmethod
