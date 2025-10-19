@@ -20,6 +20,9 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -38,7 +41,9 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import LayerBlockType, LazyLoader, common_broadcastable_dtype
+from vllm.utils import LayerBlockType
+from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -144,6 +149,10 @@ class ModelConfig:
     seed: int | None = None
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
+    hf_config: PretrainedConfig = field(init=False)
+    """The Hugging Face config of the model."""
+    hf_text_config: PretrainedConfig = field(init=False)
+    """The Hugging Face config of the text model (same as hf_config for text models)."""
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -419,6 +428,10 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
+        # Enable batch invariance settings if requested
+        if vllm_is_batch_invariant():
+            self.enforce_eager = True
+
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -764,8 +777,10 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        prefix = "Transformers"
-        prefix += "MoE" if self.get_num_experts() > 1 else ""
+        cls = "Transformers"
+        # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
+        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
+        cls += "MoE" if self.get_num_experts() > 1 else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
         convert = None
@@ -781,18 +796,15 @@ class ModelConfig:
             runner = "generate"
         if convert in {None, "none"}:
             convert = "embed"
-        # Resolve Transformers backend pooling classes
+        # Resolve Transformers backend task
         if runner == "pooling":
             if convert == "embed":
-                return prefix + "EmbeddingModel"
+                return cls + "EmbeddingModel"
             if convert == "classify":
-                return prefix + "ForSequenceClassification"
-        # Resolve Transformers backend generate classes
-        if self.hf_config != self.hf_text_config:
-            # If 'hf_text_config' is the same as 'hf_config'. If not, it is
-            # probably a composite config, i.e. multimodal
-            return prefix + "ForMultimodalLM"
-        return prefix + "ForCausalLM"
+                return cls + "ForSequenceClassification"
+        else:
+            cls += "ForCausalLM"
+        return cls
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""

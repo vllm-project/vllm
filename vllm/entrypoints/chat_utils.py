@@ -51,7 +51,7 @@ from vllm.transformers_utils.chat_templates import get_chat_template_fallback_pa
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid
-from vllm.utils.func import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 logger = init_logger(__name__)
 
