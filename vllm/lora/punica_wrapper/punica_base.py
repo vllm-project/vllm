@@ -449,7 +449,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         # TODO: implement it based on torch ops
         raise NotImplementedError
 
-
     def moe_lora_align_block_size(
         self,
         topk_ids: torch.Tensor,
@@ -468,22 +467,22 @@ class PunicaWrapperBase(PunicaWrapperABC):
         raise NotImplementedError
 
     def add_lora_fused_moe(
-            self,
-            y: torch.Tensor,
-            x: torch.Tensor,
-            lora_a_stacked: list[torch.Tensor],
-            lora_b_stacked: list[torch.Tensor],
-            topk_weights: torch.Tensor,
-            sorted_token_ids: torch.Tensor,
-            expert_ids: torch.Tensor,
-            num_tokens_post_padded: torch.Tensor,
-            max_lora_rank: int,
-            top_k_num: int,
-            config,
-            mul_routed_weight=False,
-        ):
-            """
-            Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
-            """
-            # TODO: implement it based on torch ops
-            raise NotImplementedError
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: list[torch.Tensor],
+        lora_b_stacked: list[torch.Tensor],
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        max_lora_rank: int,
+        top_k_num: int,
+        config,
+        mul_routed_weight=False,
+    ):
+        """
+        Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
+        """
+        # TODO: implement it based on torch ops
+        raise NotImplementedError
