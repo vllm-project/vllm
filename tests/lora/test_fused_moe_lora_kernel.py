@@ -203,10 +203,10 @@ def use_torch(
 @pytest.mark.parametrize("num_tokens", [100])
 @pytest.mark.parametrize("top_k_num", [6, 12])
 @pytest.mark.parametrize("num_experts", [64])
-@pytest.mark.parametrize("max_loras", [4, 16])
+@pytest.mark.parametrize("max_loras", [4, 6, 16])
 @pytest.mark.parametrize("N", [1408])
 @pytest.mark.parametrize("K", [2048])
-@pytest.mark.parametrize("max_lora_rank", [100])
+@pytest.mark.parametrize("max_lora_rank", [16, 32, 64])
 @pytest.mark.parametrize("block_size", [16])
 def test_fused_moe_lora_kernel(
     num_tokens, top_k_num, num_experts, max_loras, N, K, max_lora_rank, block_size

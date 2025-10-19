@@ -47,7 +47,7 @@ __global__ void moe_lora_align_sum_kernel(
     expert_ids[lora_id * max_num_m_blocks + it] = -1;
   }
 
-  // Initialize expert_ids with -1
+  // Initialize total_tokens_post_pad with 0
   total_tokens_post_pad[lora_id] = 0;
 
   for (int i = 0; i < num_experts; ++i) {
@@ -57,7 +57,6 @@ __global__ void moe_lora_align_sum_kernel(
   for (int i = start_idx; i < numel && i < start_idx + tokens_per_thread; ++i) {
     int mask = token_lora_mapping[i / topk_num] == lora_id;
     int idx = index(num_experts, threadIdx.x + 1, topk_ids[i]);
-    // atomicAdd(&tokens_cnts[idx], mask);
     tokens_cnts[idx] += mask;
   }
 
