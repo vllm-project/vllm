@@ -18,12 +18,12 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     PoolingResponse,
 )
-from vllm.entrypoints.openai.utils import (
+from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     binary2tenser,
 )
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -296,44 +296,27 @@ async def test_base64_embed_dtype_and_endianness(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_base64_embed_dtype_and_endianness_not_supported(
-    hf_model, server: RemoteOpenAIServer, model_name: str
+@pytest.mark.parametrize("param_name", ["encoding_format", "embed_dtype", "endianness"])
+async def test_params_not_supported(
+    server: RemoteOpenAIServer, model_name: str, param_name: str
 ):
     input_texts = [
         "The best thing about vLLM is that it supports many different models",
     ]
 
-    bad_embed_dtype = "bad_embed_dtype"
     responses_base64 = requests.post(
         server.url_for("/v1/embeddings"),
         json={
             "model": model_name,
             "input": input_texts,
             "encoding_format": "base64",
-            "embed_dtype": bad_embed_dtype,
-        },
-    )
-
-    assert responses_base64.status_code == 400
-    assert responses_base64.json()["error"]["message"].startswith(
-        f"embed_dtype={bad_embed_dtype!r} is not supported."
-    )
-
-    #################################
-
-    bad_endianness = "bad_endianness"
-    responses_base64 = requests.post(
-        server.url_for("/v1/embeddings"),
-        json={
-            "model": model_name,
-            "input": input_texts,
-            "encoding_format": "base64",
-            "endianness": bad_endianness,
+            param_name: f"bad_{param_name}",
         },
     )
 
     assert responses_base64.status_code == 400
     assert "literal_error" in responses_base64.json()["error"]["message"]
+    assert f"bad_{param_name}" in responses_base64.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

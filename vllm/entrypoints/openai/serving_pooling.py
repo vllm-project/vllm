@@ -4,7 +4,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator
-from typing import Final, Literal, cast
+from typing import Final, cast
 
 import jinja2
 from fastapi import Request
@@ -25,16 +25,13 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    encoding_pooling_output,
-)
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.tensor_serial import ENCODING_FORMAT_TYPE, encoding_pooling_output
 
 logger = init_logger(__name__)
 
@@ -76,12 +73,6 @@ class OpenAIServingPooling(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        if request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
-            return self.create_error_response(
-                f"embed_dtype={request.embed_dtype!r} is not supported. "
-                f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
-            )
 
         model_name = self.models.model_name()
 
@@ -254,7 +245,7 @@ class OpenAIServingPooling(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        encoding_format: Literal["float", "base64"],
+        encoding_format: ENCODING_FORMAT_TYPE,
         embed_dtype: str,
         endianness: str,
     ) -> PoolingResponse:

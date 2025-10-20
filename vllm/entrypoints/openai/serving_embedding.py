@@ -28,10 +28,6 @@ from vllm.entrypoints.openai.serving_engine import (
     TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    encoding_pooling_output,
-)
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
@@ -44,6 +40,7 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.utils.asyncio import merge_async_iterators
 from vllm.utils.collections import chunk_list
+from vllm.utils.tensor_serial import encoding_pooling_output
 
 logger = init_logger(__name__)
 
@@ -71,12 +68,6 @@ class EmbeddingMixin(OpenAIServing):
     ) -> ErrorResponse | None:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
-            if ctx.request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
-                return self.create_error_response(
-                    f"embed_dtype={ctx.request.embed_dtype!r} is not supported. "
-                    f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
-                )
-
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             tokenizer = await self.engine_client.get_tokenizer()
@@ -127,7 +118,7 @@ class EmbeddingMixin(OpenAIServing):
     ) -> EmbeddingResponse | StreamingResponse | ErrorResponse:
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
-        if not ctx.request.binary_response:
+        if ctx.request.encoding_format in ["float", "base64"]:
             items: list[EmbeddingResponseData] = []
             num_prompt_tokens = 0
 
