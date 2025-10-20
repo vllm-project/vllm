@@ -109,6 +109,7 @@ def plot(
 
         fig_path = output_dir / (
             file_prefix
+            + ("--" if file_prefix else "")
             + "-".join(
                 (
                     "FIGURE",
