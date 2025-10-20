@@ -36,7 +36,8 @@ if [ -z "$TORCH_CUDA_ARCH_LIST" ]; then
 fi
 
 # disable all features except IBGDA
-export NVSHMEM_IBGDA_SUPPORT=1
+# TODO: set this back to 1 once we fix IBGDA support
+export NVSHMEM_IBGDA_SUPPORT=0
 
 export NVSHMEM_SHMEM_SUPPORT=0
 export NVSHMEM_UCX_SUPPORT=0
@@ -52,7 +53,9 @@ export NVSHMEM_BUILD_HYDRA_LAUNCHER=0
 export NVSHMEM_BUILD_TXZ_PACKAGE=0
 export NVSHMEM_TIMEOUT_DEVICE_POLLING=0
 
-cmake -G Ninja -S . -B $WORKSPACE/nvshmem_build/ -DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install
+CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS:-}"
+
+cmake -G Ninja -S . -B $WORKSPACE/nvshmem_build/ -DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install $CMAKE_EXTRA_ARGS
 cmake --build $WORKSPACE/nvshmem_build/ --target install
 
 popd

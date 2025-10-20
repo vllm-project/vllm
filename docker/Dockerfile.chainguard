@@ -5,8 +5,6 @@ ARG BUILD_BASE_IMAGE=vannevarlabs.jfrog.io/vl-general/vannevarlabs.com/pytorch:l
 ARG FINAL_BASE_IMAGE=vannevarlabs.jfrog.io/vl-general/vannevarlabs.com/pytorch:latest-dev
 
 ARG VL_PYPI_USER
-ARG VL_PYPI_PASSWORD
-ARG VL_PYPI_INDEX_URL=https://${VL_PYPI_USER}:${VL_PYPI_PASSWORD}@vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple
 
 # PyTorch provides its own indexes for standard and nightly builds
 ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
@@ -30,8 +28,9 @@ FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG TARGETPLATFORM
+ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG INSTALL_KV_CONNECTORS=true
-ARG VL_PYPI_INDEX_URL
+ARG VL_PYPI_USER
 
 WORKDIR /workspace
 
@@ -59,9 +58,11 @@ EOF
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # install build and runtime dependencies
+# NOTE: alt --index-url https://${VL_PYPI_USER}:${VL_PYPI_PASSWORD}@vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=ARTY_NETRC,target=/root/.netrc,required \
     uv pip install --system -r requirements/cuda.txt \
-    --extra-index-url ${VL_PYPI_INDEX_URL} \
+    --index-url https://vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 USER nonroot
 
@@ -80,7 +81,7 @@ ARG TARGETPLATFORM
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
-ARG VL_PYPI_INDEX_URL
+ARG VL_PYPI_USER
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -91,12 +92,12 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
-# ENV PIP_INDEX_URL=${VL_PYPI_INDEX_URL}
 
 USER root
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=ARTY_NETRC,target=/root/.netrc,required \
     uv pip install --system -r requirements/build.txt \
-    --extra-index-url ${VL_PYPI_INDEX_URL} \
+    --index-url https://vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 USER nonroot
 
@@ -142,14 +143,12 @@ ARG PYTHON_VERSION
 ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ARG TARGETPLATFORM
-ARG VL_PYPI_INDEX_URL
+ARG VL_PYPI_USER
 
-ARG GDRCOPY_CUDA_VERSION=12.8
+# ARG GDRCOPY_CUDA_VERSION=12.8
 # Keep in line with FINAL_BASE_IMAGE
 # TODO: update this OS version for Alpine linux
-ARG GDRCOPY_OS_VERSION=Ubuntu22_04
-
-# ENV PIP_INDEX_URL=${VL_PYPI_INDEX_URL}
+# ARG GDRCOPY_OS_VERSION=Ubuntu22_04
 
 SHELL ["/bin/bash", "-c"]
 
@@ -177,8 +176,9 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=ARTY_NETRC,target=/root/.netrc,required \
     uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${VL_PYPI_INDEX_URL} \
+        --index-url https://vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -194,21 +194,23 @@ COPY requirements/build.txt requirements/build.txt
 # COPY tools/install_gdrcopy.sh install_gdrcopy.sh
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 
-ENV CUDA_HOME=/usr/local/cuda
+# ENV CUDA_HOME=/usr/local/cuda
 
 USER root
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=ARTY_NETRC,target=/root/.netrc,required \
     uv pip install --system -r requirements/build.txt \
-        --extra-index-url ${VL_PYPI_INDEX_URL} \
+        --index-url https://vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # NOTE: deepseek-ai packages have been removed due to national security concerns
 
-# TODO: figure out how to do this on Alpine Linux
-RUN git clone --branch v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
-    cd gdrcopy && \
-    make prefix=/usr/local/gdrcopy CUDA=/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2) all install && \
-    ./insmod.sh
+# NOTE: disabling for now due to build errors. This will prevent us from using
+# ExpertParallel and disaggregated serving
+# RUN git clone --branch v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
+#     cd gdrcopy && \
+#     make prefix=/usr/local/gdrcopy CUDA=/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2) all install && \
+#     ./insmod.sh
 
 # RUN set -eux; \
 # case "${TARGETPLATFORM}" in \
@@ -222,8 +224,16 @@ RUN git clone --branch v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
 
 # Install EP kernels from perplexity(pplx-kernels)
 # NOTE: DeepEP from DeepSeek has been removed due to national security concerns
+ENV CMAKE_EXTRA_ARGS="-DNVSHMEM_IBGDA_SUPPORT=OFF"
 RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
-    && bash install_python_libraries.sh
+    export CUDA_HOME=/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2) && \
+    export PATH="${CUDA_HOME}/bin:${PATH}" && \
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64" && \
+    export CC=/usr/local/bin/gcc-12 && \
+    export CXX=/usr/local/bin/g++-12 && \
+    export NVCC_PREPEND_FLAGS='-ccbin=/usr/local/bin/g++-12' && \
+    export NVCC_APPEND_FLAGS='-ccbin=/usr/local/bin/g++-12' && \
+    bash install_python_libraries.sh
 USER nonroot
 #################### vLLM installation IMAGE ####################
 
@@ -232,11 +242,9 @@ USER nonroot
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=true
-ARG VL_PYPI_INDEX_URL
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-# ENV PIP_INDEX_URL=${VL_PYPI_INDEX_URL}
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -247,15 +255,21 @@ COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
 # install additional dependencies for openai api server
 USER root
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=ARTY_NETRC,target=/root/.netrc,required \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r requirements/kv_connectors.txt; \
+        uv pip install \
+        --index-url https://vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple \
+        --system -r requirements/kv_connectors.txt; \
     fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         BITSANDBYTES_VERSION="0.42.0"; \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' boto3 runai-model-streamer runai-model-streamer[s3]
+    uv pip install \
+    --index-url https://vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple \
+    --system \
+    accelerate hf_transfer "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' boto3 runai-model-streamer runai-model-streamer[s3]
 USER nonroot
 
 ENV VLLM_USAGE_SOURCE=production-docker-image
