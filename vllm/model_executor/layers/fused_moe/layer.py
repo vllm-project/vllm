@@ -46,6 +46,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    is_flashinfer_supporting_global_sf,
+)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -1550,9 +1553,18 @@ class FusedMoE(CustomOp):
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
-        is_modeloptnvfp4 = quant_method_name == "ModelOptNvFp4FusedMoE"
-        is_input_scale = "input_scale" in weight_name
-        if expert_id == -1 and not (is_modeloptnvfp4 and is_input_scale):
+
+        allow_flashinfer = getattr(self.quant_method, "allow_flashinfer", False)
+        moe_backend = getattr(self.quant_method, "flashinfer_moe_backend", None)
+
+        use_global_sf = (
+            allow_flashinfer
+            and is_flashinfer_supporting_global_sf(moe_backend)
+            and "input_scale" in weight_name
+            and quant_method_name == "ModelOptNvFp4FusedMoE"
+        )
+
+        if expert_id == -1 and not use_global_sf:
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
@@ -1625,7 +1637,7 @@ class FusedMoE(CustomOp):
         expert_data = param.data if full_load else param.data[expert_id]
 
         # Case input scale: input_scale loading is only supported for fp8
-        if is_input_scale:
+        if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
@@ -1643,7 +1655,7 @@ class FusedMoE(CustomOp):
             self._load_single_value(
                 param=param,
                 loaded_weight=loaded_weight,
-                expert_id=global_expert_id if is_modeloptnvfp4 else expert_id,
+                expert_id=global_expert_id if use_global_sf else expert_id,
             )
             return True if return_success else None
 

@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
+    is_flashinfer_supporting_global_sf,
     register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
@@ -1303,21 +1304,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
 
-        input_scale_experts = (
-            global_num_experts if self.allow_flashinfer else num_experts
+        use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(
+            self.flashinfer_moe_backend
         )
+        global_scale_num_experts = global_num_experts if use_global_sf else num_experts
 
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(input_scale_experts, 2, dtype=torch.float32),
-            weight_loader=weight_loader
+            data=torch.empty(global_scale_num_experts, 2, dtype=torch.float32),
+            weight_loader=weight_loader,
         )
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(input_scale_experts, dtype=torch.float32),
-            weight_loader=weight_loader
+            data=torch.empty(global_scale_num_experts, dtype=torch.float32),
+            weight_loader=weight_loader,
         )
-
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def prepare_static_weights_for_trtllm_fp4_moe(
@@ -1470,9 +1471,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
 
         # Common processing for input scales and alphas
-        if self.allow_flashinfer:
+        use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(
+            self.flashinfer_moe_backend
+        )
+        if use_global_sf:
             # For backends provide by Flashinfer, the input global scales are
-            # shared across all experts. Same for w2_input_scale.
+            # shared across all experts.
             w13_input_scale = (
                 layer.w13_input_scale.max().to(torch.float32).expand(layer.num_experts)
             )
@@ -1489,7 +1493,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         # GEMM 2 processing
-        if self.allow_flashinfer:
+        if use_global_sf:
+            # For backends provide by Flashinfer, the input global scales are
+            # shared across all experts.
             w2_input_scale = (
                 layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
             )
