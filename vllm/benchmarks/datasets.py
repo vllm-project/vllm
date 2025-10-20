@@ -3242,7 +3242,8 @@ class PrefixRepetitionRandomLengthsDataset(BenchmarkDataset):
             prompt_len = len(combined_tokens)
             # Keep a buffer of 10 tokens from max_model_len
             output_len = max(1, min(int(np.random.normal(
-                loc=output_len_mean, scale=output_len_std)), max_model_len - input_len - 10))
+                loc=output_len_mean, scale=output_len_std)),
+                max_model_len - input_len - 10))
 
             requests.append(
                 SampleRequest(
