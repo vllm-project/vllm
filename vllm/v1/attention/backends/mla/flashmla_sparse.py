@@ -144,7 +144,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         # Treat requests with query length <= 1 as decodes to match the
         # DeepGEMM indexer constraint (fp8_paged_mqa_logits only supports next_n <= 2)
-        self._init_reorder_batch_threshold(1)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         props = torch.cuda.get_device_properties(device)
         sm_count = props.multi_processor_count
