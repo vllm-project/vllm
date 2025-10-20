@@ -1732,14 +1732,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
         ):
+            curr_group_outputs = []
+
+            # EVS-related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
-            # processing multimodal data.This solves the issue with scheduler
+            # processing multimodal data. This solves the issue with scheduler
             # putting too many video samples into a single batch. Scheduler
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
-            curr_group_outputs = []
-
+            # TODO(ywang96): Fix memory profiling to take EVS into account and 
+            # remove this hack.
             if (
                 self.is_multimodal_pruning_enabled
                 and modality == "video"
