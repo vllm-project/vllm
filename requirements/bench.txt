@@ -1,1 +1,0 @@
-opencv-python~=4.12 # We use OpenCV to generate MP4 files for random videos
