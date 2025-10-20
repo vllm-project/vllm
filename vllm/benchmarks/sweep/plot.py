@@ -39,12 +39,12 @@ def _plot_fig(
     if var_x not in df.columns:
         raise ValueError(
             f"Cannot find {var_x=!r} in parameter sweep results. "
-            f"Available variables: {df.columns}"
+            f"Available variables: {df.columns.tolist()}"
         )
     if var_y not in df.columns:
         raise ValueError(
             f"Cannot find {var_y=!r} in parameter sweep results. "
-            f"Available variables: {df.columns}"
+            f"Available variables: {df.columns.tolist()}"
         )
 
     if max_x is not None:
