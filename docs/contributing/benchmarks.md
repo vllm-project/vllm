@@ -1082,7 +1082,7 @@ python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
 ```
 
 !!! tip
-    You can use `--dry-run` to preview the commands to be run.
+    You can use `--dry-run` to preview the figures to be plotted.
 
 ## Performance Benchmarks
 
