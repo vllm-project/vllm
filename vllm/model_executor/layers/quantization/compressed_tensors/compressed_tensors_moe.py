@@ -142,7 +142,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
             # Prefer to use the MarlinMoE kernel when it is supported.
-            if not check_moe_marlin_supports_layer(layer, group_size):
+            if not check_moe_marlin_supports_layer(layer, group_size) or current_platform.is_rocm():
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
                     and weight_quant.actorder
