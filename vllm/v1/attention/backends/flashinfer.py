@@ -864,7 +864,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # print(f"paged_kv_indices: {paged_kv_indices}")
         # print(f"block_table_tensor[0]: {block_table_tensor[0]}")
         # print(f"{'='*80}\n")
-        # breakpoint()
+        #breakpoint()
 
         # Compute paged_kv_last_page_len (same as original)
         paged_kv_last_page_len_np = seq_lens_np % page_size

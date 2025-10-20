@@ -307,6 +307,10 @@ class Scheduler(SchedulerInterface):
                 # During verification, use full KV indices (no sparse attention)
                 self.req_to_sparse_selected_kv_indices[request.request_id] = []
                 self.req_to_full_kv_start_offset[request.request_id] = 0
+                # CRITICAL: Also reset the request object field so scheduler reads 0
+                # old_offset = request.full_kv_start_block_offset  # For debug only
+                request.full_kv_start_block_offset = 0
+                # print(f"[TRANSITION TO VERIFYING] req_id={request.request_id}, reset full_kv_start_block_offset {old_offset}→0")
 
                 # Reuse the existing spec decoding interface
                 request.spec_token_ids = tokens_to_verify
@@ -857,12 +861,16 @@ class Scheduler(SchedulerInterface):
                 num_recent_blocks = int(req.num_computed_tokens * self.streaming_cache_recent_ratio / self.block_size)
                 sink_sizes_list.append(self.streaming_cache_sink_size_blocks)
                 recent_sizes_list.append(num_recent_blocks)
-                full_kv_start_block_offsets_list.append(req.full_kv_start_block_offset)
+                # CRITICAL: Use dictionary which is updated correctly, not request field which may be stale
+                full_kv_start_block_offsets_list.append(self.req_to_full_kv_start_offset.get(req_id, 0))
             else:
                 # NORMAL or VERIFYING: use full KV (no streaming cache)
                 sink_sizes_list.append(0)
                 recent_sizes_list.append(0)
                 full_kv_start_block_offsets_list.append(0)
+                # Debug: Log what scheduler is sending for VERIFYING requests
+                # if req.self_spec_state == SelfSpecState.VERIFYING:
+                #     print(f"[SCHEDULER VERIFYING] req_id={req_id}, sending offset=0, req.full_kv_start_block_offset={req.full_kv_start_block_offset}")
 
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.

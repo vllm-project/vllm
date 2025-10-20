@@ -812,31 +812,74 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 pass
                 # print(f"  No spec tokens to write (or skipped because is_last_rank={is_last_rank})")
 
-        # ===== STREAMING CACHE: Extract and populate metadata =====
-        # Populate InputBatch CPU tensors from CachedRequestData
-        # Also sync full_kv_start_block_offset back to request states
-        if hasattr(req_data, 'sink_sizes') and hasattr(req_data, 'recent_sizes') and hasattr(req_data, 'full_kv_start_block_offsets'):
-            for i, req_id in enumerate(req_data.req_ids):
-                req_index = self.input_batch.req_id_to_index.get(req_id)
-                if req_index is not None:
-                    self.input_batch.sink_sizes_cpu_tensor[req_index] = req_data.sink_sizes[i]
-                    self.input_batch.recent_sizes_cpu_tensor[req_index] = req_data.recent_sizes[i]
-
-                # Sync full_kv_start_block_offset from scheduler to request state
-                if req_id in self.requests:
-                    self.requests[req_id].full_kv_start_block_offset = req_data.full_kv_start_block_offsets[i]
-
-        # Add the new or resumed requests to the persistent batch.
+        # Add the new or resumed requests to the persistent batch FIRST.
+        # This ensures they have indices before we update streaming cache buffers.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
             self.input_batch.add_request(request)
 
-        # Condense the batched states if there are gaps left by removed requests
+        # Condense the batched states to fill gaps
         self.input_batch.condense()
-        # Allow attention backend to reorder the batch, potentially
+
+        # Allow attention backend to reorder the batch
+        # This MUST happen before updating buffers to ensure buffers are updated at final indices
         self._may_reorder_batch(scheduler_output)
+
+        # ===== STREAMING CACHE: Extract and populate metadata =====
+        # Populate InputBatch CPU tensors from CachedRequestData
+        # Also sync full_kv_start_block_offset back to request states
+        # NOTE: This happens AFTER all batch reorganization (add_request, condense, reorder)
+        # to ensure buffers are updated at the FINAL indices that attention will read from
+        if hasattr(req_data, 'sink_sizes') and hasattr(req_data, 'recent_sizes') and hasattr(req_data, 'full_kv_start_block_offsets'):
+            # Debug: Log the complete mapping of indices to request IDs after reordering
+            # verifying_reqs = []
+            # for idx in range(min(10, self.input_batch.num_reqs)):
+            #     if idx < len(self.input_batch.req_ids):
+            #         req_id = self.input_batch.req_ids[idx]
+            #         if req_id in self.requests:
+            #             req = self.requests[req_id]
+            #             if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
+            #                 verifying_reqs.append((idx, req_id))
+            # if verifying_reqs:
+            #     print(f"[INDEX MAP AT WRITE] VERIFYING requests: {verifying_reqs}")
+
+            for i, req_id in enumerate(req_data.req_ids):
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    # old_offset = self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index].item()  # For debug only
+                    new_offset = req_data.full_kv_start_block_offsets[i]
+
+                    self.input_batch.sink_sizes_cpu_tensor[req_index] = req_data.sink_sizes[i]
+                    self.input_batch.recent_sizes_cpu_tensor[req_index] = req_data.recent_sizes[i]
+                    self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index] = new_offset
+
+                    # Debug: Log ALL buffer updates, especially for VERIFYING
+                    # if req_id in self.requests:
+                    #     req = self.requests[req_id]
+                    #     if hasattr(req, 'self_spec_state'):
+                    #         if old_offset == 0 and new_offset != 0:
+                    #             print(f"[BUFFER UPDATE RESUMED] req_id={req_id}, idx={req_index}, {old_offset}→{new_offset}, state={req.self_spec_state}")
+                    #         elif req.self_spec_state == SelfSpecState.VERIFYING:
+                    #             print(f"[BUFFER UPDATE VERIFYING] req_id={req_id}, idx={req_index}, {old_offset}→{new_offset}, state=VERIFYING")
+
+                # Sync full_kv_start_block_offset from scheduler to request state NOTE(brian1009): maybe remove
+                if req_id in self.requests:
+                    self.requests[req_id].full_kv_start_block_offset = req_data.full_kv_start_block_offsets[i]
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+        # Debug: Verify index mapping after refresh_metadata
+        # if hasattr(req_data, 'sink_sizes'):
+        #     verifying_reqs_after = []
+        #     for idx in range(min(10, self.input_batch.num_reqs)):
+        #         if idx < len(self.input_batch.req_ids):
+        #             req_id = self.input_batch.req_ids[idx]
+        #             if req_id in self.requests:
+        #                 req = self.requests[req_id]
+        #                 if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
+        #                     verifying_reqs_after.append((idx, req_id))
+        #     if verifying_reqs_after:
+        #         print(f"[INDEX MAP AFTER REFRESH] VERIFYING requests: {verifying_reqs_after}")
 
     def _update_states_after_model_execute(
             self, output_token_ids: torch.Tensor) -> None:
@@ -1073,6 +1116,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+
+        # Debug: Check if indices have changed at start of _prepare_inputs
+        # verifying_reqs_prepare = []
+        # for idx in range(min(10, self.input_batch.num_reqs)):
+        #     if idx < len(self.input_batch.req_ids):
+        #         req_id = self.input_batch.req_ids[idx]
+        #         if req_id in self.requests:
+        #             req = self.requests[req_id]
+        #             if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
+        #                 offset_val = self.input_batch.full_kv_start_block_offset_cpu_tensor[idx].item()
+        #                 verifying_reqs_prepare.append((idx, req_id, offset_val))
+        # if verifying_reqs_prepare:
+        #     print(f"[INDEX MAP IN PREPARE] VERIFYING requests: {verifying_reqs_prepare}")
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -1360,17 +1416,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.recent_sizes.cpu[:num_reqs].copy_(
                     self.input_batch.recent_sizes_cpu_tensor[:num_reqs])
 
-                # Extract full_kv_start_block_offset from requests into CPU buffer
+                self.full_kv_start_offset.cpu[:num_reqs].copy_(
+                    self.input_batch.full_kv_start_block_offset_cpu_tensor[:num_reqs])
+
+                # Debug: Check for non-zero offsets in VERIFYING state
                 for req_idx in range(num_reqs):
                     req_id = self.input_batch.req_ids[req_idx]
-                    if req_id in self.requests:
-                        request = self.requests[req_id]
-                        if hasattr(request, 'full_kv_start_block_offset'):
-                            self.full_kv_start_offset.cpu[req_idx] = request.full_kv_start_block_offset
-                        else:
-                            self.full_kv_start_offset.cpu[req_idx] = 0
-                    else:
-                        self.full_kv_start_offset.cpu[req_idx] = 0
+                    offset = self.full_kv_start_offset.cpu[req_idx].item()
+                    if offset > 0 and req_id in self.requests:
+                        req = self.requests[req_id]
+                        if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
+                            print(f"[ATTENTION READ ERROR] req_id={req_id}, idx={req_idx}, offset={offset}, state=VERIFYING (SHOULD BE 0!)")
 
                 # Copy all streaming cache buffers to GPU
                 self.sink_sizes.copy_to_gpu(num_reqs)
