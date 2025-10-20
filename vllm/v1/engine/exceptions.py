@@ -36,9 +36,9 @@ class EngineLoopPausedError(Exception):
 class FaultInfo:
     type: str
     message: str
-    timestamp: str
     engine_id: str
-    additional_info: dict
+    timestamp: str | None = None
+    additional_info: dict | None = None
 
     def __post_init__(self):
         # If no exit time is specified, the current timestamp will be used by default.

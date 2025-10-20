@@ -287,6 +287,7 @@ class CoreEngineActorManager:
         log_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
+        fault_report_address: str | None = None,
     ):
         import copy
 
@@ -298,8 +299,6 @@ class CoreEngineActorManager:
 
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
-
-        self.actor_id_to_dp_rank = {}
 
         env_vars_list = get_env_vars_to_copy(destination="DPEngineCoreActor")
         self.env_vars_dict = {
@@ -313,6 +312,20 @@ class CoreEngineActorManager:
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+
+        if fault_report_address:
+            zmq_ctx = zmq.Context()
+            num_identity = 1
+            identity = generate_identity_group(
+                "core_engine_actor_manager", "clinet_guard", "report", num_identity
+            )[0]
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=fault_report_address,
+                socket_type=zmq.DEALER,
+                bind=True,
+                identity=identity,
+            )
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")

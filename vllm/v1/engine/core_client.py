@@ -673,10 +673,7 @@ class MPClient(EngineCoreClient):
                             actor
                         ) + len(engine_manager.local_engine_actors)
                     else:
-                        logger.error(
-                            "Unknown actor (ID: %s)",
-                            actor_id
-                        )
+                        logger.error("Unknown actor (ID: %s)", actor_id)
                         continue
 
                     if actor_state == "DEAD":
@@ -751,9 +748,9 @@ class MPClient(EngineCoreClient):
                     "Engine core proc %s died unexpectedly, shutting down client.",
                     proc_name,
                 )
-
-            _self.resources.engine_dead = True
-            _self.shutdown()
+            if _self and _self.resources:
+                _self.resources.engine_dead = True
+                _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
             # like MultiprocExecutor, but we set engine_dead flag which will
             # cause subsequent operations to raise EngineDeadError
