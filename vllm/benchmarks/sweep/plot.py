@@ -118,7 +118,7 @@ class PlotBinner:
 
 
 PLOT_BINNERS: dict[str, type[PlotBinner]] = {
-    "@": PlotBinner,
+    "%": PlotBinner,
 }
 
 
