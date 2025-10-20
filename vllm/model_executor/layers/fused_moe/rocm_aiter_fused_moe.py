@@ -106,7 +106,7 @@ def rocm_aiter_grouped_topk(
     token = hidden_states.shape[0]
     device = hidden_states.device
     if (
-        rocm_aiter_ops.is_fused_moe_shared_experts_enabled()
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         and num_fused_shared_experts > 0
     ):
         assert aiter_topK_meta_data is not None, (
@@ -157,7 +157,7 @@ def rocm_aiter_grouped_topk(
         )
 
     if (
-        rocm_aiter_ops.is_fused_moe_shared_experts_enabled()
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         and num_fused_shared_experts > 0
     ):
         return total_topk_weights, total_topk_ids

@@ -1131,7 +1131,7 @@ class FusedMoE(CustomOp):
         # ROCm aiter shared experts fusion
         self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         self.aiter_fmoe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fused_moe_shared_experts_enabled()
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
 
         self.num_fused_shared_experts = (
@@ -1990,7 +1990,7 @@ class FusedMoE(CustomOp):
             assert topk_group is not None
             assert num_expert_group is not None
             if rocm_aiter_ops.is_fused_moe_enabled():
-                if not rocm_aiter_ops.is_fused_moe_shared_experts_enabled():
+                if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
                     assert num_fused_shared_experts == 0
                 grouped_topk_impl = partial(
                     rocm_aiter_grouped_topk,

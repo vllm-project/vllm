@@ -7,7 +7,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
 def is_aiter_supported(func: Callable) -> Callable:
@@ -440,7 +440,7 @@ class rocm_aiter_ops:
 
     @classmethod
     @is_aiter_supported
-    def is_fused_moe_shared_experts_enabled(cls) -> bool:
+    def is_fusion_moe_shared_experts_enabled(cls) -> bool:
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
 
     @classmethod
