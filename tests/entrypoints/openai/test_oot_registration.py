@@ -25,13 +25,10 @@ def run_and_test_dummy_opt_api_server(model, tp=1):
         client = server.get_client()
         completion = client.chat.completions.create(
             model=model,
-            messages=[{
-                "role": "system",
-                "content": "You are a helpful assistant."
-            }, {
-                "role": "user",
-                "content": "Hello!"
-            }],
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello!"},
+            ],
             temperature=0,
         )
         generated_text = completion.choices[0].message.content

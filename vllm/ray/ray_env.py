@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
-from typing import Optional
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -14,7 +13,8 @@ CONFIG_HOME = envs.VLLM_CONFIG_ROOT
 # This file contains a list of env vars that should not be copied
 # from the driver to the Ray workers.
 RAY_NON_CARRY_OVER_ENV_VARS_FILE = os.path.join(
-    CONFIG_HOME, "ray_non_carry_over_env_vars.json")
+    CONFIG_HOME, "ray_non_carry_over_env_vars.json"
+)
 
 try:
     if os.path.exists(RAY_NON_CARRY_OVER_ENV_VARS_FILE):
@@ -25,13 +25,16 @@ try:
 except json.JSONDecodeError:
     logger.warning(
         "Failed to parse %s. Using an empty set for non-carry-over env vars.",
-        RAY_NON_CARRY_OVER_ENV_VARS_FILE)
+        RAY_NON_CARRY_OVER_ENV_VARS_FILE,
+    )
     RAY_NON_CARRY_OVER_ENV_VARS = set()
 
 
-def get_env_vars_to_copy(exclude_vars: Optional[set[str]] = None,
-                         additional_vars: Optional[set[str]] = None,
-                         destination: Optional[str] = None) -> set[str]:
+def get_env_vars_to_copy(
+    exclude_vars: set[str] | None = None,
+    additional_vars: set[str] | None = None,
+    destination: str | None = None,
+) -> set[str]:
     """
     Get the environment variables to copy to downstream Ray actors.
 
@@ -60,13 +63,17 @@ def get_env_vars_to_copy(exclude_vars: Optional[set[str]] = None,
 
     to_destination = " to " + destination if destination is not None else ""
 
-    logger.info("RAY_NON_CARRY_OVER_ENV_VARS from config: %s",
-                RAY_NON_CARRY_OVER_ENV_VARS)
-    logger.info("Copying the following environment variables%s: %s",
-                to_destination,
-                [v for v in env_vars_to_copy if v in os.environ])
     logger.info(
-        "If certain env vars should NOT be copied, add them to "
-        "%s file", RAY_NON_CARRY_OVER_ENV_VARS_FILE)
+        "RAY_NON_CARRY_OVER_ENV_VARS from config: %s", RAY_NON_CARRY_OVER_ENV_VARS
+    )
+    logger.info(
+        "Copying the following environment variables%s: %s",
+        to_destination,
+        [v for v in env_vars_to_copy if v in os.environ],
+    )
+    logger.info(
+        "If certain env vars should NOT be copied, add them to %s file",
+        RAY_NON_CARRY_OVER_ENV_VARS_FILE,
+    )
 
     return env_vars_to_copy

@@ -12,7 +12,7 @@ import os
 import random
 from contextlib import contextmanager
 from dataclasses import asdict
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -28,8 +28,8 @@ from vllm.utils import FlexibleArgumentParser
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompts: list[str]
-    stop_token_ids: Optional[list[int]] = None
-    lora_requests: Optional[list[LoRARequest]] = None
+    stop_token_ids: list[int] | None = None
+    lora_requests: list[LoRARequest] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -84,6 +84,33 @@ def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
         f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
         for question in questions
     ]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Bee-8B
+def run_bee(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "Open-Bee/Bee-8B-RL"
+
+    prompts = [
+        (
+            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<image>\n{question}<|im_end|>"
+            f"<|im_start|>assistant\n<think>\n"
+        )
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
@@ -248,7 +275,8 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=2048,
         max_num_seqs=2,
-        mm_processor_kwargs={"do_pan_and_scan": True},
+        # TODO: Support this in transformers backend
+        # mm_processor_kwargs={"do_pan_and_scan": True},
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -576,7 +604,7 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
 
 # Intern-S1
 def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "internlm/Intern-S1"
+    model_name = "internlm/Intern-S1-mini"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -724,6 +752,26 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         model="moonshotai/Kimi-VL-A3B-Instruct",
         trust_remote_code=True,
         max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# LightOnOCR
+def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [
+        "<|im_start|>system<|im_end|>\n<|im_start|>user\n<|image_pad|><|im_end|>\n<|im_start|>assistant\n"
+        for _ in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -1140,14 +1188,10 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
     elif modality == "video":
         placeholder = "<video>"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    messages = [
-        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+    prompts = [
+        f"<|im_start|>user\n\n{placeholder}\n{question}<|im_end|>\n<|im_start|>assistant\n"
         for question in questions
     ]
-    prompts = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1691,6 +1735,7 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
 model_example_map = {
     "aria": run_aria,
     "aya_vision": run_aya_vision,
+    "bee": run_bee,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
     "dots_ocr": run_dots_ocr,
@@ -1712,6 +1757,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "lightonocr": run_lightonocr,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,

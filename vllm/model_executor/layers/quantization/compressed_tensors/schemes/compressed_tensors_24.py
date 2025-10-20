@@ -1,29 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from compressed_tensors import CompressionFormat, ModelCompressor
-from compressed_tensors.quantization import (QuantizationArgs,
-                                             QuantizationStrategy,
-                                             QuantizationType)
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+    QuantizationStrategy,
+    QuantizationType,
+)
 from compressed_tensors.utils import combine_shards
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear)
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme)
+    CompressedTensorsScheme,
+)
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    convert_to_channelwise, sparse_cutlass_supported)
-from vllm.model_executor.parameter import (BasevLLMParameter,
-                                           ChannelQuantScaleParameter,
-                                           ModelWeightParameter,
-                                           PerTensorScaleParameter)
+    convert_to_channelwise,
+    sparse_cutlass_supported,
+)
+from vllm.model_executor.parameter import (
+    BasevLLMParameter,
+    ChannelQuantScaleParameter,
+    ModelWeightParameter,
+    PerTensorScaleParameter,
+)
 
 __all__ = ["CompressedTensors24"]
 
@@ -31,27 +40,32 @@ from vllm.platforms import current_platform
 
 
 class CompressedTensors24(CompressedTensorsScheme):
-
     def __init__(
         self,
         quantized: bool = False,
-        weight_quant: Optional[QuantizationArgs] = None,
-        input_quant: Optional[QuantizationArgs] = None,
-        model_compression_config: Optional[dict[str, Any]] = None,
+        weight_quant: QuantizationArgs | None = None,
+        input_quant: QuantizationArgs | None = None,
+        model_compression_config: dict[str, Any] | None = None,
     ):
         self.quantized = quantized
         self.weight_quant = weight_quant
         self.input_quant = input_quant
-        self.model_compressor = (
-            ModelCompressor.from_compression_config(model_compression_config)
-            if model_compression_config is not None else None)
+        model_compressor = ModelCompressor.from_compression_config(
+            model_compression_config
+        )
         self.do_sparse_decompress = (
-            self.model_compressor is not None
-            and self.model_compressor.sparsity_config.format
-            == CompressionFormat.sparse_24_bitmask.value)
+            model_compressor is not None
+            and model_compressor.sparsity_config.format
+            == CompressionFormat.sparse_24_bitmask.value
+        )
+        if self.do_sparse_decompress:
+            self.model_compressor = model_compressor
 
-        if quantized and input_quant is not None and \
-                self._get_quant_dtype() == current_platform.fp8_dtype():
+        if (
+            quantized
+            and input_quant is not None
+            and self._get_quant_dtype() == current_platform.fp8_dtype()
+        ):
             static = not input_quant.dynamic
             g_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
             self.quant_fp8 = QuantFP8(static, g_shape)
@@ -74,7 +88,8 @@ class CompressedTensors24(CompressedTensorsScheme):
         if not sparse_cutlass_supported():
             raise ValueError(
                 "Sparse CUTLASS not supported. vLLM must be built with "
-                "CUDA 12.2 or later to use this feature")
+                "CUDA 12.2 or later to use this feature"
+            )
 
         layer.logical_widths = output_partition_sizes
         layer.input_size = input_size
@@ -93,9 +108,9 @@ class CompressedTensors24(CompressedTensorsScheme):
             weight_loader=weight_loader,
         )
         if self.do_sparse_decompress:
-            assert all(partition_size % 8 == 0
-                       for partition_size in output_partition_sizes
-                       ), "All partitions must be divisible by 8 for "
+            assert all(
+                partition_size % 8 == 0 for partition_size in output_partition_sizes
+            ), "All partitions must be divisible by 8 for "
             "2:4 sparse compressed models"
 
             shape = BasevLLMParameter(
@@ -130,20 +145,24 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         # Check if quantized, not just 2:4 Sparse
         if self.quantized:
-            if (self.weight_quant and self.weight_quant.strategy
-                    == QuantizationStrategy.CHANNEL.value):
+            if (
+                self.weight_quant
+                and self.weight_quant.strategy == QuantizationStrategy.CHANNEL.value
+            ):
                 weight_scale = ChannelQuantScaleParameter(
-                    data=torch.empty((sum(output_partition_sizes), 1),
-                                     dtype=torch.float32),
+                    data=torch.empty(
+                        (sum(output_partition_sizes), 1), dtype=torch.float32
+                    ),
                     output_dim=0,
                     weight_loader=weight_loader,
                 )
             else:
-                assert (self.weight_quant and self.weight_quant.strategy
-                        == QuantizationStrategy.TENSOR.value)
+                assert (
+                    self.weight_quant
+                    and self.weight_quant.strategy == QuantizationStrategy.TENSOR.value
+                )
                 weight_scale = PerTensorScaleParameter(
-                    data=torch.empty(len(output_partition_sizes),
-                                     dtype=torch.float32),
+                    data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                     weight_loader=weight_loader,
                 )
 
@@ -152,8 +171,7 @@ class CompressedTensors24(CompressedTensorsScheme):
             # input quant will be non-none
             if self.input_quant and not self.input_quant.dynamic:
                 # register input quant scale
-                assert (self.input_quant.strategy ==
-                        QuantizationStrategy.TENSOR.value)
+                assert self.input_quant.strategy == QuantizationStrategy.TENSOR.value
                 input_scale = BasevLLMParameter(
                     data=torch.empty(1, dtype=torch.float32),
                     weight_loader=weight_loader,
@@ -163,12 +181,12 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         else:
             # for sparse-only, pass in 1 for weight/input scales
-            weight_scale = torch.nn.Parameter(data=torch.ones(
-                1, dtype=torch.float32),
-                                              requires_grad=False)
-            input_scale = torch.nn.Parameter(data=torch.ones(
-                1, dtype=torch.float32),
-                                             requires_grad=False)
+            weight_scale = torch.nn.Parameter(
+                data=torch.ones(1, dtype=torch.float32), requires_grad=False
+            )
+            input_scale = torch.nn.Parameter(
+                data=torch.ones(1, dtype=torch.float32), requires_grad=False
+            )
             layer.register_parameter("input_scale", input_scale)
             layer.register_parameter("weight_scale", weight_scale)
 
@@ -199,8 +217,9 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         # torch.compile workaround
         if hasattr(layer, "input_scale"):
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
-                                                   requires_grad=False)
+            layer.input_scale = torch.nn.Parameter(
+                layer.input_scale.data, requires_grad=False
+            )
 
         if self.weight_quant:
             if self.weight_quant.strategy == QuantizationStrategy.TENSOR.value:
@@ -214,11 +233,11 @@ class CompressedTensors24(CompressedTensorsScheme):
             else:
                 # torch.compile workaround
                 layer.weight_scale = torch.nn.Parameter(
-                    layer.weight_scale.data, requires_grad=False)
+                    layer.weight_scale.data, requires_grad=False
+                )
 
         # Set all negative zero values to 0 prior to compression
-        if (layer.weight.dtype.is_floating_point
-                and layer.weight.dtype.itemsize >= 2):
+        if layer.weight.dtype.is_floating_point and layer.weight.dtype.itemsize >= 2:
             layer.weight.data[layer.weight.data == -0.0] = 0.0
 
         w_compressed, meta = ops.cutlass_sparse_compress(layer.weight.data)
@@ -229,7 +248,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Returns the output tensor for the layer with 2:4
@@ -243,7 +262,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         :return: The output tensor of the layer
         """
         if self.quantized:
-            scale = getattr(layer, 'input_scale', None)
+            scale = getattr(layer, "input_scale", None)
 
             if self.weights_dtype == torch.int8:
                 ops_output = ops.scaled_int8_quant(x, scale=scale)
@@ -286,12 +305,16 @@ class CompressedTensors24(CompressedTensorsScheme):
         if not is_8_bits:
             raise ValueError("Cutlass only supports 8-bit quantization")
 
-        if (self.weight_quant.type == QuantizationType.FLOAT
-                and self.input_quant.type == QuantizationType.FLOAT):
+        if (
+            self.weight_quant.type == QuantizationType.FLOAT
+            and self.input_quant.type == QuantizationType.FLOAT
+        ):
             return torch.float8_e4m3fn
 
-        if (self.weight_quant.type == QuantizationType.INT
-                and self.input_quant.type == QuantizationType.INT):
+        if (
+            self.weight_quant.type == QuantizationType.INT
+            and self.input_quant.type == QuantizationType.INT
+        ):
             return torch.int8
 
         raise ValueError("Quantization type not supported by Cutlass")
@@ -317,7 +340,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         :param bitmask: The 2:4 bitmask associated with the compressed weights,
             representing the positions of non-zero elements in the compressed
             tensor.
-        :param layer: The layer whose weights need to be processed after 
+        :param layer: The layer whose weights need to be processed after
             loading.
         :return: The decompressed 2:4 sparse weight tensor.
         """
@@ -343,14 +366,16 @@ class CompressedTensors24(CompressedTensorsScheme):
         if isinstance(layer, (QKVParallelLinear, MergedColumnParallelLinear)):
             split_weights = torch.split(compressed, layer.logical_widths)
             split_bitmask = torch.split(bitmask, layer.logical_widths)
-            split_shape = [(out, layer.input_size_per_partition)
-                           for out in layer.logical_widths]
+            split_shape = [
+                (out, layer.input_size_per_partition) for out in layer.logical_widths
+            ]
 
         if split_weights:
             decompressed_shards = [
                 _process_split(compressed_weight, shape, bitmask)
                 for compressed_weight, shape, bitmask in zip(
-                    split_weights, split_shape, split_bitmask)
+                    split_weights, split_shape, split_bitmask
+                )
             ]
             decompressed = combine_shards(decompressed_shards)
         else:
@@ -362,5 +387,6 @@ class CompressedTensors24(CompressedTensorsScheme):
                         layer.input_size_per_partition,
                     ),
                     bitmask=bitmask,
-                ))
+                )
+            )
         return decompressed

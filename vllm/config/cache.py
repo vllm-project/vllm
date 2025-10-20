@@ -3,16 +3,15 @@
 
 import hashlib
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import SkipValidation, model_validator
+from pydantic import Field, SkipValidation, field_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, get_cpu_memory
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import get_cpu_memory
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
@@ -21,9 +20,8 @@ else:
 
 logger = init_logger(__name__)
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2",
-                     "fp8_inc"]
+BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
+CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 
@@ -40,7 +38,7 @@ class CacheConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
     platform."""
-    gpu_memory_utilization: float = 0.9
+    gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
     utilization. If unspecified, will use the default value of 0.9. This is a
@@ -48,7 +46,7 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
-    swap_space: float = 4
+    swap_space: float = Field(default=4, ge=0)
     """Size of the CPU swap space per GPU (in GiB)."""
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
@@ -61,20 +59,20 @@ class CacheConfig:
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    num_gpu_blocks_override: Optional[int] = None
+    num_gpu_blocks_override: int | None = None
     """Number of GPU blocks to use. This overrides the profiled `num_gpu_blocks`
     if specified. Does nothing if `None`. Used for testing preemption."""
-    sliding_window: Optional[int] = None
+    sliding_window: int | None = None
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    enable_prefix_caching: Optional[bool] = None
+    enable_prefix_caching: bool | None = None
     """Whether to enable prefix caching. Enabled by default for V1."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
     - "sha256" uses Pickle for object serialization before hashing.\n
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
     serializes objects using canonical CBOR and hashes them with SHA-256."""
-    cpu_offload_gb: float = 0
+    cpu_offload_gb: float = Field(default=0, ge=0)
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
     increase the GPU memory size. For example, if you have one 24 GB GPU and
@@ -87,12 +85,13 @@ class CacheConfig:
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
-    cpu_kvcache_space_bytes: Optional[int] = None
+    cpu_kvcache_space_bytes: int | None = None
     """(CPU backend only) CPU key-value cache space."""
-    mamba_page_size_padded: Optional[int] = None
+    mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-
+    mamba_block_size: int | None = None
+    """Size of a contiguous cache block in number of tokens for mamba cache."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -103,9 +102,9 @@ class CacheConfig:
     for the ssm state will be determined by mamba_cache_dtype."""
 
     # Will be set after profiling.
-    num_gpu_blocks: Optional[int] = field(default=None, init=False)
+    num_gpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for GPU memory."""
-    num_cpu_blocks: Optional[int] = field(default=None, init=False)
+    num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
     kv_sharing_fast_prefill: bool = False
@@ -118,13 +117,13 @@ class CacheConfig:
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
 
-    kv_cache_memory_bytes: Optional[int] = None
+    kv_cache_memory_bytes: int | None = None
     """Size of KV Cache per GPU in bytes. By default, this is set to None
     and vllm can automatically infer the kv cache size based on
     gpu_memory_utilization. However, users may want to manually specify
     the kv cache memory size. kv_cache_memory_bytes allows more fine-grain
     control of how much memory gets used when compared with using
-    gpu_memory_memory_utilization. Note that kv_cache_memory_bytes
+    gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
     def compute_hash(self) -> str:
@@ -144,76 +143,42 @@ class CacheConfig:
         factors.append(self.mamba_cache_dtype)
         factors.append(self.mamba_ssm_cache_dtype)
         # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
-
-    def __post_init__(self) -> None:
-        self.swap_space_bytes = self.swap_space * GiB_bytes
-
-        self._verify_cache_dtype()
-        self._verify_prefix_caching()
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
-    @model_validator(mode='after')
-    def _verify_args(self) -> Self:
-        if self.cpu_offload_gb < 0:
-            raise ValueError("CPU offload space must be non-negative"
-                             f", but got {self.cpu_offload_gb}")
-
-        if self.gpu_memory_utilization > 1.0:
-            raise ValueError(
-                "GPU memory utilization must be less than 1.0. Got "
-                f"{self.gpu_memory_utilization}.")
-
-        return self
-
-    def _verify_cache_dtype(self) -> None:
-        if self.cache_dtype == "auto":
-            pass
-        elif self.cache_dtype in get_args(CacheDType):
-            if self.cache_dtype.startswith("fp8"):
-                logger.info(
-                    "Using fp8 data type to store kv cache. It reduces the GPU "
-                    "memory footprint and boosts the performance. "
-                    "Meanwhile, it may cause accuracy drop without a proper "
-                    "scaling factor.")
-        else:
-            raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
-
-    def _verify_prefix_caching(self) -> None:
-        if not self.enable_prefix_caching:
-            return
-
-        if self.sliding_window is not None and not envs.VLLM_USE_V1:
-            raise NotImplementedError(
-                "Prefix caching is not supported with sliding window. "
-                "Run with --disable-sliding-window to use prefix caching.")
-
-        if (self.enable_prefix_caching and self.prefix_caching_hash_algo
-                not in get_args(PrefixCachingHashAlgo)):
-            raise ValueError(
-                "Unknown prefix caching hash algorithm: "
-                f"{self.prefix_caching_hash_algo}. Must be one of "
-                f"{get_args(PrefixCachingHashAlgo)}.")
+    @field_validator("cache_dtype", mode="after")
+    @classmethod
+    def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+        if cache_dtype.startswith("fp8"):
+            logger.info(
+                "Using fp8 data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "Meanwhile, it may cause accuracy drop without a proper "
+                "scaling factor."
+            )
+        return cache_dtype
 
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
     ) -> None:
+        swap_space_bytes = self.swap_space * GiB_bytes
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
         # group are in the same node. However, the GPUs may span multiple nodes.
         num_gpus_per_node = parallel_config.tensor_parallel_size
-        cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
+        cpu_memory_usage = swap_space_bytes * num_gpus_per_node
 
-        msg = (f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
-               f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
-               "is allocated for the swap space.")
+        msg = (
+            f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
+            f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
+            "is allocated for the swap space."
+        )
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
