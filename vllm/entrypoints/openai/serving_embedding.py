@@ -6,7 +6,7 @@ from typing import Any, Final, assert_never, cast
 
 import torch
 from fastapi import Request
-from flask import Response
+from fastapi.responses import Response
 from typing_extensions import override
 
 from vllm.engine.protocol import EngineClient
