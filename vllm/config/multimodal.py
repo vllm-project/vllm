@@ -3,13 +3,17 @@
 
 import hashlib
 from collections.abc import Mapping
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.config.utils import config
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
+else:
+    _Backend = Any
 
 
 @dataclass
@@ -156,7 +160,14 @@ class MultiModalConfig:
     @field_validator("mm_encoder_attn_backend", mode="before")
     @classmethod
     def _validate_mm_encoder_attn_backend(cls, value: object) -> _Backend | None:
-        if value is None or isinstance(value, _Backend):
+        from vllm.attention.backends.registry import (
+            _Backend as BackendEnum,
+        )
+        from vllm.attention.backends.registry import (
+            backend_name_to_enum,
+        )
+
+        if value is None or isinstance(value, BackendEnum):
             return value
 
         if isinstance(value, str):
@@ -164,7 +175,7 @@ class MultiModalConfig:
             if candidate is not None:
                 return candidate
 
-        valid_backends = ", ".join(sorted(_Backend.__members__.keys()))
+        valid_backends = ", ".join(sorted(BackendEnum.__members__.keys()))
         raise ValueError(
             f"Invalid mm encoder attention backend. Expected one of: {valid_backends}."
         )

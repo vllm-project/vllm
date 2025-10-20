@@ -382,7 +382,6 @@ class Qwen3_VisionTransformer(nn.Module):
             raise RuntimeError(
                 f"Qwen3-VL does not support {self.attn_backend} backend now."
             )
-        print(f"self.attn_backend: {self.attn_backend}")
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
