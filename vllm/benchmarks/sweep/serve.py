@@ -109,9 +109,9 @@ def _get_comb_base_path(
 ):
     parts = list[str]()
     if serve_comb:
-        parts.extend(("SERVE-", *serve_comb.as_text(sep="-")))
+        parts.extend(("SERVE-", serve_comb.as_text(sep="-").split("-")))
     if bench_comb:
-        parts.extend(("BENCH-", *bench_comb.as_text(sep="-")))
+        parts.extend(("BENCH-", bench_comb.as_text(sep="-").split("-")))
 
     return output_dir / sanitize_filename("-".join(parts))
 
@@ -228,9 +228,9 @@ def _get_sla_base_path(
 ):
     parts = list[str]()
     if serve_comb:
-        parts.extend(("SERVE-", *serve_comb.as_text(sep="-")))
+        parts.extend(("SERVE-", serve_comb.as_text(sep="-")))
     if bench_comb:
-        parts.extend(("BENCH-", *bench_comb.as_text(sep="-")))
+        parts.extend(("BENCH-", bench_comb.as_text(sep="-")))
 
     return output_dir / sanitize_filename("-".join(parts))
 
