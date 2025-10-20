@@ -5,6 +5,8 @@
 import numpy as np
 import torch
 
+from vllm.config import get_cached_compilation_config
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbedding
@@ -248,6 +250,15 @@ class MRotaryEmbedding(RotaryEmbedding):
         self.mrope_interleaved = mrope_interleaved
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
+
+    @classmethod
+    def enabled(cls) -> bool:
+        enabled = super().enabled()
+        compilation_config = get_cached_compilation_config()
+        custom_ops = compilation_config.custom_ops
+        disabled = hasattr(cls, "name") and f"-{cls.name}" in custom_ops
+        use_triton = current_platform.is_cuda_alike()
+        return (use_triton or enabled) and not disabled
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         if self.scaling_factor is None:
