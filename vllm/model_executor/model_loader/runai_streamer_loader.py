@@ -16,7 +16,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
 )
-from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetensors
 
 
