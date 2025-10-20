@@ -338,7 +338,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            per_act_token_quant=self.weight_qscheme == "per_channel",
+            per_act_token_quant=self.input_qscheme == "per_channel",
+            per_out_ch_quant=self.weight_qscheme == "per_channel",
         )
 
     def apply(
@@ -469,22 +470,24 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "not implemented. Please open an issue."
             )
 
-        if not current_platform.supports_mx():
-            self.emulate = True
+        self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
+
+        self.emulate = not current_platform.supports_mx() or not (
+            self.use_rocm_aiter_moe and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+        )
+        if self.emulate:
             logger.warning_once(
-                "The current platform does not support native MXFP4/MXFP6 "
+                f"The current mode (supports_mx={current_platform.supports_mx()}, "
+                f"use_mxfp4_aiter_moe={self.use_rocm_aiter_moe}, "
+                f"ocp_mx_scheme={self.ocp_mx_scheme}) "
+                "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision."
             )
         else:
-            self.emulate = True
             logger.warning_once(
-                "The current platform supports native MXFP4/MXFP6 "
-                "computation, but kernels are not yet integrated in vLLM. "
-                "Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
+                "The current mode supports native MoE MXFP4 computation"
             )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
@@ -565,6 +568,24 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
+    def process_weights_after_loading(self, layer):
+        if self.emulate:
+            return
+
+        from aiter.utility.fp4_utils import e8m0_shuffle
+
+        # Pre-shuffle weight scales
+        s0, s1, _ = layer.w13_weight_scale.shape
+        w13_weight_scale = layer.w13_weight_scale.view(s0 * s1, -1)
+        w13_weight_scale = e8m0_shuffle(w13_weight_scale)
+        layer.w13_weight_scale.data = w13_weight_scale.view(s0, s1, -1)
+
+        s0, s1, _ = layer.w2_weight_scale.shape
+        w2_weight_scale = layer.w2_weight_scale.view(s0 * s1, -1)
+        w2_weight_scale = e8m0_shuffle(w2_weight_scale)
+        layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
+        torch.cuda.empty_cache()
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -608,8 +629,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "EPLB not supported for `QuarkOCP_MX_MoEMethod` yet."
             )
 
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
         topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -625,17 +644,34 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             indices_type=self.topk_indices_dtype,
         )
 
-        out = fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
-            quant_config=self.moe_quant_config,
-        )
+        if not self.emulate:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                rocm_aiter_fused_experts,
+            )
+
+            out = rocm_aiter_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                quant_config=self.get_fused_moe_quant_config(layer),
+            )
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+
+            out = fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                quant_config=self.moe_quant_config,
+            )
         return out

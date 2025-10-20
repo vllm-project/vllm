@@ -90,14 +90,14 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (
+from vllm.utils import random_uuid
+from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
     collect_from_async_generator,
-    is_list_of,
     make_async,
     merge_async_iterators,
-    random_uuid,
 )
+from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)

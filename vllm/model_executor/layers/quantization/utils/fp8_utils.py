@@ -720,11 +720,11 @@ def requant_weight_ue8m0_inplace(
     UE8M0 (power-of-two) format expected by the new DeepGEMM kernels inplace.
 
     Args:
-        weight: Block-quantised weight tensor stored in ``torch.float8_e4m3fn``.
-            Expected shape ``(..., M, K)``.
-        weight_scale: Corresponding per-block scale tensor (``torch.float32``)
-            with shape ``(..., M // block_size[0], K // block_size[1])``.
-        block_size: 2-element iterable ``[block_m, block_k]`` describing the
+        weight: Block-quantised weight tensor stored in `torch.float8_e4m3fn`.
+            Expected shape `(..., M, K)`.
+        weight_scale: Corresponding per-block scale tensor (`torch.float32`)
+            with shape `(..., M // block_size[0], K // block_size[1])`.
+        block_size: 2-element iterable `[block_m, block_k]` describing the
             block quantisation granularity.
     """
     if weight.numel() == 0:

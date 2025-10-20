@@ -1049,6 +1049,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN

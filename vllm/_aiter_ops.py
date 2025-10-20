@@ -406,6 +406,7 @@ class rocm_aiter_ops:
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+    _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
 
     @classmethod
     @is_aiter_supported
@@ -436,6 +437,11 @@ class rocm_aiter_ops:
     def is_fused_moe_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
+
+    @classmethod
+    @is_aiter_supported
+    def is_fused_moe_shared_experts_enabled(cls) -> bool:
+        return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
 
     @classmethod
     @is_aiter_supported
