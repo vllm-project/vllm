@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import json
+from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -103,39 +104,49 @@ def plot(
 
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    for fig_group, fig_data in full_groupby(
-        all_data,
-        key=lambda item: tuple((k, str(item[k])) for k in fig_by),
-    ):
-        fig_group = tuple(fig_group)
+    with ProcessPoolExecutor() as pool:
+        tasks = list[Future[None]]()
 
-        fig_path = fig_dir / (
-            "-".join(
-                (
-                    "FIGURE-",
-                    *(f"{k}={v}" for k, v in fig_group),
+        for fig_group, fig_data in full_groupby(
+            all_data,
+            key=lambda item: tuple((k, str(item[k])) for k in fig_by),
+        ):
+            fig_group = tuple(fig_group)
+
+            fig_path = fig_dir / (
+                "-".join(
+                    (
+                        "FIGURE-",
+                        *(f"{k}={v}" for k, v in fig_group),
+                    )
                 )
+                .replace("/", "_")
+                .replace("..", "__")  # Sanitize
+                + ".png"
             )
-            .replace("/", "_")
-            .replace("..", "__")  # Sanitize
-            + ".png"
-        )
-        fig_title = (
-            ", ".join(f"{k}={v}" for k, v in fig_group) if fig_group else "(All data)"
-        )
+            fig_title = (
+                ", ".join(f"{k}={v}" for k, v in fig_group)
+                if fig_group
+                else "(All data)"
+            )
 
-        _plot_fig(
-            fig_path,
-            fig_title,
-            fig_data,
-            curve_by,
-            var_x=var_x,
-            var_y=var_y,
-            max_x=max_x,
-            bin_x=bin_x,
-            log_y=log_y,
-            dry_run=dry_run,
-        )
+            task = pool.submit(
+                _plot_fig,
+                fig_path,
+                fig_title,
+                fig_data,
+                curve_by,
+                var_x=var_x,
+                var_y=var_y,
+                max_x=max_x,
+                bin_x=bin_x,
+                log_y=log_y,
+                dry_run=dry_run,
+            )
+            tasks.append(task)
+
+        for f in tasks:
+            f.result()
 
 
 def main():
