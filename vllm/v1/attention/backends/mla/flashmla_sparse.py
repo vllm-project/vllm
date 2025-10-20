@@ -22,7 +22,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -254,9 +253,6 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         parallel_config = vllm_config.parallel_config
         self.device = device
 
-        props = torch.cuda.get_device_properties(device)
-        sm_count = props.multi_processor_count
-
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
@@ -272,25 +268,15 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             (1, 1), dtype=torch.int32, device=self.device
         )
 
-        # Equation taken from FlashMLA/csrc/pybind.cpp
-        h_q, h_k = self.num_heads, 1
-        s_q = 1  # inversely proportional to s_q, so s_q = 1 is the largest
-        max_num_sm_parts = int(
-            max((sm_count // 2) / h_k // (cdiv(h_q // h_k, 2 * 64) * s_q), 1)
-        )
-        if current_platform.is_device_capability(100):
-            max_num_sm_parts *= 2
+        # Allocate buffers for per-token batching
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.tile_scheduler_metadata_buffer = torch.empty(
-            # TileSchedulerMetaDataSize = 8
-            # see: FlashMLA/csrc/params.h
-            (max_num_sm_parts, 8),
+            (max_tokens, 8),  # TileSchedulerMetaDataSize = 8
             dtype=torch.int32,
             device=device,
         )
         self.num_splits_buffer = torch.empty(
-            # We pack all the tokens into one batch for sparse attention.
-            # Otherwise, we can exceed the sm of `get_mla_metadata`.
-            (2,),
+            (max_tokens + 1,),  # batch_size + 1
             dtype=torch.int32,
             device=device,
         )
@@ -321,8 +307,15 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         fp8_extra_metadata = None
         if self.use_fp8_kv_cache:
+            cache_seqlens = torch.full(
+                (num_tokens,),
+                self.topk_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
             tile_scheduler_metadata, num_splits = get_mla_metadata(
-                cache_seqlens=self.topk_tokens_tensor,
+                cache_seqlens=cache_seqlens,
                 num_q_tokens_per_head_k=num_tokens * self.num_heads,
                 topk=self.topk_tokens,
                 num_heads_q=self.num_heads,
@@ -336,11 +329,13 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 :num_sm_parts
             ]
             tile_scheduler_metadata_buffer.copy_(tile_scheduler_metadata)
-            self.num_splits_buffer.copy_(num_splits)
+
+            num_splits_buffer = self.num_splits_buffer[: num_splits.size(0)]
+            num_splits_buffer.copy_(num_splits)
 
             fp8_extra_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
                 scheduler_metadata=tile_scheduler_metadata_buffer,
-                num_splits=self.num_splits_buffer,
+                num_splits=num_splits_buffer,
                 # cache_lens and block_table are basically unused in sparse case
                 # but the decode kernel will treat -1 and indices >= cache_lens
                 # as invalid so we make sure cache_lens is large enough to not
@@ -443,20 +438,32 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         assert attn_metadata.fp8_extra_metadata is not None
         extra_metadata = attn_metadata.fp8_extra_metadata
 
+        num_tokens = q.shape[0]
+        topk = attn_metadata.topk_tokens
+
+        k_cache_prepared = kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2)
+        q_batched = q.unsqueeze(1)
+        indices_batched = topk_indices.unsqueeze(1)
+        cache_seqlens = torch.full(
+            (num_tokens,), topk, dtype=torch.int32, device=q.device
+        )
+
+        block_table_expanded = attn_metadata.block_table[attn_metadata.req_id_per_token]
+
         _attn_out, _ = flash_mla_with_kvcache(
-            q=q.unsqueeze(0),  # unsqueeze to add batch_dim
-            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-            block_table=extra_metadata.dummy_block_table,
+            q=q_batched,
+            k_cache=k_cache_prepared,
+            block_table=block_table_expanded,
             head_dim_v=512,
-            cache_seqlens=extra_metadata.cache_lens,
+            cache_seqlens=cache_seqlens,
             tile_scheduler_metadata=extra_metadata.scheduler_metadata,
             num_splits=extra_metadata.num_splits,
             is_fp8_kvcache=True,
-            indices=topk_indices.unsqueeze(0),  # unsqueeze to add batch_dim
+            indices=indices_batched,
             softmax_scale=self.softmax_scale,
         )
 
-        return _attn_out
+        return _attn_out.squeeze(1)
 
     def forward(
         self,
