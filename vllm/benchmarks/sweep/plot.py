@@ -35,7 +35,7 @@ def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...]):
     return fig_dir / (
         "-".join(
             (
-                "FIGURE-",
+                "FIGURE" + ("-" if group else ""),
                 *(f"{k}={v}" for k, v in group),
             )
         )

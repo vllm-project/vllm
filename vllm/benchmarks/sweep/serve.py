@@ -108,9 +108,9 @@ def _get_comb_base_path(
 ):
     return output_dir / "-".join(
         (
-            "SERVE-",
+            "SERVE" + ("-" if serve_comb else ""),
             serve_comb.as_text(sep="-"),
-            "BENCH-",
+            "BENCH" + ("-" if bench_comb else ""),
             bench_comb.as_text(sep="-"),
         )
     ).replace("/", "_").replace("..", "__")  # Sanitize
@@ -228,9 +228,9 @@ def _get_sla_base_path(
 ):
     return output_dir / "-".join(
         (
-            "SERVE-",
+            "SERVE" + ("-" if serve_comb else ""),
             serve_comb.as_text(sep="-"),
-            "BENCH-",
+            "BENCH" + ("-" if bench_comb else ""),
             bench_comb.as_text(sep="-"),
         )
     ).replace("/", "_").replace("..", "__")  # Sanitize
