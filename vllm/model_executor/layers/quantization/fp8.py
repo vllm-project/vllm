@@ -93,7 +93,6 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
@@ -102,6 +101,7 @@ from vllm.utils.deep_gemm import (
     should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.flashinfer import has_flashinfer_moe
+from vllm.utils.optional_deps import has_deep_gemm
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper

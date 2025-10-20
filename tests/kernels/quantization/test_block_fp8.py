@@ -18,12 +18,12 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_triton_block_scaled_mm,
 )
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
     per_block_cast_to_fp8,
 )
+from vllm.utils.optional_deps import has_deep_gemm
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)

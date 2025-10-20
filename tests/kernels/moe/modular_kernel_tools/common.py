@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.optional_deps import has_deep_ep, has_deep_gemm, has_pplx
 
 from .mk_objects import (
     TestMoEQuantConfig,

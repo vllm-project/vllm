@@ -22,7 +22,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import has_deep_gemm
+from vllm.utils.optional_deps import has_deep_gemm
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)

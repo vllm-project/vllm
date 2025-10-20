@@ -15,8 +15,8 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
-from vllm.utils import has_deep_ep
 from vllm.utils.network_utils import get_open_port
+from vllm.utils.optional_deps import has_deep_ep
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
