@@ -1741,7 +1741,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
-            # TODO(ywang96): Fix memory profiling to take EVS into account and 
+            # TODO(ywang96): Fix memory profiling to take EVS into account and
             # remove this hack.
             if (
                 self.is_multimodal_pruning_enabled
