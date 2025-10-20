@@ -174,6 +174,9 @@ class MMEncoderAttention(CustomOp):
         q_len: int,
         kv_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Reshape query, key, value to 4D tensors:
+        (batch_size, seq_len, num_heads, head_size)
+        """
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
@@ -185,7 +188,30 @@ class MMEncoderAttention(CustomOp):
 
         return query, key, value
 
-    def forward_tpu(
+    def reshape_qkv_to_3d(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        bsz: int,
+        q_len: int,
+        kv_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Reshape query, key, value to 3D tensors:
+        (batch_size * seq_len, num_heads, head_size)
+        """
+        query = query.view(bsz * q_len, self.num_heads, self.head_size)
+        key = key.view(bsz * kv_len, self.num_kv_heads, self.head_size)
+        value = value.view(bsz * kv_len, self.num_kv_heads, self.head_size)
+
+        if (num_repeat := self.num_queries_per_kv) > 1:
+            # Handle MQA and GQA
+            key = torch.repeat_interleave(key, num_repeat, dim=1)
+            value = torch.repeat_interleave(value, num_repeat, dim=1)
+
+        return query, key, value
+
+    def _forward_pallas(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -206,67 +232,192 @@ class MMEncoderAttention(CustomOp):
         out = out.transpose(1, 2)
         return out.reshape(bsz, q_len, -1)
 
-    def forward(
+    def _forward_sdpa(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         attn_mask_factory: Callable | None = None,
-    ) -> torch.Tensor:
-        """Input shape:
-        (batch_size x seq_len x hidden_size) or
-        (batch_size x seq_len x num_heads x head_size)
-        """
+    ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
-        query = query.view(bsz, q_len, self.num_heads, self.head_size)
-        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
-        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+        query, key, value = self.reshape_qkv_to_4d(
+            query, key, value, bsz, q_len, kv_len
+        )
 
-        if (num_repeat := self.num_queries_per_kv) > 1:
-            # Handle MQA and GQA
-            key = torch.repeat_interleave(key, num_repeat, dim=2)
-            value = torch.repeat_interleave(value, num_repeat, dim=2)
+        query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+        out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+        out = out.transpose(1, 2)
+        return out.reshape(bsz, q_len, -1)
 
-        if self.is_flash_attn_backend:
-            cu_seqlens_q = torch.arange(
+    def _forward_xformers(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask_factory: Callable | None = None,
+    ):
+        from xformers import ops as xops
+
+        bsz, q_len = query.size()[:2]
+        kv_len = key.size(1)
+
+        query, key, value = self.reshape_qkv_to_4d(
+            query, key, value, bsz, q_len, kv_len
+        )
+
+        out = xops.memory_efficient_attention_forward(
+            query, key, value, scale=self.scale
+        )
+        return out.reshape(bsz, q_len, -1)
+
+    def _forward_fa(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask_factory: Callable | None = None,
+    ):
+        bsz, q_len = query.size()[:2]
+        kv_len = key.size(1)
+
+        query, key, value = self.reshape_qkv_to_3d(
+            query, key, value, bsz, q_len, kv_len
+        )
+
+        cu_seqlens_q = torch.arange(
                 0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device
             )
-            cu_seqlens_k = torch.arange(
-                0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
-            )
-
-            out = self._flash_attn_varlen_func(
-                query.flatten(0, 1),
-                key.flatten(0, 1),
-                value.flatten(0, 1),
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=q_len,
-                max_seqlen_k=kv_len,
-                softmax_scale=self.scale,
-            )
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(
-                query, key, value, scale=self.scale
-            )
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
-            out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS:
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            from torch_xla.experimental.custom_kernel import flash_attention
-
-            out = flash_attention(query, key, value, sm_scale=self.scale)
-            out = out.transpose(1, 2)
-        else:
-            # ViT attention hasn't supported this backend yet
-            raise NotImplementedError(
-                f"ViT attention hasn't supported {self.attn_backend} backend yet."
-            )
-
+        cu_seqlens_k = torch.arange(
+            0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
+        )
+        out = self._flash_attn_varlen_func(
+            query,
+            key,
+            value,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=q_len,
+            max_seqlen_k=kv_len,
+            softmax_scale=self.scale,
+        )
         return out.reshape(bsz, q_len, -1)
+
+    def forward_native(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask_factory: Callable | None = None,
+    ):
+        return self._forward_sdpa(query, key, value, attn_mask_factory)
+
+    def forward_cuda(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask_factory: Callable | None = None,
+    ):
+        if self.is_flash_attn_backend:
+            return self._forward_fa(query, key, value, attn_mask_factory)
+        elif self.attn_backend == _Backend.XFORMERS:
+            return self._forward_xformers(query, key, value, attn_mask_factory)
+        elif self.attn_backend == _Backend.TORCH_SDPA:
+            return self._forward_sdpa(query, key, value, attn_mask_factory)
+        else:
+            raise NotImplementedError(
+                f"MMEncoderAttention does not support {self.attn_backend} backend on CUDA."
+            )
+
+    def forward_cpu(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask_factory: Callable | None = None,
+    ):
+        assert self.attn_backend == _Backend.TORCH_SDPA, (
+            f"MMEncoderAttention on CPU only supports TORCH_SDPA backend, "
+            f"but got {self.attn_backend}."
+        )
+        return self._forward_sdpa(query, key, value, attn_mask_factory)
+
+    def forward_tpu(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask_factory: Callable | None = None,
+    ):
+        assert self.attn_backend == _Backend.PALLAS, (
+            f"MMEncoderAttention on TPU only supports PALLAS backend, "
+            f"but got {self.attn_backend}."
+        )
+        return self._forward_pallas(query, key, value, attn_mask_factory)
+
+    # def forward(
+    #     self,
+    #     query: torch.Tensor,
+    #     key: torch.Tensor,
+    #     value: torch.Tensor,
+    #     attn_mask_factory: Callable | None = None,
+    # ) -> torch.Tensor:
+    #     """Input shape:
+    #     (batch_size x seq_len x hidden_size) or
+    #     (batch_size x seq_len x num_heads x head_size)
+    #     """
+    #     bsz, q_len = query.size()[:2]
+    #     kv_len = key.size(1)
+
+    #     query = query.view(bsz, q_len, self.num_heads, self.head_size)
+    #     key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+    #     value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+
+    #     if (num_repeat := self.num_queries_per_kv) > 1:
+    #         # Handle MQA and GQA
+    #         key = torch.repeat_interleave(key, num_repeat, dim=2)
+    #         value = torch.repeat_interleave(value, num_repeat, dim=2)
+
+    #     if self.is_flash_attn_backend:
+    #         cu_seqlens_q = torch.arange(
+    #             0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device
+    #         )
+    #         cu_seqlens_k = torch.arange(
+    #             0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
+    #         )
+
+    #         out = self._flash_attn_varlen_func(
+    #             query.flatten(0, 1),
+    #             key.flatten(0, 1),
+    #             value.flatten(0, 1),
+    #             cu_seqlens_q=cu_seqlens_q,
+    #             cu_seqlens_k=cu_seqlens_k,
+    #             max_seqlen_q=q_len,
+    #             max_seqlen_k=kv_len,
+    #             softmax_scale=self.scale,
+    #         )
+    #     elif self.attn_backend == _Backend.XFORMERS:
+    #         from xformers import ops as xops
+
+    #         out = xops.memory_efficient_attention_forward(
+    #             query, key, value, scale=self.scale
+    #         )
+    #     elif self.attn_backend == _Backend.TORCH_SDPA:
+    #         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+    #         out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+    #         out = out.transpose(1, 2)
+    #     elif self.attn_backend == _Backend.PALLAS:
+    #         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+    #         from torch_xla.experimental.custom_kernel import flash_attention
+
+    #         out = flash_attention(query, key, value, sm_scale=self.scale)
+    #         out = out.transpose(1, 2)
+    #     else:
+    #         # ViT attention hasn't supported this backend yet
+    #         raise NotImplementedError(
+    #             f"ViT attention hasn't supported {self.attn_backend} backend yet."
+    #         )
+
+    #     return out.reshape(bsz, q_len, -1)
