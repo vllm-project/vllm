@@ -656,7 +656,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation=activation,
-                quant_config=self.get_fused_moe_quant_config(layer),
+                quant_config=self.moe_quant_config,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
