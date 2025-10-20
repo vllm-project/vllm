@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import json
 import multiprocessing
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -16,6 +18,7 @@ from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
+import ray
 import zmq
 import zmq.asyncio
 
@@ -23,13 +26,14 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.utils import (
+from vllm.utils.async_utils import in_loop
+from vllm.utils.network_utils import (
     close_sockets,
     get_open_port,
     get_open_zmq_inproc_path,
     make_zmq_socket,
+    run_method,
 )
-from vllm.utils.asyncio import in_loop
 from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
@@ -40,10 +44,11 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
+    FaultHandler,
     generate_identity_group,
     launch_core_engines,
 )
@@ -250,6 +255,12 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def handle_fault(self, instruction: str, timeout: int) -> None:
+        raise NotImplementedError
+
+    async def exception_reporter(self):
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -420,7 +431,11 @@ class BackgroundResources:
 
 class ClientGuard:
     def __init__(
-        self, fault_receiver_addr: str, cmd_addr: str, engine_registry: dict[int, str]
+        self,
+        fault_receiver_addr: str,
+        cmd_addr: str,
+        engine_registry: dict[int, str],
+        engine_exception_q: asyncio.Queue[FaultInfo],
     ):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
@@ -433,6 +448,14 @@ class ClientGuard:
         self.cmd_socket = make_zmq_socket(
             ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
         )
+
+        self.fault_handler = FaultHandler(self.cmd_socket, self.engine_registry)
+
+        self.engine_exception_q: asyncio.Queue[FaultInfo] = engine_exception_q
+
+        Thread(
+            target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
+        ).start()
 
     def recv_msg(
         self, socket: zmq.Socket | zmq.asyncio.Socket
@@ -471,8 +494,35 @@ class ClientGuard:
             logger.error("Unexpected error occurred while receiving message: %s", e)
             return (None, None)
 
-    def handle_fault(self, instruction):
-        pass
+    def handle_fault(self, instruction: str, timeout: int) -> bool:
+        """
+        Executes fault tolerance measures based on the fault tolerance instructions
+         received from the api_server.
+
+        This method processes the fault tolerance commands/instructions passed by the
+        api_server, then implements corresponding fault tolerance strategies or actions
+        to handle system anomalies, ensuring stable operation or graceful degradation
+        of the relevant components.
+        """
+        return run_method(
+            self.fault_handler, "handle_fault", args=(instruction, timeout), kwargs={}
+        )
+
+    def fault_receiver(self):
+        """
+        Continuously listens for exception/error information sent from the engine_core.
+
+        This method maintains a persistent listening state to capture and process
+        fault-related data, exceptions, or error notifications emitted by the
+        engine_core component. It is designed to run continuously to ensure no critical
+        error information from the engine core is missed.
+        """
+        while True:
+            sender_identity, message = self.recv_msg(self.fault_receiver_socket)
+            assert message is not None, (
+                "message should not be None at fault tolerance scenario"
+            )
+            self.engine_exception_q.put_nowait(FaultInfo.from_json(json.loads(message)))
 
     def shutdown_guard(self):
         self.fault_receiver_socket.close()
@@ -516,6 +566,7 @@ class MPClient(EngineCoreClient):
         self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
         success = False
+
         try:
             # State used for data parallel.
             self.engines_running = False
@@ -598,7 +649,11 @@ class MPClient(EngineCoreClient):
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
             # Start monitoring engine core processes for unexpected failures
-            self.start_engine_core_monitor()
+            if self.vllm_config.parallel_config.data_parallel_backend == "ray":
+                self.start_engine_core_actor_monitor()
+            else:
+                self.start_engine_core_monitor()
+
             self.engine_registry = {}
             engine_ids = [i for i in range(dp_size)]
             engine_core_identities = generate_identity_group(
@@ -610,6 +665,22 @@ class MPClient(EngineCoreClient):
             self.engine_registry = dict(zip(engine_ids, engine_core_identities))
             addresses.engine_core_guard_identities = self.engine_registry
             # todo 拉起ClientGuard
+            if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                self.engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+                assert addresses.fault_report_addr is not None, (
+                    "addresses.fault_report_addr should not be None at fault tolerance"
+                    " scenario"
+                )
+                assert addresses.client_cmd_addr is not None, (
+                    "addresses.client_cmd_addr should not be None at fault tolerance"
+                    " scenario"
+                )
+                self.client_guard = ClientGuard(
+                    addresses.fault_report_addr,
+                    addresses.client_cmd_addr,
+                    self.engine_registry,
+                    self.engine_exception_q,
+                )
             success = True
         finally:
             if not success:
@@ -640,6 +711,55 @@ class MPClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return self.engines_running
 
+    def start_engine_core_actor_monitor(self):
+        engine_manager = self.resources.engine_manager
+        if (
+            not isinstance(engine_manager, CoreEngineActorManager)
+            or not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
+        ):
+            return
+
+        def monitor_actors():
+            while True:
+                all_actors = (
+                    engine_manager.local_engine_actors
+                    + engine_manager.remote_engine_actors
+                )
+
+                if not all_actors:
+                    return
+
+                for i, actor in enumerate(all_actors):
+                    actor_id = actor._actor_id.hex()
+                    actor_info = ray.state.actors(actor_id)
+                    actor_state = actor_info.get("State", "UNKNOWN")
+                    if actor in engine_manager.local_engine_actors:
+                        actor_index = engine_manager.local_engine_actors.index(actor)
+                    elif actor in engine_manager.remote_engine_actors:
+                        actor_index = engine_manager.remote_engine_actors.index(
+                            actor
+                        ) + len(engine_manager.local_engine_actors)
+                    else:
+                        logger.error("Unknown actor (ID: %s)", actor_id)
+                        continue
+
+                    if actor_state == "DEAD":
+                        fault_info = FaultInfo(
+                            type="engine_actor dead",
+                            message=f"Engine core actor id {actor_id} "
+                            f"(status: {actor_state}).",
+                            engine_id=str(actor_index),
+                            additional_info=None,
+                        )
+                        engine_manager.engine_down_socket.send_multipart(
+                            [b"", fault_info.serialize().encode("utf-8")]
+                        )
+
+                time.sleep(3)
+                # Implements the "check once every 3 seconds" frequency control
+
+        Thread(target=monitor_actors, daemon=True, name="MPClientEngineMonitor").start()
+
     def start_engine_core_monitor(self):
         """Start a monitor thread for engine core processes."""
         engine_manager = self.resources.engine_manager
@@ -659,19 +779,45 @@ class MPClient(EngineCoreClient):
         # callback to inform the engine.
         def monitor_engine_cores():
             sentinels = [proc.sentinel for proc in engine_processes]
-            died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
-            if not _self or _self.resources.engine_dead:
-                return
-            _self.resources.engine_dead = True
-            proc_name = next(
-                proc.name for proc in engine_processes if proc.sentinel == died[0]
-            )
-            logger.error(
-                "Engine core proc %s died unexpectedly, shutting down client.",
-                proc_name,
-            )
-            _self.shutdown()
+            if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                while engine_processes:
+                    died = multiprocessing.connection.wait(sentinels)
+                    for sentinel in died:
+                        died_proc = next(
+                            proc
+                            for proc in engine_processes
+                            if proc.sentinel == sentinel
+                        )
+                        fault_info = FaultInfo(
+                            type="engine_core dead",
+                            message=f"Engine core proc {died_proc.pid} "
+                            f"(PID: {died_proc.name}) died unexpectedly.",
+                            engine_id=died_proc.name[-1],
+                            additional_info=None,
+                        )
+                        engine_manager.engine_down_socket.send_multipart(
+                            [b"", fault_info.serialize().encode("utf-8")]
+                        )
+                        logger.error(
+                            "Engine core proc %s died unexpectedly",
+                            died_proc.name,
+                        )
+            else:
+                died = multiprocessing.connection.wait(sentinels)
+                _self = self_ref()
+                if not _self or _self.resources.engine_dead:
+                    return
+                proc_name = next(
+                    proc.name for proc in engine_processes if proc.sentinel == died[0]
+                )
+                logger.error(
+                    "Engine core proc %s died unexpectedly, shutting down client.",
+                    proc_name,
+                )
+            if _self and _self.resources:
+                _self.resources.engine_dead = True
+                _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
             # like MultiprocExecutor, but we set engine_dead flag which will
             # cause subsequent operations to raise EngineDeadError
@@ -679,6 +825,21 @@ class MPClient(EngineCoreClient):
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
+
+    async def handle_fault(self, instruction: str, timeout: int) -> None:
+        """handle fault of current instance by instruction"""
+        execute_result = self.client_guard.handle_fault(instruction, timeout)
+        if not execute_result:
+            logger.error("execute fail tolerance instruction, shutdown vllm instance")
+            self.shutdown()
+
+    async def exception_reporter(self):
+        """report exception from engine_core"""
+        engine_exception_dict = {}
+        if self.engine_exception_q:
+            fault_info: FaultInfo = await self.engine_exception_q.get()
+            engine_exception_dict[fault_info.engine_id] = "Unhealthy"
+        return engine_exception_dict
 
 
 def _process_utility_output(

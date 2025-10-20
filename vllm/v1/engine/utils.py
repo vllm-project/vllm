@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import json
 import os
 import uuid
 import weakref
@@ -23,11 +24,12 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import (
     get_mp_context,
-    get_open_zmq_ipc_path,
     make_zmq_socket,
-    zmq_socket_ctx,
+    serialize_method_call,
 )
+from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -153,6 +155,8 @@ class CoreEngineProcManager:
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
+        self.vllm_config = vllm_config
+
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
@@ -186,7 +190,31 @@ class CoreEngineProcManager:
 
     def join_first(self):
         """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            sentinels = [proc.sentinel for proc in self.processes]
+            while self.processes is not None:
+                died = connection.wait(sentinels)
+                for sentinel in died:
+                    died_proc = next(
+                        proc for proc in self.processes if proc.sentinel == sentinel
+                    )
+                    fault_info = FaultInfo(
+                        type="engine_core dead",
+                        message=f"Engine core proc {died_proc.pid} "
+                        f"(PID: {died_proc.name}) died unexpectedly.",
+                        engine_id=died_proc.name[-1],
+                        additional_info=None,
+                    )
+                    self.engine_down_socket.send_multipart(
+                        [b"", fault_info.serialize().encode("utf-8")]
+                    )
+
+                    logger.error(
+                        "Engine core proc %s died unexpectedly",
+                        died_proc,
+                    )
+        else:
+            connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -259,6 +287,7 @@ class CoreEngineActorManager:
         log_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
+        fault_report_address: str | None = None,
     ):
         import copy
 
@@ -283,6 +312,20 @@ class CoreEngineActorManager:
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+
+        if fault_report_address:
+            zmq_ctx = zmq.Context()
+            num_identity = 1
+            identity = generate_identity_group(
+                "core_engine_actor_manager", "clinet_guard", "report", num_identity
+            )[0]
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=fault_report_address,
+                socket_type=zmq.DEALER,
+                bind=True,
+                identity=identity,
+            )
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
@@ -349,6 +392,7 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
+
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
@@ -1124,3 +1168,55 @@ def generate_identity_group(peer1, peer2, use, n):
         identity_str = f"{peer1}_{peer2}_{use}_{id}".encode()
         identitys.append(identity_str)
     return identitys
+
+
+class FaultHandler:
+    def __init__(self, cmd_socket: zmq.socket, client_cmd_registry: dict) -> None:
+        self.cmd_socket = cmd_socket
+        self.client_cmd_registry = client_cmd_registry
+
+    def handle_fault(self, instruction: str, timeout) -> bool:
+        kwargs = {"timeout": timeout}
+        for identity in self.client_cmd_registry.values():
+            serialized_instruction = serialize_method_call(instruction, **kwargs)
+            self.cmd_socket.send_multipart([identity, b"", serialized_instruction])
+
+        poller = zmq.Poller()
+        poller.register(self.cmd_socket, zmq.POLLIN)
+
+        engine_indexes = [engine_index for engine_index in self.client_cmd_registry]
+        while engine_indexes:
+            socks = dict(poller.poll(timeout))
+            if self.cmd_socket not in socks:
+                logger.error(
+                    "Timeout while waiting for responses from engines: %s",
+                    engine_indexes,
+                )
+                return False
+
+            try:
+                parts = self.cmd_socket.recv_multipart()
+                if len(parts) != 3:
+                    logger.error("Malformed response: %s", parts)
+                    return False
+                identity, _, response = parts
+                response_dict = json.loads(response.decode("utf-8"))
+
+                engine_id = response_dict.get("engine_id")
+                success = response_dict.get("success", False)
+
+                if engine_id in engine_indexes:
+                    engine_indexes.remove(engine_id)
+
+                if not success:
+                    logger.error(
+                        "Engine %s reported failure: %s",
+                        engine_id,
+                        response_dict.get("reason", "unknown"),
+                    )
+                    return False
+
+            except Exception as e:
+                logger.error("Error while receiving response: %s", e)
+                return False
+        return True

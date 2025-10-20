@@ -23,13 +23,14 @@ ALLOWED_FILES = {
     "vllm/transformers_utils/config.py",
     "vllm/model_executor/models/registry.py",
     "vllm/compilation/caching.py",
-    "tests/utils_/test_utils.py",
-    "tests/tokenization/test_cached_tokenizer.py",
     "vllm/distributed/utils.py",
     "vllm/distributed/parallel_state.py",
     "vllm/distributed/device_communicators/all_reduce_utils.py",
     "vllm/distributed/device_communicators/shm_broadcast.py",
     "vllm/distributed/device_communicators/shm_object_storage.py",
+    "vllm/utils/hashing.py",
+    "tests/utils_/test_hashing.py",
+    "tests/tokenization/test_cached_tokenizer.py",
     "benchmarks/kernels/graph_machete_bench.py",
     "benchmarks/kernels/benchmark_lora.py",
     "benchmarks/kernels/benchmark_machete.py",
@@ -40,9 +41,8 @@ ALLOWED_FILES = {
     "vllm/executor/mp_distributed_executor.py",
     "vllm/executor/ray_distributed_executor.py",
     "vllm/entrypoints/llm.py",
-    "tests/utils.py",
-    # pickle and cloudpickle
     "vllm/utils/__init__.py",
+    "tests/utils.py",
 }
 
 PICKLE_RE = re.compile(
