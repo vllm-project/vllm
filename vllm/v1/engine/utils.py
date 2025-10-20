@@ -28,6 +28,7 @@ from vllm.utils import (
     zmq_socket_ctx,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -154,6 +155,8 @@ class CoreEngineProcManager:
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
+        self.vllm_config = vllm_config
+
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
@@ -187,7 +190,31 @@ class CoreEngineProcManager:
 
     def join_first(self):
         """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            sentinels = [proc.sentinel for proc in self.processes]
+            while self.processes is not None:
+                died = connection.wait(sentinels)
+                for sentinel in died:
+                    died_proc = next(
+                        proc for proc in self.processes if proc.sentinel == sentinel
+                    )
+                    fault_info = FaultInfo(
+                        type="engine_core dead",
+                        message=f"Engine core proc {died_proc.pid} "
+                        f"(PID: {died_proc.name}) died unexpectedly.",
+                        engine_id=died_proc.name[-1],
+                        additional_info=None,
+                    )
+                    self.engine_down_socket.send_multipart(
+                        [b"", fault_info.serialize().encode("utf-8")]
+                    )
+
+                    logger.error(
+                        "Engine core proc %s died unexpectedly",
+                        died_proc,
+                    )
+        else:
+            connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -260,6 +287,7 @@ class CoreEngineActorManager:
         log_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
+        fault_report_address: str | None = None,
     ):
         import copy
 
@@ -284,6 +312,20 @@ class CoreEngineActorManager:
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+
+        if fault_report_address:
+            zmq_ctx = zmq.Context()
+            num_identity = 1
+            identity = generate_identity_group(
+                "core_engine_actor_manager", "clinet_guard", "report", num_identity
+            )[0]
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=fault_report_address,
+                socket_type=zmq.DEALER,
+                bind=True,
+                identity=identity,
+            )
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
@@ -350,6 +392,7 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
+
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
