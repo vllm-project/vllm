@@ -159,8 +159,7 @@ def encoding_pooling_bytes(
 
 
 def decoding_pooling_output(
-    items: list[MetadataItem],
-    body: bytes
+    items: list[MetadataItem], body: bytes
 ) -> list[torch.Tensor]:
     items.sort(key=lambda x: x.index)
 
