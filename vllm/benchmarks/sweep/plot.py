@@ -24,6 +24,7 @@ def _plot_fig(
     var_y: str,
     max_x: float | None,
     bin_x: float | None,
+    log_y: bool,
     dry_run: bool,
 ):
     print("[BEGIN FIGURE]")
@@ -62,6 +63,9 @@ def _plot_fig(
             markers=True,
         )
 
+    if log_y:
+        ax.set_yscale("log")
+
     sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
 
     fig = ax.get_figure()
@@ -82,6 +86,7 @@ def plot(
     var_y: str,
     max_x: float | None,
     bin_x: float | None,
+    log_y: bool,
     dry_run: bool,
 ):
     all_data = [
@@ -114,6 +119,7 @@ def plot(
             var_y=var_y,
             max_x=max_x,
             bin_x=bin_x,
+            log_y=log_y,
             dry_run=dry_run,
         )
 
@@ -169,6 +175,11 @@ def main():
         "to reduce noise.",
     )
     parser.add_argument(
+        "--log-y",
+        action="store_true",
+        help="Use logarithmic scaling for the y-axis.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="If set, prints the location of the figures without drawing them.",
@@ -187,6 +198,7 @@ def main():
         var_y=args.var_y,
         max_x=args.max_x,
         bin_x=args.bin_x,
+        log_y=args.log_y,
         dry_run=args.dry_run,
     )
 
