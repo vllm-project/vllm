@@ -161,7 +161,7 @@ def encoding_pooling_bytes(
 def decoding_pooling_output(
     items: list[MetadataItem],
     body: bytes,
-    embed_dtype: EMBED_DTYPE_TO_TORCH_DTYPE,
+    embed_dtype: EmbedDType,
     endianness: Endianness,
 ) -> list[torch.Tensor]:
     items.sort(key=lambda x: x.index)
