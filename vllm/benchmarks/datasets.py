@@ -1119,14 +1119,15 @@ class RandomMultiModalDataset(RandomDataset):
 
         vocab_size = tokenizer.vocab_size
         # Can't use tokenizer.all_special_ids since
-        # it returns ONLY ids from special_tokens_map.json which
-        # is WAY less than total number of special tokens
+        # it returns ONLY ids from special_tokens_map.json
+        # We want to exclude placeholder tokens and all
+        # tokens that indicate start/end of image as it
+        # may break prompt replacement logic.
         prohibited_tokens = list(
             tok_id
             for tok_id, token in tokenizer.added_tokens_decoder.items()
             if token.special
         )
-        logger.debug("Special tokens: %s", repr(prohibited_tokens))
         all_tokens = np.arange(vocab_size)
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
         logger.debug(
