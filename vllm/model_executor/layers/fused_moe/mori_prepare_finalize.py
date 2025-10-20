@@ -32,6 +32,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_local_experts: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
+        json_config: dict | None = None,
     ):
         """
         Initialize MoriPrepareAndFinalize.
@@ -42,6 +43,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_local_experts: Number of experts on this rank
             num_dispatchers: Number of dispatcher ranks (world size)
             use_fp8_dispatch: Whether to use FP8 quantization during dispatch
+            json_config: Optional JSON configuration with operation-specific parameters
         """
         super().__init__()
         assert max_num_tokens > 0
@@ -52,6 +54,33 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.num_local_experts = num_local_experts
         self.num_dispatchers_ = num_dispatchers
         self.use_fp8_dispatch = use_fp8_dispatch
+
+        # Extract dispatch and combine specific parameters from JSON config
+        self.dispatch_kwargs = {}
+        self.combine_kwargs = {}
+
+        if json_config:
+            # Extract dispatch-specific parameters
+            if "dispatch" in json_config:
+                dispatch_config = json_config["dispatch"]
+
+                if "block_num" in dispatch_config:
+                    self.dispatch_kwargs["block_num"] = dispatch_config["block_num"]
+                if "warp_num_per_block" in dispatch_config:
+                    self.dispatch_kwargs["warp_per_block"] = dispatch_config[
+                        "warp_num_per_block"
+                    ]
+
+            # Extract combine-specific parameters
+            if "combine" in json_config:
+                combine_config = json_config["combine"]
+
+                if "block_num" in combine_config:
+                    self.combine_kwargs["block_num"] = combine_config["block_num"]
+                if "warp_num_per_block" in combine_config:
+                    self.combine_kwargs["warp_per_block"] = combine_config[
+                        "warp_num_per_block"
+                    ]
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -129,6 +158,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             weights=topk_weights,
             scales=scales,
             indices=topk_ids,
+            **self.dispatch_kwargs,  # Apply dispatch-specific parameters from JSON
         )
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
@@ -173,6 +203,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             input=fused_expert_output,
             weights=topk_weights,
             indices=topk_ids,
+            **self.combine_kwargs,  # Apply combine-specific parameters from JSON
         )
 
         output.copy_(

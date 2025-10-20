@@ -279,6 +279,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
+                json_config=all2all_manager.json_config,
             )
 
         return prepare_finalize

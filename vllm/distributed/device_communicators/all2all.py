@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -500,6 +502,12 @@ class MoriAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
         self.config = None
         self._shmem_initialized = False
+
+        self.json_config = None
+        config_path = envs.VLLM_MORI_CONFIG_PATH
+        if config_path:
+            self.json_config = self._load_mori_config_from_json(config_path)
+
         # Delay mori shmem initialization until first use
         logger.debug("[rank %s] MoriAll2AllManager created", self.rank)
 
@@ -560,6 +568,104 @@ class MoriAll2AllManager(All2AllManagerBase):
                 "[rank %s] Continuing without mori shmem optimize", self.rank
             )
 
+    def _load_mori_config_from_json(self, json_path: str) -> dict | None:
+        """
+        Load mori configuration parameters from JSON file.
+
+        Supports both flat and hierarchical schema:
+
+        Flat schema:
+        {
+            "warp_num_per_block": 8,
+            "block_num": 80,
+        }
+
+        Hierarchical schema (dispatch/combine specific):
+        {
+            "global": {
+                "warp_num_per_block": 8,
+                "block_num": 80,
+            },
+            "dispatch": {
+                "warp_num_per_block": 16,
+                "block_num": 160
+            },
+            "combine": {
+                "warp_num_per_block": 4,
+                "block_num": 40
+            }
+        }
+
+        Args:
+            json_path: Path to JSON configuration file
+
+        Returns:
+            Dictionary of configuration parameters, or None if file doesn't exist
+
+        Raises:
+            ValueError: If JSON is invalid or contains unsupported parameters
+        """
+        if not json_path:
+            return None
+
+        json_file = Path(json_path)
+        if not json_file.exists():
+            logger.warning(
+                "[rank %d] Mori config file not found: %s", self.rank, json_path
+            )
+            return None
+
+        try:
+            with open(json_file) as f:
+                config = json.load(f)
+
+            # Valid parameter keys
+            valid_param_keys = {
+                "warp_num_per_block",
+                "block_num",
+            }
+
+            is_hierarchical = any(
+                key in config for key in ["global", "dispatch", "combine"]
+            )
+
+            if is_hierarchical:
+                valid_top_keys = {"global", "dispatch", "combine"}
+                invalid_keys = set(config.keys()) - valid_top_keys
+                if invalid_keys:
+                    raise ValueError(
+                        f"Invalid top-level keys: {invalid_keys}. "
+                        f"Valid keys: {valid_top_keys}"
+                    )
+
+                # Validate each section
+                for section in ["global", "dispatch", "combine"]:
+                    if section in config:
+                        section_config = config[section]
+                        if not isinstance(section_config, dict):
+                            raise ValueError(f"'{section}' must be a dictionary")
+
+                        invalid_keys = set(section_config.keys()) - valid_param_keys
+                        if invalid_keys:
+                            raise ValueError(
+                                f"Invalid keys in '{section}': {invalid_keys}. "
+                                f"Valid keys: {valid_param_keys}"
+                            )
+            else:
+                invalid_keys = set(config.keys()) - valid_param_keys
+                if invalid_keys:
+                    raise ValueError(
+                        f"Invalid config keys: {invalid_keys}. "
+                        f"Valid keys: {valid_param_keys}"
+                    )
+
+            return config
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in mori config file {json_path}") from e
+        except Exception as e:
+            raise ValueError(f"Error loading mori config from {json_path}") from e
+
     def _make_mori_config(
         self,
         max_num_tokens: int,
@@ -571,9 +677,40 @@ class MoriAll2AllManager(All2AllManagerBase):
         data_type: torch.dtype = torch.bfloat16,
         quant_dtype: torch.dtype | None = None,
     ):
-        """Create mori EpDispatchCombineConfig"""
+        """
+        Create mori EpDispatchCombineConfig.
+
+        Args:
+            max_num_tokens: Maximum number of tokens per DP rank
+            num_local_experts: Number of local experts
+            experts_per_token: Number of experts per token (topk)
+            hidden_dim: Hidden dimension size
+            scale_dim: Scale dimension for quantization
+            scale_type_size: Scale type size for quantization
+            data_type: Tensor data type
+            quant_dtype: Quantization data type (optional)
+        """
         import mori.ops.dispatch_combine as mori_ops
         from mori.ops.dispatch_combine import EpDispatchCombineKernelType
+
+        # Default values (can be overridden by JSON)
+        warp_num_per_block = 8
+        block_num = 80
+
+        # Override with JSON config if provided
+        if self.json_config is not None:
+            is_hierarchical = any(
+                key in self.json_config for key in ["global", "dispatch", "combine"]
+            )
+
+            global_config = self.json_config
+            if is_hierarchical and "global" in global_config:
+                global_config = self.json_config["global"]
+
+            warp_num_per_block = global_config.get(
+                "warp_num_per_block", warp_num_per_block
+            )
+            block_num = global_config.get("block_num", block_num)
 
         config = mori_ops.EpDispatchCombineConfig(
             data_type=data_type if quant_dtype is None else quant_dtype,
@@ -583,10 +720,10 @@ class MoriAll2AllManager(All2AllManagerBase):
             max_num_inp_token_per_rank=max_num_tokens,
             num_experts_per_rank=num_local_experts,
             num_experts_per_token=experts_per_token,
-            # Performance tuning parameters
-            # warp_num_per_block=8,
-            # block_num=80,
             max_token_type_size=data_type.itemsize,
+            # Performance tuning parameters
+            warp_num_per_block=warp_num_per_block,
+            block_num=block_num,
             # Quantization support
             scale_dim=scale_dim,
             scale_type_size=scale_type_size,
@@ -610,6 +747,9 @@ class MoriAll2AllManager(All2AllManagerBase):
                 - experts_per_token: Number of experts per token (topk)
                 - hidden_dim: Hidden dimension size
                 - data_type: Tensor data type (optional, default bfloat16)
+                - scale_dim: Scale dimension (optional)
+                - scale_type_size: Scale type size (optional)
+                - ubatch_id: Microbatch ID (optional)
         """
         # Ensure shmem is initialized before creating handles
         self._ensure_shmem_initialized()
