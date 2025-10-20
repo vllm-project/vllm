@@ -552,11 +552,11 @@ __global__ void indexer_k_quant_and_cache_kernel(
 #ifndef USE_ROCM
   __syncwarp();
 #endif
-  float scale = fmaxf(amax, 1e-4);
-  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3FNUZ)
-    scale /= 240.0f;
-  else
-    scale /= 448.0f;
+#if defined(__gfx942__)
+  float scale = fmaxf(amax, 1e-4) / 224.0f;
+#else
+  float scale = fmaxf(amax, 1e-4) / 448.0f;
+#endif
   if (use_ue8m0) {
     scale = exp2f(ceilf(log2f(scale)));
   }
@@ -1223,7 +1223,6 @@ void indexer_k_quant_and_cache(
   int cache_block_size = kv_cache.size(1);
   int cache_stride = kv_cache.size(2);
   bool use_ue8m0 = scale_fmt == "ue8m0";
-  auto fp8_dtype = kv_cache.dtype() == c10::ScalarType::Float8_e4m3fnuz ? "fp8_e4m3fnuz" : "fp8_e4m3";
 
   TORCH_CHECK(k.device() == kv_cache.device(),
               "k and kv_cache must be on the same device");
@@ -1239,7 +1238,7 @@ void indexer_k_quant_and_cache(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(k));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), fp8_dtype,
+  DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
                              CALL_INDEXER_K_QUANT_AND_CACHE);
 }
 

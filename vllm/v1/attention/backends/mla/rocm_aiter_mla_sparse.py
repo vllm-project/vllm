@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional, Tuple
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 import torch
@@ -10,27 +13,18 @@ from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionMetadata,
 )
+from vllm.attention.backends.utils import get_mla_dims
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv
-
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
-
-from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
+from vllm.v1.attention.backends.mla.common import (
+    MLACommonBaseImpl,
+    is_rocm_aiter_fp8bmm_enabled,
+)
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.flashmla import (
-    flash_mla_sparse_prefill,
-    flash_mla_with_kvcache,
-    get_mla_metadata,
-)
-from vllm.v1.attention.backends.mla.common import is_rocm_aiter_fp8bmm_enabled
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -38,12 +32,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 if is_rocm_aiter_fp8bmm_enabled():
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501 # isort: skip
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
-        as aiter_triton_fp8_bmm)
+    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,  # noqa: E501
+    )
 
     def dynamic_per_batched_tensor_quant(
-            x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn):
+        x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+    ):
         DTYPE_MAX = torch.finfo(dtype).max
         min_val, max_val = x.aminmax()
         amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
@@ -51,42 +46,43 @@ if is_rocm_aiter_fp8bmm_enabled():
         x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
         return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
+
 class ROCMAiterMLASparseBackend(AttentionBackend):
-  accept_output_buffer: bool = True
+    accept_output_buffer: bool = True
 
-  @staticmethod
-  def get_name() -> str:
-    return "ROCMAITERMLA_SPARSE"
+    @staticmethod
+    def get_name() -> str:
+        return "ROCMAITERMLA_SPARSE"
 
-  @staticmethod
-  def get_metadata_cls() -> type[AttentionMetadata]:
-      return ROCMAiterMLASparseMetadata
+    @staticmethod
+    def get_metadata_cls() -> type[AttentionMetadata]:
+        return ROCMAiterMLASparseMetadata
 
-  @staticmethod
-  def get_builder_cls() -> type["ROCMAiterMLASparseMetadataBuilder"]:
-      return ROCMAiterMLASparseMetadataBuilder
+    @staticmethod
+    def get_builder_cls() -> type["ROCMAiterMLASparseMetadataBuilder"]:
+        return ROCMAiterMLASparseMetadataBuilder
 
-  @staticmethod
-  def get_impl_cls() -> type["ROCMAiterMLASparseImpl"]:
-      return ROCMAiterMLASparseImpl
+    @staticmethod
+    def get_impl_cls() -> type["ROCMAiterMLASparseImpl"]:
+        return ROCMAiterMLASparseImpl
 
-  @staticmethod
-  def get_kv_cache_shape(
-      num_blocks: int,
-      block_size: int,
-      num_kv_heads: int,  # assumed to be 1 for MLA
-      head_size: int,
-      cache_dtype_str: str = "auto",
-  ) -> tuple[int, ...]:
-      return (num_blocks, block_size, head_size)
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,  # assumed to be 1 for MLA
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        return (num_blocks, block_size, head_size)
 
-  @classmethod
-  def get_supported_dtypes(cls) -> list[torch.dtype]:
-      return [torch.bfloat16]
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16]
 
-  @classmethod
-  def get_supported_head_sizes(cls) -> list[int]:
-      return [576]
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [576]
 
 
 @dataclass
@@ -105,11 +101,12 @@ class ROCMAiterMLASparseMetadata:
     topk_tokens: int = 2048
 
 
-
-def ref_convert_to_gloabl(req_id: torch.Tensor,
-                      block_table: torch.Tensor,
-                      token_indices: torch.Tensor,
-                      block_size: int) -> torch.Tensor:
+def ref_convert_to_global(
+    req_id: torch.Tensor,
+    block_table: torch.Tensor,
+    token_indices: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
     # Ensure contiguous
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
@@ -129,9 +126,7 @@ def ref_convert_to_gloabl(req_id: torch.Tensor,
     num_tokens = idxs_in_clamped.size(0)
     rest = idxs_in_clamped.numel() // num_tokens
     gathered = torch.gather(
-        block_table_indexed, 
-        1,
-        idxs_in_clamped.view(num_tokens, rest)
+        block_table_indexed, 1, idxs_in_clamped.view(num_tokens, rest)
     ).view_as(idxs_in_clamped)
 
     # Compute global indices and apply invalid mask
@@ -141,30 +136,10 @@ def ref_convert_to_gloabl(req_id: torch.Tensor,
     return out
 
 
-def flash_mla_sparse_prefill_triton(
-    q,
-    kv,
-    cu_seqlens_q,
-    max_seqlen_q,
-    softmax_scale,
-    topk_indices,
-    kv_lora_rank=512
-):
-    from aiter.ops.triton.unified_attention_sparse_mla import unified_attention_sparse_mla
-
-    qs, qh, _ = q.shape
-    out = torch.randn([qs, qh, kv_lora_rank], dtype=torch.bfloat16, device=q.device)
-    block_table = torch.empty_like(topk_indices)    # no use
-    num_seq = cu_seqlens_q.size(0) - 1
-    seqused_k = torch.randn([num_seq], device=q.device)  # no use
-    max_seqlen_k = 0
-    unified_attention_sparse_mla(q, kv, out, cu_seqlens_q, max_seqlen_q, seqused_k, max_seqlen_k, softmax_scale, topk_indices, block_table, kv_lora_rank)
-    return out
-
-
-
 @dataclass
-class ROCMAiterMLASparseMetadataBuilder(AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseMetadataBuilder(
+    AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
+):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
@@ -232,14 +207,14 @@ class ROCMAiterMLASparseMetadataBuilder(AttentionMetadataBuilder[ROCMAiterMLASpa
         )
         return metadata
 
-# Take from https://github.com/deepseek-ai/FlashMLA/blob/main/tests/test_flash_mla_prefill.py#L72
+
+# Take from
+# https://github.com/deepseek-ai/FlashMLA/blob/main/tests/test_flash_mla_prefill.py#L72
 def reference_mla_sparse_prefill(
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        indices: torch.Tensor,
-        sm_scale: float,
-        d_v: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    q: torch.Tensor, kv: torch.Tensor, indices: torch.Tensor, sm_scale: float, d_v: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import math
+
     def log2sumexp2(a: torch.Tensor, dim: int) -> torch.Tensor:
         return torch.logsumexp(a * math.log(2), dim=dim) * math.log2(math.e)
 
@@ -247,20 +222,23 @@ def reference_mla_sparse_prefill(
     sq = q.shape[0]
     topk = indices.shape[-1]
     dqk = q.shape[-1]
-    indices = indices[:, 0, :] # [s_q, topk]
+    indices = indices[:, 0, :]  # [s_q, topk]
     invalid_indices_mask = (indices < 0) | (indices >= skv)
     qs = q.float()  # [s_q, h_q, d_qk]
     kvs = kv[:, 0, :].float()  # [s_kv, d_qk]
 
-    kvs = torch.index_select(kvs, 0, indices.masked_fill(invalid_indices_mask, 0).flatten()).view(sq, topk, dqk)  # [s_q, topk, d_qk]
-    attn_score = qs @ kvs.transpose(1, 2)    # [s_q, h_q, topk]
-    attn_score.masked_fill_(invalid_indices_mask.unsqueeze(1), float('-inf'))
+    kvs = torch.index_select(
+        kvs, 0, indices.masked_fill(invalid_indices_mask, 0).flatten()
+    ).view(sq, topk, dqk)  # [s_q, topk, d_qk]
+    attn_score = qs @ kvs.transpose(1, 2)  # [s_q, h_q, topk]
+    attn_score.masked_fill_(invalid_indices_mask.unsqueeze(1), float("-inf"))
     attn_score *= sm_scale * math.log2(math.e)
-    max_logits = torch.max(attn_score, dim=-1)[0]   # [s_q, h_q]
-    lse = log2sumexp2(attn_score, dim=-1)   # [s_q, h_q]
-    attn_score = torch.exp2(attn_score - lse.unsqueeze(-1))   # [s_q, h_q, topk]
+    max_logits = torch.max(attn_score, dim=-1)[0]  # [s_q, h_q]
+    lse = log2sumexp2(attn_score, dim=-1)  # [s_q, h_q]
+    attn_score = torch.exp2(attn_score - lse.unsqueeze(-1))  # [s_q, h_q, topk]
     result = attn_score @ kvs[:, :, :d_v]
     return (result.to(q.dtype), max_logits, lse)
+
 
 class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
     def __init__(
@@ -269,14 +247,14 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: Optional[torch.Tensor] = None,
+        topk_indice_buffer: torch.Tensor | None = None,
         indexer: Optional["Indexer"] = None,
         **mla_args,
     ) -> None:
@@ -296,32 +274,24 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
-        self.padding = 128 if current_platform.is_device_capability(100) else 64
 
     def _forward_bf16_kv(
-      self,
-      q: torch.Tensor,
-      kv_c_and_k_pe_cache: torch.Tensor,
-      topk_indices: torch.Tensor,
-      attn_metadata: ROCMAiterMLASparseMetadata,
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: ROCMAiterMLASparseMetadata,
     ) -> torch.Tensor:
-      num_tokens = q.shape[0]
-      kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-          -1, 1, kv_c_and_k_pe_cache.shape[-1])
+        num_tokens = q.shape[0]
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
+            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+        )
 
-      # NOTE(Chen): kernel requires num_local_head to be a multiple of
-      # 64 on hopper and 128 on blackwell
-      if self.num_heads % self.padding != 0:
-          assert self.padding % self.num_heads == 0
-          logger.warning_once(f"padding num_heads to {self.padding} \
-                  due to sparse attn kernel requirement")
-          q_padded = q.new_empty((q.shape[0], self.padding, q.shape[2]))
-          q_padded[:, :self.num_heads, :] = q
-          q = q_padded
-
-      topk_indices = topk_indices.view(num_tokens, 1, -1)
-      output = reference_mla_sparse_prefill(q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale, 512)[0]
-      return output[:, :self.num_heads, :]
+        topk_indices = topk_indices.view(num_tokens, 1, -1)
+        output = reference_mla_sparse_prefill(
+            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale, 512
+        )[0]
+        return output[:, : self.num_heads, :]
 
     def forward(
         self,
@@ -331,9 +301,9 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: ROCMAiterMLASparseMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
@@ -364,7 +334,9 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         q_nope = q_nope.transpose(0, 1)
         if is_rocm_aiter_fp8bmm_enabled():
             # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-            ql_nope = aiter_triton_fp8_bmm(q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True)
+            ql_nope = aiter_triton_fp8_bmm(
+                q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+            )
         else:
             # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
             ql_nope = torch.bmm(q_nope, self.W_UK_T)
@@ -373,15 +345,15 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
 
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        # Note: the above triton kernel may triggers some strange unexpected crush on Mi300, 
-        # although the code looks fine on memory access pattern, this ref torch impl can help
-        # to alleviate this issue.
-        topk_indices_global = ref_convert_to_gloabl(
-            attn_metadata.req_id_per_token, 
-            attn_metadata.block_table, 
-            topk_indices, 
-            attn_metadata.block_size)
-
+        # Note: the above triton kernel may triggers some strange unexpected
+        # crush on Mi300, although the code looks fine on memory access pattern,
+        # this ref torch  impl can help to alleviate this issue.
+        topk_indices_global = ref_convert_to_global(
+            attn_metadata.req_id_per_token,
+            attn_metadata.block_table,
+            topk_indices,
+            attn_metadata.block_size,
+        )
 
         q = torch.cat([ql_nope, q_pe], dim=-1)
 
@@ -396,9 +368,9 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
                 scale=layer._k_scale,
             )
 
-        attn_out = self._forward_bf16_kv(q, kv_cache, topk_indices_global,
-                                          attn_metadata)
+        attn_out = self._forward_bf16_kv(
+            q, kv_cache, topk_indices_global, attn_metadata
+        )
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output
-
