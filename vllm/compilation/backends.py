@@ -243,12 +243,12 @@ class CompilerManager:
             self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
-            if graph_index == 0:
+            if graph_index == 0 and is_local_first_rank():
                 # adds some info logging for the first graph
                 if runtime_shape is None:
-                    logger.debug("Cache the graph for dynamic shape for later use")
+                    logger.info("Cache the graph for dynamic shape for later use")
                 else:
-                    logger.debug(
+                    logger.info(
                         "Cache the graph of shape %s for later use", str(runtime_shape)
                     )
             if runtime_shape is None:
