@@ -333,6 +333,7 @@ class ElasticEPScalingState:
             # e.g., to drain in-batch requests.
             self._create_standby_groups()
             self._switch_and_prepare()
+            self._update_parallel_config()
             self.state = ScaleDownRemainingEngineState.COMPLETE
             return True
 
