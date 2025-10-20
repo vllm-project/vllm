@@ -15,7 +15,7 @@ from vllm.attention.layer import (
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import utils as dist_utils
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -400,7 +400,6 @@ class DotsSwiGLUFFN(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        multimodal_config: MultiModalConfig | None = None,
     ):
         super().__init__()
         hidden_features = config.intermediate_size

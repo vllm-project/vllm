@@ -14,7 +14,6 @@ from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
-from vllm.config.multimodal import MultiModalConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
@@ -343,7 +342,6 @@ class Siglip2MLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        multimodal_config: MultiModalConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -668,15 +666,10 @@ class Siglip2NavitModel(torch.nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        multimodal_config: MultiModalConfig | None = None,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
         self.vision_model = Siglip2VisionTransformer(
             config,
             quant_config=quant_config,
