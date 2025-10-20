@@ -553,6 +553,12 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
 
+        if self.max_parallel_loading_workers is not None:
+            logger.warning(
+                "max_parallel_loading_workers is currently "
+                "not supported and will be ignored."
+            )
+
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (

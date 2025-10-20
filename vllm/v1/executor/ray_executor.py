@@ -358,12 +358,7 @@ class RayDistributedExecutor(Executor):
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
         self.collective_rpc("init_device")
-        self.collective_rpc(
-            "load_model",
-            kwargs=dict(
-                max_concurrent_workers=self.parallel_config.max_parallel_loading_workers
-            ),
-        )
+        self.collective_rpc("load_model")
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])
