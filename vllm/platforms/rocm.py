@@ -225,8 +225,6 @@ class RocmPlatform(Platform):
     ) -> str:
         from vllm.attention.backends.registry import _Backend
 
-        if use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on ROCm.")
         if use_mla:
             if not use_v1:
                 raise RuntimeError(
@@ -237,6 +235,13 @@ class RocmPlatform(Platform):
             from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
                 is_aiter_mla_enabled,
             )
+            if use_sparse:
+                if kv_cache_dtype.startswith("fp8"):
+                    raise ValueError(f"ROCMAiterMLASparseBackend dose not support kv_cache_dtype == fp8.")
+
+                logger.info_once("Using Sparse MLA backend on V1 engine.")
+                return ("vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse."
+                        "ROCMAiterMLASparseBackend")
 
             if selected_backend is None:
                 selected_backend = (
