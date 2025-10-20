@@ -267,11 +267,8 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
             Author.new(Role.TOOL, f"functions.{name}"), content
         ).with_channel("commentary")
         return [msg]
-    # system message
-    if role == "system":
-        msg = Message.from_dict(chat_msg)
-        return [msg]
-    if role == "developer":
+    # system or developer message
+    if role == "system" or role == "developer":
         msg = Message.from_dict(chat_msg)
         return [msg]
 
