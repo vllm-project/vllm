@@ -14,9 +14,9 @@
 from typing import Literal
 
 import torch
-import triton
-import triton.language as tl
 from torch.library import wrap_triton
+
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit

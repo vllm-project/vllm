@@ -25,10 +25,6 @@ EMBEDDING_MODELS = [
         mteb_score=0.824413164,
         architecture="XLMRobertaModel",
         is_matryoshka=True,
-        # The default max length of the model is 8194, which will crash
-        # CUDAGraph due to odd length for Gemm. We set it to 8192 to avoid
-        # avoid this issue.
-        max_model_len=8192,
         dtype="float32",
     )
 ]

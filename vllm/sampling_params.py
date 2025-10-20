@@ -58,6 +58,7 @@ class StructuredOutputsParams:
                 self.choice is not None,
                 self.grammar is not None,
                 self.json_object is not None,
+                self.structural_tag is not None,
             ]
         )
         if count > 1:
@@ -65,6 +66,37 @@ class StructuredOutputsParams:
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
             )
+
+    def all_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+                "structural_tag",
+            )
+        )
+
+    def all_non_structural_tag_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+            )
+        )
 
 
 @dataclass
@@ -306,10 +338,10 @@ class SamplingParams(
         )
 
     def __post_init__(self) -> None:
-        # how we deal with `best_of``:
-        # if `best_of`` is not set, we default to `n`;
-        # if `best_of`` is set, we set `n`` to `best_of`,
-        # and set `_real_n`` to the original `n`.
+        # how we deal with `best_of`:
+        # if `best_of` is not set, we default to `n`;
+        # if `best_of` is set, we set `n` to `best_of`,
+        # and set `_real_n` to the original `n`.
         # when we return the result, we will check
         # if we need to return `n` or `_real_n` results
         if self.best_of:

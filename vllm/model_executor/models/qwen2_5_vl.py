@@ -116,7 +116,7 @@ class Qwen2_5_VLImagePixelInputs(TensorSchema):
         - pixel_values shape: (num_patches, num_channels * patch_size *
           patch_size)
         - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
-          formatnum_channels * patch_size * patch_size
+          format.
     """
 
     type: Literal["pixel_values"]
@@ -396,7 +396,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
 
-        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
+        q, k, v = (rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
         if rotary_pos_emb is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
@@ -1586,19 +1586,19 @@ class Qwen2_5_VLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                vision_embeddings = self._process_image_input(multimodal_input)
+                image_embeddings = self._process_image_input(multimodal_input)
                 if self.is_multimodal_pruning_enabled:
-                    vision_embeddings = self._postprocess_image_embeds_evs(
-                        vision_embeddings, multimodal_input
+                    image_embeddings = self._postprocess_image_embeds_evs(
+                        image_embeddings, multimodal_input
                     )
-                multimodal_embeddings += vision_embeddings
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input
                     )
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
         return multimodal_embeddings
 
     def forward(

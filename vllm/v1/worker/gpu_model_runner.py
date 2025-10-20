@@ -19,13 +19,11 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
 from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
-from vllm.attention.layer import MLAAttention
-from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
@@ -44,10 +42,8 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     is_mixture_of_experts,
@@ -73,18 +69,20 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (
-    STR_DTYPE_TO_TORCH_DTYPE,
-    DeviceMemoryProfiler,
-    GiB_bytes,
     cdiv,
     check_use_alibi,
-    get_dtype_size,
     is_pin_memory_available,
     length_from_prompt_token_ids_or_embeds,
     round_up,
-    supports_dynamo,
 )
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.torch_utils import (
+    get_dtype_size,
+    kv_cache_dtype_str_to_dtype,
+    supports_dynamo,
+)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -106,7 +104,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -231,9 +228,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 
         set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
-        from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-
-        init_batch_invariance()
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -242,10 +236,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
-        if cache_config.cache_dtype == "auto":
-            self.kv_cache_dtype = self.dtype
-        else:
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            cache_config.cache_dtype, self.model_config
+        )
 
         self.is_pooling_model = model_config.runner_type == "pooling"
         self.enable_prompt_embeds = model_config.enable_prompt_embeds
@@ -375,9 +368,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
-        self.async_output_copy_stream = (
-            torch.cuda.Stream() if self.use_async_scheduling else None
-        )
+        # Separate cuda stream for overlapping transfer of sampled token ids from
+        # GPU to CPU when async scheduling is enabled.
+        self.async_output_copy_stream: torch.cuda.Stream | None = None
+        # cuda event to synchronize use of reused CPU tensors between steps
+        # when async scheduling is enabled.
+        self.prepare_inputs_event: torch.cuda.Event | None = None
+        if self.use_async_scheduling:
+            self.async_output_copy_stream = torch.cuda.Stream()
+            self.prepare_inputs_event = torch.cuda.Event()
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -443,14 +442,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mrope_positions = self._make_buffer(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
             )
-
-        # CUDA event to synchronize use of reused CPU tensors between steps
-        # when async scheduling is enabled.
-        self.prepare_inputs_event: torch.cuda.Event | None = None
-        if self.use_async_scheduling:
-            self.prepare_inputs_event = torch.cuda.Event()
-            # Start in a completed state.
-            self.prepare_inputs_event.record(torch.cuda.default_stream())
 
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
@@ -789,7 +780,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, ()
+                req_id, []
             )
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
@@ -800,7 +791,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ] = spec_token_ids
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
-                self.input_batch.spec_token_ids[req_index] = spec_token_ids
+
+            # When speculative decoding is used with structured output,
+            # the scheduler can drop draft tokens that do not
+            # conform to the schema. This can result in
+            # scheduler_output.scheduled_spec_decode_tokens being empty,
+            # even when speculative decoding is enabled.
+            self.input_batch.spec_token_ids[req_index] = spec_token_ids
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -1523,6 +1520,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             use_sliding_window=use_sliding_window,
             use_local_attention=use_local_attention,
             num_sms=self.num_sms,
+            dcp_world_size=self.dcp_world_size,
         )
         return common_prefix_len if use_cascade else 0
 
@@ -1927,15 +1925,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if (
-            self.scheduler_config.chunked_prefill_enabled
-            and "encode" in supported_tasks
-        ):
-            supported_tasks.remove("encode")
+        if self.scheduler_config.chunked_prefill_enabled:
+            if "token_embed" in supported_tasks:
+                supported_tasks.remove("token_embed")
+            if "token_classify" in supported_tasks:
+                supported_tasks.remove("token_classify")
 
             logger.debug_once(
                 "Chunked prefill is not supported with "
-                "encode task which using ALL pooling. "
+                "token_embed and token_classify tasks "
+                "which using ALL pooling. "
                 "Please turn off chunked prefill by "
                 "`--no-enable-chunked-prefill` before using it."
             )
@@ -2066,7 +2065,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         if (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
             and hasattr(self, "cudagraph_batch_sizes")
             and self.cudagraph_batch_sizes
             and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]
@@ -2570,10 +2568,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits = model_output_broadcast_data["logits"]
 
             # Apply structured output bitmasks if present
-            if scheduler_output.grammar_bitmask is not None:
-                apply_grammar_bitmask(
-                    scheduler_output, self.input_batch, logits, self.device
-                )
+            if scheduler_output.structured_output_request_ids:
+                apply_grammar_bitmask(scheduler_output, self.input_batch, logits)
 
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
@@ -2876,7 +2872,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
-            logger.info("Loading model from scratch...")
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.model_config
             )
@@ -2932,14 +2927,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         if (
-            self.vllm_config.compilation_config.level == CompilationLevel.DYNAMO_AS_IS
+            self.vllm_config.compilation_config.mode
+            == CompilationMode.STOCK_TORCH_COMPILE
             and supports_dynamo()
         ):
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
-            compilation_counter.dynamo_as_is_count += 1
+            compilation_counter.stock_torch_compile_count += 1
             self.model.compile(fullgraph=True, backend=backend)
             return
-        # for other compilation levels, cudagraph behavior is controlled by
+        # for other compilation modes, cudagraph behavior is controlled by
         # CudagraphWraper and CudagraphDispatcher of vllm.
 
         # wrap the model with full cudagraph wrapper if needed.
@@ -3622,8 +3618,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
     ) -> PoolerOutput:
         # Find the task that has the largest output for subsequent steps
+        supported_pooling_tasks = self.get_supported_pooling_tasks()
+
+        if not supported_pooling_tasks:
+            if self.scheduler_config.chunked_prefill_enabled:
+                raise RuntimeError(
+                    f"Model {self.model_config.model} does not support "
+                    "any pooling tasks with chunked prefill enabled. "
+                    "Please add --no-enable-chunked-prefill to your "
+                    "config or CLI args. See "
+                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                    "to learn more."
+                )
+            else:
+                raise RuntimeError(
+                    f"Model {self.model_config.model} does not support "
+                    "any pooling tasks. See "
+                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                    "to learn more."
+                )
+
         output_size = dict[PoolingTask, float]()
-        for task in self.get_supported_pooling_tasks():
+        for task in supported_pooling_tasks:
             # Run a full batch with each task to ensure none of them OOMs
             output = self._dummy_pooler_run_task(hidden_states, task)
             output_size[task] = sum(o.nbytes for o in output)
@@ -3970,7 +3986,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # if not supported any full cudagraphs, just raise it.
                 msg += (
                     "; please try cudagraph_mode=PIECEWISE, and "
-                    "make sure compilation level is piecewise"
+                    "make sure compilation mode is VLLM_COMPILE"
                 )
                 raise ValueError(msg)
 
@@ -3997,7 +4013,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"with {min_cg_builder_name} backend (support: "
                 f"{min_cg_support})"
             )
-            if self.compilation_config.level == CompilationLevel.PIECEWISE and (
+            if self.compilation_config.mode == CompilationMode.VLLM_COMPILE and (
                 self.compilation_config.splitting_ops_contain_attention()
                 or self.compilation_config.use_inductor_graph_partition
             ):
@@ -4053,7 +4069,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"supported with {min_cg_builder_name} backend ("
                 f"support:{min_cg_support}) "
                 "; please try cudagraph_mode=PIECEWISE, "
-                "and make sure compilation level is piecewise"
+                "and make sure compilation mode is VLLM_COMPILE"
             )
 
         # Trigger cudagraph dispatching keys initialization here (after
@@ -4563,109 +4579,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             format. Layers that do not need KV cache are not included.
         """
 
-        block_size = self.vllm_config.cache_config.block_size
-        use_mla = self.vllm_config.model_config.use_mla
-        cache_dtype_str = self.vllm_config.cache_config.cache_dtype
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
-            if isinstance(attn_module, Attention):
-                if (
-                    kv_tgt_layer := attn_module.kv_sharing_target_layer_name
-                ) is not None:
-                    # The layer doesn't need its own KV cache and will use that of
-                    # the target layer. We skip creating a KVCacheSpec for it, so
-                    # that KV cache management logic will act as this layer does
-                    # not exist, and doesn't allocate KV cache for the layer. This
-                    # enables the memory saving of cross-layer kv sharing, allowing
-                    # a given amount of memory to accommodate longer context lengths
-                    # or enable more requests to be processed simultaneously.
-                    self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
-                    continue
-
-                # TODO(lucas): move the attention specs into the model layers like
-                # the attention backends
-                if attn_module.attn_type == AttentionType.DECODER:
-                    if attn_module.sliding_window is not None:
-                        assert not use_mla, "MLA is not supported for slidingwindow"
-                        kv_cache_spec[layer_name] = SlidingWindowSpec(
-                            block_size=block_size,
-                            num_kv_heads=attn_module.num_kv_heads,
-                            head_size=attn_module.head_size,
-                            dtype=self.kv_cache_dtype,
-                            sliding_window=attn_module.sliding_window,
-                        )
-                    elif self.attention_chunk_size is not None and isinstance(
-                        attn_module, ChunkedLocalAttention
-                    ):
-                        kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
-                            block_size=block_size,
-                            num_kv_heads=attn_module.num_kv_heads,
-                            head_size=attn_module.head_size,
-                            dtype=self.kv_cache_dtype,
-                            attention_chunk_size=self.attention_chunk_size,
-                        )
-                    else:
-                        kv_cache_spec[layer_name] = FullAttentionSpec(
-                            block_size=block_size,
-                            num_kv_heads=attn_module.num_kv_heads,
-                            head_size=attn_module.head_size,
-                            dtype=self.kv_cache_dtype,
-                        )
-                elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                    kv_cache_spec[layer_name] = CrossAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                    )
-                elif attn_module.attn_type in (
-                    AttentionType.ENCODER,
-                    AttentionType.ENCODER_ONLY,
-                ):
-                    # encoder-only attention does not need KV cache.
-                    continue
-                else:
-                    raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
-
-            elif isinstance(attn_module, MLAAttention):
-                kv_cache_spec[layer_name] = MLAAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    cache_dtype_str=cache_dtype_str,
-                )
-
-            elif isinstance(attn_module, MambaBase):
-                if (
-                    self.vllm_config.speculative_config is not None
-                    and self.vllm_config.model_config.hf_config.model_type
-                    not in ["qwen3_next"]
-                ):
-                    raise NotImplementedError(
-                        "Mamba with speculative decoding is not supported yet."
-                    )
-                mamba_block_size = self.vllm_config.cache_config.mamba_block_size
-                page_size_padded = self.vllm_config.cache_config.mamba_page_size_padded
-                kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=attn_module.get_state_shape(),
-                    dtypes=attn_module.get_state_dtype(),
-                    block_size=mamba_block_size,
-                    page_size_padded=page_size_padded,
-                    mamba_type=attn_module.mamba_type,
-                    num_speculative_blocks=(
-                        self.speculative_config.num_speculative_tokens
-                        if self.speculative_config
-                        else 0
-                    ),
-                )
-
-        ds_indexer_layers = get_layers_from_vllm_config(
-            self.vllm_config, DeepseekV32IndexerCache
-        )
-        for layer_name, ds_indexer_module in ds_indexer_layers.items():
-            kv_cache_spec[layer_name] = ds_indexer_module.get_kv_cache_spec()
+            if isinstance(attn_module, Attention) and (
+                kv_tgt_layer := attn_module.kv_sharing_target_layer_name
+            ):
+                # The layer doesn't need its own KV cache and will use that of
+                # the target layer. We skip creating a KVCacheSpec for it, so
+                # that KV cache management logic will act as this layer does
+                # not exist, and doesn't allocate KV cache for the layer. This
+                # enables the memory saving of cross-layer kv sharing, allowing
+                # a given amount of memory to accommodate longer context lengths
+                # or enable more requests to be processed simultaneously.
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                continue
+            # Skip modules that don't need KV cache (eg encoder-only attention)
+            if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
 
