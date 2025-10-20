@@ -7,7 +7,6 @@ NOTE:
 """
 
 import argparse
-import base64
 import json
 
 import requests
@@ -16,7 +15,7 @@ import torch
 from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
-    binary2tensor, decoding_pooling_output,
+    decoding_pooling_output,
 )
 
 
