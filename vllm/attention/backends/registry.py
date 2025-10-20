@@ -50,7 +50,7 @@ BACKEND_MAP = {
     _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",  # noqa: E501
     _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",  # noqa: E501
     _Backend.ROCM_AITER_UNIFIED_ATTN: "vllm.v1.attention.backends.rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",  # noqa: E501
-    _Backend.MIRAGE: "vllm.v1.attention.backends.mirage.MirageBackend",  # noqa: E501
+    _Backend.MIRAGE: "vllm.v1.attention.backends.mirage.MirageAttentionBackend",  # noqa: E501
 }
 
 

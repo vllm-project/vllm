@@ -603,17 +603,21 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
-        # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
-        # piecewise compilation. Update when more backends are supported.
-        if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
-            "",
-            "eager",
-            "inductor",
-        ]:
-            raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}"
-            )
+        # Allow eager/inductor for piecewise compilation by default.
+        # Additionally allow opting into an experimental/custom backend by
+        # specifying its fully-qualified class path. For now we explicitly
+        # permit the MirageBackend.
+        if self.mode == CompilationMode.VLLM_COMPILE:
+            allowed_backends = {
+                "",
+                "eager",
+                "inductor",
+                "vllm.compilation.mirage_backend.MirageBackend",
+            }
+            if self.backend not in allowed_backends:
+                raise ValueError(
+                    f"Invalid backend for piecewise compilation: {self.backend}"
+                )
 
         if self.use_inductor is not None:
             logger.warning_once(
@@ -655,14 +659,21 @@ class CompilationConfig:
             return resolve_obj_by_qualname(self.backend)
 
         assert self.mode == CompilationMode.VLLM_COMPILE
-        if self.backend not in ["eager", "inductor"]:
-            raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}"
-            )
+        # Default piecewise compilation path (vLLM backend driving Inductor/Eager)
+        if self.backend in ["", "eager", "inductor"]:
+            from vllm.compilation.backends import VllmBackend
+            return VllmBackend(vllm_config)
 
-        from vllm.compilation.backends import VllmBackend
+        # Custom/experimental backend specified by fully-qualified class name.
+        # Currently support MirageBackend.
+        if self.backend == "vllm.compilation.mirage_backend.MirageBackend":
+            from vllm.compilation.mirage_backend import MirageBackend
+            return MirageBackend(vllm_config)
 
-        return VllmBackend(vllm_config)
+        # Should not reach here due to validation above.
+        raise ValueError(
+            f"Unsupported backend for piecewise compilation: {self.backend}"
+        )
 
     def init_with_cudagraph_sizes(self, cudagraph_capture_sizes: list[int]) -> None:
         """To complete the initialization of config,
