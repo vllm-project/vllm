@@ -122,21 +122,14 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         return [FUSED_OPS[kNvfp4Quant]]
 
 
-test_params: list[
-    tuple[type[TestSiluMulFp8QuantModel | TestSiluMulNvfp4QuantModel], bool, bool]
-] = [
-    *list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False])),
-    (TestSiluMulNvfp4QuantModel, False, False),
-]
-
-
 @pytest.mark.parametrize("num_tokens", [32, 64])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
 @pytest.mark.parametrize(
     "model_class, enable_quant_fp8_custom_op, cuda_force_torch",
-    test_params,
+    list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False]))
+    + [(TestSiluMulNvfp4QuantModel, False, False)],
 )
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
@@ -152,7 +145,7 @@ def test_fusion_silu_and_mul_quant(
     enable_quant_fp8_custom_op: bool,
     cuda_force_torch: bool,
 ):
-    if model_class == TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
+    if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
 
     torch.set_default_device("cuda")
