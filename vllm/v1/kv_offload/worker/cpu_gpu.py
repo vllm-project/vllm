@@ -83,10 +83,18 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
             self.gpu_tensors.append(gpu_tensor)
 
             gpu_shape = gpu_tensor.shape
-            test_shape = attn_backends[layer_name].get_kv_cache_shape(
+            attn_backend = attn_backends[layer_name]
+            test_shape = attn_backend.get_kv_cache_shape(
                 num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
             )
-            if test_shape[0] == 1234:
+
+            if len(gpu_shape) != len(test_shape):
+                # cross-layers tensor
+                # shape is (num_blocks, ...)
+                assert len(gpu_shape) == len(test_shape) + 1
+                num_blocks_idx = 0
+                self.kv_dim_before_num_blocks.append(False)
+            elif test_shape[0] == 1234:
                 # shape is (num_blocks, ...)
                 num_blocks_idx = 0
                 self.kv_dim_before_num_blocks.append(False)

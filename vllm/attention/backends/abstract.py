@@ -81,7 +81,28 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        """
+        Get the physical (memory layout) ordering of the kv cache dimensions.
+        e.g. if the KV cache shape is
+        [num_blocks, block_size, num_heads, head_size],
+        and get_kv_cache_stride_order returns (0, 2, 1, 3) then the physical
+        ordering of dimensions is
+        [num_blocks, num_heads, block_size, head_size].
+
+        Args:
+            include_num_layers_dimension: if True, includes an additional
+                num_layers dimension, which is assumed to be prepended
+                to the logical KV cache shape.
+                With the above example, a return value (1, 3, 0, 2, 4)
+                corresponds to
+                [num_blocks, num_heads, num_layers, block_size, head_size]
+
+        Returns:
+            A tuple of ints which is a permutation of range(len(shape)).
+        """
         raise NotImplementedError
 
     @classmethod

@@ -47,7 +47,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -202,6 +202,24 @@ class KVConnectorBase_V1(ABC):
 
         Args:
             kv_caches: dictionary of layer names, kv cache
+        """
+        return
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
+    ):
+        """
+        Initialize with a single KV cache tensor used by all layers.
+        The first dimension should be num_layers.
+        This function will only be called for models with uniform layers,
+        and only if the KV connector returns True on
+        prefers_cross_layer_blocks().
+        Only one of the functions
+        {register_kv_caches, register_cross_layers_kv_cache} will be called.
+
+        Args:
+            kv_cache: a cross-layers kv cache tensor
+            attn_backend: The attention backend that corresponds to all layers
         """
         return
 
@@ -474,6 +492,23 @@ class KVConnectorBase_V1(ABC):
                 "on the abstract base class"
             )
         return None
+
+    @classmethod
+    def prefer_cross_layer_blocks(cls) -> bool:
+        """
+        Returns whether this connector prefers KV blocks
+        that hold KV data for all layers (for speeding up KV data transfers).
+
+        Returns:
+            bool: whether layers' KV data should be contiguous.
+        """
+
+        if cls is KVConnectorBase_V1:
+            raise TypeError(
+                "prefer_cross_layer_blocks should not be called "
+                "on the abstract base class"
+            )
+        return False
 
     def get_finished_count(self) -> int | None:
         """
