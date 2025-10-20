@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import json
-from concurrent.futures import Future, ProcessPoolExecutor
+from collections.abc import Iterable
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -83,6 +85,51 @@ def _plot_fig(
     print("[END FIGURE]")
 
 
+def _plot_fig_by_group(
+    fig_dir: Path,
+    fig_group_data: tuple[Iterable[tuple[str, str]], list[dict[str, object]]],
+    curve_by: list[str],
+    *,
+    var_x: str,
+    var_y: str,
+    max_x: float | None,
+    bin_x: float | None,
+    log_y: bool,
+    dry_run: bool,
+):
+    fig_group, fig_data = fig_group_data
+
+    fig_group = tuple(fig_group)
+
+    fig_path = fig_dir / (
+        "-".join(
+            (
+                "FIGURE-",
+                *(f"{k}={v}" for k, v in fig_group),
+            )
+        )
+        .replace("/", "_")
+        .replace("..", "__")  # Sanitize
+        + ".png"
+    )
+    fig_title = (
+        ", ".join(f"{k}={v}" for k, v in fig_group) if fig_group else "(All data)"
+    )
+
+    return _plot_fig(
+        fig_path,
+        fig_title,
+        fig_data,
+        curve_by,
+        var_x=var_x,
+        var_y=var_y,
+        max_x=max_x,
+        bin_x=bin_x,
+        log_y=log_y,
+        dry_run=dry_run,
+    )
+
+
 def plot(
     output_dir: Path,
     fig_dir: Path,
@@ -105,48 +152,23 @@ def plot(
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     with ProcessPoolExecutor() as pool:
-        tasks = list[Future[None]]()
-
-        for fig_group, fig_data in full_groupby(
-            all_data,
-            key=lambda item: tuple((k, str(item[k])) for k in fig_by),
-        ):
-            fig_group = tuple(fig_group)
-
-            fig_path = fig_dir / (
-                "-".join(
-                    (
-                        "FIGURE-",
-                        *(f"{k}={v}" for k, v in fig_group),
-                    )
-                )
-                .replace("/", "_")
-                .replace("..", "__")  # Sanitize
-                + ".png"
-            )
-            fig_title = (
-                ", ".join(f"{k}={v}" for k, v in fig_group)
-                if fig_group
-                else "(All data)"
-            )
-
-            task = pool.submit(
-                _plot_fig,
-                fig_path,
-                fig_title,
-                fig_data,
-                curve_by,
+        pool.map(
+            partial(
+                _plot_fig_by_group,
+                fig_dir,
+                curve_by=curve_by,
                 var_x=var_x,
                 var_y=var_y,
                 max_x=max_x,
                 bin_x=bin_x,
                 log_y=log_y,
                 dry_run=dry_run,
-            )
-            tasks.append(task)
-
-        for f in tasks:
-            f.result()
+            ),
+            full_groupby(
+                all_data,
+                key=lambda item: tuple((k, str(item[k])) for k in fig_by),
+            ),
+        )
 
 
 def main():
