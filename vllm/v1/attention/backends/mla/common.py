@@ -1253,6 +1253,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
+            # Initialize workspace buffer for trtllm_ragged
+            self._workspace_buffer = torch.zeros(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=get_current_vllm_config().device_config.device,
+            )
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
@@ -1449,7 +1455,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         assert prefill.query_seq_lens is not None
 
-        return trtllm_ragged_attention_deepseek(
+        ret = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
             value=v,
@@ -1470,6 +1476,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             attention_sinks=None,
         )
 
+        if isinstance(ret, tuple):
+            # Convert from (q_len, num_heads) to (num_heads, q_len)
+            return ret[0], ret[1].transpose(0, 1).contiguous()
+        return ret
+
     def _run_prefill_context_chunk_trtllm_ragged(
         self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
     ):
@@ -1479,7 +1490,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
 
-        return trtllm_ragged_attention_deepseek(
+        out = torch.zeros(
+            q.shape[0],
+            q.shape[1],
+            v.shape[2],
+            device=q.device,
+            dtype=q.dtype,
+        )
+        attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
             value=v,
@@ -1489,15 +1507,18 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             max_kv_len=prefill.chunked_context.max_seq_lens[chunk_idx],
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
-            o_sf_scale=-1.0,  # NOTE(yming): why -1.0?
-            batch_size=prefill.chunked_context.seq_lens[chunk_idx].shape[0],
+            o_sf_scale=1.0,  # NOTE(yming): why -1.0?
+            batch_size=prefill.query_seq_lens.shape[0],
             window_left=-1,
             cum_seq_lens_q=prefill.query_start_loc,
             cum_seq_lens_kv=prefill.chunked_context.cu_seq_lens[chunk_idx],
             enable_pdl=False,
             is_causal=False,
             return_lse=True,
+            out=out,
         )
+        # Convert from (q_len, num_heads) to (num_heads, q_len)
+        return attn_out, lse.transpose(0, 1).contiguous()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
