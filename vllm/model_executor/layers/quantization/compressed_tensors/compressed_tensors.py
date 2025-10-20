@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensors24,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4MXFp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
@@ -322,6 +323,35 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_symmetric
         )
 
+    def _is_fp4a4_mxfp4(
+        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ):
+        if weight_quant is None or input_quant is None:
+            return False
+
+        is_group_quant = (
+            weight_quant.strategy == QuantizationStrategy.GROUP.value
+            and input_quant.strategy == QuantizationStrategy.GROUP.value
+        )
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+
+        is_group_size_32 = (
+            weight_quant.group_size == 32 and input_quant.group_size == 32
+        )
+        is_float_type = (
+            weight_quant.type == QuantizationType.FLOAT
+            and input_quant.type == QuantizationType.FLOAT
+        )
+        is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
+
+        return (
+            is_group_quant
+            and is_float_type
+            and is_4_bits
+            and is_group_size_32
+            and is_symmetric
+        )
+
     def _is_fp4a16_nvfp4(
         self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ):
@@ -576,6 +606,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                         " Running CompressedTensorsW4A16Fp4."
                     )
                     return CompressedTensorsW4A16Fp4(has_input_global_scale=True)
+
+            if self._is_fp4a4_mxfp4(weight_quant, input_quant):
+                return CompressedTensorsW4A4MXFp4()
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
