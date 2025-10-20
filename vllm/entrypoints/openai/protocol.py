@@ -81,7 +81,8 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.utils import random_uuid, resolve_obj_by_qualname
+from vllm.utils import random_uuid
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 EMBED_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
@@ -199,7 +200,7 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     strict: bool | None = None
 
 
-class StructuralTag(OpenAIBaseModel):
+class LegacyStructuralTag(OpenAIBaseModel):
     begin: str
     # schema is the field, but that causes conflicts with pydantic so
     # instead use structural_tag_schema with an alias
@@ -207,10 +208,20 @@ class StructuralTag(OpenAIBaseModel):
     end: str
 
 
+class LegacyStructuralTagResponseFormat(OpenAIBaseModel):
+    type: Literal["structural_tag"]
+    structures: list[LegacyStructuralTag]
+    triggers: list[str]
+
+
 class StructuralTagResponseFormat(OpenAIBaseModel):
     type: Literal["structural_tag"]
-    structures: list[StructuralTag]
-    triggers: list[str]
+    format: Any
+
+
+AnyStructuralTagResponseFormat: TypeAlias = (
+    LegacyStructuralTagResponseFormat | StructuralTagResponseFormat
+)
 
 
 class ResponseFormat(OpenAIBaseModel):
@@ -219,7 +230,9 @@ class ResponseFormat(OpenAIBaseModel):
     json_schema: JsonSchemaResponseFormat | None = None
 
 
-AnyResponseFormat: TypeAlias = ResponseFormat | StructuralTagResponseFormat
+AnyResponseFormat: TypeAlias = (
+    ResponseFormat | StructuralTagResponseFormat | LegacyStructuralTagResponseFormat
+)
 
 
 class StreamOptions(OpenAIBaseModel):
@@ -822,7 +835,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 elif response_format.type == "structural_tag":
                     structural_tag = response_format
                     assert structural_tag is not None and isinstance(
-                        structural_tag, StructuralTagResponseFormat
+                        structural_tag,
+                        (
+                            LegacyStructuralTagResponseFormat,
+                            StructuralTagResponseFormat,
+                        ),
                     )
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
                     self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
