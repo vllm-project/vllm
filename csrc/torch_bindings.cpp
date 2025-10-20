@@ -175,12 +175,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
-  // Polynomial Normalization.
-  ops.def(
-      "poly_norm(Tensor! out, Tensor input, Tensor weight, Tensor bias, float "
-      "epsilon) -> ()");
-  ops.impl("poly_norm", torch::kCUDA, &poly_norm);
-
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
@@ -191,13 +185,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Optimized top-k per row operation
   ops.def(
       "top_k_per_row(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, Tensor! values, int numRows, int stride0, "
+      "Tensor! indices, int numRows, int stride0, "
       "int stride1) -> ()");
   ops.impl("top_k_per_row", torch::kCUDA, &top_k_per_row);
 
   ops.def(
       "top_k_per_row_decode(Tensor logits, int next_n, "
-      "Tensor seq_lens, Tensor! indices, Tensor! values, int numRows, "
+      "Tensor seq_lens, Tensor! indices, int numRows, "
       "int stride0, int stride1) -> ()");
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
