@@ -48,10 +48,10 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 
-from vllm.utils.tensor_serial import (
-    EMBED_DTYPE_TYPE,
-    ENCODING_FORMAT_TYPE,
-    ENDIANNESS_TYPE,
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
 )
 
 # Backward compatibility for OpenAI client versions
@@ -1525,7 +1525,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str | None = None
     input: list[int] | list[list[int]] | str | list[str]
-    encoding_format: ENCODING_FORMAT_TYPE = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1558,7 +1558,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
     )
-    embed_dtype: EMBED_DTYPE_TYPE = Field(
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
             "What dtype to use for encoding. Default to using float32 for base64 "
@@ -1566,7 +1566,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "This parameter will affect base64 and binary_response."
         ),
     )
-    endianness: ENDIANNESS_TYPE = Field(
+    endianness: Endianness = Field(
         default="native",
         description=(
             "What endianness to use for encoding. Default to using native for "
@@ -1588,7 +1588,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     model: str | None = None
     messages: list[ChatCompletionMessageParam]
 
-    encoding_format: ENCODING_FORMAT_TYPE = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1653,7 +1653,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
     )
-    embed_dtype: EMBED_DTYPE_TYPE = Field(
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
             "What dtype to use for encoding. Default to using float32 for base64 "
@@ -1661,7 +1661,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "This parameter will affect base64 and binary_response."
         ),
     )
-    endianness: ENDIANNESS_TYPE = Field(
+    endianness: Endianness = Field(
         default="native",
         description=(
             "What endianness to use for encoding. Default to using native for "
@@ -1713,8 +1713,8 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     """
     activation: bool = False
 
-    encoding_format: ENCODING_FORMAT_TYPE = "float"
-    embed_dtype: EMBED_DTYPE_TYPE = Field(
+    encoding_format: EncodingFormat = "float"
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
             "What dtype to use for encoding. Default to using float32 for base64 "
@@ -1722,7 +1722,7 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
             "This parameter will affect base64 and binary_response."
         ),
     )
-    endianness: ENDIANNESS_TYPE = Field(
+    endianness: Endianness = Field(
         default="native",
         description=(
             "What endianness to use for encoding. Default to using native for "

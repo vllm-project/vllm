@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from tests.models.utils import check_embeddings_close
-from vllm.utils.tensor_serial import (
+from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     binary2tensor,

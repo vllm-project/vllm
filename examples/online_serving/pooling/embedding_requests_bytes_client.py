@@ -12,7 +12,7 @@ import json
 import requests
 import torch
 
-from vllm.utils.tensor_serial import (
+from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,

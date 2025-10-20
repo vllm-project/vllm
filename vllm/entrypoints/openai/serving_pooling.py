@@ -34,10 +34,10 @@ from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
-from vllm.utils.tensor_serial import (
-    EMBED_DTYPE_TYPE,
-    ENCODING_FORMAT_TYPE,
-    ENDIANNESS_TYPE,
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
     encoding_pooling_bytes,
     encoding_pooling_output,
 )
@@ -254,9 +254,9 @@ class OpenAIServingPooling(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        encoding_format: ENCODING_FORMAT_TYPE,
-        embed_dtype: EMBED_DTYPE_TYPE,
-        endianness: ENDIANNESS_TYPE,
+        encoding_format: EncodingFormat,
+        embed_dtype: EmbedDType,
+        endianness: Endianness,
     ) -> PoolingResponse | PoolingBytesResponse:
         def encoding_float_base64():
             items: list[PoolingResponseData] = []

@@ -41,10 +41,10 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
-from vllm.utils.tensor_serial import (
-    EMBED_DTYPE_TYPE,
-    ENCODING_FORMAT_TYPE,
-    ENDIANNESS_TYPE,
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
     encoding_pooling_bytes,
     encoding_pooling_output,
 )
@@ -125,9 +125,9 @@ class EmbeddingMixin(OpenAIServing):
     ) -> EmbeddingResponse | Response | ErrorResponse:
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
-        encoding_format: ENCODING_FORMAT_TYPE = ctx.request.encoding_format
-        embed_dtype: EMBED_DTYPE_TYPE = ctx.request.embed_dtype
-        endianness: ENDIANNESS_TYPE = ctx.request.endianness
+        encoding_format: EncodingFormat = ctx.request.encoding_format
+        embed_dtype: EmbedDType = ctx.request.embed_dtype
+        endianness: Endianness = ctx.request.endianness
 
         def encoding_float_base64():
             items: list[EmbeddingResponseData] = []
