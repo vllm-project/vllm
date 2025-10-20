@@ -996,7 +996,7 @@ The basic purpose of this script is to evaluate vLLM under different settings. F
 Example command:
 
 ```bash
-python vllm/benchmarks/sweep/serve.py \
+python -m vllm.benchmarks.sweep.serve \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1044,7 +1044,7 @@ For example, to ensure E2E latency within different target values for 99% of req
 Example command:
 
 ```bash
-python vllm/benchmarks/sweep/serve.py \
+python -m vllm.benchmarks.sweep.serve \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1073,7 +1073,7 @@ The algorithm for adjusting the SLA variable is as follows:
 Example command:
 
 ```bash
-python vllm/benchmarks/sweep/plot.py benchmarks/results/<timestamp> \
+python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
     --var-x max_concurrency \
     --curve-by api_server_count,max_num_batched_tokens \
     --row-by random_input_len \

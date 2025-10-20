@@ -36,7 +36,7 @@ class ParameterSweepItem(dict[str, object]):
         return cls(record)
 
     def __or__(self, other: dict[str, Any]):
-        return type(self)(self | other)
+        return type(self)(super().__or__(other))
 
     # In JSON, we prefer "_"
     def _iter_param_key_candidates(self, param_key: str):

@@ -15,6 +15,8 @@ from typing_extensions import Self, override
 
 from vllm.utils.collection_utils import full_groupby
 
+from .utils import sanitize_filename
+
 
 class PlotFilterBase(ABC):
     @classmethod
@@ -152,17 +154,13 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
 
 
 def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...]):
-    return fig_dir / (
-        "-".join(
-            (
-                "FIGURE" + ("-" if group else ""),
-                *(f"{k}={v}" for k, v in group),
-            )
-        )
-        .replace("/", "_")
-        .replace("..", "__")  # Sanitize
-        + ".png"
-    )
+    parts = list[str]()
+    if group:
+        parts.extend(("FIGURE-", *(f"{k}={v}" for k, v in group)))
+    else:
+        parts.append("figure")
+
+    return fig_dir / sanitize_filename("-".join(parts) + ".png")
 
 
 class DummyExecutor:

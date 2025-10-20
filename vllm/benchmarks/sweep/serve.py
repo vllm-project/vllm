@@ -15,6 +15,7 @@ from typing_extensions import assert_never
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .server import ServerProcess
 from .sla_sweep import SLASweep, SLASweepItem
+from .utils import sanitize_filename
 
 
 @contextlib.contextmanager
@@ -106,14 +107,13 @@ def _get_comb_base_path(
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
 ):
-    return output_dir / "-".join(
-        (
-            "SERVE" + ("-" if serve_comb else ""),
-            serve_comb.as_text(sep="-"),
-            "BENCH" + ("-" if bench_comb else ""),
-            bench_comb.as_text(sep="-"),
-        )
-    ).replace("/", "_").replace("..", "__")  # Sanitize
+    parts = list[str]()
+    if serve_comb:
+        parts.extend(("SERVE-", *serve_comb.as_text(sep="-")))
+    if bench_comb:
+        parts.extend(("BENCH-", *bench_comb.as_text(sep="-")))
+
+    return output_dir / sanitize_filename("-".join(parts))
 
 
 def _get_comb_run_path(base_path: Path, run_number: int | None):
@@ -226,14 +226,13 @@ def _get_sla_base_path(
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
 ):
-    return output_dir / "-".join(
-        (
-            "SERVE" + ("-" if serve_comb else ""),
-            serve_comb.as_text(sep="-"),
-            "BENCH" + ("-" if bench_comb else ""),
-            bench_comb.as_text(sep="-"),
-        )
-    ).replace("/", "_").replace("..", "__")  # Sanitize
+    parts = list[str]()
+    if serve_comb:
+        parts.extend(("SERVE-", *serve_comb.as_text(sep="-")))
+    if bench_comb:
+        parts.extend(("BENCH-", *bench_comb.as_text(sep="-")))
+
+    return output_dir / sanitize_filename("-".join(parts))
 
 
 def _get_sla_iter_path(
