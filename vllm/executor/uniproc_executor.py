@@ -43,9 +43,9 @@ class UniProcExecutor(ExecutorBase):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
-        is_new_worker = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         self.collective_rpc("init_worker", args=([kwargs],))
-        if not is_new_worker:
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
             self.collective_rpc("init_device")
             self.collective_rpc("load_model")
 

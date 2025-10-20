@@ -579,7 +579,7 @@ def stateless_init_torch_distributed_process_group(
             timeout=timeout,
         )
 
-    if isinstance(group_name, str):
+    if group_name is not None:
         from torch._C._distributed_c10d import _register_process_group
 
         pg._set_group_name(group_name)

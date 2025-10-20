@@ -7,7 +7,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 
 import torch.distributed
-from torch.distributed import ReduceOp
 
 from vllm.config import ParallelConfig
 from vllm.distributed import (
@@ -24,41 +23,50 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-WorkerType = Literal["existing", "new", "shutdown"]
+WorkerType = Literal["existing", "new", "removing"]
 
 
-class ScaleUpExistingWorkerState(enum.IntEnum):
+class ScaleUpExistingEningeState(enum.IntEnum):
     WAIT_NEW_WORKERS_INIT = 0
     CREATE_STANDBY_GROUPS = 1
     TRANSFER_EXPERT_MAPPING = 2
     WAIT_NEW_WORKERS_WEIGHTS_INIT = 3
     TRANSFER_WEIGHTS = 4
-    SYNC_KV_CACHE_MEMORY = 5
+    SYNC_KV_CACHE_MEMORY_SIZE = 5
     SWITCH_AND_PREPARE = 6
     EPLB_RESHUFFLE = 7
     COMPLETE = 8
 
 
-class ScaleUpNewWorkerState(enum.IntEnum):
+class ScaleUpNewEngineState(enum.IntEnum):
     PREPARE = 0
     EPLB_RESHUFFLE = 1
     COMPLETE = 2
 
 
-class ScaleDownRemainingWorkerState(enum.IntEnum):
+class ScaleDownRemainingEngineState(enum.IntEnum):
     PREPARE = 0
     EPLB_RESHUFFLE = 1
     SWITCH_AND_PREPARE = 2
     COMPLETE = 3
 
 
-class ScaleDownShutdownWorkerState(enum.IntEnum):
+class ScaleDownRemovingEngineState(enum.IntEnum):
     PREPARE = 0
     EPLB_RESHUFFLE = 1
     COMPLETE = 2
 
 
-class ElasticScalingState:
+class _BarrierTimeoutError(RuntimeError):
+    """
+    Exception raised for timeout
+    in the first stage of our two-staged
+    TCPStore based barrier to synchronize the
+    execution of all engines in the DP group.
+    """
+
+
+class ElasticEPScalingState:
     def __init__(
         self,
         model_executor: "Executor",
@@ -74,27 +82,26 @@ class ElasticScalingState:
         self.vllm_config = vllm_config
         self.old_dp_group = self.engine_core.dp_group if worker_type != "new" else None
         self.old_dp_store = self.engine_core.dp_store if worker_type != "new" else None
-        self.new_dp_group = (
+        self.new_dp_group_or_config: torch.distributed.ProcessGroup | ParallelConfig = (
             self.engine_core.dp_group if worker_type == "new" else new_parallel_config
         )
         self.new_dp_store = self.engine_core.dp_store if worker_type == "new" else None
         self.worker_type = worker_type
         self.scale_type = scale_type
         self.reconfig_request = reconfig_request
-        self.waiting_for_notification = False
         self.last_barrier_timeout = False
 
         if scale_type == "scale_up":
             self.state = (
-                ScaleUpNewWorkerState.PREPARE
+                ScaleUpNewEngineState.PREPARE
                 if worker_type == "new"
-                else ScaleUpExistingWorkerState.WAIT_NEW_WORKERS_INIT
+                else ScaleUpExistingEningeState.WAIT_NEW_WORKERS_INIT
             )
         else:
             self.state = (
-                ScaleDownShutdownWorkerState.PREPARE
-                if worker_type == "shutdown"
-                else ScaleDownRemainingWorkerState.PREPARE
+                ScaleDownRemovingEngineState.PREPARE
+                if worker_type == "removing"
+                else ScaleDownRemainingEngineState.PREPARE
             )
 
     @property
@@ -112,22 +119,19 @@ class ElasticScalingState:
         return engine_core
 
     def progress(self) -> bool:
-        if self.waiting_for_notification:
-            return False
-
         if self.scale_type == "scale_up":
             return (
-                self._progress_new_worker()
+                self._progress_new_engine()
                 if self.worker_type == "new"
-                else self._progress_existing_worker()
+                else self._progress_existing_engine()
             )
         return (
-            self._progress_shutdown_worker()
-            if self.worker_type == "shutdown"
-            else self._progress_remaining_worker()
+            self._progress_removing_worker()
+            if self.worker_type == "removing"
+            else self._progress_remaining_engine()
         )
 
-    def _do_store_barrier(
+    def _execute_tcp_store_barrier(
         self, dp_store, group_rank, group_size, barrier_id, timeout=None
     ):
         arrival_key = f"arrival_{barrier_id}_{group_rank}"
@@ -141,7 +145,7 @@ class ElasticScalingState:
                 timeout is not None
                 and time.time() - start_time > timeout.total_seconds()
             ):
-                raise RuntimeError(
+                raise _BarrierTimeoutError(
                     f"Barrier timed out after {timeout.total_seconds()} seconds"
                 )
 
@@ -158,188 +162,195 @@ class ElasticScalingState:
                 sched_yield()
 
     def _staged_barrier(self, use_new_group: bool) -> bool:
+        # NOTE(yongji): currently we use a two-staged
         dp_store = self.new_dp_store if use_new_group else self.old_dp_store
-        dp_group = self.new_dp_group if use_new_group else self.old_dp_group
+        dp_group = self.new_dp_group_or_config if use_new_group else self.old_dp_group
 
         group_rank = dp_group.rank()
         group_size = dp_group.size()
-        barrier_id = "elastic_ep_barrier"
+        barrier_id = "eep_barrier"
 
-        if self.last_barrier_timeout:
-            self._do_store_barrier(
-                dp_store, group_rank, group_size, barrier_id, timeout=None
-            )
-            torch.distributed.barrier(dp_group)
-            self.last_barrier_timeout = False
-            if group_rank == 0:
-                dp_store.delete_key("elastic_ep_sync")
-                for i in range(group_size):
-                    dp_store.delete_key(f"arrival_{barrier_id}_{i}")
-            return True
-
-        # NOTE(yongji): figure out appropriate timeout
-        timeout = None if dp_store.check(["elastic_ep_sync"]) else timedelta(seconds=5)
+        # TODO(yongji): figure out appropriate timeout for the barrier
+        timeout = (
+            None
+            if dp_store.check(["eep_barrier_sync"]) or self.last_barrier_timeout
+            else timedelta(seconds=5)
+        )
 
         try:
-            self._do_store_barrier(
+            self._execute_tcp_store_barrier(
                 dp_store, group_rank, group_size, barrier_id, timeout=timeout
             )
             torch.distributed.barrier(dp_group)
             self.last_barrier_timeout = False
+            # clean up barrier keys
             if group_rank == 0:
-                dp_store.delete_key("elastic_ep_sync")
+                dp_store.delete_key("eep_barrier_sync")
                 for i in range(group_size):
                     dp_store.delete_key(f"arrival_{barrier_id}_{i}")
             return True
-        except RuntimeError:
+        except _BarrierTimeoutError as e:
+            if timeout is None:
+                raise RuntimeError("Unexpected timeout encountered") from e
             self.last_barrier_timeout = True
-            dp_store.compare_set("elastic_ep_sync", "", b"1")
+            dp_store.compare_set("eep_barrier_sync", "", b"1")
             return False
 
-    def _progress_existing_worker(self) -> bool:
+    def _progress_existing_engine(self) -> bool:
         state = self.state
 
-        if state == ScaleUpExistingWorkerState.WAIT_NEW_WORKERS_INIT:
-            self.waiting_for_notification = True
+        if state == ScaleUpExistingEningeState.WAIT_NEW_WORKERS_INIT:
             return False
 
-        elif state == ScaleUpExistingWorkerState.CREATE_STANDBY_GROUPS:
-            # NOTE(yongji): wait for all exisiting workers to receive the request
+        elif state == ScaleUpExistingEningeState.CREATE_STANDBY_GROUPS:
+            # NOTE(yongji): wait for all existing workers to receive the request
             if (
-                int(self.old_dp_store.get("elastic_ep_ticket"))
+                int(self.old_dp_store.get("eep_barrier_engine_count"))
                 < self.old_dp_group.size()
             ):
                 return False
             if not self._staged_barrier(use_new_group=False):
                 return False
             if self.old_dp_group.rank() == 0:
-                self.old_dp_store.delete_key("elastic_ep_ticket")
+                self.old_dp_store.delete_key("eep_barrier_engine_count")
             self._create_standby_groups()
-            self.state = ScaleUpExistingWorkerState.TRANSFER_EXPERT_MAPPING
+            self.state = ScaleUpExistingEningeState.TRANSFER_EXPERT_MAPPING
             return True
 
-        elif state == ScaleUpExistingWorkerState.TRANSFER_EXPERT_MAPPING:
+        elif state == ScaleUpExistingEningeState.TRANSFER_EXPERT_MAPPING:
             self._transfer_expert_mapping()
-            self.state = ScaleUpExistingWorkerState.WAIT_NEW_WORKERS_WEIGHTS_INIT
+            self.state = ScaleUpExistingEningeState.WAIT_NEW_WORKERS_WEIGHTS_INIT
             return True
 
-        elif state == ScaleUpExistingWorkerState.WAIT_NEW_WORKERS_WEIGHTS_INIT:
-            self.waiting_for_notification = True
+        elif state == ScaleUpExistingEningeState.WAIT_NEW_WORKERS_WEIGHTS_INIT:
             return False
 
-        elif state == ScaleUpExistingWorkerState.TRANSFER_WEIGHTS:
+        elif state == ScaleUpExistingEningeState.TRANSFER_WEIGHTS:
             if (
-                int(self.old_dp_store.get("elastic_ep_ticket"))
+                int(self.old_dp_store.get("eep_barrier_engine_count"))
                 < self.old_dp_group.size()
             ):
                 return False
             if not self._staged_barrier(use_new_group=False):
                 return False
             if self.old_dp_group.rank() == 0:
-                self.old_dp_store.delete_key("elastic_ep_ticket")
+                self.old_dp_store.delete_key("eep_barrier_engine_count")
             self._transfer_weights()
-            self.state = ScaleUpExistingWorkerState.SYNC_KV_CACHE_MEMORY
+            self.state = ScaleUpExistingEningeState.SYNC_KV_CACHE_MEMORY_SIZE
             return True
 
-        elif state == ScaleUpExistingWorkerState.SYNC_KV_CACHE_MEMORY:
-            self._sync_kv_cache_memory()
-            self.state = ScaleUpExistingWorkerState.SWITCH_AND_PREPARE
+        elif state == ScaleUpExistingEningeState.SYNC_KV_CACHE_MEMORY_SIZE:
+            self._sync_kv_cache_memory_size()
+            self.state = ScaleUpExistingEningeState.SWITCH_AND_PREPARE
             return True
 
-        elif state == ScaleUpExistingWorkerState.SWITCH_AND_PREPARE:
+        elif state == ScaleUpExistingEningeState.SWITCH_AND_PREPARE:
             self._switch_and_prepare()
-            self.state = ScaleUpExistingWorkerState.EPLB_RESHUFFLE
-            self.new_dp_store.add("elastic_ep_ticket", 1)
+            self.state = ScaleUpExistingEningeState.EPLB_RESHUFFLE
+            self.new_dp_store.add("eep_barrier_engine_count", 1)
             return True
 
-        elif state == ScaleUpExistingWorkerState.EPLB_RESHUFFLE:
+        elif state == ScaleUpExistingEningeState.EPLB_RESHUFFLE:
             if (
-                int(self.new_dp_store.get("elastic_ep_ticket"))
-                < self.new_dp_group.size()
+                int(self.new_dp_store.get("eep_barrier_engine_count"))
+                < self.new_dp_group_or_config.size()
             ):
                 return False
             if not self._staged_barrier(use_new_group=True):
                 return False
-            if self.new_dp_group.rank() == 0:
-                self.new_dp_store.delete_key("elastic_ep_ticket")
+            if self.new_dp_group_or_config.rank() == 0:
+                self.new_dp_store.delete_key("eep_barrier_engine_count")
             self._eplb_reshuffle()
-            self.state = ScaleUpExistingWorkerState.COMPLETE
+            self.state = ScaleUpExistingEningeState.COMPLETE
             self._update_parallel_config()
             return True
 
-        return False
+        else:
+            assert self.state == ScaleUpExistingEningeState.COMPLETE
+            return True
 
-    def _progress_new_worker(self) -> bool:
+    def _progress_new_engine(self) -> bool:
         state = self.state
 
-        if state == ScaleUpNewWorkerState.PREPARE:
+        if state == ScaleUpNewEngineState.PREPARE:
             tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
             torch.distributed.all_reduce(
-                tensor, op=ReduceOp.MAX, group=self.new_dp_group
+                tensor,
+                op=torch.distributed.ReduceOp.MAX,
+                group=self.new_dp_group_or_config,
             )
             data = tensor.tolist()
             self.engine_core.engines_running = bool(data[0])
             self.engine_core.current_wave = int(data[1])
             self.engine_core.step_counter = int(data[2])
-            self.state = ScaleUpNewWorkerState.EPLB_RESHUFFLE
-            self.new_dp_store.add("elastic_ep_ticket", 1)
+            self.state = ScaleUpNewEngineState.EPLB_RESHUFFLE
+            self.new_dp_store.add("eep_barrier_engine_count", 1)
             return True
 
-        elif state == ScaleUpNewWorkerState.EPLB_RESHUFFLE:
+        elif state == ScaleUpNewEngineState.EPLB_RESHUFFLE:
             if (
-                int(self.new_dp_store.get("elastic_ep_ticket"))
-                < self.new_dp_group.size()
+                int(self.new_dp_store.get("eep_barrier_engine_count"))
+                < self.new_dp_group_or_config.size()
             ):
                 return False
             if not self._staged_barrier(use_new_group=True):
                 return False
-            assert self.new_dp_group.rank() > 0
+            assert self.new_dp_group_or_config.rank() > 0
             self._eplb_reshuffle()
-            self.state = ScaleUpNewWorkerState.COMPLETE
+            self.state = ScaleUpNewEngineState.COMPLETE
             return True
 
-        return False
+        else:
+            assert self.state == ScaleUpNewEngineState.COMPLETE
+            return True
 
-    def _progress_remaining_worker(self) -> bool:
+    def _progress_remaining_engine(self) -> bool:
         state = self.state
 
-        if state == ScaleDownRemainingWorkerState.PREPARE:
-            self.state = ScaleDownRemainingWorkerState.EPLB_RESHUFFLE
-            self.old_dp_store.add("elastic_ep_ticket", 1)
+        if state == ScaleDownRemainingEngineState.PREPARE:
+            self.state = ScaleDownRemainingEngineState.EPLB_RESHUFFLE
+            self.old_dp_store.add("eep_barrier_engine_count", 1)
             return True
 
-        elif state == ScaleDownRemainingWorkerState.EPLB_RESHUFFLE:
+        elif state == ScaleDownRemainingEngineState.EPLB_RESHUFFLE:
             if (
-                int(self.old_dp_store.get("elastic_ep_ticket"))
+                int(self.old_dp_store.get("eep_barrier_engine_count"))
                 < self.old_dp_group.size()
             ):
                 return False
             if not self._staged_barrier(use_new_group=False):
                 return False
             if self.old_dp_group.rank() == 0:
-                self.old_dp_store.delete_key("elastic_ep_ticket")
+                self.old_dp_store.delete_key("eep_barrier_engine_count")
             self._eplb_reshuffle_before_scale_down()
-            self.state = ScaleDownRemainingWorkerState.SWITCH_AND_PREPARE
-            return True
-        elif state == ScaleDownRemainingWorkerState.SWITCH_AND_PREPARE:
+            self.state = ScaleDownRemainingEngineState.SWITCH_AND_PREPARE
+            # NOTE(yongji): currently, after EPLB reshuffle
+            # that redistributes experts to remaining workers, workers
+            # to be removed will immediately initiate shutdown;
+            # existing workers can no longer execute forward steps using
+            # the old setup. In the future, we may keep
+            # the removing workers alive a bit longer,
+            # e.g., to drain in-batch requests.
             self._create_standby_groups()
             self._switch_and_prepare()
-            self.state = ScaleDownRemainingWorkerState.COMPLETE
+            self.state = ScaleDownRemainingEngineState.COMPLETE
             return True
 
-        return False
+        else:
+            assert self.state == ScaleDownRemainingEngineState.COMPLETE
+            return True
 
-    def _progress_shutdown_worker(self) -> bool:
+    def _progress_removing_worker(self) -> bool:
         state = self.state
 
-        if state == ScaleDownShutdownWorkerState.PREPARE:
-            self.state = ScaleDownShutdownWorkerState.EPLB_RESHUFFLE
-            self.old_dp_store.add("elastic_ep_ticket", 1)
+        if state == ScaleDownRemovingEngineState.PREPARE:
+            self.state = ScaleDownRemovingEngineState.EPLB_RESHUFFLE
+            self.old_dp_store.add("eep_barrier_engine_count", 1)
             return True
 
-        if state == ScaleDownShutdownWorkerState.EPLB_RESHUFFLE:
+        if state == ScaleDownRemovingEngineState.EPLB_RESHUFFLE:
             if (
-                int(self.old_dp_store.get("elastic_ep_ticket"))
+                int(self.old_dp_store.get("eep_barrier_engine_count"))
                 < self.old_dp_group.size()
             ):
                 return False
@@ -347,47 +358,47 @@ class ElasticScalingState:
                 return False
             assert self.old_dp_group.rank() > 0
             self._eplb_reshuffle_before_scale_down()
-            self.state = ScaleDownShutdownWorkerState.COMPLETE
-            self.engine_core._send_worker_notification("SHUTDOWN_COMPLETE")
+            self.state = ScaleDownRemovingEngineState.COMPLETE
+            self.engine_core._eep_send_worker_notification("SHUTDOWN_COMPLETE")
             self.engine_core.shutdown()
             return True
 
-        return False
+        else:
+            assert self.state == ScaleDownRemovingEngineState.COMPLETE
+            return True
 
     def handle_notification(self, notification_type: str):
         assert self.worker_type != "new"
         if (
             notification_type == "NEW_WORKERS_INIT_READY"
-            and self.state == ScaleUpExistingWorkerState.WAIT_NEW_WORKERS_INIT
+            and self.state == ScaleUpExistingEningeState.WAIT_NEW_WORKERS_INIT
         ):
-            self.old_dp_store.add("elastic_ep_ticket", 1)
-            self.waiting_for_notification = False
-            self.state = ScaleUpExistingWorkerState.CREATE_STANDBY_GROUPS
+            self.old_dp_store.add("eep_barrier_engine_count", 1)
+            self.state = ScaleUpExistingEningeState.CREATE_STANDBY_GROUPS
         elif (
             notification_type == "NEW_WORKERS_WEIGHTS_INIT_READY"
-            and self.state == ScaleUpExistingWorkerState.WAIT_NEW_WORKERS_WEIGHTS_INIT
+            and self.state == ScaleUpExistingEningeState.WAIT_NEW_WORKERS_WEIGHTS_INIT
         ):
-            self.old_dp_store.add("elastic_ep_ticket", 1)
-            self.waiting_for_notification = False
-            self.state = ScaleUpExistingWorkerState.TRANSFER_WEIGHTS
+            self.old_dp_store.add("eep_barrier_engine_count", 1)
+            self.state = ScaleUpExistingEningeState.TRANSFER_WEIGHTS
 
     def is_complete(self) -> bool:
         if self.scale_type == "scale_up":
             return (
-                self.state == ScaleUpNewWorkerState.COMPLETE
+                self.state == ScaleUpNewEngineState.COMPLETE
                 if self.worker_type == "new"
-                else self.state == ScaleUpExistingWorkerState.COMPLETE
+                else self.state == ScaleUpExistingEningeState.COMPLETE
             )
         return (
-            self.state == ScaleDownShutdownWorkerState.COMPLETE
+            self.state == ScaleDownRemovingEngineState.COMPLETE
             if self.worker_type == "shutdown"
-            else self.state == ScaleDownRemainingWorkerState.COMPLETE
+            else self.state == ScaleDownRemainingEngineState.COMPLETE
         )
 
     def _create_standby_groups(self):
-        assert isinstance(self.new_dp_group, ParallelConfig)
-        self.new_dp_group, self.new_dp_store = (
-            self.new_dp_group.stateless_init_dp_group(return_store=True)
+        assert isinstance(self.new_dp_group_or_config, ParallelConfig)
+        self.new_dp_group_or_config, self.new_dp_store = (
+            self.new_dp_group_or_config.stateless_init_dp_group(return_store=True)
         )
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("create_standby_groups", self.reconfig_request)
@@ -413,10 +424,11 @@ class ElasticScalingState:
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] Broadcasted expert mapping to new workers")
 
-    def _sync_kv_cache_memory(self):
+    def _sync_kv_cache_memory_size(self):
         assert self.engine_core.available_gpu_memory_for_kv_cache > 0
         ParallelConfig.sync_kv_cache_memory_size(
-            self.new_dp_group, self.engine_core.available_gpu_memory_for_kv_cache
+            self.new_dp_group_or_config,
+            self.engine_core.available_gpu_memory_for_kv_cache,
         )
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] Synced KV cache memory size to new workers")
@@ -427,7 +439,8 @@ class ElasticScalingState:
         )
         old_dp_group = self.old_dp_group
         stateless_destroy_torch_distributed_process_group(old_dp_group)
-        new_dp_group = self.new_dp_group
+        assert isinstance(self.new_dp_group_or_config, torch.distributed.ProcessGroup)
+        new_dp_group = self.new_dp_group_or_config
         self.engine_core.dp_group = new_dp_group
         self.engine_core.dp_rank = new_dp_group.rank()
         self.engine_core.dp_store = self.new_dp_store
@@ -439,19 +452,23 @@ class ElasticScalingState:
             dtype=torch.int32,
             device="cpu",
         )
-        torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=self.new_dp_group)
+        torch.distributed.all_reduce(
+            tensor, op=torch.distributed.ReduceOp.MAX, group=self.new_dp_group_or_config
+        )
         data = tensor.tolist()
         self.engine_core.engines_running = bool(data[0])
         self.engine_core.current_wave = int(data[1])
         self.engine_core.step_counter = int(data[2])
-        if self.new_dp_group.rank() == 0:
+        if self.new_dp_group_or_config.rank() == 0:
+            self.engine_core._eep_send_worker_notification("RECONFIGURE_FINISHED")
             logger.info("[Elastic EP] Switched to new setup")
 
     def _eplb_reshuffle(self):
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("perform_eplb_reshuffle",)
         )
-        if self.new_dp_group.rank() == 0:
+        assert isinstance(self.new_dp_group_or_config, torch.distributed.ProcessGroup)
+        if self.new_dp_group_or_config.rank() == 0:
             logger.info("[Elastic EP] EPLB reshuffle completed")
 
     def _eplb_reshuffle_before_scale_down(self):

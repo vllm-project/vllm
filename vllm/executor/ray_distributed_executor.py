@@ -398,11 +398,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
             all_kwargs.append(kwargs)
         self._run_workers("init_worker", all_kwargs)
 
-        self._run_workers("init_device")
-        self._run_workers(
-            "load_model",
-            max_concurrent_workers=self.parallel_config.max_parallel_loading_workers,
-        )
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
+            self._run_workers("init_device")
+            self._run_workers(
+                "load_model",
+                max_concurrent_workers=self.parallel_config.max_parallel_loading_workers,
+            )
 
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):

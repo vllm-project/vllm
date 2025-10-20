@@ -457,10 +457,6 @@ class CudaPlatformBase(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
-    def device_count(cls) -> int:
-        return cuda_device_count_stateless()
-
-    @classmethod
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,
@@ -490,6 +486,10 @@ class CudaPlatformBase(Platform):
 
         pg._register_backend(device, backend_type, backend_class)
         return pg
+
+    @classmethod
+    def device_count(cls) -> int:
+        return cuda_device_count_stateless()
 
     @classmethod
     def is_kv_cache_dtype_supported(
