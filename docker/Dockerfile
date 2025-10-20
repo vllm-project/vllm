@@ -129,9 +129,8 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements/common.txt requirements/common.txt
-COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=build,src=/workspace/requirements,target=/vllm-workspace/requirements \
     uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -430,11 +429,9 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-# Copy over remaining requirements files
-COPY requirements/ requirements/
-
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=build,src=/workspace/requirements,target=/vllm-workspace/requirements \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         uv pip install --system -r requirements/dev.txt; \
