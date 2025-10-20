@@ -344,12 +344,7 @@ async def test_bytes_embed_dtype_and_endianness(
             body = responses_bytes.content
             items = [MetadataItem(**x) for x in metadata["data"]]
 
-            bytes_data = decoding_pooling_output(
-                items=items,
-                body=body,
-                embed_dtype=embed_dtype,
-                endianness=endianness,
-            )
+            bytes_data = decoding_pooling_output(items=items, body=body)
             bytes_data = [x.to(torch.float32).view(-1).tolist() for x in bytes_data]
 
             check_embeddings_close(

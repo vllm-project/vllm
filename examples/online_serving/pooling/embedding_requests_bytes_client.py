@@ -55,12 +55,7 @@ def main(args):
             body = response.content
             items = [MetadataItem(**x) for x in metadata["data"]]
 
-            embedding = decoding_pooling_output(
-                items=items,
-                body=body,
-                embed_dtype=embed_dtype,
-                endianness=endianness,
-            )
+            embedding = decoding_pooling_output(items=items, body=body)
             embedding = [x.to(torch.float32) for x in embedding]
             embedding = torch.cat(embedding)
             print(embed_dtype, endianness, embedding.shape)

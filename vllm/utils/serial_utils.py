@@ -160,15 +160,13 @@ def encoding_pooling_bytes(
 
 def decoding_pooling_output(
     items: list[MetadataItem],
-    body: bytes,
-    embed_dtype: EmbedDType,
-    endianness: Endianness,
+    body: bytes
 ) -> list[torch.Tensor]:
     items.sort(key=lambda x: x.index)
 
     tensor_list: list[torch.Tensor] = []
     for item in items:
         binary = body[item.start : item.end]
-        tensor = binary2tensor(binary, item.shape, embed_dtype, endianness)
+        tensor = binary2tensor(binary, item.shape, item.embed_dtype, item.endianness)
         tensor_list.append(tensor)
     return tensor_list
