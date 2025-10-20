@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import InitVar, field
 from typing import Any, Literal
 
-from pydantic import Field, SkipValidation, model_validator
+from pydantic import SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -37,7 +38,7 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    prefill_max_num_batched_tokens: int | None = None
+    prefill_max_num_batched_tokens: int = None  # type: ignore
     """Prefill maximum number of tokens to be processed in a single iteration.
 
     This config is used when there are no decoding requests."""
@@ -80,7 +81,7 @@ class SchedulerConfig:
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
-    enable_hybrid_chunked_prefill: bool | None = None
+    enable_hybrid_chunked_prefill: bool = None  # type: ignore
     """If True, prefill requests will only be chunked when there are decode 
     requests present, otherwise they will proceed with normal prefill 
     computation to increase throughput."""
@@ -165,6 +166,15 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
+    @field_validator(
+        "prefill_max_num_batched_tokens", "enable_hybrid_chunked_prefill", mode="wrap"
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
+
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         if self.max_model_len is None:
             self.max_model_len = 8192
@@ -182,6 +192,9 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
+
+        if self.enable_hybrid_chunked_prefill is None:
+            self.enable_hybrid_chunked_prefill = False
 
         self.prefill_max_num_batched_tokens = max(
             self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS
