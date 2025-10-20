@@ -211,15 +211,14 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
 
-        # Check if there are any requests in the decode phase in the running queue.
-        has_decode_requests = self._has_decode_requests()
-        if (
-            self.scheduler_config.enable_hybrid_chunked_prefill
-            and not has_decode_requests
-        ):
-            token_budget = self.prefill_max_num_scheduled_tokens
-        else:
-            token_budget = self.max_num_scheduled_tokens
+        token_budget = self.max_num_scheduled_tokens
+        # Check if there are any requests in the decode phase in the running queue
+        # when hybrid chunked prefill is enabled.
+        has_decode_requests = True
+        if self.scheduler_config.enable_hybrid_chunked_prefill:
+            has_decode_requests = self._has_decode_requests()
+            if not has_decode_requests:
+                token_budget = self.prefill_max_num_scheduled_tokens
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
