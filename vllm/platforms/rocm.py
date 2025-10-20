@@ -9,7 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
@@ -75,7 +75,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74bd": "AMD_Instinct_MI300X_HF",
 }
 
-# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
+# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
 if "HIP_VISIBLE_DEVICES" in os.environ:
     val = os.environ["HIP_VISIBLE_DEVICES"]
     if cuda_val := os.environ.get("CUDA_VISIBLE_DEVICES", None):
