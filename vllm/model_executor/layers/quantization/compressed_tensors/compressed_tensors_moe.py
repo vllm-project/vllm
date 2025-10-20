@@ -848,7 +848,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                rocm_aiter_fused_experts,
                 shuffle_weights,
             )
 
@@ -1056,6 +1055,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN

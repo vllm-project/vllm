@@ -19,12 +19,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (
-    _run_task_with_lock,
+from vllm.utils.async_utils import make_async
+from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
     get_open_port,
-    make_async,
 )
 from vllm.v1.outputs import SamplerOutput
 
@@ -748,3 +747,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Assume that the Ray workers are healthy.
         # TODO: check the health of the Ray workers
         return
+
+
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args, **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)
