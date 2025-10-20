@@ -416,10 +416,7 @@ def per_block_cast_to_fp8(
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    if fp8_dtype == torch.float8_e4m3fnuz:
-        sf = x_amax / 240.0
-    else:
-        sf = x_amax / 448.0
+    sf = x_amax / 224.0 if current_platform.is_fp8_fnuz() else x_amax / 448.0
     sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
     x_scaled = (x_view * (1.0 / sf)).to(fp8_dtype)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
