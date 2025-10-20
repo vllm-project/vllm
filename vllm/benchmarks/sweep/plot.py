@@ -373,9 +373,9 @@ def main():
     parser.add_argument(
         "--fig-dir",
         type=str,
-        default=None,
-        help="The directory to save the figures. "
-        "By default, this is set to `OUTPUT_DIR`.",
+        default="",
+        help="The directory to save the figures, relative to `OUTPUT_DIR`. "
+        "By default, the same directory is used.",
     )
     parser.add_argument(
         "--curve-by",
@@ -459,14 +459,18 @@ def main():
 
     args = parser.parse_args()
 
+    output_dir = Path(args.OUTPUT_DIR)
+    if not output_dir.exists():
+        raise ValueError(f"No parameter sweep results under {output_dir}")
+
     curve_by = [] if not args.curve_by else args.curve_by.split(",")
     row_by = [] if not args.row_by else args.row_by.split(",")
     col_by = [] if not args.col_by else args.col_by.split(",")
     fig_by = [] if not args.fig_by else args.fig_by.split(",")
 
     plot(
-        output_dir=Path(args.OUTPUT_DIR),
-        fig_dir=Path(args.fig_dir or args.OUTPUT_DIR),
+        output_dir=output_dir,
+        fig_dir=output_dir / args.fig_dir,
         fig_by=fig_by,
         row_by=row_by,
         col_by=col_by,
