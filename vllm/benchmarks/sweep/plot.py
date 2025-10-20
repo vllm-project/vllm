@@ -22,7 +22,8 @@ def _plot_fig(
     *,
     var_x: str,
     var_y: str,
-    bin_y: float,
+    max_x: float | None,
+    bin_x: float | None,
     dry_run: bool,
 ):
     print("[BEGIN FIGURE]")
@@ -33,7 +34,12 @@ def _plot_fig(
         return
 
     df = pd.DataFrame.from_records(fig_data)
-    df[var_y] = df[var_y] // bin_y * bin_y
+
+    if max_x is not None:
+        df = df[df[var_x] <= max_x]
+
+    if bin_x is not None:
+        df[var_x] = df[var_x] // bin_x * bin_x
 
     if len(curve_by) <= 3:
         hue, style, size, *_ = (*curve_by, None, None)
@@ -74,7 +80,8 @@ def plot(
     *,
     var_x: str,
     var_y: str,
-    bin_y: float,
+    max_x: float | None,
+    bin_x: float | None,
     dry_run: bool,
 ):
     all_data = [
@@ -105,7 +112,8 @@ def plot(
             curve_by,
             var_x=var_x,
             var_y=var_y,
-            bin_y=bin_y,
+            max_x=max_x,
+            bin_x=bin_x,
             dry_run=dry_run,
         )
 
@@ -148,10 +156,16 @@ def main():
         help="The variable for the y-axis",
     )
     parser.add_argument(
-        "--bin-y",
+        "--max-x",
         type=float,
-        default=1,
-        help="Points with y-axis values in the same bin are grouped togther "
+        default=None,
+        help="The maximum value to plot for the x-axis.",
+    )
+    parser.add_argument(
+        "--bin-x",
+        type=float,
+        default=None,
+        help="Group together points with x-axis values in the same bin "
         "to reduce noise.",
     )
     parser.add_argument(
@@ -171,7 +185,8 @@ def main():
         curve_by=curve_by,
         var_x=args.var_x,
         var_y=args.var_y,
-        bin_y=args.bin_y,
+        max_x=args.max_x,
+        bin_x=args.bin_x,
         dry_run=args.dry_run,
     )
 
