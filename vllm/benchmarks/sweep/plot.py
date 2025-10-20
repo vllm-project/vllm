@@ -278,6 +278,8 @@ def _plot_fig(
             size=size,
             markers=True,
         )
+
+        g.add_legend(title=hue)
     else:
         df["curve_group"] = (
             pd.concat(
@@ -296,7 +298,7 @@ def _plot_fig(
             markers=True,
         )
 
-    g.add_legend()
+        g.add_legend()
 
     g.savefig(fig_path)
     plt.close(g.figure)
