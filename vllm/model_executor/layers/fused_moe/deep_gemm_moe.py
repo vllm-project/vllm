@@ -31,7 +31,7 @@ from vllm.utils.deep_gemm import (
     m_grouped_fp8_gemm_nt_contiguous,
 )
 from vllm.utils.func_utils import run_once
-from vllm.utils.optional_deps import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
 

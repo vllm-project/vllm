@@ -15,7 +15,7 @@ from vllm.utils.deep_gemm import (
     get_num_sms,
     get_paged_mqa_logits_metadata,
 )
-from vllm.utils.optional_deps import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
 
 
 def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:

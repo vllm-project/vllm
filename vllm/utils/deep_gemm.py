@@ -17,7 +17,7 @@ import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.utils.optional_deps import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
 
 
 @functools.cache

@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.optional_deps import has_triton_kernels
+from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 

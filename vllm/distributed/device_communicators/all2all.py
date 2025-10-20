@@ -10,7 +10,7 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import has_flashinfer_all2all
-from vllm.utils.optional_deps import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_pplx
 
 from .base_device_communicator import All2AllManagerBase, Cache
 

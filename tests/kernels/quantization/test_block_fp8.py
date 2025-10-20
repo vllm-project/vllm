@@ -23,7 +23,7 @@ from vllm.utils.deep_gemm import (
     get_col_major_tma_aligned_tensor,
     per_block_cast_to_fp8,
 )
-from vllm.utils.optional_deps import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)

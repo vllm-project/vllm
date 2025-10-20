@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
-from vllm.utils.optional_deps import has_deep_ep, has_deep_gemm
+from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch

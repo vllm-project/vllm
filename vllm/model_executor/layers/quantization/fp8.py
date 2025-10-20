@@ -101,7 +101,7 @@ from vllm.utils.deep_gemm import (
     should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.flashinfer import has_flashinfer_moe
-from vllm.utils.optional_deps import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper

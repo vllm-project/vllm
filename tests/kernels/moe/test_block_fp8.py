@@ -25,7 +25,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
-from vllm.utils.optional_deps import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
 
 dg_available = has_deep_gemm()
 
