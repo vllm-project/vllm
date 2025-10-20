@@ -49,7 +49,6 @@ from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
     FaultHandler,
-    generate_identity_group,
     launch_core_engines,
 )
 from vllm.v1.executor.abstract import Executor
@@ -434,7 +433,7 @@ class ClientGuard:
         self,
         fault_receiver_addr: str,
         cmd_addr: str,
-        engine_registry: dict[int, str],
+        engine_registry: dict[int, bytes],
         engine_exception_q: asyncio.Queue[FaultInfo],
     ):
         self.engine_registry = engine_registry
@@ -654,17 +653,6 @@ class MPClient(EngineCoreClient):
             else:
                 self.start_engine_core_monitor()
 
-            self.engine_registry = {}
-            engine_ids = [i for i in range(dp_size)]
-            engine_core_identities = generate_identity_group(
-                peer1="client",
-                peer2="engine_core_guard",
-                use="report and cmd",
-                n=dp_size,
-            )
-            self.engine_registry = dict(zip(engine_ids, engine_core_identities))
-            addresses.engine_core_guard_identities = self.engine_registry
-            # todo 拉起ClientGuard
             if vllm_config.fault_tolerance_config.enable_fault_tolerance:
                 self.engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
                 assert addresses.fault_report_addr is not None, (
@@ -675,6 +663,8 @@ class MPClient(EngineCoreClient):
                     "addresses.client_cmd_addr should not be None at fault tolerance"
                     " scenario"
                 )
+                self.engine_registry = addresses.engine_core_guard_identities
+                assert self.engine_registry is not None
                 self.client_guard = ClientGuard(
                     addresses.fault_report_addr,
                     addresses.client_cmd_addr,

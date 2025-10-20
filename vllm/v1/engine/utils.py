@@ -78,7 +78,7 @@ class EngineZmqAddresses:
     engine_core_cmd_addr: str | None = None
     fault_report_addr: str | None = None
     client_cmd_addr: str | None = None
-    engine_core_guard_identities: dict | None = None
+    engine_core_guard_identities: dict[int, bytes] | None = None
 
 
 @dataclass
@@ -872,6 +872,16 @@ def launch_core_engines(
         )
         addresses.client_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
+        )
+        engine_ids = [i for i in range(dp_size)]
+        engine_core_identities = generate_identity_group(
+            peer1="client",
+            peer2="engine_core_guard",
+            use="report and cmd",
+            n=dp_size,
+        )
+        addresses.engine_core_guard_identities = dict(
+            zip(engine_ids, engine_core_identities)
         )
 
     # Run the DP Coordinator process with rank 0 when in

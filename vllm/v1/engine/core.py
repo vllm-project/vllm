@@ -99,7 +99,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         client_cmd_addr: str,
         worker_cmd_addr: str,
         fault_report_addr: str,
-        guard_identity: str,
+        guard_identity: bytes,
     ):
         super().__init__(daemon=True)
         self.engine_index = engine_index
