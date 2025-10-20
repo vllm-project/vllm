@@ -84,6 +84,7 @@ def _plot_fig(
 
 def plot(
     output_dir: Path,
+    fig_dir: Path,
     fig_by: list[str],
     curve_by: list[str],
     *,
@@ -92,7 +93,6 @@ def plot(
     max_x: float | None,
     bin_x: float | None,
     log_y: bool,
-    file_prefix: str,
     dry_run: bool,
 ):
     all_data = [
@@ -107,10 +107,8 @@ def plot(
     ):
         fig_group = tuple(fig_group)
 
-        fig_path = output_dir / (
-            file_prefix
-            + ("--" if file_prefix else "")
-            + "-".join(
+        fig_path = fig_dir / (
+            "-".join(
                 (
                     "FIGURE-",
                     *(f"{k}={v}" for k, v in fig_group),
@@ -146,8 +144,15 @@ def main():
         "OUTPUT_DIR",
         type=str,
         default="results",
-        help="The directory containing the results to plot. "
-        "Figures will be saved to the same directory.",
+        help="The directory containing the results to plot, "
+        "i.e., the `--output-dir` argument to the parameter sweep script.",
+    )
+    parser.add_argument(
+        "--fig-dir",
+        type=str,
+        default=None,
+        help="The directory to save the figures. "
+        "By default, this is set to `OUTPUT_DIR`.",
     )
     parser.add_argument(
         "--curve-by",
@@ -194,13 +199,6 @@ def main():
         help="Use logarithmic scaling for the y-axis.",
     )
     parser.add_argument(
-        "--file-prefix",
-        type=str,
-        default="",
-        help="If set, prepends this to the filename of the saved figures to "
-        "distinguish them from other runs of this script.",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="If set, prints the location of the figures without drawing them.",
@@ -213,6 +211,7 @@ def main():
 
     plot(
         output_dir=Path(args.OUTPUT_DIR),
+        fig_dir=Path(args.fig_dir or args.OUTPUT_DIR),
         fig_by=fig_by,
         curve_by=curve_by,
         var_x=args.var_x,
@@ -220,7 +219,6 @@ def main():
         max_x=args.max_x,
         bin_x=args.bin_x,
         log_y=args.log_y,
-        file_prefix=args.file_prefix,
         dry_run=args.dry_run,
     )
 
