@@ -58,12 +58,14 @@ from vllm.entrypoints.openai.protocol import (
     CompletionResponse,
     DetokenizeRequest,
     DetokenizeResponse,
+    EmbeddingBytesResponse,
     EmbeddingRequest,
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
     IOProcessorResponse,
     LoadLoRAAdapterRequest,
+    PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
     RerankRequest,
@@ -681,7 +683,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 )
 @with_cancellation
 @load_aware_call
-async def create_embedding(request: EmbeddingRequest, raw_request: Request):
+async def create_embedding(
+    request: EmbeddingRequest,
+    raw_request: Request,
+):
     handler = embedding(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -701,6 +706,12 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         )
     elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
+    elif isinstance(generator, EmbeddingBytesResponse):
+        return Response(
+            content=b"".join(generator.body),
+            headers={"metadata": generator.metadata},
+            media_type=generator.media_type,
+        )
 
     assert_never(generator)
 
@@ -733,6 +744,12 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         )
     elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
+    elif isinstance(generator, PoolingBytesResponse):
+        return Response(
+            content=b"".join(generator.body),
+            headers={"metadata": generator.metadata},
+            media_type=generator.media_type,
+        )
 
     assert_never(generator)
 

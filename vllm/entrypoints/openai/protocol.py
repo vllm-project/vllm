@@ -1927,6 +1927,12 @@ class EmbeddingResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
+class EmbeddingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
+
+
 class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
@@ -1940,6 +1946,12 @@ class PoolingResponse(OpenAIBaseModel):
     model: str
     data: list[PoolingResponseData]
     usage: UsageInfo
+
+
+class PoolingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
 
 
 class ScoreResponseData(OpenAIBaseModel):

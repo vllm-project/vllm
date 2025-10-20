@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import json
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, cast
+from typing import Any, Final, assert_never, cast
 
 import torch
 from fastapi import Request
-from fastapi.responses import StreamingResponse
+from flask import Response
 from typing_extensions import override
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -40,7 +41,13 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
-from vllm.utils.tensor_serial import encoding_pooling_output, tensor2binary
+from vllm.utils.tensor_serial import (
+    EMBED_DTYPE_TYPE,
+    ENCODING_FORMAT_TYPE,
+    ENDIANNESS_TYPE,
+    encoding_pooling_output,
+    tensor2binary,
+)
 
 logger = init_logger(__name__)
 
@@ -115,10 +122,14 @@ class EmbeddingMixin(OpenAIServing):
     def _build_response(
         self,
         ctx: ServeContext,
-    ) -> EmbeddingResponse | StreamingResponse | ErrorResponse:
+    ) -> EmbeddingResponse | Response | ErrorResponse:
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
-        if ctx.request.encoding_format in ["float", "base64"]:
+        encoding_format: ENCODING_FORMAT_TYPE = ctx.request.encoding_format
+        embed_dtype: EMBED_DTYPE_TYPE = ctx.request.embed_dtype
+        endianness: ENDIANNESS_TYPE = ctx.request.endianness
+
+        if encoding_format in ["float", "base64"]:
             items: list[EmbeddingResponseData] = []
             num_prompt_tokens = 0
 
@@ -127,9 +138,9 @@ class EmbeddingMixin(OpenAIServing):
                     index=idx,
                     embedding=encoding_pooling_output(
                         final_res,
-                        encoding_format=ctx.request.encoding_format,
-                        embed_dtype=ctx.request.embed_dtype,
-                        endianness=ctx.request.endianness,
+                        encoding_format=encoding_format,
+                        embed_dtype=embed_dtype,
+                        endianness=endianness,
                     ),
                 )
                 prompt_token_ids = final_res.prompt_token_ids
@@ -149,23 +160,33 @@ class EmbeddingMixin(OpenAIServing):
                 data=items,
                 usage=usage,
             )
-        else:
+        elif encoding_format == "bytes":
             num_prompt_tokens = 0
             items: list[dict[str, Any]] = []
-            bytes_list = []
+            body = []
+            offset = 0
             for idx, final_res in enumerate(final_res_batch_checked):
+                binary = tensor2binary(
+                    tensor=final_res.outputs.data,
+                    embed_dtype=embed_dtype,
+                    endianness=endianness,
+                )
+                size = len(binary)
+
                 item = {
                     "index": idx,
-                    "embed_dtype": ctx.request.embed_dtype,
-                    "endianness": ctx.request.endianness,
-                    "filename": f"embedding-{idx}.tensor",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                    "start": offset,
+                    "end": offset + size,
+                    "shape": final_res.outputs.data.shape,
                 }
 
-                prompt_token_ids = final_res.prompt_token_ids
-
+                body.append(binary)
                 items.append(item)
-                bytes_list.append(tensor2binary(final_res.outputs.data))
+                prompt_token_ids = final_res.prompt_token_ids
                 num_prompt_tokens += len(prompt_token_ids)
+                offset += size
 
             usage = {
                 "prompt_tokens": num_prompt_tokens,
@@ -179,21 +200,12 @@ class EmbeddingMixin(OpenAIServing):
                 "data": items,
                 "usage": usage,
             }
-
-            print(metadata)
-
-            """
-            streaming_response = response_compression_pooling_output(
-                metadata=metadata,
-                tensor=tensor,
-                embed_dtype=ctx.request.embed_dtype,
-                endianness=ctx.request.endianness,
+            return EmbeddingBytesResponse(
+                body=body,
+                metadata=json.dumps(metadata),
             )
-
-            return StreamingResponse(
-                streaming_response, media_type="application/octet-stream"
-            )
-            """
+        else:
+            assert_never(encoding_format)
 
     def _get_max_position_embeddings(self) -> int:
         """Get the model's effective maximum sequence length for chunking."""

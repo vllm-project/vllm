@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncGenerator
-from typing import Final, cast
+from typing import Any, Final, assert_never, cast
 
 import jinja2
 from fastapi import Request
@@ -16,6 +17,7 @@ from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
     IOProcessorRequest,
     IOProcessorResponse,
+    PoolingBytesResponse,
     PoolingChatRequest,
     PoolingCompletionRequest,
     PoolingRequest,
@@ -31,7 +33,13 @@ from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
-from vllm.utils.tensor_serial import ENCODING_FORMAT_TYPE, encoding_pooling_output
+from vllm.utils.tensor_serial import (
+    EMBED_DTYPE_TYPE,
+    ENCODING_FORMAT_TYPE,
+    ENDIANNESS_TYPE,
+    encoding_pooling_output,
+    tensor2binary,
+)
 
 logger = init_logger(__name__)
 
@@ -65,7 +73,7 @@ class OpenAIServingPooling(OpenAIServing):
         self,
         request: PoolingRequest,
         raw_request: Request | None = None,
-    ) -> PoolingResponse | IOProcessorResponse | ErrorResponse:
+    ) -> PoolingResponse | IOProcessorResponse | PoolingBytesResponse | ErrorResponse:
         """
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
@@ -246,39 +254,86 @@ class OpenAIServingPooling(OpenAIServing):
         created_time: int,
         model_name: str,
         encoding_format: ENCODING_FORMAT_TYPE,
-        embed_dtype: str,
-        endianness: str,
-    ) -> PoolingResponse:
-        items: list[PoolingResponseData] = []
-        num_prompt_tokens = 0
+        embed_dtype: EMBED_DTYPE_TYPE,
+        endianness: ENDIANNESS_TYPE,
+    ) -> PoolingResponse | PoolingBytesResponse:
+        if encoding_format in ["float", "base64"]:
+            items: list[PoolingResponseData] = []
+            num_prompt_tokens = 0
 
-        for idx, final_res in enumerate(final_res_batch):
-            item = PoolingResponseData(
-                index=idx,
-                data=encoding_pooling_output(
-                    final_res,
-                    encoding_format=encoding_format,
+            for idx, final_res in enumerate(final_res_batch):
+                item = PoolingResponseData(
+                    index=idx,
+                    data=encoding_pooling_output(
+                        final_res,
+                        encoding_format=encoding_format,
+                        embed_dtype=embed_dtype,
+                        endianness=endianness,
+                    ),
+                )
+                prompt_token_ids = final_res.prompt_token_ids
+
+                items.append(item)
+                num_prompt_tokens += len(prompt_token_ids)
+
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                total_tokens=num_prompt_tokens,
+            )
+
+            return PoolingResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                data=items,
+                usage=usage,
+            )
+        elif encoding_format == "bytes":
+            num_prompt_tokens = 0
+            items: list[dict[str, Any]] = []
+            body = []
+            offset = 0
+            for idx, final_res in enumerate(final_res_batch):
+                binary = tensor2binary(
+                    tensor=final_res.outputs.data,
                     embed_dtype=embed_dtype,
                     endianness=endianness,
-                ),
+                )
+                size = len(binary)
+
+                item = {
+                    "index": idx,
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                    "start": offset,
+                    "end": offset + size,
+                    "shape": final_res.outputs.data.shape,
+                }
+
+                body.append(binary)
+                items.append(item)
+                prompt_token_ids = final_res.prompt_token_ids
+                num_prompt_tokens += len(prompt_token_ids)
+                offset += size
+
+            usage = {
+                "prompt_tokens": num_prompt_tokens,
+                "total_tokens": num_prompt_tokens,
+            }
+
+            metadata = {
+                "id": request_id,
+                "created": created_time,
+                "model": model_name,
+                "data": items,
+                "usage": usage,
+            }
+            return PoolingBytesResponse(
+                body=body,
+                metadata=json.dumps(metadata),
             )
-            prompt_token_ids = final_res.prompt_token_ids
-
-            items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
-
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
-
-        return PoolingResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            data=items,
-            usage=usage,
-        )
+        else:
+            assert_never(encoding_format)
 
     def _build_render_config(self, request: PoolingCompletionRequest) -> RenderConfig:
         return RenderConfig(

@@ -101,3 +101,20 @@ def encoding_pooling_output(
     elif encoding_format == "bytes":
         return tensor2binary(output.outputs.data, embed_dtype, endianness)
     assert_never(encoding_format)
+
+
+def decoding_pooling_output(
+    metadata: dict,
+    body: bytes,
+    embed_dtype: str,
+    endianness: str,
+) -> list[torch.Tensor]:
+    items = metadata["data"]
+    items.sort(key=lambda x: x["index"])
+
+    tensor_list: list[torch.Tensor] = []
+    for item in items:
+        binary = body[item["start"] : item["end"]]
+        tensor = binary2tensor(binary, item["shape"], embed_dtype, endianness)
+        tensor_list.append(tensor)
+    return tensor_list

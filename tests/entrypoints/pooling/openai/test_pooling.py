@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+import json
 
 import numpy as np
 import pytest
@@ -16,6 +17,7 @@ from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     binary2tensor,
+    decoding_pooling_output,
 )
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
@@ -299,6 +301,60 @@ async def test_base64_embed_dtype_and_endianness(
                 embeddings_1_lst=base64_data,
                 name_0="float_data",
                 name_1="base64_data",
+                tol=1e-2,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_bytes_embed_dtype_and_endianness(
+    server: RemoteOpenAIServer, model_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ]
+
+    url = server.url_for("pooling")
+    float_response = requests.post(
+        url,
+        json={
+            "model": model_name,
+            "input": input_texts,
+            "encoding_format": "float",
+        },
+    )
+    responses_float = PoolingResponse.model_validate(float_response.json())
+    float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
+
+    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+        for endianness in ENDIANNESS:
+            responses_bytes = requests.post(
+                url,
+                json={
+                    "model": model_name,
+                    "input": input_texts,
+                    "encoding_format": "bytes",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                },
+            )
+
+            metadata = json.loads(responses_bytes.headers["metadata"])
+            body = responses_bytes.content
+
+            bytes_data = decoding_pooling_output(
+                metadata=metadata,
+                body=body,
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+            )
+            bytes_data = [x.to(torch.float32).view(-1).tolist() for x in bytes_data]
+
+            check_embeddings_close(
+                embeddings_0_lst=float_data,
+                embeddings_1_lst=bytes_data,
+                name_0="float_data",
+                name_1="bytes_data",
                 tol=1e-2,
             )
 
