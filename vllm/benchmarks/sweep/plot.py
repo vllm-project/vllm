@@ -76,7 +76,7 @@ def _plot_fig(
             markers=True,
         )
     else:
-        df["params"] = df[list(curve_by)].agg("-".join, axis=1)
+        df["params"] = df[list(curve_by)].astype(str).agg("-".join, axis=1)
         ax = sns.lineplot(
             df,
             x=var_x,
