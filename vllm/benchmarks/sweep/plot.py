@@ -13,7 +13,7 @@ import pandas as pd
 import seaborn as sns
 from typing_extensions import Self, override
 
-from vllm.utils.collections import full_groupby
+from vllm.utils.collection_utils import full_groupby
 
 
 class PlotFilterBase(ABC):
