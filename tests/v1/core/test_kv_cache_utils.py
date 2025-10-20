@@ -8,6 +8,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -44,7 +45,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
-from vllm.lora.request import LoRARequest
 
 pytestmark = pytest.mark.cpu_test
 
@@ -455,16 +455,14 @@ def test_generate_block_hash_extra_keys_lora():
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
     )
-    
+
     request.lora_request = LoRARequest(
-        lora_name="test_lora_adapter",
-        lora_int_id=1,
-        lora_path="/path/to/lora"
+        lora_name="test_lora_adapter", lora_int_id=1, lora_path="/path/to/lora"
     )
-    
+
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
     assert extra_keys == ("test_lora_adapter",)
-    
+
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
     assert extra_keys is None
