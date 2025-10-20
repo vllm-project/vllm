@@ -343,6 +343,14 @@ Supported models:
 
 Flags: `--tool-call-parser glm45`
 
+### Command-A Models (`command`)
+
+Supported models:
+
+* `CohereLabs/c4ai-command-a-03-2025` (The chat template is already included in the Hugging Face model files.)
+
+Flags: `--tool-call-parser command`
+
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
