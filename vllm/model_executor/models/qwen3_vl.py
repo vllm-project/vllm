@@ -79,7 +79,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import (
     MultiModalEmbeddings,
