@@ -101,6 +101,8 @@ def plot(
         for run_data in _json_load_bytes(path)
     ]
 
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
     for fig_group, fig_data in full_groupby(
         all_data,
         key=lambda item: tuple((k, str(item[k])) for k in fig_by),
