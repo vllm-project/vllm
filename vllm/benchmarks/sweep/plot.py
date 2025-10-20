@@ -143,13 +143,20 @@ def _plot_fig(
 
     g = sns.FacetGrid(df, row="row_group", col="col_group")
 
-    g.set_titles("{row_name},{col_name}")
+    if row_by and col_by:
+        g.set_titles("{row_name},{col_name}")
+    elif row_by:
+        g.set_titles("{row_name}")
+    elif col_by:
+        g.set_titles("{col_name}")
+    else:
+        g.set_titles("")
 
     if log_y:
         g.set(yscale="log")
 
     if len(curve_by) <= 3:
-        hue, style, size, *_ = (*curve_by, None, None)
+        hue, style, size, *_ = (*curve_by, None, None, None)
         g.map_dataframe(
             sns.lineplot,
             x=var_x,
@@ -259,7 +266,7 @@ def main():
     parser.add_argument(
         "--curve-by",
         type=str,
-        required=True,
+        default=None,
         help="A comma-separated list of variables, such that a separate curve "
         "is created for each combination of these variables.",
     )
