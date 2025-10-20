@@ -324,6 +324,8 @@ class LazyLoader(ModuleType):
         if self._module is None:
             self._module = self._load()
         return dir(self._module)
+
+
 # Optional dependency detection utilities
 @cache
 def _has_module(module_name: str) -> bool:
