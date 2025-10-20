@@ -47,7 +47,6 @@ class CachedRequestState:
     lora_request: Optional[LoRARequest] = None
 
     thinking_state: bool = False
-    need_early_exit: bool = False
     early_stop_signal_list: list[list[float]] = field(default_factory=list)
     early_stop_ewma_score: list[float] = field(default_factory=list)
 

@@ -16,8 +16,12 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.utils import ThinkSettings
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
@@ -532,3 +536,92 @@ def test_propose_tree(spec_token_tree):
 
     # Verify that the draft tokens match our expectations.
     assert torch.equal(result, expected_tokens)
+
+
+@pytest.mark.parametrize("early_stop_method,early_stop_signal,should_stop", [
+    ("confidence", [0.9], True),
+    ("confidence", [0.7], False),
+    ("remain", [50.0], True),
+    ("remain", [150.0], False),
+    ("progress", [0.5], True),
+    ("progress", [0.1], False),
+    ("confidence_progress_remain", [0.9, 0.5, 50.0], True),
+    ("confidence_progress_remain", [0.7, 0.5, 50.0], False),
+    ("confidence_progress_remain", [0.9, 0.1, 50.0], False),
+    ("confidence_progress_remain", [0.9, 0.5, 150.0], False),
+])
+def test_speculative_early_exit(early_stop_method, early_stop_signal,
+                                should_stop):
+    """
+    Tests the early exit functionality for speculative decoding.
+    """
+    # Setup runner and configurations
+    device = torch.device(current_platform.device_type)
+    proposer = _create_proposer("eagle3", num_speculative_tokens=5)
+    proposer.speculative_config.early_stop_thinking = True
+    proposer.speculative_config.early_stop_method = early_stop_method
+
+    # Mock GPUModelRunner
+    runner = mock.MagicMock(spec=GPUModelRunner)
+    runner.model = mock.MagicMock()
+    runner.drafter = proposer
+    runner.speculative_config = proposer.speculative_config
+
+    # Mock ThinkSettings
+    think_settings = ThinkSettings(start_think_id=100,
+                                   stop_think_id=101,
+                                   min_think_tokens=0,
+                                   think_prob_threshold={
+                                       "confidence": 0.8,
+                                       "progress": 0.3,
+                                       "remain": 100.0
+                                   })
+    think_settings.step_split_token_ids.add(200)
+    runner.model.think_settings = think_settings
+
+    # Setup request state to simulate a thinking step
+    output_token_ids = [1, 2, 3, 4, 5, 6]
+    req_id = "test_req_1"
+    req_state: CachedRequestState = CachedRequestState(
+        req_id=req_id,
+        prompt_token_ids=[0],
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        mm_kwargs=[],
+        mm_positions=[],
+        block_ids=([], ),
+        generator=None,
+        num_computed_tokens=len(output_token_ids),
+        output_token_ids=output_token_ids,
+        thinking_state=True)
+    req_state.early_stop_ewma_score = early_stop_signal
+
+    input_batch: InputBatch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=True,
+        vocab_size=1024,
+        block_sizes=[16],
+    )
+    input_batch.add_request(req_state)
+
+    runner.requests = {req_id: req_state}
+    runner.input_batch = input_batch
+
+    # Prepare sampled tokens that include a step_split_token
+    valid_sampled_token_ids = [[200, 10, 11, 12, 13]]
+
+    GPUModelRunner._apply_early_stop_thinking(runner, valid_sampled_token_ids)
+
+    if should_stop:
+        # Expect the stop_think_id to be inserted and sequence truncated
+        assert valid_sampled_token_ids[0] == [
+            200, think_settings.stop_think_id
+        ]
+        assert not req_state.thinking_state
+    else:
+        # Expect the tokens to remain unchanged
+        assert valid_sampled_token_ids[0] == [200, 10, 11, 12, 13]
+        assert req_state.thinking_state
