@@ -174,6 +174,9 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+    def long_prefill_token_threshold(self, request: Optional[Request]) -> int:
+        return self.scheduler_config.long_prefill_token_threshold
+    
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -213,8 +216,8 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            if 0 < self.long_prefill_token_threshold(request) < num_new_tokens:
+                num_new_tokens = self.long_prefill_token_threshold(request)
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -446,11 +449,11 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = request.num_tokens - num_computed_tokens
                     if (
                         0
-                        < self.scheduler_config.long_prefill_token_threshold
+                        < self.long_prefill_token_threshold(request)
                         < num_new_tokens
                     ):
                         num_new_tokens = (
-                            self.scheduler_config.long_prefill_token_threshold
+                            self.long_prefill_token_threshold(request)
                         )
 
                     # chunked prefill has to be enabled explicitly to allow
