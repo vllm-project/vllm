@@ -35,17 +35,27 @@ def _plot_fig(
     print("[BEGIN FIGURE]")
     print(f"Output file: {fig_path}")
 
-    if dry_run:
-        print("[END FIGURE]")
-        return
-
     df = pd.DataFrame.from_records(fig_data)
+    if var_x not in df.columns:
+        raise ValueError(
+            f"Cannot find {var_x=!r} in parameter sweep results. "
+            f"Available variables: {df.columns}"
+        )
+    if var_y not in df.columns:
+        raise ValueError(
+            f"Cannot find {var_y=!r} in parameter sweep results. "
+            f"Available variables: {df.columns}"
+        )
 
     if max_x is not None:
         df = df[df[var_x] <= max_x]
 
     if bin_x is not None:
         df[var_x] = df[var_x] // bin_x * bin_x
+
+    if dry_run:
+        print("[END FIGURE]")
+        return
 
     if len(curve_by) <= 3:
         hue, style, size, *_ = (*curve_by, None, None)
@@ -152,7 +162,7 @@ def plot(
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     with ProcessPoolExecutor() as pool:
-        pool.map(
+        out = pool.map(
             partial(
                 _plot_fig_by_group,
                 fig_dir,
@@ -169,6 +179,9 @@ def plot(
                 key=lambda item: tuple((k, str(item[k])) for k in fig_by),
             ),
         )
+
+        # Collect the results
+        all(out)
 
 
 def main():
