@@ -127,7 +127,7 @@ def _plot_fig(
         pd.concat(
             [k + "=" + df[k].astype(str) for k in row_by],
             axis=1,
-        ).agg("-".join, axis=1)
+        ).agg("\n".join, axis=1)
         if row_by
         else "(All)"
     )
@@ -136,7 +136,7 @@ def _plot_fig(
         pd.concat(
             [k + "=" + df[k].astype(str) for k in col_by],
             axis=1,
-        ).agg("-".join, axis=1)
+        ).agg("\n".join, axis=1)
         if col_by
         else "(All)"
     )
@@ -144,7 +144,7 @@ def _plot_fig(
     g = sns.FacetGrid(df, row="row_group", col="col_group")
 
     if row_by and col_by:
-        g.set_titles("{row_name},{col_name}")
+        g.set_titles("{row_name}\n{col_name}")
     elif row_by:
         g.set_titles("{row_name}")
     elif col_by:
@@ -157,6 +157,7 @@ def _plot_fig(
 
     if len(curve_by) <= 3:
         hue, style, size, *_ = (*curve_by, None, None, None)
+
         g.map_dataframe(
             sns.lineplot,
             x=var_x,
@@ -171,7 +172,7 @@ def _plot_fig(
             pd.concat(
                 [k + "=" + df[k].astype(str) for k in curve_by],
                 axis=1,
-            ).agg("-".join, axis=1)
+            ).agg("\n".join, axis=1)
             if curve_by
             else "(All)"
         )
