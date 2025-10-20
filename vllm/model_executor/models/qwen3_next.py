@@ -71,7 +71,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .interfaces import (
@@ -325,7 +325,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
-                dtype=torch.float32,
             )
         )
 

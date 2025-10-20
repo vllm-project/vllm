@@ -107,6 +107,41 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_bee(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Open-Bee/Bee-8B-RL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        trust_remote_code=True,
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_command_a_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "CohereLabs/command-a-vision-07-2025"
 
@@ -1215,6 +1250,7 @@ def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
+    "bee": load_bee,
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
     "gemma3": load_gemma3,

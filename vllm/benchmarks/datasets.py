@@ -40,7 +40,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 try:
     from datasets import load_dataset
@@ -479,6 +479,22 @@ class RandomDataset(BenchmarkDataset):
         batchsize: int = 1,
         **kwargs,
     ) -> list[SampleRequest]:
+        # validate total input tokens (prefix + sampled) is at least 1.
+        num_special = int(tokenizer.num_special_tokens_to_add())
+        real_input_len = max(0, int(input_len) - num_special)
+        min_sampled_input = math.floor(real_input_len * (1.0 - float(range_ratio)))
+        min_total_input = int(prefix_len) + min_sampled_input
+        if min_total_input < 1:
+            raise ValueError(
+                "--random-input-len is too small: with tokenizer special "
+                f"tokens {num_special} and --random-range-ratio {range_ratio}, "
+                "the minimum possible total input tokens (prefix + sampled) is "
+                f"{min_total_input}. Increase --random-input-len and/or "
+                "--random-prefix-len, or decrease --random-range-ratio so that "
+                "prefix_len + floor(max(0, random_input_len - num_special)) "
+                "* (1 - range_ratio) >= 1."
+            )
+
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
