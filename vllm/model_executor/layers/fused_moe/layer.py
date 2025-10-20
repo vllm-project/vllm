@@ -1393,7 +1393,7 @@ class FusedMoE(CustomOp):
                 "Only softmax scoring function is supported for non-grouped topk."
             )
 
-        moe = FusedMoEConfig(
+        self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
@@ -1405,24 +1405,26 @@ class FusedMoE(CustomOp):
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
         )
-        self.moe_config: FusedMoEConfig = moe
+
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
+        def _get_quant_method() -> FusedMoEMethodBase:
+            """
+            Helper method to ensure self.quant_method is never None and
+            of the proper type.
+            """
+            quant_method = None
+            if self.quant_config is not None:
+                quant_method = self.quant_config.get_quant_method(self, prefix)
+            if quant_method is None:
+                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
+            assert isinstance(quant_method, FusedMoEMethodBase)
+            return quant_method
+
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
-        quant_method: QuantizeMethodBase | None = None
-        quant_method = (
-            UnquantizedFusedMoEMethod(moe)
-            if quant_config is None
-            else quant_config.get_quant_method(self, prefix)
-        )
-        if quant_method is None:
-            quant_method = UnquantizedFusedMoEMethod(moe)
-
-        assert quant_method is not None
-        assert isinstance(quant_method, FusedMoEMethodBase)
-        self.quant_method = quant_method
+        self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
         if not self.moe_config.is_act_and_mul:
             # Avoid circular import
@@ -1442,20 +1444,17 @@ class FusedMoE(CustomOp):
                     "is_act_and_mul=False is supported only for CUDA for now"
                 )
 
-        if self.enable_eplb:
-            from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
-
-            if not isinstance(quant_method, (Fp8MoEMethod, UnquantizedFusedMoEMethod)):
-                # TODO: Add support for additional quantization methods.
-                # The implementation for other quantization methods does not
-                # contain essential differences, but the current quant API
-                # design causes duplicated work when extending to new
-                # quantization methods, so I'm leaving it for now.
-                # If you plan to add support for more quantization methods,
-                # please refer to the implementation in `Fp8MoEMethod`.
-                raise NotImplementedError(
-                    "EPLB is only supported for FP8 quantization for now."
-                )
+        if self.enable_eplb and not self.quant_method.supports_eplb:
+            # TODO: Add support for additional quantization methods.
+            # The implementation for other quantization methods does not
+            # contain essential differences, but the current quant API
+            # design causes duplicated work when extending to new
+            # quantization methods, so I'm leaving it for now.
+            # If you plan to add support for more quantization methods,
+            # please refer to the implementation in `Fp8MoEMethod`.
+            raise NotImplementedError(
+                "EPLB is only supported for FP8 quantization for now."
+            )
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
