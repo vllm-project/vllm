@@ -239,7 +239,7 @@ class RocmPlatform(Platform):
             if use_sparse:
                 if kv_cache_dtype.startswith("fp8"):
                     raise ValueError(
-                        "ROCMAiterMLASparseBackend dosen't support fp8 kv_cache_dtype."
+                        "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
                     )
 
                 logger.info_once("Using Sparse MLA backend on V1 engine.")
