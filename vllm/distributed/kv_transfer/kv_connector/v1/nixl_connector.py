@@ -39,7 +39,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -462,7 +462,9 @@ class NixlConnectorScheduler:
 
         params = request.kv_transfer_params
         logger.debug(
-            "NIXLConnector request_finished, request_status=%s, kv_transfer_params=%s",
+            "NIXLConnector request_finished(%s), request_status=%s, "
+            "kv_transfer_params=%s",
+            request.request_id,
             request.status,
             params,
         )
@@ -494,6 +496,12 @@ class NixlConnectorScheduler:
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
+            logger.debug(
+                "NIXLConnector request_finished(%s) waiting for %d seconds "
+                "for remote decode to fetch blocks",
+                request.request_id,
+                envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
+            )
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
