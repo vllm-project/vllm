@@ -67,17 +67,17 @@ class _HfExamplesInfo:
 
     is_available_online: bool = True
     """
-    Set this to ``False`` if the name of this architecture no longer exists on
+    Set this to `False` if the name of this architecture no longer exists on
     the HF repo. To maintain backwards compatibility, we have not removed them
     from the main model registry, so without this flag the registry tests will
     fail.
     """
 
     trust_remote_code: bool = False
-    """The ``trust_remote_code`` level required to load the model."""
+    """The `trust_remote_code` level required to load the model."""
 
     hf_overrides: dict[str, Any] = field(default_factory=dict)
-    """The ``hf_overrides`` required to load the model."""
+    """The `hf_overrides` required to load the model."""
 
     max_model_len: int | None = None
     """
@@ -566,6 +566,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"),
+    "BeeForConditionalGeneration": _HfExamplesInfo(
+        "Open-Bee/Bee-8B-RL",
+        trust_remote_code=True,
+    ),
     "Blip2ForConditionalGeneration": _HfExamplesInfo(
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},

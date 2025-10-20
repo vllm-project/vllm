@@ -30,9 +30,9 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
-from vllm.utils.asyncio import cancel_task_threadsafe
-from vllm.utils.collections import as_list
-from vllm.utils.functools import deprecate_kwargs
+from vllm.utils.async_utils import cancel_task_threadsafe
+from vllm.utils.collection_utils import as_list
+from vllm.utils.func_utils import deprecate_kwargs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -40,7 +40,11 @@ from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollec
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
+from vllm.v1.metrics.loggers import (
+    StatLoggerFactory,
+    StatLoggerManager,
+    load_stat_logger_plugin_factories,
+)
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
@@ -100,11 +104,16 @@ class AsyncLLM(EngineClient):
         self.observability_config = vllm_config.observability_config
         self.log_requests = log_requests
 
-        self.log_stats = log_stats or (stat_loggers is not None)
-        if not log_stats and stat_loggers is not None:
+        custom_stat_loggers = list(stat_loggers or [])
+        custom_stat_loggers.extend(load_stat_logger_plugin_factories())
+
+        has_custom_loggers = bool(custom_stat_loggers)
+        self.log_stats = log_stats or has_custom_loggers
+        if not log_stats and has_custom_loggers:
             logger.info(
-                "AsyncLLM created with log_stats=False and non-empty custom "
-                "logger list; enabling logging without default stat loggers"
+                "AsyncLLM created with log_stats=False, "
+                "but custom stat loggers were found; "
+                "enabling logging without default stat loggers."
             )
 
         if self.model_config.skip_tokenizer_init:
@@ -144,7 +153,7 @@ class AsyncLLM(EngineClient):
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
                 engine_idxs=self.engine_core.engine_ranks_managed,
-                custom_stat_loggers=stat_loggers,
+                custom_stat_loggers=custom_stat_loggers,
                 enable_default_loggers=log_stats,
                 client_count=client_count,
                 aggregate_engine_logging=aggregate_engine_logging,

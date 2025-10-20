@@ -8,7 +8,7 @@ This page provides detailed instructions on how to do so.
 
 ## Built-in models
 
-To add a model directly to the vLLM library, start by forking our [GitHub repository](https://github.com/vllm-project/vllm) and then [build it from source][build-from-source].
+To add a model directly to the vLLM library, start by forking our [GitHub repository](https://github.com/vllm-project/vllm) and then [build it from source](../../getting_started/installation/gpu.md#build-wheel-from-source).
 This gives you the ability to modify the codebase and test your model.
 
 After you have implemented your model (see [tutorial](basic.md)), put it into the [vllm/model_executor/models](../../../vllm/model_executor/models) directory.
