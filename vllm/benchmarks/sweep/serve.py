@@ -108,9 +108,9 @@ def _get_comb_base_path(
 ):
     return output_dir / "-".join(
         (
-            "SERVE",
+            "SERVE-",
             serve_comb.as_text(sep="-"),
-            "BENCH",
+            "BENCH-",
             bench_comb.as_text(sep="-"),
         )
     ).replace("/", "_").replace("..", "__")  # Sanitize
@@ -228,9 +228,9 @@ def _get_sla_base_path(
 ):
     return output_dir / "-".join(
         (
-            "SERVE",
+            "SERVE-",
             serve_comb.as_text(sep="-"),
-            "BENCH",
+            "BENCH-",
             bench_comb.as_text(sep="-"),
         )
     ).replace("/", "_").replace("..", "__")  # Sanitize
@@ -244,7 +244,7 @@ def _get_sla_iter_path(
 ):
     if sla_value is None:
         prefix = sla_comb.as_text(sep="-")
-        return base_path / f"SLA-{prefix}.json"
+        return base_path / f"SLA--{prefix}.json"
 
     return base_path / f"{sla_variable}={sla_value}"
 

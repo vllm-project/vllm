@@ -112,7 +112,7 @@ def plot(
             + ("--" if file_prefix else "")
             + "-".join(
                 (
-                    "FIGURE",
+                    "FIGURE-",
                     *(f"{k}={v}" for k, v in fig_group),
                 )
             )
