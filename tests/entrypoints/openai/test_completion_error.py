@@ -80,8 +80,8 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
 
 
 @pytest.mark.asyncio
-async def test_completion_502_error_non_stream():
-    """test finish_reason='error' returns 502 BadGateway (non-streaming)"""
+async def test_completion_error_non_stream():
+    """test finish_reason='error' returns 503 ServiceUnavailable (non-streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
@@ -128,14 +128,14 @@ async def test_completion_502_error_non_stream():
     response = await serving_completion.create_completion(request)
 
     assert isinstance(response, ErrorResponse)
-    assert response.error.type == "BadGateway"
+    assert response.error.type == "ServiceUnavailable"
     assert response.error.message == "Service temporarily unavailable"
-    assert response.error.code == HTTPStatus.BAD_GATEWAY
+    assert response.error.code == HTTPStatus.SERVICE_UNAVAILABLE
 
 
 @pytest.mark.asyncio
-async def test_completion_502_error_stream():
-    """test finish_reason='error' returns 502 BadGateway (streaming)"""
+async def test_completion_error_stream():
+    """test finish_reason='error' returns 503 ServiceUnavailable (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False

@@ -5,6 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import cast
 
 import jinja2
@@ -289,11 +290,21 @@ class OpenAIServingCompletion(OpenAIServing):
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
-            # check for error finish reason and return 502 error
+            # check for error finish reason and return 503 error
+            # finish_reason='error' indicates a retryable request-level internal error
             for final_res in final_res_batch_checked:
-                error = self._handle_error_finish_reason(final_res.outputs, request_id)
-                if error:
-                    return error
+                for output in final_res.outputs:
+                    if output.finish_reason == "error":
+                        logger.error(
+                            "Request-level error for request %s: %s",
+                            request_id,
+                            output.stop_reason or "unknown",
+                        )
+                        return self.create_error_response(
+                            "Service temporarily unavailable",
+                            err_type="ServiceUnavailable",
+                            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                        )
 
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
@@ -444,9 +455,16 @@ class OpenAIServingCompletion(OpenAIServing):
                     stop_reason = output.stop_reason
 
                     # check for error finish reason and abort streaming
-                    if error_data := self._handle_streaming_error_finish_reason(
-                        finish_reason, request_id
-                    ):
+                    # finish_reason='error' indicates a retryable error
+                    if finish_reason == "error":
+                        logger.error(
+                            "Request-level error for request %s: %s",
+                            request_id,
+                            stop_reason or "unknown",
+                        )
+                        error_data = self.create_streaming_error_response(
+                            "Service temporarily unavailable"
+                        )
                         yield f"data: {error_data}\n\n"
                         yield "data: [DONE]\n\n"
                         return

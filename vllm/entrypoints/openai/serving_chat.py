@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Final
 
 import jinja2
@@ -1109,9 +1110,16 @@ class OpenAIServingChat(OpenAIServing):
                     # if the model is finished generating
                     else:
                         # check for error finish reason and abort streaming
-                        if error_data := self._handle_streaming_error_finish_reason(
-                            output.finish_reason, request_id
-                        ):
+                        # finish_reason='error' indicates a retryable error
+                        if output.finish_reason == "error":
+                            logger.error(
+                                "Request-level error for request %s: %s",
+                                request_id,
+                                output.stop_reason or "unknown",
+                            )
+                            error_data = self.create_streaming_error_response(
+                                "Service temporarily unavailable"
+                            )
                             yield f"data: {error_data}\n\n"
                             yield "data: [DONE]\n\n"
                             return
@@ -1314,9 +1322,20 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
-        # Check for error finish reason and return 502 error
-        if error := self._handle_error_finish_reason(final_res.outputs, request_id):
-            return error
+        # Check for error finish reason and return 503 error
+        # finish_reason='error' indicates a retryable request-level internal error
+        for output in final_res.outputs:
+            if output.finish_reason == "error":
+                logger.error(
+                    "Request-level error for request %s: %s",
+                    request_id,
+                    output.stop_reason or "unknown",
+                )
+                return self.create_error_response(
+                    "Service temporarily unavailable",
+                    err_type="ServiceUnavailable",
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
