@@ -654,13 +654,23 @@ def multi_thread_safetensors_weights_iterator(
             yield from state_dict.items()
 
 
+def _infer_streamer_device() -> str | None:
+    """Return the device string expected by Run:AI streamer."""
+    if current_platform.is_cuda():
+        index = torch.cuda.current_device()
+        return f"cuda:{index}" if index else None
+
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
-        streamer.stream_files(hf_weights_files)
+        device = _infer_streamer_device()
+        if device is not None:
+            streamer.stream_files(hf_weights_files, device=device)
+        else:
+            streamer.stream_files(hf_weights_files)
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
