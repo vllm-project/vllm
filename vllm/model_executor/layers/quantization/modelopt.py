@@ -72,7 +72,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.parameter import ModelWeightParameter, PerTensorScaleParameter
 from vllm.scalar_type import scalar_types
-from vllm.utils import next_power_of_2
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -1125,16 +1124,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         return out.view(*output_shape)
 
 
-def _get_tile_tokens_dim(num_tokens: int, top_k: int, num_experts: int) -> int:
-    # Guess tokens per expert assuming perfect expert distribution first.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_power_of_2(num_tokens_per_expert)
-    # Cap to 8-64 tokens per CTA tile as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-    return tile_tokens_dim
-
-
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
     MoE Method for FP4 Quantization.
@@ -1332,8 +1321,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ):
         from flashinfer import nvfp4_block_scale_interleave
         from flashinfer.fused_moe.core import (
-            _maybe_get_cached_w2_permute_indices,
             _maybe_get_cached_w3_w1_permute_indices,
+            get_w2_permute_indices_with_cache,
         )
 
         """Prepare quantized weights for kernel (done offline with weights)."""
@@ -1394,7 +1383,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 )
             )
 
-            permute_indices = _maybe_get_cached_w2_permute_indices(
+            permute_indices = get_w2_permute_indices_with_cache(
                 self._cache_permute_indices,
                 gemm2_weights_fp4[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -1405,7 +1394,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 .contiguous()
             )
 
-            permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+            permute_sf_indices = get_w2_permute_indices_with_cache(
                 self._cache_permute_indices,
                 gemm2_scales_linear_fp4[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -1664,9 +1653,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 routed_scaling_factor=None,
-                tile_tokens_dim=_get_tile_tokens_dim(
-                    x.shape[0], top_k, layer.local_num_experts
-                ),
+                tile_tokens_dim=None,
                 routing_method_type=routing_method_type,
                 do_finalize=True,
             )[0]

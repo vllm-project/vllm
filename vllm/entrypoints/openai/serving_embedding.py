@@ -39,8 +39,8 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.utils import chunk_list
-from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.collection_utils import chunk_list
 
 logger = init_logger(__name__)
 
