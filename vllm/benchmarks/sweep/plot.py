@@ -19,6 +19,13 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
         return json.load(f)
 
 
+def _get_metric(run_data: dict[str, object], metric_key: str):
+    try:
+        return run_data[metric_key]
+    except KeyError as exc:
+        raise ValueError(f"Cannot find metric {metric_key!r} in {run_data=}") from exc
+
+
 def _plot_fig(
     fig_path: Path,
     fig_title: str,
@@ -179,7 +186,7 @@ def plot(
             ),
             full_groupby(
                 all_data,
-                key=lambda item: tuple((k, str(item[k])) for k in fig_by),
+                key=lambda item: tuple((k, str(_get_metric(item, k))) for k in fig_by),
             ),
         )
 
