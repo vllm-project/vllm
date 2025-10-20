@@ -78,6 +78,9 @@ async def generate(
 async def test_load(
     output_kind: RequestOutputKind, data_parallel_backend: str, async_scheduling: bool
 ):
+    if async_scheduling and data_parallel_backend == "ray":
+        # TODO(NickLucche) Re-enable when async scheduling is supported
+        pytest.skip("Async scheduling is not supported with ray")
     stats_loggers = {}
 
     @dataclass
