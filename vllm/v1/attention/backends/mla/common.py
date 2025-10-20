@@ -212,7 +212,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -1271,7 +1271,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             kwargs["num_splits"] = 1
 
         attn_out = self.flash_attn_varlen_func(

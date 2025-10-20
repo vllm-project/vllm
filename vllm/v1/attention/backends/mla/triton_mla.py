@@ -15,7 +15,7 @@ from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.config.cache import BlockSize, CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -185,7 +185,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
-        num_kv_splits = 1 if vllm_kernel_override_batch_invariant() else 4
+        num_kv_splits = 1 if vllm_is_batch_invariant() else 4
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(

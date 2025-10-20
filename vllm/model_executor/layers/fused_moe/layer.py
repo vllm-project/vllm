@@ -52,8 +52,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, direct_register_custom_op, has_deep_ep, has_pplx, round_up
+from vllm.utils import cdiv, has_deep_ep, has_pplx, round_up
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
@@ -992,6 +993,11 @@ def maybe_roundup_hidden_size(
     if moe_parallel_config.use_deepep_ht_kernels:
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
+        )
+
+    if moe_parallel_config.use_deepep_ll_kernels:
+        hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size
         )
 
     # we are padding globally so EP buffer allocation works

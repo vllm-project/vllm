@@ -5,7 +5,7 @@
 import enum
 from typing import TYPE_CHECKING
 
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend

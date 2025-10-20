@@ -404,7 +404,7 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
             # to ensure inference when chunked_prefill is disabled
-            seq_lens=seq_lens_cpu.tolist(),
+            seq_lens=seq_lens_cpu.tolist()[num_decodes:],  # prefill
             decode_seq_lens_tensor=seq_lens_cpu[:num_decodes],  # decode
             decode_max_seq_len=max_decode_seq_len,  # decode
             decode_block_tables=block_table_tensor[:num_decodes],  # decode
@@ -609,7 +609,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     prefill_meta.prefill_block_tables,
                     self.alibi_slopes,
                 )
-
         if decode_meta := attn_metadata.decode_metadata:
             assert attn_type != AttentionType.ENCODER_ONLY, (
                 "Encoder-only models should not have decode metadata."
@@ -678,7 +677,12 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         causal_attn = attn_type == AttentionType.DECODER
 
         seq_lens_q, seq_lens_kv = attn_metadata.get_seq_lens(attn_type)
-        start_q, start_kv = 0, 0
+        # Incoming Q and KV contain decoded tokens as well, hence start at an offset
+        # equal to num_decode_tokens since decode requests appear first
+        start_q, start_kv = (
+            attn_metadata.num_decode_tokens,
+            attn_metadata.num_decode_tokens,
+        )
         for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv, attn_masks):
             end_q = start_q + seq_len_q
             end_kv = start_kv + seq_len_kv
