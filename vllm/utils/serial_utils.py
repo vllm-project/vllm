@@ -121,7 +121,7 @@ class MetadataItem:
 
 def encoding_pooling_bytes(
     pooling_outputs: list[PoolingRequestOutput],
-    embed_dtype: EMBED_DTYPE_TO_TORCH_DTYPE,
+    embed_dtype: EmbedDType,
     endianness: Endianness,
 ):
     num_prompt_tokens = 0
