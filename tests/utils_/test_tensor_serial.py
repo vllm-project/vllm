@@ -24,7 +24,7 @@ def test_encode_and_decode(embed_dtype: str, endianness: str):
             torch.float32
         )
 
-        if "embed_dtype" in ["float32", "float16", "bfloat16"]:
+        if embed_dtype in ["float32", "float16", "bfloat16"]:
             torch.testing.assert_close(tensor, new_tensor, atol=1e-7, rtol=1e-7)
         else:  # for fp8
             torch.testing.assert_close(tensor, new_tensor, atol=0.1, rtol=0.1)
