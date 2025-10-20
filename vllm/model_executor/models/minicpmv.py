@@ -49,7 +49,6 @@ from vllm.model_executor.layers.resampler import (
     Resampler2,
     get_2d_sincos_pos_embed,
 )
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -86,8 +85,9 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import flatten_2d_lists
+from vllm.utils.collection_utils import flatten_2d_lists
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (
@@ -1129,12 +1129,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                image_features = self._process_vision_input(image_input)
-                multimodal_embeddings += tuple(image_features)
+                image_embeddings = self._process_vision_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_features = self._process_vision_input(video_input)
-                multimodal_embeddings += tuple(video_features)
+                video_embeddings = self._process_vision_input(video_input)
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
