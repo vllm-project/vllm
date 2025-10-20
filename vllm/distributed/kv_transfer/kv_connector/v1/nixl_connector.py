@@ -962,7 +962,10 @@ class NixlConnectorWorker:
                     continue
 
                 seen_base_addresses.append(base_addr)
-                seen_addresses_device_id.append(cache.get_device())
+                # Need to make sure the device ID is non-negative for NIXL,
+                # Torch uses -1 to indicate CPU tensors while NIXL uses explicit
+                # memory type.
+                seen_addresses_device_id.append(max(cache.get_device(), 0))
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
                 if tensor_size_bytes is None:
@@ -985,8 +988,11 @@ class NixlConnectorWorker:
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
                         "All kv cache tensors must have the same size"
                     )
+                # Need to make sure the device ID is non-negative for NIXL,
+                # Torch uses -1 to indicate CPU tensors while NIXL uses explicit
+                # memory type.
                 caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, cache.get_device(), "")
+                    (base_addr, curr_tensor_size_bytes, max(cache.get_device(), 0), "")
                 )
 
         logger.debug(

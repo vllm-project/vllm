@@ -291,6 +291,8 @@ def test_kv_transfer_metadata(dist_init):
     # of role SCHEDULER, and expect it to be serving NixlAgentMetadata from
     # all workers of the instance.
     vllm_config = create_vllm_config()
+    # in case the test runs on non-GPU machine
+    vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
     scheduler = create_scheduler(vllm_config)
 
     # Create two NixlConnector of role WORKER, one is the worker of
@@ -398,6 +400,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 engine_id=self.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
+                device_id=[0],
                 num_blocks=1,
                 block_lens=self.block_len_per_layer,
                 attn_backend_name=self.backend_name,
@@ -644,6 +647,7 @@ class TestNixlHandshake:
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
+                device_id=[0],
                 num_blocks=1,
                 block_lens=worker.block_len_per_layer,
                 attn_backend_name=worker.backend_name,
