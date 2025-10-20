@@ -1135,8 +1135,11 @@ class Scheduler(SchedulerInterface):
         if failed_kv_load_req_ids:
             for req_id in failed_kv_load_req_ids:
                 request = self.requests.get(req_id)
-                if request is None:
+                # only create output and free for finished requests (abort case).
+                # recompute case: requests remain RUNNING and will be rescheduled.
+                if request is None or not request.is_finished():
                     continue
+
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
