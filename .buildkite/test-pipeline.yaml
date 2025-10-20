@@ -1020,6 +1020,11 @@ steps:
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
   # end io_processor plugins test
+  # begin stat_logger plugins test
+  - pip install -e ./plugins/vllm_add_dummy_stat_logger
+  - pytest -v -s plugins_tests/test_stats_logger_plugins.py
+  - pip uninstall dummy_stat_logger -y
+  # end stat_logger plugins test
   # other tests continue here:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
@@ -1085,7 +1090,7 @@ steps:
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
   
-- label: NixlConnector P/D accuracy tests (Distributed) # 30min
+- label: NixlConnector PD accuracy tests (Distributed) # 30min
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
