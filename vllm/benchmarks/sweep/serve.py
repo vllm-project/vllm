@@ -79,7 +79,9 @@ def _run_benchmark(
             return run_data
 
     if server is None:
-        assert dry_run
+        if not dry_run:
+            raise ValueError(f"Cannot find results at {output_path}")
+
         print("[END BENCHMARK]")
         return None
 
