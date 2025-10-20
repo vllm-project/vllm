@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import LazyDict
+from vllm.utils.collection_utils import LazyDict
 
 logger = init_logger(__name__)
 

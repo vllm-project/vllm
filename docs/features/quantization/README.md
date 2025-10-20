@@ -64,4 +64,4 @@ th:not(:first-child) {
 !!! note
     This compatibility chart is subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
 
-    For the most up-to-date information on hardware support and quantization methods, please refer to <gh-dir:vllm/model_executor/layers/quantization> or consult with the vLLM development team.
+    For the most up-to-date information on hardware support and quantization methods, please refer to [vllm/model_executor/layers/quantization](../../../vllm/model_executor/layers/quantization) or consult with the vLLM development team.

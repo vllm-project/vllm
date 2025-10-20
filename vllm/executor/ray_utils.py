@@ -15,7 +15,7 @@ from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import get_ip
+from vllm.utils.network_utils import get_ip
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -90,14 +90,17 @@ try:
 
             execute_model_req = self.input_decoder.decode(serialized_req)
 
+            assert self.worker is not None, "Worker is not initialized"
+
             # TODO(swang): This is needed right now because Ray Compiled Graph
             # executes on a background thread, so we need to reset torch's
             # current device.
             if not self.compiled_dag_cuda_device_set:
+                assert self.worker.device is not None
                 current_platform.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            output = self.worker._execute_model_spmd(
+            output = self.worker._execute_model_spmd(  # type: ignore[attr-defined]
                 execute_model_req, intermediate_tensors
             )
             # Pipeline model request and output to the next pipeline stage.
@@ -119,6 +122,7 @@ try:
                     # Not needed
                     pass
                 else:
+                    assert self.worker.device is not None
                     current_platform.set_device(self.worker.device)
 
                 self.compiled_dag_cuda_device_set = True
@@ -139,6 +143,7 @@ try:
                 scheduler_output, intermediate_tensors = scheduler_output
             else:
                 scheduler_output, intermediate_tensors = scheduler_output, None
+            assert self.worker.model_runner is not None
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )

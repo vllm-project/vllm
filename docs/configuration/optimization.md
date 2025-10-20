@@ -27,8 +27,6 @@ You can monitor the number of preemption requests through Prometheus metrics exp
 
 In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as recomputation has lower overhead in the V1 architecture.
 
-[](){ #chunked-prefill }
-
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.
@@ -100,7 +98,7 @@ from vllm import LLM
 llm = LLM(
     model="meta-llama/Llama-3.3-70B-Instruct,
     tensor_parallel_size=4,
-    pipeline_parallel_size=2
+    pipeline_parallel_size=2,
 )
 ```
 
@@ -174,14 +172,14 @@ Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to u
 
 Known supported models (with corresponding benchmarks):
 
-- dots_ocr (<gh-pr:25466>)
-- GLM-4.1V or above (<gh-pr:23168>)
-- InternVL (<gh-pr:23909>)
-- Kimi-VL (<gh-pr:23817>)
-- Llama4 (<gh-pr:18368>)
-- MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
-- Qwen2-VL or above (<gh-pr:22742>, <gh-pr:24955>, <gh-pr:25445>)
-- Step3 (<gh-pr:22697>)
+- dots_ocr (<https://github.com/vllm-project/vllm/pull/25466>)
+- GLM-4.1V or above (<https://github.com/vllm-project/vllm/pull/23168>)
+- InternVL (<https://github.com/vllm-project/vllm/pull/23909>)
+- Kimi-VL (<https://github.com/vllm-project/vllm/pull/23817>)
+- Llama4 (<https://github.com/vllm-project/vllm/pull/18368>)
+- MiniCPM-V-2.5 or above (<https://github.com/vllm-project/vllm/pull/23327>, <https://github.com/vllm-project/vllm/pull/23948>)
+- Qwen2-VL or above (<https://github.com/vllm-project/vllm/pull/22742>, <https://github.com/vllm-project/vllm/pull/24955>, <https://github.com/vllm-project/vllm/pull/25445>)
+- Step3 (<https://github.com/vllm-project/vllm/pull/22697>)
 
 ## Input Processing
 
@@ -257,18 +255,24 @@ Examples:
 
 ```python
 # Use a larger cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_cache_gb=8)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_cache_gb=8,
+)
 
 # Use a shared-memory based IPC cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          tensor_parallel_size=2,
-          mm_processor_cache_type="shm",
-          mm_processor_cache_gb=8)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    tensor_parallel_size=2,
+    mm_processor_cache_type="shm",
+    mm_processor_cache_gb=8,
+)
 
 # Disable the cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_cache_gb=0)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_cache_gb=0,
+)
 ```
 
 ### Cache Placement
