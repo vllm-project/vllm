@@ -68,6 +68,7 @@ async def send_fault_tolerance_instruction(request: Request) -> Response:
     fault_tolerance_instruction = request_dict.get("fault_tolerance_instruction")
     fault_tolerance_timeout = request_dict.get("fault_tolerance_timeout")
 
+    assert engine is not None
     return await engine.handle_fault(
         fault_tolerance_instruction, fault_tolerance_timeout
     )
@@ -76,6 +77,7 @@ async def send_fault_tolerance_instruction(request: Request) -> Response:
 @app.get("/fault_tolerance/get_fault_info")
 async def get_fault_info() -> Response:
     """Health check."""
+    assert engine is not None
     engine_exception_dict = engine.exception_reporter()
     return Response(engine_exception_dict, status_code=200)
 
