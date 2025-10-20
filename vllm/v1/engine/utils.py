@@ -24,11 +24,10 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import (
     get_mp_context,
-    get_open_zmq_ipc_path,
     make_zmq_socket,
     serialize_method_call,
-    zmq_socket_ctx,
 )
+from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor.abstract import Executor
