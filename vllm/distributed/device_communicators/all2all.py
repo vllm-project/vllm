@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+import psutil
 import torch
 import torch.distributed as dist
 
@@ -516,8 +518,8 @@ class MoriAll2AllManager(All2AllManagerBase):
         if self._shmem_initialized:
             return
 
-        import mori.shmem
         import torch.distributed as dist
+        from mori.shmem import shmem_torch_process_group_init
 
         try:
             # Check if we have a valid backend
@@ -532,7 +534,8 @@ class MoriAll2AllManager(All2AllManagerBase):
             )
 
             assert self.cpu_group is not None, "No CPU group is given to mori"
-            group_name = "mori_shmem_group"
+            ppid = psutil.Process(os.getpid()).ppid()
+            group_name = f"mori_shmem_group_{ppid}"
 
             try:
                 import torch._C._distributed_c10d as c10d
@@ -544,29 +547,18 @@ class MoriAll2AllManager(All2AllManagerBase):
                 )
 
                 # Initialize mori shmem with the registered group
-                mori.shmem.shmem_torch_process_group_init(group_name)
+                shmem_torch_process_group_init(group_name)
                 logger.debug("[rank %s] torch proc group shmem init success", self.rank)
                 self._shmem_initialized = True
                 return
 
             except Exception as torch_error:
-                logger.debug(
-                    "[rank %s] torch process group shmem init failed: %s",
-                    self.rank,
-                    torch_error,
-                )
-                self._shmem_initialized = True
-                logger.warning(
-                    "[rank %s] Continue without mori shmem optimize", self.rank
-                )
+                raise RuntimeError(
+                    "torch process group initialization failed"
+                ) from torch_error
 
         except Exception as e:
-            logger.error("[rank %s] mori shmem init failed: %s", self.rank, e)
-            # Don't fail completely - mark as initialized to avoid retry loops
-            self._shmem_initialized = True
-            logger.warning(
-                "[rank %s] Continuing without mori shmem optimize", self.rank
-            )
+            raise RuntimeError("mori shmem initialization failed") from e
 
     def _load_mori_config_from_json(self, json_path: str) -> dict | None:
         """
@@ -690,7 +682,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             data_type: Tensor data type
             quant_dtype: Quantization data type (optional)
         """
-        import mori.ops.dispatch_combine as mori_ops
+        from mori.ops import EpDispatchCombineConfig
         from mori.ops.dispatch_combine import EpDispatchCombineKernelType
 
         # Default values (can be overridden by JSON)
@@ -712,7 +704,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             )
             block_num = global_config.get("block_num", block_num)
 
-        config = mori_ops.EpDispatchCombineConfig(
+        config = EpDispatchCombineConfig(
             data_type=data_type if quant_dtype is None else quant_dtype,
             rank=self.rank,
             world_size=self.world_size,
@@ -764,7 +756,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             data_type: torch.dtype = torch.bfloat16,
             quant_dtype: torch.dtype | None = None,
         ):
-            import mori
+            from mori.ops import EpDispatchCombineOp
 
             config = self._make_mori_config(
                 max_num_tokens=max_num_tokens,
@@ -776,7 +768,7 @@ class MoriAll2AllManager(All2AllManagerBase):
                 data_type=data_type,
                 quant_dtype=quant_dtype,
             )
-            op = mori.ops.EpDispatchCombineOp(config)
+            op = EpDispatchCombineOp(config)
             logger.debug(
                 "[rank %s] Created mori handle with config: tokens=%d, experts=%d,"
                 " topk=%d, hidden_dim=%d",
@@ -816,10 +808,10 @@ class MoriAll2AllManager(All2AllManagerBase):
             # finalize mori shared memory if it was initialized
             if self._shmem_initialized:
                 try:
-                    import mori.shmem
+                    from mori.shmem import shmem_finalize
 
                     # Check if shmem is actually active before finalizing
-                    mori.shmem.shmem_finalize()
+                    shmem_finalize()
                     logger.debug("[rank %s] mori shmem finalize", self.dp_rank)
                 except Exception as shmem_error:
                     logger.debug(

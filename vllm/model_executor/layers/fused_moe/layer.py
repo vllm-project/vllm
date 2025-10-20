@@ -446,10 +446,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 quant_config=self.moe_quant_config,
             )
         elif self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
-            from vllm.model_executor.layers.fused_moe import AiterExperts
+            from vllm.model_executor.layers.fused_moe import AiterMoriExperts
 
-            logger.debug("AiterExperts for Mori integration %s", self.moe)
-            return AiterExperts(
+            logger.debug("AiterMoriExperts for Mori integration %s", self.moe)
+            return AiterMoriExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 quant_config=self.moe_quant_config,
             )

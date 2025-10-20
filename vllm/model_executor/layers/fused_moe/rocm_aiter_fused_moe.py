@@ -221,7 +221,7 @@ def rocm_aiter_fused_moe_impl(
 
     # Check if input is already pre-quantized (from mori dispatch)
     input_is_pre_quantized = (
-        a1_scale is not None and hidden_states.dtype == torch.float8_e4m3fnuz
+        a1_scale is not None and hidden_states.dtype == current_platform.fp8_dtype()
     )
     dtype = output_dtype if input_is_pre_quantized else None
 

@@ -131,14 +131,13 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if self.use_fp8_dispatch:
             from aiter import QuantType, get_hip_quant
 
-            block_shape = quant_config.block_shape
-            if block_shape is not None:
+            if quant_config.block_shape is not None:
                 assert not apply_router_weight_on_input, (
                     "apply_router_weight_on_input is not supported for block scaled moe"
                 )
                 quant_type = QuantType.per_1x128
             else:
-                quant_type = QuantType.per_Token
+                quant_type = QuantType.per_Tensor
 
             quant_func = get_hip_quant(quant_type)
 

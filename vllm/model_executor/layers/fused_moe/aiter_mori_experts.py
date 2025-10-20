@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 
 
-class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class AiterMoriExperts(mk.FusedMoEPermuteExpertsUnpermute):
     """
     Aiter-based expert processing that works with Mori dispatch/combine.
 
@@ -29,6 +29,11 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         max_num_tokens: int,
         quant_config: FusedMoEQuantConfig,
     ):
+        from vllm.platforms.rocm import on_mi3xx
+
+        if not on_mi3xx():
+            raise RuntimeError("AiterMoriExperts should be used on AMD mi3xx GPUs")
+
         super().__init__(
             quant_config=quant_config,
         )
