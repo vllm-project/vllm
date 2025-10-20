@@ -172,13 +172,17 @@ class OpenAISpeechToText(OpenAIServing):
         return prompts, duration
 
     def _get_verbose_segments(
-        self, tokens: tuple, segment_class: type[S], start_time: float = 0
+        self,
+        tokens: tuple,
+        request: SpeechToTextRequest,
+        segment_class: type[S],
+        start_time: float = 0,
     ) -> list[S]:
         """
         Convert tokens to verbose segments.
 
         Note: Fields like avg_logprob, compression_ratio,
-        no_speech_prob, and temperature are not supported
+        and no_speech_prob are not supported
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
@@ -212,7 +216,7 @@ class OpenAISpeechToText(OpenAIServing):
                         start=start_time + BASE_OFFSET * start_timestamp,
                         end=start_time + BASE_OFFSET * end_timestamp,
                         no_speech_prob=-1.0,
-                        temperature=-1.0,
+                        temperature=request.temperature,
                         text=self.tokenizer.decode(sliced_timestamp_tokens[1:-1]),
                         tokens=sliced_timestamp_tokens[1:-1],
                     ),
@@ -247,10 +251,13 @@ class OpenAISpeechToText(OpenAIServing):
                 + ("`text`, `json` or `verbose_json`")
             )
 
-        if (request.response_format == "verbose_json"
-                and not self.model_cls.supports_segment_timestamp):
+        if (
+            request.response_format == "verbose_json"
+            and not self.model_cls.supports_segment_timestamp
+        ):
             return self.create_error_response(
-                f"Currently do not support verbose_json for {request.model}")
+                f"Currently do not support verbose_json for {request.model}"
+            )
 
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -328,8 +335,9 @@ class OpenAISpeechToText(OpenAIServing):
 
                         segments: list[TranslationSegment | TranscriptionSegment] = (
                             self._get_verbose_segments(
-                                tuple(op.outputs[0].token_ids),
+                                tokens=tuple(op.outputs[0].token_ids),
                                 segment_class=segment_class,
+                                request=request,
                                 start_time=idx * 30,
                             )
                         )

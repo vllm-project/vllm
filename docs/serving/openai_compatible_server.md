@@ -460,6 +460,7 @@ For `verbose_json` response format:
       ]
     }
     ```
+Currently “verbose_json” response format doesn’t support avg_logprob, compression_ratio, no_speech_prob. They are all set to -1.
 
 #### Extra Parameters
 
