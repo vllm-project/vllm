@@ -6,10 +6,16 @@
 python examples/online_serving/pooling/cohere_rerank_client.py
 ```
 
-## Embedding requests usage
+## Embedding requests base64 encoding_format usage
 
 ```bash
 python examples/online_serving/pooling/embedding_requests_base64_client.py
+```
+
+## Embedding requests bytes encoding_format usage
+
+```bash
+python examples/online_serving/pooling/embedding_requests_bytes_client.py
 ```
 
 ## Jinaai rerank usage
