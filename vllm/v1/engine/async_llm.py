@@ -774,6 +774,14 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=None,
             )
 
+    async def handle_fault(self, instruction: str, timeout: int = 300) -> None:
+        """send fault tolerance instruction to the engine"""
+        await self.engine_core.handle_fault(instruction, timeout)
+
+    async def exception_reporter(self):
+        """report exception in engine core"""
+        return self.engine_core.exception_reporter()
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.
