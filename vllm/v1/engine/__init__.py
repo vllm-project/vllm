@@ -30,8 +30,8 @@ class FinishReason(enum.IntEnum):
     stop - a stop string was emitted
     length - max_tokens was consumed, or max_model_len was reached
     abort - aborted for another reason
-    error - internal error occurred (e.g., KV load failure), should never
-            be exposed via API (always converted to exception)
+    error - retryable request-level internal error (e.g., KV load failure).
+            Invariant: always converted to 503 Service Unavailable.
 
     """
 
