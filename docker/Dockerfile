@@ -350,9 +350,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # install build and runtime dependencies
-COPY requirements/common.txt requirements/common.txt
-COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=build,src=/workspace/requirements,target=/vllm-workspace/requirements \
     uv pip install --system -r requirements/cuda.txt \
     -r requirements/common.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
@@ -453,8 +452,7 @@ ENV HF_HUB_ENABLE_HF_TRANSFER 1
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
 # Install vllm wheel
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -463,7 +461,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # will not be imported by other tests
 RUN mkdir src
 RUN mv vllm src/vllm
-
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
