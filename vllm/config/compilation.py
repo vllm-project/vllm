@@ -366,6 +366,14 @@ class CompilationConfig:
     minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
     FULL_AND_PIECEWISE instead.
     """
+    cudagraph_specialize_lora: bool = True
+    """Whether to create separate cuda graphs for cases with and without active
+    LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
+    for all cases, incurring the overhead of running LoRA ops even when no
+    adapters are active. Setting this to True will remove this overhead at the
+    cost of increased startup time and slightly higher memory usage.
+    When `enable_lora` is False, this option has no effect.
+    """
 
     use_inductor_graph_partition: bool = False
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
