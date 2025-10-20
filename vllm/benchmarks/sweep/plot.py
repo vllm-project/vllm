@@ -159,6 +159,9 @@ def plot(
         for run_data in _json_load_bytes(path)
     ]
 
+    if not all_data:
+        raise ValueError(f"Did not find any parameter sweep results under {output_dir}")
+
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     with ProcessPoolExecutor() as pool:
