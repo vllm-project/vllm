@@ -118,9 +118,8 @@ class CoreEngineProcManager:
         }
         if fault_report_address:
             zmq_ctx = zmq.Context()
-            num_identity = 1
             identity = generate_identity_group(
-                "core_engine_proc_manager", "clinet_guard", "report", num_identity
+                "core_engine_proc_manager", "clinet_guard", "report", 1
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
