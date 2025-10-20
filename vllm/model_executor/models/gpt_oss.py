@@ -223,6 +223,7 @@ class TransformerBlock(torch.nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.attn(hidden_states, positions)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         output = self.mlp(hidden_states)

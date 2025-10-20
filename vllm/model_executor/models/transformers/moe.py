@@ -14,31 +14,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Wrapper around `transformers` MoE models."""
+"""Transformers backend mixin for Mixture of Experts (MoE) models."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.models.interfaces import MixtureOfExperts
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
-from .interfaces import MixtureOfExperts, SupportsMultiModal
-from .transformers import (
-    TransformersBase,
-    TransformersForCausalLM,
-    TransformersForMultimodalLM,
-    can_enable_torch_compile,
-    log_replacement,
-)
-from .utils import maybe_prefix
+from .utils import log_replacement
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @CustomOp.register("transformers_fused_moe")
@@ -117,11 +113,11 @@ direct_register_custom_op(
 )
 
 
-class TransformersMoEBase(TransformersBase, MixtureOfExperts):
-    def __init__(self, *, vllm_config, prefix=""):
+class MoEMixin(MixtureOfExperts):
+    def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         self.check_version("4.57.0.dev0", "MoE models support")
-        self.ep_group = get_ep_group()
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # Skip MixtureOfExperts.__init__ and call the next class in MRO
+        super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
     def set_eplb_state(
         self,
@@ -242,7 +238,7 @@ class TransformersMoEBase(TransformersBase, MixtureOfExperts):
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
 
         # MixtureOfExperts mixin settings
-        ep_size = self.ep_group.world_size
+        ep_size = get_ep_group().world_size
 
         self.mlp_layers = []  # Used for MixtureOfExperts methods
         self.expert_weights = []
@@ -316,24 +312,5 @@ class TransformersMoEBase(TransformersBase, MixtureOfExperts):
                     _recursive_replace(child_module, prefix=qual_name)
 
         _recursive_replace(self.model, prefix="model")
-        # Continue with the replacement of layers in TransformersBase
+        # Continue with the replacement of layers in Base
         super().recursive_replace()
-
-
-@support_torch_compile(enable_if=can_enable_torch_compile)
-class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
-    pass
-
-
-@support_torch_compile(
-    # set `positions` to last dim to support Qwen-mrope
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    },
-    enable_if=can_enable_torch_compile,
-)
-class TransformersMoEForMultimodalLM(TransformersMoEBase, TransformersForMultimodalLM):
-    get_input_embeddings = SupportsMultiModal.get_input_embeddings
