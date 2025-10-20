@@ -290,7 +290,6 @@ class CoreEngineActorManager:
         log_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
-        fault_report_address: str | None = None,
     ):
         import copy
 
@@ -316,7 +315,7 @@ class CoreEngineActorManager:
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
 
-        if fault_report_address:
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
             num_identity = 1
             identity = generate_identity_group(
@@ -324,7 +323,7 @@ class CoreEngineActorManager:
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
-                path=fault_report_address,
+                path=vllm_config.fault_tolerance_config.fault_report_addr,
                 socket_type=zmq.DEALER,
                 bind=True,
                 identity=identity,
