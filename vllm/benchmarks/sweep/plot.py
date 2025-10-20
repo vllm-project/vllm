@@ -31,10 +31,7 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
     return tuple((k, str(_get_metric(run_data, k))) for k in group_keys)
 
 
-def _get_fig_path(
-    fig_dir: Path,
-    group: tuple[tuple[str, str], ...],
-):
+def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...]):
     return fig_dir / (
         "-".join(
             (
@@ -46,10 +43,6 @@ def _get_fig_path(
         .replace("..", "__")  # Sanitize
         + ".png"
     )
-
-
-def _get_fig_title(group: tuple[tuple[str, str], ...]):
-    return ", ".join(f"{k}={v}" for k, v in group) if group else "(All)"
 
 
 class DummyExecutor:
@@ -117,6 +110,8 @@ def _plot_fig(
             f"Available variables: {df.columns.tolist()}"
         )
 
+    # TODO: Support <KEY><OP><VALUE> syntax
+    # e.g. request_rate<=1024%2 means max of 1024 and bin size of 2
     if max_x is not None:
         df = df[df[var_x] <= max_x]
 
