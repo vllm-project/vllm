@@ -25,7 +25,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # vLLM V1
 /vllm/v1/attention @LucasWilkinson
-/vllm/v1/attention/backends/mla @pavanimajety 
+/vllm/v1/attention/backends/mla @pavanimajety
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345 @ApostaC
