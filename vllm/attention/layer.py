@@ -99,7 +99,7 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 def maybe_get_vit_flash_attn_backend(
     attn_backend: _Backend, use_upstream_fa: bool
-) -> tuple[_Backend, Callable]:
+) -> tuple[_Backend, Callable | None]:
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             attn_backend = _Backend.ROCM_AITER_FA
@@ -548,6 +548,7 @@ class MultiHeadAttention(nn.Module):
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
         if self.is_flash_attn_backend:
+            assert self._flash_attn_varlen_func is not None
             cu_seqlens_q = torch.arange(
                 0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device
             )
