@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -357,7 +357,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # get attention page size (for 1 token)
-        attn_page_size_1_token = FullAttentionSpec(
+        attn_spec_cls = MLAAttentionSpec if model_config.use_mla else FullAttentionSpec
+        attn_page_size_1_token = attn_spec_cls(
             block_size=1,
             num_kv_heads=model_config.get_num_kv_heads(parallel_config),
             head_size=model_config.get_head_size(),
