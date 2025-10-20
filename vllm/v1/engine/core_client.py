@@ -464,8 +464,11 @@ class ClientGuard:
 
             return (sender_identity, message)
 
-        except (zmq.ZMQError, UnicodeDecodeError, Exception) as e:
-            logger.error("error occurred while receiving message: %s", e)
+        except (zmq.ZMQError, UnicodeDecodeError) as e:
+            logger.error("receive message failed: %s", e)
+            return (None, None)
+        except (Exception) as e:
+            logger.error("Unexpected error occurred while receiving message: %s", e)
             return (None, None)
 
     def handle_fault(self, instruction):
