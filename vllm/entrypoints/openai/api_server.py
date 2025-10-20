@@ -117,9 +117,9 @@ from vllm.utils import (
     Device,
     FlexibleArgumentParser,
     decorate_logs,
-    is_valid_ipv6_address,
     set_ulimit,
 )
+from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
@@ -996,6 +996,16 @@ if envs.VLLM_SERVER_DEV_MODE:
         await engine_client(raw_request).reset_prefix_cache(device)
         return Response(status_code=200)
 
+    @router.post("/reset_mm_cache")
+    async def reset_mm_cache(raw_request: Request):
+        """
+        Reset the multi-modal cache. Note that we currently do not check if the
+        multi-modal cache is successfully reset in the API server.
+        """
+        logger.info("Resetting multi-modal cache...")
+        await engine_client(raw_request).reset_mm_cache()
+        return Response(status_code=200)
+
     @router.post("/sleep")
     async def sleep(raw_request: Request):
         # get POST params
@@ -1750,16 +1760,19 @@ async def init_app_state(
         else None
     )
     state.openai_serving_pooling = (
-        OpenAIServingPooling(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
+        (
+            OpenAIServingPooling(
+                engine_client,
+                state.openai_serving_models,
+                supported_tasks=supported_tasks,
+                request_logger=request_logger,
+                chat_template=resolved_chat_template,
+                chat_template_content_format=args.chat_template_content_format,
+                trust_request_chat_template=args.trust_request_chat_template,
+                log_error_stack=args.log_error_stack,
+            )
         )
-        if "encode" in supported_tasks
+        if ("token_embed" in supported_tasks or "token_classify" in supported_tasks)
         else None
     )
     state.openai_serving_embedding = (
@@ -1810,6 +1823,7 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
         else None
@@ -1820,6 +1834,7 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
         else None

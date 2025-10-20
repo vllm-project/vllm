@@ -5,7 +5,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
-      "token_expert_indices, Tensor gating_output) -> ()");
+      "token_expert_indices, Tensor gating_output, bool renormalize) -> ()");
   m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
 
   // Calculate the result of moe by summing up the partial results
@@ -21,6 +21,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad) -> ()");
   m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
+
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size, but for the batched case.
+  m.def(
+      "batched_moe_align_block_size(int max_tokens_per_batch,"
+      "                     int block_size, Tensor expert_num_tokens,"
+      "                     Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad) -> ()");
+  m.impl("batched_moe_align_block_size", torch::kCUDA,
+         &batched_moe_align_block_size);
 
 #ifndef USE_ROCM
   m.def(

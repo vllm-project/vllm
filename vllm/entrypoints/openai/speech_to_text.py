@@ -37,8 +37,8 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
+from vllm.utils.import_utils import PlaceholderModule
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import PlaceholderModule
 
 try:
     import librosa
@@ -77,6 +77,7 @@ class OpenAISpeechToText(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -92,6 +93,8 @@ class OpenAISpeechToText(OpenAIServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
         )
+
+        self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
         self.tokenizer = cast(
@@ -410,9 +413,7 @@ class OpenAISpeechToText(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        include_usage = (
-            request.stream_include_usage if request.stream_include_usage else False
-        )
+        include_usage = self.enable_force_include_usage or request.stream_include_usage
         include_continuous_usage = (
             request.stream_continuous_usage_stats
             if include_usage and request.stream_continuous_usage_stats
