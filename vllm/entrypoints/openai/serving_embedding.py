@@ -206,9 +206,7 @@ class EmbeddingMixin(OpenAIServing):
                 metadata=json.dumps(metadata),
             )
 
-        if encoding_format == "float":
-            return encoding_float_base64()
-        elif encoding_format == "base64":
+        if encoding_format == "float" or encoding_format == "base64":
             return encoding_float_base64()
         elif encoding_format == "bytes":
             return encoding_bytes()
