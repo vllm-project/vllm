@@ -72,6 +72,7 @@ from .utils import (
 
 device_module = torch.get_device_module()
 
+
 class Qwen2MLP(nn.Module):
     def __init__(
         self,
