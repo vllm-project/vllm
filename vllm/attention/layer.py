@@ -46,6 +46,12 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+else:
+    on_gfx9 = lambda *args, **kwargs: False
+
+
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
@@ -94,13 +100,21 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 def maybe_get_vit_flash_attn_backend(
     attn_backend: _Backend, use_upstream_fa: bool
 ) -> tuple[_Backend, Callable]:
-    if (
-        attn_backend != _Backend.FLASH_ATTN
-        and attn_backend != _Backend.ROCM_AITER_FA
-        and check_upstream_fa_availability(torch.get_default_dtype())
-    ):
-        attn_backend = _Backend.FLASH_ATTN
-        use_upstream_fa = True
+    if current_platform.is_rocm():
+        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
+            attn_backend = _Backend.ROCM_AITER_FA
+        elif on_gfx9():
+            attn_backend = _Backend.FLASH_ATTN
+        else:
+            return _Backend.TORCH_SDPA, None
+    else:
+        if (
+            attn_backend != _Backend.FLASH_ATTN
+            and attn_backend != _Backend.ROCM_AITER_FA
+            and check_upstream_fa_availability(torch.get_default_dtype())
+        ):
+            attn_backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
 
     if current_platform.is_rocm() and attn_backend == _Backend.FLASH_ATTN:
         use_upstream_fa = True
