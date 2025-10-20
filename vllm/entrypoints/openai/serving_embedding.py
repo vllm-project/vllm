@@ -129,7 +129,7 @@ class EmbeddingMixin(OpenAIServing):
         embed_dtype: EMBED_DTYPE_TYPE = ctx.request.embed_dtype
         endianness: ENDIANNESS_TYPE = ctx.request.endianness
 
-        if encoding_format in ["float", "base64"]:
+        def encoding_float_base64():
             items: list[EmbeddingResponseData] = []
             num_prompt_tokens = 0
 
@@ -160,7 +160,8 @@ class EmbeddingMixin(OpenAIServing):
                 data=items,
                 usage=usage,
             )
-        elif encoding_format == "bytes":
+
+        def encoding_bytes():
             num_prompt_tokens = 0
             items: list[dict[str, Any]] = []
             body = []
@@ -204,6 +205,11 @@ class EmbeddingMixin(OpenAIServing):
                 body=body,
                 metadata=json.dumps(metadata),
             )
+
+        if encoding_format in ["float", "base64"]:
+            return encoding_float_base64()
+        elif encoding_format == "bytes":
+            return encoding_bytes()
         else:
             assert_never(encoding_format)
 

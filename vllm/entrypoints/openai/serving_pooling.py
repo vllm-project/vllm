@@ -257,7 +257,7 @@ class OpenAIServingPooling(OpenAIServing):
         embed_dtype: EMBED_DTYPE_TYPE,
         endianness: ENDIANNESS_TYPE,
     ) -> PoolingResponse | PoolingBytesResponse:
-        if encoding_format in ["float", "base64"]:
+        def encoding_float_base64():
             items: list[PoolingResponseData] = []
             num_prompt_tokens = 0
 
@@ -288,7 +288,8 @@ class OpenAIServingPooling(OpenAIServing):
                 data=items,
                 usage=usage,
             )
-        elif encoding_format == "bytes":
+
+        def encoding_bytes():
             num_prompt_tokens = 0
             items: list[dict[str, Any]] = []
             body = []
@@ -332,6 +333,11 @@ class OpenAIServingPooling(OpenAIServing):
                 body=body,
                 metadata=json.dumps(metadata),
             )
+
+        if encoding_format in ["float", "base64"]:
+            return encoding_float_base64()
+        elif encoding_format == "bytes":
+            return encoding_bytes()
         else:
             assert_never(encoding_format)
 
