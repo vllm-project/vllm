@@ -225,7 +225,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         except (zmq.ZMQError, UnicodeDecodeError) as e:
             logger.error("error occurred while receiving message: %s", e)
             return (False, None)
-        except (Exception) as e:
+        except Exception as e:
             logger.error("Unexpected error occurred while receiving message: %s", e)
             return (False, None)
 
@@ -1136,7 +1136,7 @@ class EngineCoreProc(EngineCore):
             self._process_engine_step()
 
     def _check_busy_loop_active(self):
-        if not self.busy_loop_active.is_set():
+        if self.enable_fault_tolerance and not self.busy_loop_active.is_set():
             raise InterruptedError("Engine busy loop is paused.")
 
     def _process_input_queue(self):
