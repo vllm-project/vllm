@@ -31,6 +31,13 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
 
+            if "distributed" in extra_config and isinstance(
+                extra_config.get("distributed"), bool
+            ):
+                os.environ["RUNAI_STREAMER_DIST"] = str(
+                    1 if extra_config.get("distributed") else 0
+                )
+
             if "concurrency" in extra_config and isinstance(
                 extra_config.get("concurrency"), int
             ):
