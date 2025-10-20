@@ -1075,9 +1075,9 @@ Example command:
 ```bash
 python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
     --var-x max_concurrency \
-    --curve-by api_server_count,max_num_batched_tokens \
     --row-by random_input_len \
     --col-by random_output_len \
+    --curve-by api_server_count,max_num_batched_tokens \
     --filter-by 'max_concurrency<=1024'
 ```
 

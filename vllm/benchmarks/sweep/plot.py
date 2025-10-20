@@ -380,17 +380,10 @@ def main():
         "By default, the same directory is used.",
     )
     parser.add_argument(
-        "--curve-by",
-        type=str,
-        default=None,
-        help="A comma-separated list of variables, such that a separate curve "
-        "is created for each combination of these variables.",
-    )
-    parser.add_argument(
-        "--col-by",
+        "--fig-by",
         type=str,
         default="",
-        help="A comma-separated list of variables, such that a separate column "
+        help="A comma-separated list of variables, such that a separate figure "
         "is created for each combination of these variables.",
     )
     parser.add_argument(
@@ -401,10 +394,17 @@ def main():
         "is created for each combination of these variables.",
     )
     parser.add_argument(
-        "--fig-by",
+        "--col-by",
         type=str,
         default="",
-        help="A comma-separated list of variables, such that a separate figure "
+        help="A comma-separated list of variables, such that a separate column "
+        "is created for each combination of these variables.",
+    )
+    parser.add_argument(
+        "--curve-by",
+        type=str,
+        default=None,
+        help="A comma-separated list of variables, such that a separate curve "
         "is created for each combination of these variables.",
     )
     parser.add_argument(
