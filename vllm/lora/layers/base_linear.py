@@ -121,6 +121,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
+        # Store original shape for later reshaping
+        original_shape = output.shape if output.ndim == 3 else None
+
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
         # therefore we need to flatten the batch dimensions.
@@ -133,6 +136,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
         if not current_platform.can_update_inplace():
             output = lora_output
+
+        # Restore original shape if it was flattened
+        if original_shape is not None:
+            output = output.reshape(original_shape)
 
         return output
 
