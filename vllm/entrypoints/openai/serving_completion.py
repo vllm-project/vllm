@@ -290,8 +290,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
-            # check for error finish reason and return 503 error
-            # finish_reason='error' indicates a retryable request-level internal error
             for final_res in final_res_batch_checked:
                 for output in final_res.outputs:
                     if output.finish_reason == "error":
@@ -454,8 +452,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
-                    # check for error finish reason and abort streaming
-                    # finish_reason='error' indicates a retryable error
                     if finish_reason == "error":
                         logger.error(
                             "Request-level error for request %s: %s",
