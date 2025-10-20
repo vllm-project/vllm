@@ -205,15 +205,18 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
-        if buffer is None:
-            r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, refer to:
-            # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros(  # type: ignore
-                (len(output_slices), x.size(0), r),
-                dtype=torch.float32,
-                device=x.device,
-            )
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        r = lora_b_stacked[0].size(-1)
+        # We set the buffer to be float32 by default, refer to:
+        # https://github.com/triton-lang/triton/issues/1387
+        # Note: buffer is zeroed inside the shrink op
+        buffer = torch.empty(
+            (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
+        )
+
         self.add_shrink(
             buffer,  # type: ignore
             x,
@@ -260,10 +263,15 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
-        if buffer is None:
-            # We set the buffer to be float32 by default, refer to:
-            # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
+
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        # We set the buffer to be float32 by default, refer to:
+        # https://github.com/triton-lang/triton/issues/1387
+        # Note: buffer is zeroed inside the shrink op
+        buffer = torch.empty((x.size(0), r), dtype=torch.float32, device=x.device)
 
         lora_shrink(
             x,
