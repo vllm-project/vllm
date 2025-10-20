@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, assert_never, cast
+from typing import Any, Final, cast
 
 import torch
 from fastapi import Request
 from fastapi.responses import Response
-from typing_extensions import override
+from typing_extensions import assert_never, override
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
