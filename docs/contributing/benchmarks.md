@@ -1073,7 +1073,11 @@ The algorithm for adjusting the SLA variable is as follows:
 Example command:
 
 ```bash
-python vllm/benchmarks/sweep/plot.py benchmarks/results/<timestamp> --curve-by api_server_count,max_num_batched_tokens --file-by random_input_len,random_output_len
+python vllm/benchmarks/sweep/plot.py benchmarks/results/<timestamp> \
+    --var-x max_concurrency \
+    --max-x 1024 \
+    --curve-by api_server_count,max_num_batched_tokens \
+    --file-by random_input_len,random_output_len
 ```
 
 !!! tip
