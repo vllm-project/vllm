@@ -483,9 +483,7 @@ class EngineArgs:
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: bool | None = SchedulerConfig.enable_chunked_prefill
-    enable_hybrid_chunked_prefill: bool | None = (
-        SchedulerConfig.enable_hybrid_chunked_prefill
-    )
+    enable_hybrid_chunked_prefill: bool = SchedulerConfig.enable_hybrid_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     disable_hybrid_kv_cache_manager: bool = (
