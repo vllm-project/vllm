@@ -457,7 +457,8 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="If set, prints the location of the figures without drawing them.",
+        help="If set, prints the information about each figure to plot, "
+        "then exits without drawing them.",
     )
 
     args = parser.parse_args()
