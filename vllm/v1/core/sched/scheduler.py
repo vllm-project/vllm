@@ -161,8 +161,9 @@ class Scheduler(SchedulerInterface):
         # ===== SELF-SPEC ADDITIONS START =====
         self.use_self_specs = False
         self.self_spec_threshold = 0
-        self.sink_size = 0
-        self.recent_size = 0
+        # Streaming cache parameters (block-based)
+        self.streaming_cache_sink_size_blocks = 0
+        self.streaming_cache_recent_ratio = 0.0
         # ===== SELF-SPEC ADDITIONS END =====
 
         if speculative_config:
@@ -174,12 +175,13 @@ class Scheduler(SchedulerInterface):
             elif hasattr(speculative_config, 'use_self_specs') and speculative_config.use_self_specs():
                 self.use_self_specs = True
                 self.self_spec_threshold = self.num_spec_tokens
-                # FIXME(brian1009): Hardcoded for sparse attn - should be configurable
-                self.sink_size = getattr(self.cache_config, 'sink_size', 32)
-                self.recent_size = getattr(self.cache_config, 'recent_size', 128)
+                # Load streaming cache config from scheduler_config
+                self.streaming_cache_sink_size_blocks = self.scheduler_config.sink_size
+                self.streaming_cache_recent_ratio = self.scheduler_config.recent_ratio
                 logger.info(
                     f"Self-spec enabled: threshold={self.self_spec_threshold}, "
-                    f"sink_size={self.sink_size}, recent_size={self.recent_size}"
+                    f"streaming_cache: sink_size_blocks={self.streaming_cache_sink_size_blocks}, "
+                    f"recent_ratio={self.streaming_cache_recent_ratio}"
                 )
             # ===== SELF-SPEC ADDITIONS END =====
 
@@ -806,6 +808,10 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: list[int] = []
         self_spec_states: list[SelfSpecState] = []
         pending_output_tokens_list: list[list[int]] = []
+        # Streaming cache parameters
+        sink_sizes_list: list[int] = []
+        recent_sizes_list: list[int] = []
+        full_kv_start_block_offsets_list: list[int] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -843,6 +849,21 @@ class Scheduler(SchedulerInterface):
             # SELF-SPEC: Populate self-spec state
             self_spec_states.append(req.self_spec_state)
             pending_output_tokens_list.append(req.get_pending_tokens())
+
+            # Streaming cache: Populate based on self_spec_state
+            if req.self_spec_state == SelfSpecState.ACCUMULATING:
+                # Use streaming cache for ACCUMULATING state
+                # Compute recent_size dynamically based on num_computed_tokens and recent_ratio
+                num_recent_blocks = int(req.num_computed_tokens * self.streaming_cache_recent_ratio / self.block_size)
+                sink_sizes_list.append(self.streaming_cache_sink_size_blocks)
+                recent_sizes_list.append(num_recent_blocks)
+                full_kv_start_block_offsets_list.append(req.full_kv_start_block_offset)
+            else:
+                # NORMAL or VERIFYING: use full KV (no streaming cache)
+                sink_sizes_list.append(0)
+                recent_sizes_list.append(0)
+                full_kv_start_block_offsets_list.append(0)
+
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -856,6 +877,9 @@ class Scheduler(SchedulerInterface):
             num_computed_tokens=num_computed_tokens,
             self_spec_state=self_spec_states,
             pending_output_tokens=pending_output_tokens_list,
+            sink_sizes=sink_sizes_list,
+            recent_sizes=recent_sizes_list,
+            full_kv_start_block_offsets=full_kv_start_block_offsets_list,
         )
 
     def _try_schedule_encoder_inputs(
@@ -1147,16 +1171,19 @@ class Scheduler(SchedulerInterface):
             if should_flip_to_accumulating and not stopped:
                 request.self_spec_state = SelfSpecState.ACCUMULATING
                 # Update sparse KV indices when transitioning to ACCUMULATING
-                all_kv_indices = self.kv_cache_manager.get_block_ids(request.request_id)[0][:request.num_computed_tokens]
-                if self.sink_size + self.recent_size >= len(all_kv_indices):
-                    selective_kv_indices = all_kv_indices
-                else:
-                    selective_kv_indices = (
-                        all_kv_indices[:self.sink_size] +
-                        all_kv_indices[-self.recent_size:]
-                    )
-                self.req_to_sparse_selected_kv_indices[request.request_id] = selective_kv_indices
+                # all_kv_indices = self.kv_cache_manager.get_block_ids(request.request_id)[0][:request.num_computed_tokens]
+                # if self.sink_size + self.recent_size >= len(all_kv_indices):
+                #     selective_kv_indices = all_kv_indices
+                # else:
+                #     selective_kv_indices = (
+                #         all_kv_indices[:self.sink_size] +
+                #         all_kv_indices[-self.recent_size:]
+                #     )
+                # self.req_to_sparse_selected_kv_indices[request.request_id] = selective_kv_indices
                 self.req_to_full_kv_start_offset[request.request_id] = request.num_computed_tokens
+                # Update streaming cache: set block offset where full KV starts
+                num_blocks = (request.num_computed_tokens + self.block_size - 1) // self.block_size
+                request.full_kv_start_block_offset = num_blocks
                 logger.debug(f"Request {request.request_id}: transitioned to ACCUMULATING state")
 
             if not (new_token_ids or pooler_output is not None or kv_transfer_params):

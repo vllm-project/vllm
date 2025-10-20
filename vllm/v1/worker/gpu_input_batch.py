@@ -100,8 +100,6 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
-        sink_size: int = 32,
-        recent_size: int = 128,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -238,33 +236,23 @@ class InputBatch:
         self.num_accepted_tokens_cpu = \
             self.num_accepted_tokens_cpu_tensor.numpy()
 
-        # ===== SELF-SPEC BUFFERS =====
-        # Maximum selective KV indices per request (sink + recent)
-        # Calculated from sink_size and recent_size parameters
-        max_selective_kv_indices = sink_size + recent_size
-
-        # Selective KV indices buffer (sparse attention)
-        self.selective_kv_indices_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_selective_kv_indices),
-            dtype=torch.int32,
-            device='cpu',
-            pin_memory=pin_memory
-        )
-
-        self.num_selective_kv_indices_cpu_tensor = torch.zeros(
+        # ===== STREAMING CACHE BUFFERS =====
+        # Streaming cache parameters (for build_with_streaming)
+        # Number of sink blocks per request
+        self.sink_sizes_cpu_tensor = torch.zeros(
             max_num_reqs,
             dtype=torch.int32,
             device='cpu',
             pin_memory=pin_memory
         )
 
-        self.full_kv_start_offset_cpu_tensor = torch.zeros(
+        # Number of recent blocks per request
+        self.recent_sizes_cpu_tensor = torch.zeros(
             max_num_reqs,
             dtype=torch.int32,
             device='cpu',
             pin_memory=pin_memory
         )
-        # ===== END SELF-SPEC BUFFERS =====
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
@@ -659,6 +647,13 @@ class InputBatch:
             self.full_kv_start_offset_cpu_tensor[i2], \
             self.full_kv_start_offset_cpu_tensor[i1]
 
+        # Swap streaming cache buffers
+        self.sink_sizes_cpu_tensor[i1], self.sink_sizes_cpu_tensor[i2] = \
+            self.sink_sizes_cpu_tensor[i2], self.sink_sizes_cpu_tensor[i1]
+
+        self.recent_sizes_cpu_tensor[i1], self.recent_sizes_cpu_tensor[i2] = \
+            self.recent_sizes_cpu_tensor[i2], self.recent_sizes_cpu_tensor[i1]
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -779,6 +774,12 @@ class InputBatch:
             self.full_kv_start_offset_cpu_tensor[
                 empty_index] = self.full_kv_start_offset_cpu_tensor[
                     last_req_index]
+
+            # Copy streaming cache buffers
+            self.sink_sizes_cpu_tensor[empty_index] = \
+                self.sink_sizes_cpu_tensor[last_req_index]
+            self.recent_sizes_cpu_tensor[empty_index] = \
+                self.recent_sizes_cpu_tensor[last_req_index]
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1

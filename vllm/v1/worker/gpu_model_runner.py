@@ -327,8 +327,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
-            sink_size=self.vllm_config.scheduler_config.sink_size,
-            recent_size=self.vllm_config.scheduler_config.recent_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -372,6 +370,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                          dtype=torch.int32)
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
+
+        # Streaming cache buffers (for self-speculative decoding)
+        self.sink_sizes = self._make_buffer(self.max_num_reqs,
+                                           dtype=torch.int32)
+        self.recent_sizes = self._make_buffer(self.max_num_reqs,
+                                             dtype=torch.int32)
+        self.full_kv_start_offset = self._make_buffer(self.max_num_reqs,
+                                                      dtype=torch.int32)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -802,9 +808,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # For VERIFYING, set num_tokens to include spec tokens
                     self.input_batch.num_tokens[req_index] = end_token_index
                 # print(f"  After writing: num_tokens[{req_index}]={self.input_batch.num_tokens[req_index]}, num_tokens_no_spec={self.input_batch.num_tokens_no_spec[req_index]}")
-            else: 
+            else:
                 pass
                 # print(f"  No spec tokens to write (or skipped because is_last_rank={is_last_rank})")
+
+        # ===== STREAMING CACHE: Extract and populate metadata =====
+        # Populate InputBatch CPU tensors from CachedRequestData
+        # Also sync full_kv_start_block_offset back to request states
+        if hasattr(req_data, 'sink_sizes') and hasattr(req_data, 'recent_sizes') and hasattr(req_data, 'full_kv_start_block_offsets'):
+            for i, req_id in enumerate(req_data.req_ids):
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    self.input_batch.sink_sizes_cpu_tensor[req_index] = req_data.sink_sizes[i]
+                    self.input_batch.recent_sizes_cpu_tensor[req_index] = req_data.recent_sizes[i]
+
+                # Sync full_kv_start_block_offset from scheduler to request state
+                if req_id in self.requests:
+                    self.requests[req_id].full_kv_start_block_offset = req_data.full_kv_start_block_offsets[i]
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -1315,18 +1335,52 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_common_prefix_blocks[kv_cache_group_id])
 
             # ===== SELF-SPEC: Detect if any request is in ACCUMULATING state =====
-            use_selective_kv = False
-            for req_idx in range(num_reqs):
-                req_id = self.input_batch.req_ids[req_idx]
-                if req_id in self.requests:
-                    request = self.requests[req_id]
-                    if (hasattr(request, 'self_spec_state') and
-                            request.self_spec_state == SelfSpecState.ACCUMULATING):
-                        use_selective_kv = True
-                        logger.debug(
-                            f"Detected request {req_id} in ACCUMULATING state, "
-                            "using selective KV attention")
-                        break
+            use_selective_kv = True
+            # for req_idx in range(num_reqs):
+            #     req_id = self.input_batch.req_ids[req_idx]
+            #     if req_id in self.requests:
+            #         request = self.requests[req_id]
+            #         if (hasattr(request, 'self_spec_state') and
+            #                 request.self_spec_state == SelfSpecState.ACCUMULATING):
+            #             use_selective_kv = True
+            #             logger.debug(
+            #                 f"Detected request {req_id} in ACCUMULATING state, "
+            #                 "using selective KV attention")
+            #             break
+
+            # ===== STREAMING CACHE: Build tensors for CommonAttentionMetadata =====
+            sink_sizes_gpu = None
+            recent_sizes_gpu = None
+            full_kv_start_offset_gpu = None
+
+            if use_selective_kv:
+                # Copy from InputBatch CPU tensors to staging buffers
+                self.sink_sizes.cpu[:num_reqs].copy_(
+                    self.input_batch.sink_sizes_cpu_tensor[:num_reqs])
+                self.recent_sizes.cpu[:num_reqs].copy_(
+                    self.input_batch.recent_sizes_cpu_tensor[:num_reqs])
+
+                # Extract full_kv_start_block_offset from requests into CPU buffer
+                for req_idx in range(num_reqs):
+                    req_id = self.input_batch.req_ids[req_idx]
+                    if req_id in self.requests:
+                        request = self.requests[req_id]
+                        if hasattr(request, 'full_kv_start_block_offset'):
+                            self.full_kv_start_offset.cpu[req_idx] = request.full_kv_start_block_offset
+                        else:
+                            self.full_kv_start_offset.cpu[req_idx] = 0
+                    else:
+                        self.full_kv_start_offset.cpu[req_idx] = 0
+
+                # Copy all streaming cache buffers to GPU
+                self.sink_sizes.copy_to_gpu(num_reqs)
+                self.recent_sizes.copy_to_gpu(num_reqs)
+                self.full_kv_start_offset.copy_to_gpu(num_reqs)
+
+                # Get GPU tensor views
+                sink_sizes_gpu = self.sink_sizes.gpu[:num_reqs]
+                recent_sizes_gpu = self.recent_sizes.gpu[:num_reqs]
+                full_kv_start_offset_gpu = self.full_kv_start_offset.gpu[:num_reqs]
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
@@ -1344,6 +1398,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                # Streaming cache parameters
+                sink_sizes=sink_sizes_gpu,
+                recent_sizes=recent_sizes_gpu,
+                full_kv_start_offset=full_kv_start_offset_gpu,
             )
 
             if (self.speculative_config
@@ -1391,21 +1449,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[ubid][layer_name] = attn_metadata_i
                 else:
                     assert isinstance(attn_metadata, dict)
-                    # ===== SELF-SPEC: Dispatch to selective KV or regular build =====
-                    # if use_selective_kv and hasattr(builder, 'build_with_selective_kv'):
-                    #     # Use selective KV attention (sparse attention with sink + recent)
-                    #     attn_metadata_i = builder.build_with_selective_kv(
-                    #         common_prefix_len=0,  # Cascade attention incompatible with selective KV
-                    #         common_attn_metadata=common_attn_metadata,
-                    #         input_batch=self.input_batch,
-                    #         **extra_attn_metadata_args)
-                    #     logger.debug("Built attention metadata with selective KV")
-                    # else:
+                    # ===== SELF-SPEC: Dispatch to streaming cache or regular build =====
+                    if use_selective_kv and hasattr(builder, 'build_with_streaming'):
+                        # Use streaming cache attention (sink + recent tokens)
+                        attn_metadata_i = builder.build_with_streaming(
+                            common_prefix_len=0,  # Cascade attention incompatible with streaming cache
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
+                        logger.debug("Built attention metadata with streaming cache")
+                    else:
                         # Regular attention
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
+                        attn_metadata_i = builder.build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
@@ -2394,8 +2451,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_tokens[req_idx] = end_idx
 
             # DEBUG: Print comprehensive state for manual verification
-            self_spec_state = req_state.self_spec_state if hasattr(req_state, 'self_spec_state') else 'NONE'
-            num_pending = len(req_state.pending_output_tokens) if (hasattr(req_state, 'pending_output_tokens') and req_state.pending_output_tokens is not None) else 0
+            # self_spec_state = req_state.self_spec_state if hasattr(req_state, 'self_spec_state') else 'NONE'
+            # num_pending = len(req_state.pending_output_tokens) if (hasattr(req_state, 'pending_output_tokens') and req_state.pending_output_tokens is not None) else 0
             # print(f"[bookkeeping_sync] req_id={req_id} req_idx={req_idx}")
             # print(f"  self_spec_state={self_spec_state}")
             # print(f"  sampled_ids={sampled_ids}")
@@ -3965,8 +4022,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
-                sink_size=self.vllm_config.scheduler_config.sink_size,
-                recent_size=self.vllm_config.scheduler_config.recent_size,
             )
 
     def _allocate_kv_cache_tensors(

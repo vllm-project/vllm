@@ -83,6 +83,14 @@ class CommonAttentionMetadata:
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: Optional[np.ndarray] = None
 
+    # Needed by FlashInfer streaming cache (self-speculative decoding)
+    sink_sizes: Optional[torch.Tensor] = None
+    """(batch_size,), number of sink blocks per request for selective KV"""
+    recent_sizes: Optional[torch.Tensor] = None
+    """(batch_size,), number of recent blocks per request for selective KV"""
+    full_kv_start_offset: Optional[torch.Tensor] = None
+    """(batch_size,), block index where full KV starts per request"""
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,

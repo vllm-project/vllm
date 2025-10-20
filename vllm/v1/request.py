@@ -103,6 +103,8 @@ class Request:
         self._pending_output_tokens: list[int] = []  # Tokens waiting for verification
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        # Streaming cache: block index where full KV computation starts
+        self.full_kv_start_block_offset: int = 0
         self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related

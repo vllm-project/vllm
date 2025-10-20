@@ -410,9 +410,9 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[
         int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
-    # Self-spec sparse attention parameters
+    # Self-spec streaming cache parameters
     sink_size: int = SchedulerConfig.sink_size
-    recent_size: int = SchedulerConfig.recent_size
+    recent_ratio: float = SchedulerConfig.recent_ratio
     model_loader_extra_config: dict = \
         get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: Optional[Union[str,

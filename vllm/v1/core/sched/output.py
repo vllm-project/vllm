@@ -109,6 +109,14 @@ class CachedRequestData:
 
     pending_output_tokens: list[list[int]]
     """Tokens in pending buffer (not yet verified) for each request"""
+
+    # Streaming cache parameters (for selective KV during ACCUMULATING phase)
+    sink_sizes: list[int]
+    """Number of sink blocks per request (for streaming cache)"""
+    recent_sizes: list[int]
+    """Number of recent blocks per request (for streaming cache)"""
+    full_kv_start_block_offsets: list[int]
+    """Block index where full KV starts per request (for streaming cache)"""
     # ===== END SELF-SPEC FIELDS =====
 
     @property
@@ -125,6 +133,9 @@ class CachedRequestData:
             num_computed_tokens=[],
             self_spec_state=[],
             pending_output_tokens=[],
+            sink_sizes=[],
+            recent_sizes=[],
+            full_kv_start_block_offsets=[],
         )
 
 
