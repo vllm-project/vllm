@@ -867,6 +867,7 @@ class NixlConnectorWorker:
                 kv_dtype = kv_cache.dtype
                 if (
                     self.kv_cache_layout == "NHD"
+                    and self.vllm_config.kv_transfer_config is not None
                     and self.vllm_config.kv_transfer_config.enable_permute_local_kv
                 ):
                     logger.info_once(

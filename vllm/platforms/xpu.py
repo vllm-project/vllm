@@ -160,7 +160,8 @@ class XPUPlatform(Platform):
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
-        vllm_config.kv_transfer_config.enable_permute_local_kv = True
+        if vllm_config.kv_transfer_config is not None:
+            vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
         if parallel_config.distributed_executor_backend is None:
             if parallel_config.world_size > 1:
