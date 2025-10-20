@@ -1340,17 +1340,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self: "DPLBAsyncMPClient", notification_data: tuple[str, int]
     ):
         cache = self.eep_scaling_cache
-        assert cache is not None
         notification_type, dp_rank = notification_data
-        if notification_type not in cache.pending_notifications:
-            cache.pending_notifications[notification_type] = set()
         if notification_type == "RECONFIGURE_FINISHED":
             from vllm.v1.engine import UtilityResult
 
             dummy_output = UtilityOutput(call_id=-1, result=UtilityResult(None))
             _process_utility_output(dummy_output, self.utility_results)
-            self.eep_scaling_cache = None
             return
+        assert cache is not None
+        if notification_type not in cache.pending_notifications:
+            cache.pending_notifications[notification_type] = set()
         if dp_rank in cache.pending_notifications[notification_type]:
             raise ValueError(
                 f"Duplicate notification {notification_type} from dp_rank {dp_rank}"
@@ -1379,6 +1378,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     ]
                 )
             cache.pending_notifications[notification_type] = set()
+            if notification_type in [
+                "SHUTDOWN_COMPLETE",
+                "NEW_WORKERS_WEIGHTS_INIT_READY",
+            ]:
+                self.eep_scaling_cache = None
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids or self.resources.engine_dead:
@@ -1483,6 +1487,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             self.vllm_config,
             new_data_parallel_size,
         )
+        wait_future = self._eep_wait_for_setup_switch_complete()
 
         # Phase 3: Wait for new engines to be created
         # and reconfig messages to be received
@@ -1511,7 +1516,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # NOTE(yongji): Before we schedule any requests on the new workers,
         # we should wait for them to switch to the new setup.
-        await self._eep_wait_for_setup_switch_complete()
+        await wait_future
+        # Update the parallel config
+        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         # Notify coordinator about scale up through existing
         # stats_update_task connection
         self._ensure_stats_update_task()
@@ -1520,8 +1527,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         await self.first_req_send_socket.send(scale_up_marker)
 
-        # Update the parallel config
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         logger.info(
             "[Elastic EP] Scale up completed, new data parallel size: %s",
             new_data_parallel_size,
@@ -1568,9 +1573,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # NOTE(yongji): Immediately stop sending requests to the removing engines.
         self.core_engines = self.core_engines[:new_data_parallel_size]
         self.lb_engines = self.lb_engines[:new_data_parallel_size]
+        wait_future = self._eep_wait_for_setup_switch_complete()
 
         await asyncio.gather(*reconfig_futures)
 
+        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         self._ensure_stats_update_task()
         scale_down_marker = msgspec.msgpack.encode(
             ("SCALE_ELASTIC_EP", new_data_parallel_size)
@@ -1580,8 +1587,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # NOTE(yongji): Unlike scaling up,
         # here we don't actually need to wait for the setup switch to complete.
         # We may want to remove it in the future.
-        await self._eep_wait_for_setup_switch_complete()
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        await wait_future
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,
