@@ -1225,7 +1225,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    context_model_parallel_size: int = 1,
+    prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
 ) -> None:
@@ -1278,7 +1278,7 @@ def initialize_model_parallel(
         -1,
         data_parallel_size,
         pipeline_model_parallel_size,
-        context_model_parallel_size,
+        prefill_context_model_parallel_size,
         tensor_model_parallel_size,
     )  # noqa
 
@@ -1341,7 +1341,7 @@ def initialize_model_parallel(
             -1,
             data_parallel_size
             * tensor_model_parallel_size
-            * context_model_parallel_size,
+            * prefill_context_model_parallel_size,
         )
         .unbind(0)
     )
@@ -1353,7 +1353,7 @@ def initialize_model_parallel(
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
     group_ranks = (
-        all_ranks.transpose(3, 4).reshape(-1, context_model_parallel_size).unbind(0)
+        all_ranks.transpose(3, 4).reshape(-1, prefill_context_model_parallel_size).unbind(0)
     )
     group_ranks = [x.tolist() for x in group_ranks]
     _PCP = init_model_parallel_group(
