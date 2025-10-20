@@ -449,6 +449,23 @@ class KVConnectorBase_V1(ABC):
             )
         return None
 
+    @classmethod
+    def prefer_cross_layer_blocks(cls) -> bool:
+        """
+        Returns whether this connector prefers KV blocks
+        that hold KV data for all layers (for speeding up KV data transfers).
+
+        Returns:
+            bool: whether layers' KV data should be contiguous.
+        """
+
+        if cls is KVConnectorBase_V1:
+            raise TypeError(
+                "prefer_cross_layer_blocks should not be called "
+                "on the abstract base class"
+            )
+        return False
+
     def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations

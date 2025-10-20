@@ -122,6 +122,20 @@ def get_kv_connector_cache_layout():
     return "NHD"
 
 
+def kv_connector_prefers_cross_layer_blocks() -> bool:
+    """
+    Returns whether a KV connector is configured and prefers
+    KV data to be contiguous across layers
+    (for speeding up KV data transfers).
+    """
+    vllm_config = get_current_vllm_config()
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is not None:
+        connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+        return connector_cls.prefer_cross_layer_blocks()
+    return False
+
+
 class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""

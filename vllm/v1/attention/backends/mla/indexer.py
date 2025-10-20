@@ -48,7 +48,9 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(with_layers_dim: bool) -> tuple[int, ...]:
+        if with_layers_dim:
+            return (0, 1, 2, 3)
         return (0, 1, 2)
 
     @classmethod
