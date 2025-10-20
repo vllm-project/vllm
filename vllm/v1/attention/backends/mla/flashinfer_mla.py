@@ -41,9 +41,6 @@ class FlashInferMLABackend(MLACommonBackend):
         return FlashInferMLAMetadataBuilder
 
 
-
-
-
 g_fi_workspace = torch.zeros(
     FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
     dtype=torch.uint8,
