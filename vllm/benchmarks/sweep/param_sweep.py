@@ -40,6 +40,14 @@ class ParameterSweepItem(dict[str, object]):
 
     # In JSON, we prefer "_"
     def _iter_param_key_candidates(self, param_key: str):
+        # Inner config arguments are not converted by the CLI
+        if "." in param_key:
+            prefix, rest = param_key.split(".", 1)
+            for prefix_candidate in self._iter_param_key_candidates(prefix):
+                yield prefix_candidate + "." + rest
+
+            return
+
         yield param_key
         yield param_key.replace("-", "_")
         yield param_key.replace("_", "-")
