@@ -40,7 +40,7 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
-from vllm.utils.tensor_serial import encoding_pooling_output
+from vllm.utils.tensor_serial import encoding_pooling_output, tensor2binary
 
 logger = init_logger(__name__)
 
@@ -152,19 +152,19 @@ class EmbeddingMixin(OpenAIServing):
         else:
             num_prompt_tokens = 0
             items: list[dict[str, Any]] = []
-            tensers = []
+            bytes_list = []
             for idx, final_res in enumerate(final_res_batch_checked):
                 item = {
                     "index": idx,
                     "embed_dtype": ctx.request.embed_dtype,
                     "endianness": ctx.request.endianness,
-                    "filename": f"embedding-{idx}.tenser",
+                    "filename": f"embedding-{idx}.tensor",
                 }
 
                 prompt_token_ids = final_res.prompt_token_ids
 
                 items.append(item)
-                tensers.append(final_res.outputs.data)
+                bytes_list.append(tensor2binary(final_res.outputs.data))
                 num_prompt_tokens += len(prompt_token_ids)
 
             usage = {
@@ -185,7 +185,7 @@ class EmbeddingMixin(OpenAIServing):
             """
             streaming_response = response_compression_pooling_output(
                 metadata=metadata,
-                tensers=tensers,
+                tensor=tensor,
                 embed_dtype=ctx.request.embed_dtype,
                 endianness=ctx.request.endianness,
             )

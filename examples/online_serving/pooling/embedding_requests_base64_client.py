@@ -15,7 +15,7 @@ import torch
 from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
-    binary2tenser,
+    binary2tensor,
 )
 
 
@@ -53,8 +53,8 @@ def main(args):
             embedding = []
             for data in response.json()["data"]:
                 binary = base64.b64decode(data["embedding"])
-                tenser = binary2tenser(binary, (-1,), embed_dtype, endianness)
-                embedding.append(tenser.to(torch.float32))
+                tensor = binary2tensor(binary, (-1,), embed_dtype, endianness)
+                embedding.append(tensor.to(torch.float32))
             embedding = torch.cat(embedding)
             print(embed_dtype, endianness, embedding.shape)
 

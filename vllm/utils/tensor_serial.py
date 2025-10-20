@@ -51,8 +51,8 @@ ENDIANNESS_TYPE = Literal["native", "big", "little"]
 ENCODING_FORMAT_TYPE = Literal["float", "base64", "bytes"]
 
 
-def tenser2binary(tenser: torch.Tensor, embed_dtype: str, endianness: str) -> bytes:
-    assert isinstance(tenser, torch.Tensor)
+def tensor2binary(tensor: torch.Tensor, embed_dtype: str, endianness: str) -> bytes:
+    assert isinstance(tensor, torch.Tensor)
     assert embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE
     assert endianness in ENDIANNESS
 
@@ -60,7 +60,7 @@ def tenser2binary(tenser: torch.Tensor, embed_dtype: str, endianness: str) -> by
     torch_view_dtype = EMBED_DTYPE_TO_TORCH_DTYPE_VIEW[embed_dtype]
 
     np_array = (
-        tenser.to(torch_dtype).flatten().contiguous().view(torch_view_dtype).numpy()
+        tensor.to(torch_dtype).flatten().contiguous().view(torch_view_dtype).numpy()
     )
 
     if endianness != "native" and endianness != sys_byteorder:
@@ -69,7 +69,7 @@ def tenser2binary(tenser: torch.Tensor, embed_dtype: str, endianness: str) -> by
     return np_array.tobytes()
 
 
-def binary2tenser(
+def binary2tensor(
     binary: bytes, shape: tuple[int, ...], embed_dtype: str, endianness: str
 ) -> torch.Tensor:
     assert embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE
@@ -96,8 +96,8 @@ def encoding_pooling_output(
     if encoding_format == "float":
         return output.outputs.data.tolist()
     elif encoding_format == "base64":
-        embedding_bytes = tenser2binary(output.outputs.data, embed_dtype, endianness)
+        embedding_bytes = tensor2binary(output.outputs.data, embed_dtype, endianness)
         return base64.b64encode(embedding_bytes).decode("utf-8")
     elif encoding_format == "bytes":
-        return tenser2binary(output.outputs.data, embed_dtype, endianness)
+        return tensor2binary(output.outputs.data, embed_dtype, endianness)
     assert_never(encoding_format)

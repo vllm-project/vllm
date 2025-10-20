@@ -15,7 +15,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
-    binary2tenser,
+    binary2tensor,
 )
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
@@ -291,8 +291,8 @@ async def test_base64_embed_dtype_and_endianness(
             base64_data = []
             for data in responses_base64.json()["data"]:
                 binary = base64.b64decode(data["data"])
-                tenser = binary2tenser(binary, (-1,), embed_dtype, endianness)
-                base64_data.append(tenser.to(torch.float32).tolist())
+                tensor = binary2tensor(binary, (-1,), embed_dtype, endianness)
+                base64_data.append(tensor.to(torch.float32).tolist())
 
             check_embeddings_close(
                 embeddings_0_lst=float_data,
