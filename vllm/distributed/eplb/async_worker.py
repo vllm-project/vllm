@@ -94,6 +94,9 @@ async def transfer_run_periodically(
                         cuda_stream=cuda_stream,
                         rank_mapping=rank_mapping,
                     )
+                    event = torch.cuda.Event(blocking=False)
+                    cuda_stream.record_event(event)
+                    state.buffer_ready_event = event
                     state.ep_buffer_ready = 1
                 finally:
                     state.buffer_lock.release()
