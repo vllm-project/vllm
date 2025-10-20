@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import json
+from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -10,9 +11,128 @@ from types import TracebackType
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-from typing_extensions import Self
+from typing_extensions import Self, override
 
 from vllm.utils.collections import full_groupby
+
+
+class PlotFilterBase(ABC):
+    @classmethod
+    def parse_str(cls, s: str):
+        for op_key in PLOT_FILTERS:
+            if op_key in s:
+                key, value = s.split(op_key)
+                return PLOT_FILTERS[op_key](key, float(value.removeprefix(op_key)))
+        else:
+            raise ValueError(
+                f"Invalid operator for plot filter '{s}'. "
+                f"Valid operators are: {set(PLOT_FILTERS)}",
+            )
+
+    def __init__(self, var: str, target: float) -> None:
+        super().__init__()
+
+        self.var = var
+        self.target = target
+
+    @abstractmethod
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Applies this filter to a DataFrame."""
+        raise NotImplementedError
+
+
+class PlotLessThan(PlotFilterBase):
+    @override
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df[df[self.var] < self.target]
+
+
+class PlotLessThanOrEqual(PlotFilterBase):
+    @override
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df[df[self.var] <= self.target]
+
+
+class PlotGreaterThan(PlotFilterBase):
+    @override
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df[df[self.var] > self.target]
+
+
+class PlotGreaterThanOrEqual(PlotFilterBase):
+    @override
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df[df[self.var] >= self.target]
+
+
+# NOTE: The ordering is important! Match longer op_keys first
+PLOT_FILTERS: dict[str, type[PlotFilterBase]] = {
+    "<=": PlotLessThanOrEqual,
+    ">=": PlotGreaterThanOrEqual,
+    "<": PlotLessThan,
+    ">": PlotGreaterThan,
+}
+
+
+class PlotFilters(list[PlotFilterBase]):
+    @classmethod
+    def parse_str(cls, s: str):
+        if not s:
+            return cls()
+
+        return cls(PlotFilterBase.parse_str(e) for e in s.split(","))
+
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        for item in self:
+            df = item.apply(df)
+
+        return df
+
+
+class PlotBinner:
+    @classmethod
+    def parse_str(cls, s: str):
+        for op_key in PLOT_BINNERS:
+            if op_key in s:
+                key, value = s.split(op_key)
+                return PLOT_BINNERS[op_key](key, float(value.removeprefix(op_key)))
+        else:
+            raise ValueError(
+                f"Invalid operator for plot binner '{s}'. "
+                f"Valid operators are: {set(PLOT_BINNERS)}",
+            )
+
+    def __init__(self, var: str, bin_size: float) -> None:
+        super().__init__()
+
+        self.var = var
+        self.bin_size = bin_size
+
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Applies this binner to a DataFrame."""
+        df = df.copy()
+        df[self.var] = df[self.var] // self.bin_size * self.bin_size
+        return df
+
+
+PLOT_BINNERS: dict[str, type[PlotBinner]] = {
+    "@": PlotBinner,
+}
+
+
+class PlotBinners(list[PlotBinner]):
+    @classmethod
+    def parse_str(cls, s: str):
+        if not s:
+            return cls()
+
+        return cls(PlotBinner.parse_str(e) for e in s.split(","))
+
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        for item in self:
+            df = item.apply(df)
+
+        return df
 
 
 def _json_load_bytes(path: Path) -> list[dict[str, object]]:
@@ -69,9 +189,10 @@ def _plot_fig(
     *,
     var_x: str,
     var_y: str,
-    max_x: float | None,
-    bin_x: float | None,
-    log_y: bool,
+    filter_by: PlotFilters,
+    bin_by: PlotBinners,
+    scale_x: str | None,
+    scale_y: str | None,
     dry_run: bool,
 ):
     fig_group, fig_data = fig_group_data
@@ -110,13 +231,8 @@ def _plot_fig(
             f"Available variables: {df.columns.tolist()}"
         )
 
-    # TODO: Support <KEY><OP><VALUE> syntax
-    # e.g. request_rate<=1024%2 means max of 1024 and bin size of 2
-    if max_x is not None:
-        df = df[df[var_x] <= max_x]
-
-    if bin_x is not None:
-        df[var_x] = df[var_x] // bin_x * bin_x
+    df = filter_by.apply(df)
+    df = bin_by.apply(df)
 
     df["row_group"] = (
         pd.concat(
@@ -147,8 +263,10 @@ def _plot_fig(
     else:
         g.set_titles("")
 
-    if log_y:
-        g.set(yscale="log")
+    if scale_x:
+        g.set(xscale=scale_x)
+    if scale_y:
+        g.set(yscale=scale_y)
 
     if len(curve_by) <= 3:
         hue, style, size, *_ = (*curve_by, None, None, None)
@@ -198,9 +316,10 @@ def plot(
     *,
     var_x: str,
     var_y: str,
-    max_x: float | None,
-    bin_x: float | None,
-    log_y: bool,
+    filter_by: PlotFilters,
+    bin_by: PlotBinners,
+    scale_x: str | None,
+    scale_y: str | None,
     dry_run: bool,
 ):
     all_data = [
@@ -231,9 +350,10 @@ def plot(
                     curve_by=curve_by,
                     var_x=var_x,
                     var_y=var_y,
-                    max_x=max_x,
-                    bin_x=bin_x,
-                    log_y=log_y,
+                    filter_by=filter_by,
+                    bin_by=bin_by,
+                    scale_x=scale_x,
+                    scale_y=scale_y,
                     dry_run=dry_run,
                 ),
                 fig_groups,
@@ -300,22 +420,38 @@ def main():
         help="The variable for the y-axis",
     )
     parser.add_argument(
-        "--max-x",
-        type=float,
-        default=None,
-        help="The maximum value to plot for the x-axis.",
+        "--filter-by",
+        type=str,
+        default="",
+        help="A comma-separated list of statements indicating values to filter by. "
+        "This is useful to remove outliers. "
+        "Example: `max_concurrency<1000,max_num_batched_tokens<=4096` means "
+        "plot only the points where `max_concurrency` is less than 1000 and "
+        "`max_num_batched_tokens` is no greater than 4096.",
     )
     parser.add_argument(
-        "--bin-x",
-        type=float,
-        default=None,
-        help="Group together points with x-axis values in the same bin "
-        "to reduce noise.",
+        "--bin-by",
+        type=str,
+        default="",
+        help="A comma-separated list of statements indicating values to bin by. "
+        "This is useful to avoid plotting points that are too close together. "
+        "Example: `request_throughput%1` means "
+        "use a bin size of 1 for the `request_throughput` variable.",
     )
     parser.add_argument(
-        "--log-y",
+        "--scale-x",
+        type=str,
+        default=None,
+        help="The scale to use for the x-axis. "
+        "Currently only accepts string values such as 'log' and 'sqrt'. "
+        "See also: https://seaborn.pydata.org/generated/seaborn.objects.Plot.scale.html",
+    )
+    parser.add_argument(
+        "--scale-y",
         action="store_true",
-        help="Use logarithmic scaling for the y-axis.",
+        help="The scale to use for the y-axis. "
+        "Currently only accepts string values such as 'log' and 'sqrt'. "
+        "See also: https://seaborn.pydata.org/generated/seaborn.objects.Plot.scale.html",
     )
     parser.add_argument(
         "--dry-run",
@@ -339,9 +475,10 @@ def main():
         curve_by=curve_by,
         var_x=args.var_x,
         var_y=args.var_y,
-        max_x=args.max_x,
-        bin_x=args.bin_x,
-        log_y=args.log_y,
+        filter_by=PlotFilters.parse_str(args.filter_by),
+        bin_by=PlotBinners.parse_str(args.bin_by),
+        scale_x=args.scale_x,
+        scale_y=args.scale_y,
         dry_run=args.dry_run,
     )
 
