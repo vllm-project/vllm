@@ -681,7 +681,7 @@ class MPClient(EngineCoreClient):
                             type="engine_actor dead",
                             message=f"Engine core actor id {actor_id} "
                             f"(status: {actor_state}).",
-                            engine_id=actor_index,
+                            engine_id=str(actor_index),
                             additional_info=None,
                         )
                         engine_manager.engine_down_socket.send_multipart(
