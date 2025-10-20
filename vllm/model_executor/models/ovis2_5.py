@@ -11,7 +11,7 @@ import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.ovis import VisualEmbedding
@@ -105,6 +105,7 @@ class VisualTokenizer(torch.nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        multimodal_config: MultiModalConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -113,6 +114,7 @@ class VisualTokenizer(torch.nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.vit",
             use_data_parallel=use_data_parallel,
+            multimodal_config=multimodal_config,
         )
         # reserved tokens for INDICATOR_IDS
         head_dim = visual_vocab_size - len(INDICATOR_IDS)
@@ -132,6 +134,7 @@ class VisualTokenizer(torch.nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        multimodal_config: MultiModalConfig | None = None,
     ):
         model_type = config.model_type
         if model_type == "siglip2_navit":
@@ -140,6 +143,7 @@ class VisualTokenizer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 use_data_parallel=use_data_parallel,
+                multimodal_config=multimodal_config,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
@@ -457,6 +461,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
@@ -469,6 +474,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             visual_vocab_size=config.visual_vocab_size,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
+            multimodal_config=multimodal_config,
         )
 
         self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)

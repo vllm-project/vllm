@@ -19,7 +19,7 @@ from transformers.utils import torch_int
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
@@ -353,6 +353,7 @@ class KeyeSiglipAttention(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
@@ -392,7 +393,9 @@ class KeyeSiglipAttention(nn.Module):
 
         # Detect attention implementation.
         self.attn_backend = get_vit_attn_backend(
-            head_size=self.head_dim, dtype=torch.get_default_dtype()
+            head_size=self.head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
 
         self.use_upstream_fa = False
@@ -521,6 +524,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -529,6 +533,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            attn_backend_override=attn_backend_override,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -573,18 +578,25 @@ class KeyeSiglipEncoder(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
     ):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
         num_heads = config.num_attention_heads
         head_dim = embed_dim // num_heads
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.layers = nn.ModuleList(
             [
                 KeyeSiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
+                    attn_backend_override=attn_backend_override,
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]
@@ -666,6 +678,7 @@ class KeyeSiglipVisionTransformer(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
@@ -676,6 +689,7 @@ class KeyeSiglipVisionTransformer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
+            attn_backend_override=attn_backend_override,
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -747,13 +761,20 @@ class KeyeSiglipVisionModel(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
     ):
         super().__init__()
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.vision_model = KeyeSiglipVisionTransformer(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.vision_model",
+            attn_backend_override=attn_backend_override,
         )
         self.quant_config = quant_config
 
@@ -1300,6 +1321,7 @@ class BaseKeyeModule(nn.Module):
             config.vision_config,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
+            multimodal_config=multimodal_config,
         )
 
         self.mlp_AR = self._build_projector(

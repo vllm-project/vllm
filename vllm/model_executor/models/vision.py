@@ -11,7 +11,6 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.attention.backends.registry import _Backend
-from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -79,17 +78,17 @@ def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInf
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
+def get_vit_attn_backend(
+    head_size: int,
+    dtype: torch.dtype,
+    *,
+    attn_backend_override: _Backend | None = None,
+) -> _Backend:
     """
     Get the available attention backend for Vision Transformer.
     """
-    mm_config = getattr(
-        getattr(get_current_vllm_config(), "model_config", None),
-        "multimodal_config",
-        None,
-    )
-    if mm_config is not None and mm_config.mm_encoder_attn_backend is not None:
-        return mm_config.mm_encoder_attn_backend
+    if attn_backend_override is not None:
+        return attn_backend_override
 
     # Lazy import to avoid circular dependency
     from vllm.attention.selector import get_env_variable_attn_backend
