@@ -457,15 +457,12 @@ class WorkerProc:
             )
             self.async_output_copy_thread.start()
 
-        import os
-
-        is_new_worker = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
         )
 
-        if not is_new_worker:
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
             self.worker.init_device()
             self.worker.load_model()
 

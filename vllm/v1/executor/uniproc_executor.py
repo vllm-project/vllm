@@ -42,9 +42,9 @@ class UniProcExecutor(Executor):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
-        is_new_worker = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         self.driver_worker.init_worker(all_kwargs=[kwargs])
-        if not is_new_worker:
+        if not is_eep_new_worker:
             self.driver_worker.init_device()
             self.driver_worker.load_model()
 

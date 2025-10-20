@@ -11,10 +11,9 @@ from torch.distributed import P2POp
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
-    CompilationLevel,
-    get_current_vllm_config,
+    CompilationMode,
     set_current_vllm_config,
 )
 from vllm.distributed import (
@@ -32,6 +31,7 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
+from vllm.utils.torch_utils import supports_dynamo
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 
@@ -122,35 +122,7 @@ def broadcast_expert_mapping(
     return physical_to_logical, num_local_physical_experts, num_logical_experts
 
 
-def clear_compile_and_cache(model: nn.Module) -> None:
-    if not isinstance(model, TorchCompileWrapperWithCustomDispatcher) and hasattr(
-        model, "model"
-    ):
-        model = model.model
-    if not isinstance(model, TorchCompileWrapperWithCustomDispatcher):
-        return
-    if model.do_not_compile:
-        return
-    # reset the compilation counter
-    compilation_counter.num_models_seen = 0
-    compilation_counter.num_graphs_seen = 0
-    compilation_counter.num_piecewise_graphs_seen = 0
-    compilation_counter.num_piecewise_capturable_graphs_seen = 0
-    compilation_counter.num_backend_compilations = 0
-    compilation_counter.num_gpu_runner_capture_triggers = 0
-    compilation_counter.num_cudagraph_captured = 0
-    compilation_counter.num_inductor_compiles = 0
-    compilation_counter.num_eager_compiles = 0
-    compilation_counter.num_cache_entries_updated = 0
-    compilation_counter.num_compiled_artifacts_saved = 0
-    compilation_counter.dynamo_as_is_count = 0
-    compilation_level = get_current_vllm_config().compilation_config.level
-    TorchCompileWrapperWithCustomDispatcher.__init__(
-        model, compilation_level=compilation_level
-    )
-
-
-class ElasticScalingExecutor:
+class ElasticEPScalingExecutor:
     def __init__(self, worker):
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
@@ -209,12 +181,20 @@ class ElasticScalingExecutor:
         dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
 
         ranks_to_send = []
+        # NOTE(yongji): determine sender-receiver pairing in weight transfer.
+        # Mapping rule:
+        # Base: each existing worker i gets (num_new_workers // old_dp_size) new workers
+        #   to send weights to. Worker i sends weights to new workers with global ranks
+        #   in [old_dp_size + i * num_dst_per_sender,
+        #   old_dp_size + (i + 1) * num_dst_per_sender].
+        # Remainder: Each of the first (num_new_workers % old_dp_size) existing workers
+        #   gets an additional new worker to send weights to, whose global rank is
+        #   old_dp_size * (num_dst_per_sender + 1) + i.
         num_dst_per_sender = num_new_workers // old_dp_size
         sender_pos = dp_rank
         recv_begin = sender_pos * num_dst_per_sender
         recv_end = recv_begin + num_dst_per_sender
         ranks_to_send = list(range(old_dp_size + recv_begin, old_dp_size + recv_end))
-
         remainder_start = old_dp_size * num_dst_per_sender
         recver_pos = remainder_start + sender_pos
         if recver_pos < num_new_workers:
@@ -252,8 +232,6 @@ class ElasticScalingExecutor:
         )
 
     def switch_and_prepare(self) -> None:
-        from vllm.platforms import current_platform
-
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
@@ -360,26 +338,32 @@ class ElasticScalingExecutor:
 
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
-        model.set_eplb_state(
-            eplb_state.expert_load_pass,
-            eplb_state.logical_to_physical_map,
-            eplb_state.logical_replica_count,
-        )
-        model.update_physical_experts_metadata(
-            num_physical_experts=num_physical_experts,
-            num_local_physical_experts=num_local_experts,
-        )
+        with set_current_vllm_config(self.worker.vllm_config):
+            model.set_eplb_state(
+                eplb_state.expert_load_pass,
+                eplb_state.logical_to_physical_map,
+                eplb_state.logical_replica_count,
+            )
+            model.update_physical_experts_metadata(
+                num_physical_experts=num_physical_experts,
+                num_local_physical_experts=num_local_experts,
+            )
 
         prepare_communication_buffer_for_model(self.worker.model_runner.model)
         if (
-            self.worker.vllm_config.compilation_config.level
-            == CompilationLevel.DYNAMO_AS_IS
-            and current_platform.is_cuda_alike()
+            self.worker.vllm_config.compilation_config.mode
+            == CompilationMode.STOCK_TORCH_COMPILE
+            and supports_dynamo()
         ):
+            # NOTE(yongji): when using stock torch.compile,
+            # torch.compile is triggered during GPUModelRunner's load_model()
+            # TODO(yongji):check do we need to re-trigger torch.compile here?
+            # any changes to the tensor shapes in execution should already
+            # be handled internally by torch.compile.
             backend = self.worker.vllm_config.compilation_config.init_backend(
                 self.worker.vllm_config
             )
-            compilation_counter.dynamo_as_is_count += 1
+            compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
         # release all previously captured CUDA graphs
@@ -390,9 +374,9 @@ class ElasticScalingExecutor:
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
             raise RuntimeError("DBO is not yet supported in elastic EP")
 
-        # clear all torch.compile
+        # reset the compile wrapper
         with set_current_vllm_config(self.worker.vllm_config):
-            clear_compile_and_cache(self.worker.model_runner.get_model())
+            reset_compile_wrapper(self.worker.model_runner.get_model())
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -499,18 +483,3 @@ class ElasticScalingExecutor:
 
     def prepare_new_worker(self) -> None:
         prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
-
-        from vllm.platforms import current_platform
-
-        if (
-            self.worker.vllm_config.compilation_config.level
-            == CompilationLevel.DYNAMO_AS_IS
-            and current_platform.is_cuda_alike()
-        ):
-            backend = self.worker.vllm_config.compilation_config.init_backend(
-                self.worker.vllm_config
-            )
-            compilation_counter.dynamo_as_is_count += 1
-            self.worker.model_runner.get_model().compile(
-                fullgraph=True, backend=backend
-            )

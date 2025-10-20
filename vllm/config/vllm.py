@@ -1047,6 +1047,7 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
+        raise RuntimeError("Current vLLM config is not set.")
         logger.warning("Current vLLM config is not set.")
         return VllmConfig()
     return _current_vllm_config

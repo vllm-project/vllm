@@ -19,12 +19,20 @@ from vllm.distributed.utils import (
     stateless_init_torch_distributed_process_group,
 )
 from vllm.logger import init_logger
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
 
 class StatelessGroupCoordinator(GroupCoordinator):
+    """
+    A stateless version of the GroupCoordinator class in parallel_state,
+    It will create CPU, device and TCPStore based communication groups
+    that are independent of PyTorch's WORLD group. Hence,
+    communication groups with a different set of participants GPUs
+    can be created without destroying the existing ones.
+    """
+
     def __init__(
         self,
         group_ranks: list[list[int]],

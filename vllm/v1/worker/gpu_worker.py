@@ -74,9 +74,9 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        from vllm.distributed.elastic_ep.elastic_execute import ElasticScalingExecutor
+        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
 
-        self.elastic_scaling_executor = ElasticScalingExecutor(self)
+        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -265,7 +265,7 @@ class Worker(WorkerBase):
                 expanded_physical_to_logical,
                 num_logical_experts,
                 old_num_physical_experts,
-            ) = self.elastic_scaling_executor.receive_expert_mapping()
+            ) = self.elastic_ep_executor.receive_expert_mapping()
             num_physical_experts = expanded_physical_to_logical.shape[1]
             self.parallel_config.eplb_config.num_redundant_experts = (
                 num_physical_experts - num_logical_experts
@@ -278,7 +278,7 @@ class Worker(WorkerBase):
             self.model_runner.setup_eplb_from_mapping(
                 expanded_physical_to_logical, old_num_physical_experts
             )
-            self.model_runner.eplb_disabled = True
+            self.model_runner.eep_eplb_suppressed = True
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -649,7 +649,7 @@ class Worker(WorkerBase):
             runner.ensure_kv_transfer_shutdown()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
-        return self.elastic_scaling_executor.execute(execute_method, *args, **kwargs)
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
 
 def init_worker_distributed_environment(
