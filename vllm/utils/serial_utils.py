@@ -112,7 +112,7 @@ def encoding_pooling_output(
 @dataclass
 class MetadataItem:
     index: int
-    embed_dtype: EMBED_DTYPE_TO_TORCH_DTYPE
+    embed_dtype: EmbedDType
     endianness: Endianness
     start: int
     end: int
