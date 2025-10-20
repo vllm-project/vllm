@@ -1,11 +1,15 @@
 from collections import defaultdict
 from .backends import *
-from mirage.mpk import MPK, MPKMetadata
+from mirage import MPK, MPKMetadata, MirageModelConfig
 import re
-from vllm.config import get_current_vllm_config
+from vllm.config import ModelConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.models.utils import extract_layer_index
 import torch
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
     """Transfer FX placeholder debug names to model-like dotted names.
 
@@ -46,91 +50,113 @@ def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
 
     return converted_names
 
-
-# @dataclass
-# class MPKMetadata:
-#     # ---------- MPK class external state bundled here ----------
-#     # args
-#     mode: str = "offline"
-#     total_num_requests: int = 1
-#     num_remote_schedulers: int = 0
-#     max_seq_length: int = 0
-#     max_num_batched_requests: int = 0
-#     max_num_batched_tokens: int = 0
-#     max_num_pages: int = 0
-#     page_size: int = 0
-#     max_sm_num: int = 108
-#     device: str = "cuda"
-#     # model 
-#     weight_from_model: bool
-#     model_name: Optional[str] # For now, model_name must be provided
-#     model_path: Optional[str] = None
-#     # fx graph
-#     state_dict: Optional[dict] = None
-#     # Meta tensors
-#     step: Optional[torch.Tensor] = None
-#     tokens: Optional[torch.Tensor] = None
-#     input_tokens: Optional[torch.Tensor] = None
-#     output_tokens: Optional[torch.Tensor] = None
-#     num_new_tokens: Optional[torch.Tensor] = None
-#     prompt_lengths: Optional[torch.Tensor] = None
-#     qo_indptr_buffer: Optional[torch.Tensor] = None
-#     paged_kv_indptr_buffer: Optional[torch.Tensor] = None
-#     paged_kv_indices_buffer: Optional[torch.Tensor] = None
-#     paged_kv_last_page_len_buffer: Optional[torch.Tensor] = None
-#     # profiling
-#     profiler_tensor: Optional[torch.Tensor] = None
-#     trace_name: Optional[str] = None
-#     # spec decode config
-#     spec_decode_config: Optional[object] = None
-    
+def build_model_config(
+    model_config: ModelConfig,
+    state_dict: dict[str, torch.Tensor],
+    k_cache_tensors: list[torch.Tensor],
+    v_cache_tensors: list[torch.Tensor],
+    position_embeddings: torch.Tensor,
+) -> MirageModelConfig:
+    mirage_model_config = MirageModelConfig(
+        # model architecture
+        hidden_size=model_config.get_hidden_size(),
+        intermediate_size=getattr(model_config.hf_text_config, "intermediate_size", 0),
+        vocab_size=model_config.get_vocab_size(),
+        num_q_heads=model_config.get_num_attention_heads(),
+        num_kv_heads=model_config.get_num_kv_heads(),
+        head_dim=model_config.get_head_size(),
+        num_layers=getattr(model_config.hf_text_config, "num_hidden_layers", 0),
+        # kv cache
+        k_cache=k_cache_tensors,
+        v_cache=v_cache_tensors,
+        # position embeddings
+        position_embeddings=position_embeddings,
+        # model weights
+        state_dict=state_dict,
+    )
+    return mirage_model_config
 
 def build_mpk_metadata(
         vllm_config: VllmConfig, 
         forward_context: ForwardContext,
-        state_dict: dict[str, torch.Tensor],
-        k_cache_tensors: list[torch.Tensor],
-        v_cache_tensors: list[torch.Tensor]
+        args: list[Any],
+        transfered_tensor_names: list[str],
     ) -> MPKMetadata:
     model_config = vllm_config.model_config
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
     parallel_config = vllm_config.parallel_config
     attn_metadata = forward_context.attn_metadata
+    
+    static_forward_context = forward_context.no_compile_layers # layer names to layers
+    k_cache_tensors = []
+    v_cache_tensors = []
+    # Convert kv_caches dict to a list of tensors in the order of layer_index.
+    index2name = defaultdict(list)
+    for layer_name in static_forward_context.keys():
+        index2name[extract_layer_index(layer_name, 1)].append(layer_name)
+
+    for layer_index in sorted(index2name.keys()):
+        layer_names = index2name[layer_index]
+        assert len(layer_names) == 1, "Multiple layers with the same layer index are not supported"
+        layer_name = layer_names[0]
+        logger.info(f"{layer_index} {layer_name}: attention num: {len(static_forward_context[layer_name].kv_cache)}; kv_cache.shape: {static_forward_context[layer_name].kv_cache[0].shape}")
+        k_cache_tensors.append(static_forward_context[layer_name].kv_cache[0][0])
+        v_cache_tensors.append(static_forward_context[layer_name].kv_cache[0][1])
+        # kv_cache_tensors shape: num_layers * (2, num_blocks, block_size, num_kv_heads, head_size)
+    
+    state_dict = {}
+    input_token_ids = None
+    positions_tensor = None
+    position_embeddings = None
+    for arg, name in zip(args, transfered_tensor_names):
+        if name == 'input_ids':
+            input_token_ids = arg
+        elif name == 'positions':
+            positions_tensor = arg
+        elif "cos_sin_cache" in name:
+            position_embeddings = arg
+        else:
+            state_dict[name] = arg
+    
+    mirage_model_config = build_model_config(
+        model_config,
+        state_dict,
+        k_cache_tensors,
+        v_cache_tensors,
+        position_embeddings
+    )
     mpk_metadata = MPKMetadata(
-        mode = "online"
+        mode = "online",
         # total_num_requests
         # num_remote_schedulers: int = 0
         max_seq_length = model_config.max_model_len,
         max_num_batched_requests = scheduler_config.max_num_seqs,
         max_num_batched_tokens = scheduler_config.max_num_batched_tokens,
-        max_num_pages = cache_config.num_gpu_blocks
-        page_size = cache_config.block_size
+        max_num_pages = cache_config.num_gpu_blocks,
+        page_size = cache_config.block_size,
         # max_sm_num: int = 108
-        device: str = "cuda"
+        device = "cuda",
         # # model 
-        # weight_from_model: bool
+        weight_from_model = False,
         model_name = model_config.model_name,
         # model_path: Optional[str] = None
         # multi device support
-        world_size = parallel_config.world_size
-        rank = parallel_config.rank
-        # # fx graph
-        state_dict = state_dict
+        world_size = parallel_config.world_size,
+        rank = parallel_config.rank,
         # # Meta tensors
-        # step: Optional[torch.Tensor] = None
+        step = positions_tensor,
         # tokens: Optional[torch.Tensor] = None
-        # input_tokens: Optional[torch.Tensor] = None
+        input_tokens = input_token_ids,
         # output_tokens: Optional[torch.Tensor] = None
         # num_new_tokens: Optional[torch.Tensor] = None
         # prompt_lengths: Optional[torch.Tensor] = None
-        qo_indptr_buffer = attn_metadata.qo_indptr_gpu
-        paged_kv_indptr_buffer = attn_metadata.paged_kv_indptr_gpu
-        paged_kv_indices_buffer = attn_metadata.paged_kv_indices_gpu
-        paged_kv_last_page_len_buffer = attn_metadata.paged_kv_last_page_len_gpu
-        # kv cache tensors
-        k_cache_tensors = k_cache_tensors
-        v_cache_tensors = v_cache_tensors
+        qo_indptr_buffer = attn_metadata.qo_indptr_gpu,
+        paged_kv_indptr_buffer = attn_metadata.paged_kv_indptr_gpu,
+        paged_kv_indices_buffer = attn_metadata.paged_kv_indices_gpu,
+        paged_kv_last_page_len_buffer = attn_metadata.paged_kv_last_page_len_gpu,
+        # kv cache tensors, weights and model config
+        model_config=mirage_model_config,
         # # profiling
         # profiler_tensor: Optional[torch.Tensor] = None
         # trace_name: Optional[str] = None
@@ -156,15 +182,8 @@ class MirageBackend:
     _called: bool = False
     # the graph we compiled
     graph: fx.GraphModule
-    # the stiching graph module for all the piecewise graphs
-    split_gm: fx.GraphModule
-    piecewise_graphs: list[SplitItem]
-    returned_callable: Callable
-    # Inductor passes to run on the graph pre-defunctionalization
-    post_grad_passes: Sequence[Callable]
-    sym_tensor_indices: list[int]
+
     input_buffers: list[torch.Tensor]
-    compiler_manager: CompilerManager
 
     def __init__(
         self,
@@ -177,25 +196,23 @@ class MirageBackend:
         # when multiple parts are initialized as independent
         # models, we need to use the model_tag to distinguish
         # them, e.g. backbone (default), eagle_head, etc.
+        logger.info("[Mirage] Calling MirageBackend init!")
         self.prefix = prefix or model_tag
 
         # Passes to run on the graph post-grad.
         self.post_grad_pass_manager = PostGradPassManager()
 
-        self.sym_tensor_indices = []
         self.input_buffers = []
 
         self.vllm_config = vllm_config
-        self.model_name = vllm_config.model_config.model_name
         self.compilation_config = vllm_config.compilation_config
+        self.model_config = vllm_config.model_config
+        self.model_name = vllm_config.model_config.model
 
-        self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config
-        )
 
     def __call__(
         self, graph: fx.GraphModule, example_inputs
-    ) -> VllmSerializableFunction:
+    ) -> Any:
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
@@ -216,55 +233,31 @@ class MirageBackend:
         transfered_tensor_names = transfer_tensor_names(placeholders)
         
         forward_context = get_forward_context()
-        static_forward_context = forward_context.no_compile_layers # layer names to layers
         
-        k_cache_tensors = []
-        v_cache_tensors = []
-        # Convert kv_caches dict to a list of tensors in the order of layer_index.
-        index2name = defaultdict(list)
-        for layer_name in static_forward_context.keys():
-            index2name[extract_layer_index(layer_name, 1)].append(layer_name)
-
-        for layer_index in sorted(index2name.keys()):
-            layer_names = index2name[layer_index]
-            assert len(layer_names) == 1, "Multiple layers with the same layer index are not supported"
-            layer_name = layer_names[0]
-            k_cache_tensors.append(static_forward_context[layer_name].kv_cache[0])
-            v_cache_tensors.append(static_forward_context[layer_name].kv_cache[1])
-            # kv_cache_tensors shape: num_layers * (2, num_blocks, block_size, num_kv_heads, head_size)
-
         self._called = True
         self.compiled = False
         
         def compile_or_call(*args):
             if not self.compiled:
                 # Compile only at the first call -- when we get real tensors
-                state_dict = {}
-                for arg, name in zip(args, transfered_tensor_names):
-                    if name == 'input_ids':
-                        input_tensor = arg
-                    elif name == 'positions':
-                        positions_tensor = arg
-                    else:
-                        state_dict[name] = arg
-                vllm_config = get_current_vllm_config()
-
-                model_config = vllm_config.model_config
+                logger.info("[Mirage] Calling compile_or_call for the first time, compiling......!")
                 mpk_metadata = build_mpk_metadata(
-                    vllm_config,
+                    self.vllm_config,
                     forward_context,
-                    state_dict,
-                    k_cache_tensors,
-                    v_cache_tensors
+                    args,
+                    transfered_tensor_names,
                 )
+                logger.info(f"[Mirage] MPK metadata: {mpk_metadata.info_as_string()}")
                 self.mpk = MPK(mpk_metadata)
                 self.mpk.build()
                 self.mpk.compile()
                 
                 self.compiled = True
                 
+            logger.info(f"[Mirage] Calling the compiled result...")
             return self.mpk()
         
-        return VllmSerializableFunction(
-            graph, example_inputs, self.prefix, compile_or_call
-        )
+        # return VllmSerializableFunction(
+        #     graph, example_inputs, self.prefix, compile_or_call
+        # )
+        return compile_or_call
