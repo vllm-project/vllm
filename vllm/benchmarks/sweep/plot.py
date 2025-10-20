@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
@@ -73,6 +74,7 @@ def _plot_fig(
 
     fig.tight_layout()
     fig.savefig(fig_path)
+    plt.close(fig)
 
     print("[END FIGURE]")
 
