@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import json
-from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
+from types import TracebackType
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+from typing_extensions import Self
 
 from vllm.utils.collections import full_groupby
 
@@ -26,10 +27,51 @@ def _get_metric(run_data: dict[str, object], metric_key: str):
         raise ValueError(f"Cannot find metric {metric_key!r} in {run_data=}") from exc
 
 
+def _get_group(run_data: dict[str, object], group_keys: list[str]):
+    return tuple((k, str(_get_metric(run_data, k))) for k in group_keys)
+
+
+def _get_fig_path(
+    fig_dir: Path,
+    group: tuple[tuple[str, str], ...],
+):
+    return fig_dir / (
+        "-".join(
+            (
+                "FIGURE-",
+                *(f"{k}={v}" for k, v in group),
+            )
+        )
+        .replace("/", "_")
+        .replace("..", "__")  # Sanitize
+        + ".png"
+    )
+
+
+def _get_fig_title(group: tuple[tuple[str, str], ...]):
+    return ", ".join(f"{k}={v}" for k, v in group) if group else "(All)"
+
+
+class DummyExecutor:
+    map = map
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        exc_traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+
 def _plot_fig(
-    fig_path: Path,
-    fig_title: str,
-    fig_data: list[dict[str, object]],
+    fig_dir: Path,
+    fig_group_data: tuple[tuple[tuple[str, str], ...], list[dict[str, object]]],
+    row_by: list[str],
+    col_by: list[str],
     curve_by: list[str],
     *,
     var_x: str,
@@ -39,10 +81,31 @@ def _plot_fig(
     log_y: bool,
     dry_run: bool,
 ):
+    fig_group, fig_data = fig_group_data
+
+    row_groups = full_groupby(
+        fig_data,
+        key=lambda item: _get_group(item, row_by),
+    )
+    num_rows = len(row_groups)
+    num_cols = max(
+        len(full_groupby(row_data, key=lambda item: _get_group(item, col_by)))
+        for _, row_data in row_groups
+    )
+
+    fig_path = _get_fig_path(fig_dir, fig_group)
+
     print("[BEGIN FIGURE]")
+    print(f"Group: {dict(fig_group)}")
+    print(f"Grid: {num_rows} rows x {num_cols} cols")
     print(f"Output file: {fig_path}")
 
+    if dry_run:
+        print("[END FIGURE]")
+        return
+
     df = pd.DataFrame.from_records(fig_data)
+
     if var_x not in df.columns:
         raise ValueError(
             f"Cannot find {var_x=!r} in parameter sweep results. "
@@ -60,14 +123,35 @@ def _plot_fig(
     if bin_x is not None:
         df[var_x] = df[var_x] // bin_x * bin_x
 
-    if dry_run:
-        print("[END FIGURE]")
-        return
+    df["row_group"] = (
+        pd.concat(
+            [k + "=" + df[k].astype(str) for k in row_by],
+            axis=1,
+        ).agg("-".join, axis=1)
+        if row_by
+        else "(All)"
+    )
+
+    df["col_group"] = (
+        pd.concat(
+            [k + "=" + df[k].astype(str) for k in col_by],
+            axis=1,
+        ).agg("-".join, axis=1)
+        if col_by
+        else "(All)"
+    )
+
+    g = sns.FacetGrid(df, row="row_group", col="col_group")
+
+    g.set_titles("{row_name},{col_name}")
+
+    if log_y:
+        g.set(yscale="log")
 
     if len(curve_by) <= 3:
         hue, style, size, *_ = (*curve_by, None, None)
-        ax = sns.lineplot(
-            df,
+        g.map_dataframe(
+            sns.lineplot,
             x=var_x,
             y=var_y,
             hue=hue,
@@ -76,85 +160,37 @@ def _plot_fig(
             markers=True,
         )
     else:
-        df["params"] = pd.concat(
-            [k + "=" + df[k].astype(str) for k in curve_by],
-            axis=1,
-        ).agg("-".join, axis=1)
+        df["curve_group"] = (
+            pd.concat(
+                [k + "=" + df[k].astype(str) for k in curve_by],
+                axis=1,
+            ).agg("-".join, axis=1)
+            if curve_by
+            else "(All)"
+        )
 
-        ax = sns.lineplot(
-            df,
+        g.map_dataframe(
+            sns.lineplot,
             x=var_x,
             y=var_y,
-            hue="params",
+            hue="curve_group",
             markers=True,
         )
 
-    ax.set_title(fig_title)
+    g.add_legend()
 
-    if log_y:
-        ax.set_yscale("log")
-
-    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-
-    fig = ax.get_figure()
-    assert fig is not None
-
-    fig.tight_layout()
-    fig.savefig(fig_path)
-    plt.close(fig)
+    g.savefig(fig_path)
+    plt.close(g.figure)
 
     print("[END FIGURE]")
-
-
-def _plot_fig_by_group(
-    fig_dir: Path,
-    fig_group_data: tuple[Iterable[tuple[str, str]], list[dict[str, object]]],
-    curve_by: list[str],
-    *,
-    var_x: str,
-    var_y: str,
-    max_x: float | None,
-    bin_x: float | None,
-    log_y: bool,
-    dry_run: bool,
-):
-    fig_group, fig_data = fig_group_data
-
-    fig_group = tuple(fig_group)
-
-    fig_path = fig_dir / (
-        "-".join(
-            (
-                "FIGURE-",
-                *(f"{k}={v}" for k, v in fig_group),
-            )
-        )
-        .replace("/", "_")
-        .replace("..", "__")  # Sanitize
-        + ".png"
-    )
-    fig_title = (
-        ", ".join(f"{k}={v}" for k, v in fig_group) if fig_group else "(All data)"
-    )
-
-    return _plot_fig(
-        fig_path,
-        fig_title,
-        fig_data,
-        curve_by,
-        var_x=var_x,
-        var_y=var_y,
-        max_x=max_x,
-        bin_x=bin_x,
-        log_y=log_y,
-        dry_run=dry_run,
-    )
 
 
 def plot(
     output_dir: Path,
     fig_dir: Path,
     fig_by: list[str],
+    row_by: list[str],
+    col_by: list[str],
     curve_by: list[str],
     *,
     var_x: str,
@@ -175,27 +211,31 @@ def plot(
 
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    with ProcessPoolExecutor() as pool:
-        out = pool.map(
-            partial(
-                _plot_fig_by_group,
-                fig_dir,
-                curve_by=curve_by,
-                var_x=var_x,
-                var_y=var_y,
-                max_x=max_x,
-                bin_x=bin_x,
-                log_y=log_y,
-                dry_run=dry_run,
-            ),
-            full_groupby(
-                all_data,
-                key=lambda item: tuple((k, str(_get_metric(item, k))) for k in fig_by),
-            ),
-        )
+    fig_groups = full_groupby(
+        all_data,
+        key=lambda item: _get_group(item, fig_by),
+    )
 
-        # Collect the results
-        all(out)
+    with DummyExecutor() if len(fig_groups) <= 1 else ProcessPoolExecutor() as executor:
+        # Resolve the iterable to ensure that the workers are run
+        all(
+            executor.map(
+                partial(
+                    _plot_fig,
+                    fig_dir,
+                    row_by=row_by,
+                    col_by=col_by,
+                    curve_by=curve_by,
+                    var_x=var_x,
+                    var_y=var_y,
+                    max_x=max_x,
+                    bin_x=bin_x,
+                    log_y=log_y,
+                    dry_run=dry_run,
+                ),
+                fig_groups,
+            )
+        )
 
 
 def main():
@@ -221,6 +261,20 @@ def main():
         type=str,
         required=True,
         help="A comma-separated list of variables, such that a separate curve "
+        "is created for each combination of these variables.",
+    )
+    parser.add_argument(
+        "--col-by",
+        type=str,
+        default="",
+        help="A comma-separated list of variables, such that a separate column "
+        "is created for each combination of these variables.",
+    )
+    parser.add_argument(
+        "--row-by",
+        type=str,
+        default="",
+        help="A comma-separated list of variables, such that a separate row "
         "is created for each combination of these variables.",
     )
     parser.add_argument(
@@ -269,12 +323,16 @@ def main():
     args = parser.parse_args()
 
     curve_by = [] if not args.curve_by else args.curve_by.split(",")
+    row_by = [] if not args.row_by else args.row_by.split(",")
+    col_by = [] if not args.col_by else args.col_by.split(",")
     fig_by = [] if not args.fig_by else args.fig_by.split(",")
 
     plot(
         output_dir=Path(args.OUTPUT_DIR),
         fig_dir=Path(args.fig_dir or args.OUTPUT_DIR),
         fig_by=fig_by,
+        row_by=row_by,
+        col_by=col_by,
         curve_by=curve_by,
         var_x=args.var_x,
         var_y=args.var_y,
