@@ -153,15 +153,15 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def get_min_compute_capability(cls) -> DeviceCapability | None:
+    def get_min_compute_capability(cls) -> "DeviceCapability | None":
         return None
 
     @classmethod
-    def get_max_compute_capability(cls) -> DeviceCapability | None:
+    def get_max_compute_capability(cls) -> "DeviceCapability | None":
         return None
 
     @classmethod
-    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+    def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
         min_capability = cls.get_min_compute_capability()
         max_capability = cls.get_max_compute_capability()
         return ((min_capability is None) or (capability >= min_capability)) and (
@@ -178,7 +178,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        device_capability: DeviceCapability,
+        device_capability: "DeviceCapability",
     ) -> str | None:
         return None
 
@@ -192,7 +192,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        device_capability: DeviceCapability,
+        device_capability: "DeviceCapability",
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -232,7 +232,7 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def get_required_kv_cache_layout(cls, capability: DeviceCapability) -> str | None:
+    def get_required_kv_cache_layout(cls, capability: "DeviceCapability") -> str | None:
         """
         Some backends require a specific kv cache layout.
         This function returns the required layout if any.
