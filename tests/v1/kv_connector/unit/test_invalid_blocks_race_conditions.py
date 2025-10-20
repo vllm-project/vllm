@@ -1,0 +1,270 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""
+Tests for race conditions and incorrect freeing in invalid block handling.
+
+These tests verify corretness in two scenarios:
+1. Async abort case: Blocks should not be freed immediately if async KV
+   transfer is still in progress
+2. Sync recompute case: Blocks should not be freed for running requests
+   that need to recompute invalid blocks
+"""
+
+from collections.abc import Callable
+from unittest.mock import Mock
+
+import pytest
+
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.request import FinishReason, Request, RequestStatus
+
+from .utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+)
+
+pytestmark = pytest.mark.cpu_test
+
+
+def _make_get_num_new_matched_tokens(
+    req_num_new_matched_tokens: dict[str, int],
+    async_load: bool,
+) -> Callable[[Request, int], tuple[int, bool]]:
+    def get_num_new_matched_tokens(request: Request, _: int) -> tuple[int, bool]:
+        value = req_num_new_matched_tokens.get(request.request_id, 0)
+        return value, async_load
+
+    return get_num_new_matched_tokens
+
+
+@pytest.fixture
+def abort_scheduler():
+    """scheduler with kv_load_retry_policy='abort'"""
+    vllm_config = create_vllm_config()
+    vllm_config.kv_transfer_config.kv_load_retry_policy = "abort"
+    return create_scheduler(vllm_config)
+
+
+@pytest.fixture
+def recompute_scheduler():
+    """scheduler with kv_load_retry_policy='recompute'"""
+    vllm_config = create_vllm_config()
+    vllm_config.kv_transfer_config.kv_load_retry_policy = "recompute"
+    return create_scheduler(vllm_config)
+
+
+def test_async_abort_blocks_not_freed_before_transfer_complete(
+    abort_scheduler: Scheduler,
+):
+    """
+    Test Issue 1: Async abort case - blocks protected by delay_free_blocks.
+
+    When aborting a request with async KV loading and invalid blocks:
+    1. Connector must return delay_free_blocks=True to protect blocks
+    2. Blocks should NOT be freed until transfer completion is confirmed
+    3. Verifies the delay_free_blocks mechanism works correctly
+
+    This test confirms that when delay_free_blocks=True, blocks are protected
+    from premature freeing during active async transfers.
+    """
+    num_prompt_blocks = 100
+    num_external_computed_blocks = 99
+    invalid_block_idx = 50
+
+    num_prompt_tokens = num_prompt_blocks * abort_scheduler.block_size
+    num_external_computed_tokens = (
+        num_external_computed_blocks * abort_scheduler.block_size
+    )
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    abort_scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens,
+    }
+
+    # mock connector indicating async load
+    abort_scheduler.connector = Mock()
+    abort_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, True)
+    )
+
+    # critical: request_finished returns delay_free_blocks=True for async transfers
+    # this prevents blocks from being freed while transfer is in progress
+    abort_scheduler.connector.request_finished.return_value = (True, None)
+    abort_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = abort_scheduler.schedule()
+
+    # request should be waiting for remote KVs
+    assert len(abort_scheduler.waiting) == 1
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == 0
+
+    # get the allocated block IDs
+    (req_block_ids,) = abort_scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    invalid_block_ids = {req_block_ids[invalid_block_idx]}
+
+    # report invalid blocks (transfer not finished yet)
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving=None,  # transfer NOT finished
+        invalid_block_ids=invalid_block_ids,
+        use_eos=True,
+    )
+
+    outputs = abort_scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # request should be marked as finished with error
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.get_finished_reason() == FinishReason.ERROR
+
+    # output should be generated
+    assert len(outputs) == 1
+    engine_outputs = next(iter(outputs.values()))
+    assert len(engine_outputs.outputs) == 1
+    output = engine_outputs.outputs[0]
+    assert output.request_id == request.request_id
+    assert output.finish_reason == FinishReason.ERROR
+
+    # critical: because delay_free_blocks=True, blocks should NOT be freed yet
+    assert request.request_id in abort_scheduler.requests, (
+        "Request should remain in scheduler.requests when delay_free_blocks=True"
+    )
+
+    # verify blocks are still allocated and protected
+    allocated_blocks = abort_scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    assert allocated_blocks is not None
+    assert len(allocated_blocks[0]) > 0, (
+        "Blocks should be protected from freeing when delay_free_blocks=True"
+    )
+
+
+def test_sync_recompute_blocks_not_freed_for_running_requests(
+    recompute_scheduler: Scheduler,
+):
+    """
+    Test Issue 2: Sync recompute case - blocks incorrectly freed for running requests.
+
+    When a running request has invalid blocks and retry_policy is 'recompute':
+    1. Request should remain in RUNNING state
+    2. num_computed_tokens should be truncated to invalid block boundary
+    3. Blocks should NOT be freed (request still needs them for recomputation)
+    4. Request should remain in scheduler.requests and scheduler.running
+    """
+    num_prompt_blocks = 100
+    num_external_computed_blocks = 99
+    invalid_block_idx = 50
+
+    num_prompt_tokens = num_prompt_blocks * recompute_scheduler.block_size
+    num_external_computed_tokens = (
+        num_external_computed_blocks * recompute_scheduler.block_size
+    )
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    recompute_scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens,
+    }
+
+    # mock connector indicating sync load
+    recompute_scheduler.connector = Mock()
+    recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    recompute_scheduler.connector.request_finished.return_value = (False, None)
+    recompute_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = recompute_scheduler.schedule()
+
+    # request should be running with sync KV load
+    assert len(recompute_scheduler.running) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 1
+    assert request.status == RequestStatus.RUNNING
+
+    # get the allocated block IDs before invalid blocks are reported
+    req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    invalid_block_ids = {req_block_ids[invalid_block_idx]}
+
+    # store original num_computed_tokens for comparison
+    original_num_computed_tokens = request.num_computed_tokens
+
+    model_runner_output = create_model_runner_output(
+        [request],
+        invalid_block_ids=invalid_block_ids,
+        use_eos=False,  # not finished - should continue running
+    )
+
+    outputs = recompute_scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
+
+    # critical assertions for recompute case:
+
+    # 1. request should still be RUNNING (not finished, not aborted)
+    assert request.status == RequestStatus.RUNNING, (
+        f"Request should remain RUNNING for recompute, got {request.status}"
+    )
+
+    # 2. num_computed_tokens should be truncated to first invalid block
+    expected_truncated_tokens = invalid_block_idx * recompute_scheduler.block_size
+    assert request.num_computed_tokens == expected_truncated_tokens, (
+        f"num_computed_tokens should be truncated to {expected_truncated_tokens}, "
+        f"got {request.num_computed_tokens}"
+    )
+    assert request.num_computed_tokens < original_num_computed_tokens, (
+        "num_computed_tokens should be reduced after invalid block detection"
+    )
+
+    # 3. no output should be generated (request is still running)
+    # the request should be skipped in the output loop
+    assert len(outputs) == 0 or request.request_id not in [
+        out.request_id for outs in outputs.values() for out in outs.outputs
+    ], "No output should be generated for recompute requests"
+
+    # 4. request should still be in running queue
+    assert request in recompute_scheduler.running, (
+        "Request should remain in running queue for recomputation"
+    )
+
+    # 5. request should still be in scheduler.requests (not deleted)
+    assert request.request_id in recompute_scheduler.requests, (
+        "Request should not be deleted from scheduler.requests"
+    )
+
+    # 6. blocks should NOT be freed - verify blocks are still allocated
+    try:
+        allocated_blocks = recompute_scheduler.kv_cache_manager.get_block_ids(
+            request.request_id
+        )
+        assert allocated_blocks is not None
+        assert len(allocated_blocks[0]) > 0, (
+            "Blocks should still be allocated for recomputation"
+        )
+    except KeyError:
+        pytest.fail(
+            "Blocks were freed incorrectly! Running requests need their blocks "
+            "to recompute invalid portions."
+        )
+
+    # 7. verify request can be rescheduled in next step
+    scheduler_output_2 = recompute_scheduler.schedule()
+
+    # request should appear in the new schedule to recompute invalid blocks
+    scheduled_req_ids = [
+        req.request_id for req in scheduler_output_2.scheduled_new_reqs
+    ]
+    if scheduler_output_2.num_scheduled_tokens:
+        scheduled_req_ids.extend(scheduler_output_2.num_scheduled_tokens.keys())
+
+    assert (
+        request.request_id in scheduled_req_ids or len(recompute_scheduler.running) > 0
+    ), "Request should be reschedulable for recomputation"
