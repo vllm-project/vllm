@@ -24,10 +24,13 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import (
     get_mp_context,
-    make_zmq_socket,
     serialize_method_call,
 )
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
+    make_zmq_socket,
+    zmq_socket_ctx,
+)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor.abstract import Executor
@@ -120,9 +123,8 @@ class CoreEngineProcManager:
         }
         if fault_report_address:
             zmq_ctx = zmq.Context()
-            num_identity = 1
             identity = generate_identity_group(
-                "core_engine_proc_manager", "clinet_guard", "report", num_identity
+                "core_engine_proc_manager", "clinet_guard", "report", 1
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
@@ -1172,7 +1174,7 @@ def generate_identity_group(peer1, peer2, use, n):
 
 
 class FaultHandler:
-    def __init__(self, cmd_socket: zmq.socket, client_cmd_registry: dict) -> None:
+    def __init__(self, cmd_socket: zmq.Socket, client_cmd_registry: dict) -> None:
         self.cmd_socket = cmd_socket
         self.client_cmd_registry = client_cmd_registry
 

@@ -175,17 +175,13 @@ class EngineCoreGuard(threading.Thread):  # changed
             src_socket.send_multipart([b"", msg_bytes])
             logger.debug("Sent message via %s: %s", src_socket, msg)
             return True, None
-
-        except (
-            zmq.ZMQError,
-            UnicodeEncodeError,
-            TypeError,
-            ValueError,
-            Exception,
-        ) as e:
+        except (zmq.ZMQError, UnicodeEncodeError, TypeError, ValueError) as e:
             error = f"Send message failed: {e}"
             logger.error(error)
             return False, error
+        except Exception as e:
+            logger.exception("Unexpected error while sending message")
+            return False, str(e)
 
     def _recv_cmd(self, poll_timeout: int = 1000) -> tuple[bool, None | str]:
         """
@@ -226,8 +222,11 @@ class EngineCoreGuard(threading.Thread):  # changed
             # No message received within timeout
             return (False, None)
 
-        except (zmq.ZMQError, UnicodeDecodeError, Exception) as e:
+        except (zmq.ZMQError, UnicodeDecodeError) as e:
             logger.error("error occurred while receiving message: %s", e)
+            return (False, None)
+        except Exception as e:
+            logger.error("Unexpected error occurred while receiving message: %s", e)
             return (False, None)
 
     def _stop_worker_execution(self):
@@ -1137,7 +1136,7 @@ class EngineCoreProc(EngineCore):
             self._process_engine_step()
 
     def _check_busy_loop_active(self):
-        if not self.busy_loop_active.is_set():
+        if self.enable_fault_tolerance and not self.busy_loop_active.is_set():
             raise InterruptedError("Engine busy loop is paused.")
 
     def _process_input_queue(self):

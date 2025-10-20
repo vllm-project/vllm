@@ -4,13 +4,15 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 
+from vllm.v1.request import Request, RequestStatus
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-    from vllm.v1.request import Request, RequestStatus
+    # from vllm.v1.request import Request, RequestStatus
 
 
 class SchedulerInterface(ABC):
