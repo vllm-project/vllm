@@ -38,11 +38,9 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.utils.asyncio import merge_async_iterators
-from vllm.utils.collections import chunk_list
-from vllm.utils.tensor_serial import encoding_pooling_output
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
+from vllm.utils.tensor_serial import encoding_pooling_output
 
 logger = init_logger(__name__)
 

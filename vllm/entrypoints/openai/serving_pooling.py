@@ -30,9 +30,8 @@ from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
-from vllm.utils.asyncio import merge_async_iterators
-from vllm.utils.tensor_serial import ENCODING_FORMAT_TYPE, encoding_pooling_output
 from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.tensor_serial import ENCODING_FORMAT_TYPE, encoding_pooling_output
 
 logger = init_logger(__name__)
 
