@@ -331,8 +331,8 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
-        connector_vllm_config = copy.deepcopy(self.vllm_config)
-        connector_vllm_config.kv_cache_config = copy.deepcopy(kv_cache_config)
+        connector_vllm_config = copy.copy(self.vllm_config)
+        connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
         ensure_kv_transfer_initialized(connector_vllm_config)
 
         if self.vllm_config.model_config.enable_sleep_mode:

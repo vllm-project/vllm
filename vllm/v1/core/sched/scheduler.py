@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import copy
 import itertools
 import time
@@ -87,8 +86,8 @@ class Scheduler(SchedulerInterface):
                 "Encoder-decoder models are not currently supported with KV connectors"
             )
 
-            connector_vllm_config = copy.deepcopy(self.vllm_config)
-            connector_vllm_config.kv_cache_config = copy.deepcopy(kv_cache_config)
+            connector_vllm_config = copy.copy(self.vllm_config)
+            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
             self.connector = KVConnectorFactory.create_connector(
                 config=connector_vllm_config, role=KVConnectorRole.SCHEDULER
             )
