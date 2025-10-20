@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 import sys
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -51,7 +52,9 @@ ENDIANNESS_TYPE = Literal["native", "big", "little"]
 ENCODING_FORMAT_TYPE = Literal["float", "base64", "bytes"]
 
 
-def tensor2binary(tensor: torch.Tensor, embed_dtype: str, endianness: str) -> bytes:
+def tensor2binary(
+    tensor: torch.Tensor, embed_dtype: EMBED_DTYPE_TYPE, endianness: ENDIANNESS_TYPE
+) -> bytes:
     assert isinstance(tensor, torch.Tensor)
     assert embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE
     assert endianness in ENDIANNESS
@@ -70,7 +73,10 @@ def tensor2binary(tensor: torch.Tensor, embed_dtype: str, endianness: str) -> by
 
 
 def binary2tensor(
-    binary: bytes, shape: tuple[int, ...], embed_dtype: str, endianness: str
+    binary: bytes,
+    shape: tuple[int, ...],
+    embed_dtype: EMBED_DTYPE_TYPE,
+    endianness: ENDIANNESS_TYPE,
 ) -> torch.Tensor:
     assert embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE
     assert embed_dtype in EMBED_DTYPE_TO_NUMPY_DTYPE_VIEW
@@ -90,8 +96,8 @@ def binary2tensor(
 def encoding_pooling_output(
     output: PoolingRequestOutput,
     encoding_format: ENCODING_FORMAT_TYPE,
-    embed_dtype: str,
-    endianness: str,
+    embed_dtype: EMBED_DTYPE_TYPE,
+    endianness: ENDIANNESS_TYPE,
 ) -> list[float] | str | bytes:
     if encoding_format == "float":
         return output.outputs.data.tolist()
@@ -103,18 +109,66 @@ def encoding_pooling_output(
     assert_never(encoding_format)
 
 
+@dataclass
+class MetadataItem:
+    index: int
+    embed_dtype: EMBED_DTYPE_TO_TORCH_DTYPE
+    endianness: ENDIANNESS_TYPE
+    start: int
+    end: int
+    shape: tuple[int, ...]
+
+
+def encoding_pooling_bytes(
+    pooling_outputs: list[PoolingRequestOutput],
+    embed_dtype: EMBED_DTYPE_TO_TORCH_DTYPE,
+    endianness: ENDIANNESS_TYPE,
+):
+    num_prompt_tokens = 0
+    items: list[dict[str, MetadataItem]] = []
+    body = []
+    offset = 0
+    for idx, output in enumerate(pooling_outputs):
+        binary = tensor2binary(
+            tensor=output.outputs.data,
+            embed_dtype=embed_dtype,
+            endianness=endianness,
+        )
+        size = len(binary)
+
+        item = {
+            "index": idx,
+            "embed_dtype": embed_dtype,
+            "endianness": endianness,
+            "start": offset,
+            "end": offset + size,
+            "shape": output.outputs.data.shape,
+        }
+
+        body.append(binary)
+        items.append(item)
+        prompt_token_ids = output.prompt_token_ids
+        num_prompt_tokens += len(prompt_token_ids)
+        offset += size
+
+    usage = {
+        "prompt_tokens": num_prompt_tokens,
+        "total_tokens": num_prompt_tokens,
+    }
+    return body, items, usage
+
+
 def decoding_pooling_output(
-    metadata: dict,
+    items: list[MetadataItem],
     body: bytes,
-    embed_dtype: str,
-    endianness: str,
+    embed_dtype: EMBED_DTYPE_TO_TORCH_DTYPE,
+    endianness: ENDIANNESS_TYPE,
 ) -> list[torch.Tensor]:
-    items = metadata["data"]
-    items.sort(key=lambda x: x["index"])
+    items.sort(key=lambda x: x.index)
 
     tensor_list: list[torch.Tensor] = []
     for item in items:
-        binary = body[item["start"] : item["end"]]
-        tensor = binary2tensor(binary, item["shape"], embed_dtype, endianness)
+        binary = body[item.start : item.end]
+        tensor = binary2tensor(binary, item.shape, embed_dtype, endianness)
         tensor_list.append(tensor)
     return tensor_list

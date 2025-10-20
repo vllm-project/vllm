@@ -23,6 +23,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
+    MetadataItem,
     binary2tensor,
     decoding_pooling_output,
 )
@@ -325,9 +326,10 @@ async def test_bytes_embed_dtype_and_endianness(
 
             metadata = json.loads(responses_bytes.headers["metadata"])
             body = responses_bytes.content
+            items = [MetadataItem(**x) for x in metadata["data"]]
 
             bytes_data = decoding_pooling_output(
-                metadata=metadata,
+                items=items,
                 body=body,
                 embed_dtype=embed_dtype,
                 endianness=endianness,

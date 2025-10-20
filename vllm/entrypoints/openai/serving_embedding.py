@@ -45,8 +45,8 @@ from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TYPE,
     ENCODING_FORMAT_TYPE,
     ENDIANNESS_TYPE,
+    encoding_pooling_bytes,
     encoding_pooling_output,
-    tensor2binary,
 )
 
 logger = init_logger(__name__)
@@ -162,37 +162,11 @@ class EmbeddingMixin(OpenAIServing):
             )
 
         def encoding_bytes():
-            num_prompt_tokens = 0
-            items: list[dict[str, Any]] = []
-            body = []
-            offset = 0
-            for idx, final_res in enumerate(final_res_batch_checked):
-                binary = tensor2binary(
-                    tensor=final_res.outputs.data,
-                    embed_dtype=embed_dtype,
-                    endianness=endianness,
-                )
-                size = len(binary)
-
-                item = {
-                    "index": idx,
-                    "embed_dtype": embed_dtype,
-                    "endianness": endianness,
-                    "start": offset,
-                    "end": offset + size,
-                    "shape": final_res.outputs.data.shape,
-                }
-
-                body.append(binary)
-                items.append(item)
-                prompt_token_ids = final_res.prompt_token_ids
-                num_prompt_tokens += len(prompt_token_ids)
-                offset += size
-
-            usage = {
-                "prompt_tokens": num_prompt_tokens,
-                "total_tokens": num_prompt_tokens,
-            }
+            body, items, usage = encoding_pooling_bytes(
+                pooling_outputs=final_res_batch_checked,
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+            )
 
             metadata = {
                 "id": ctx.request_id,

@@ -15,6 +15,7 @@ import torch
 from vllm.utils.tensor_serial import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
+    MetadataItem,
     decoding_pooling_output,
 )
 
@@ -52,9 +53,10 @@ def main(args):
             response = post_http_request(prompt=prompt, api_url=api_url)
             metadata = json.loads(response.headers["metadata"])
             body = response.content
+            items = [MetadataItem(**x) for x in metadata["data"]]
 
             embedding = decoding_pooling_output(
-                metadata=metadata,
+                items=items,
                 body=body,
                 embed_dtype=embed_dtype,
                 endianness=endianness,
