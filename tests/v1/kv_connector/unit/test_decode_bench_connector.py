@@ -6,24 +6,31 @@ Unit tests for DecodeBenchConnector.
 Tests the functionality of the DecodeBenchConnector which fills KV cache
 with dummy values for decode performance benchmarking.
 """
+
 import pytest
 import torch
 
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+
 # ruff: noqa: E501
 from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import (
-    DecodeBenchConnector, DecodeBenchConnectorMetadata)
+    DecodeBenchConnector,
+    DecodeBenchConnectorMetadata,
+)
 from vllm.forward_context import ForwardContext
 from vllm.utils import sha256
-from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
-                                         init_none_hash)
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
 
-from .utils import (EOS_TOKEN_ID, create_model_runner_output, create_scheduler,
-                    create_vllm_config)
+from .utils import (
+    EOS_TOKEN_ID,
+    create_model_runner_output,
+    create_scheduler,
+    create_vllm_config,
+)
 
 
 class DecodeBenchTestRunner:
@@ -36,20 +43,23 @@ class DecodeBenchTestRunner:
         self.req_id = -1
 
         # Create vllm config with DecodeBenchConnector
-        vllm_config = create_vllm_config(block_size=block_size,
-                                         max_num_batched_tokens=1000)
+        vllm_config = create_vllm_config(
+            block_size=block_size, max_num_batched_tokens=1000
+        )
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="DecodeBenchConnector",
             kv_role="kv_both",
         )
 
         self.vllm_config = vllm_config
-        self.scheduler: Scheduler = create_scheduler(vllm_config,
-                                                     num_blocks=num_gpu_blocks)
+        self.scheduler: Scheduler = create_scheduler(
+            vllm_config, num_blocks=num_gpu_blocks
+        )
 
         # Create worker-side connector
-        self.worker_connector = DecodeBenchConnector(vllm_config,
-                                                     KVConnectorRole.WORKER)
+        self.worker_connector = DecodeBenchConnector(
+            vllm_config, KVConnectorRole.WORKER
+        )
 
         # Create dummy KV caches for testing
         # Shape: [num_blocks, 2, num_heads, block_size, head_dim]
@@ -57,8 +67,9 @@ class DecodeBenchTestRunner:
         num_heads = 4
         head_dim = 64
         self.kv_caches = {
-            f"layer_{i}":
-            torch.zeros(num_gpu_blocks, 2, num_heads, block_size, head_dim)
+            f"layer_{i}": torch.zeros(
+                num_gpu_blocks, 2, num_heads, block_size, head_dim
+            )
             for i in range(2)  # 2 layers for testing
         }
 
@@ -74,9 +85,9 @@ class DecodeBenchTestRunner:
         init_none_hash(sha256)
         self._block_hasher = get_request_block_hasher(block_size, sha256)
 
-        self._dummy_ctx: ForwardContext = ForwardContext(no_compile_layers={},
-                                                         attn_metadata={},
-                                                         virtual_engine=0)
+        self._dummy_ctx: ForwardContext = ForwardContext(
+            no_compile_layers={}, attn_metadata={}, virtual_engine=0
+        )
 
     def new_request(self, token_ids: list[int]) -> Request:
         """Create a new request with given token IDs."""
@@ -118,8 +129,7 @@ class DecodeBenchTestRunner:
             token_id=token_id,
         )
 
-        self.scheduler.update_from_output(scheduler_output,
-                                          model_runner_output)
+        self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
         return scheduler_output, kv_connector_metadata
 
@@ -129,8 +139,7 @@ def test_decode_bench_connector_basic():
     block_size = 16
     num_gpu_blocks = 100
 
-    runner = DecodeBenchTestRunner(block_size=block_size,
-                                   num_gpu_blocks=num_gpu_blocks)
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # Create a request with multiple blocks worth of tokens
     num_tokens = block_size * 3  # 3 blocks
@@ -170,8 +179,7 @@ def test_decode_bench_connector_no_refill():
     block_size = 16
     num_gpu_blocks = 100
 
-    runner = DecodeBenchTestRunner(block_size=block_size,
-                                   num_gpu_blocks=num_gpu_blocks)
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # Create a request
     num_tokens = block_size * 2
@@ -193,8 +201,7 @@ def test_decode_bench_connector_single_token():
     block_size = 16
     num_gpu_blocks = 100
 
-    runner = DecodeBenchTestRunner(block_size=block_size,
-                                   num_gpu_blocks=num_gpu_blocks)
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # Create a request with just 1 token
     # Should not fill anything (need at least 2 tokens: 1 to fill, 1 to decode)
@@ -212,8 +219,7 @@ def test_decode_bench_connector_two_tokens():
     block_size = 16
     num_gpu_blocks = 100
 
-    runner = DecodeBenchTestRunner(block_size=block_size,
-                                   num_gpu_blocks=num_gpu_blocks)
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # Create a request with 2 tokens
     # Should fill 1 token (first token), decode the second
@@ -237,8 +243,7 @@ def test_decode_bench_connector_large_context():
     block_size = 16
     num_gpu_blocks = 1000
 
-    runner = DecodeBenchTestRunner(block_size=block_size,
-                                   num_gpu_blocks=num_gpu_blocks)
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # Create a request with many blocks
     num_blocks = 20
@@ -275,8 +280,7 @@ def test_decode_bench_connector_multiple_requests():
     block_size = 16
     num_gpu_blocks = 100
 
-    runner = DecodeBenchTestRunner(block_size=block_size,
-                                   num_gpu_blocks=num_gpu_blocks)
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # First request
     req1 = runner.new_request([1] * (block_size * 2))
@@ -318,8 +322,7 @@ def test_decode_bench_connector_partial_block():
     block_size = 16
     num_gpu_blocks = 100
 
-    runner = DecodeBenchTestRunner(block_size=block_size,
-                                   num_gpu_blocks=num_gpu_blocks)
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=num_gpu_blocks)
 
     # Create a request that doesn't align to block boundaries
     # e.g., 2.5 blocks worth of tokens

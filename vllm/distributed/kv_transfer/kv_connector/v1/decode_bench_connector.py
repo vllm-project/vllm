@@ -7,15 +7,17 @@ This connector emulates a prefill-decode disaggregated setting by filling
 the KV cache with dummy values, allowing measurement of decoder performance
 under larger input sequence lengths (ISL) in resource-limited environments.
 """
+
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata)
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    KVConnectorBase_V1,
+    KVConnectorRole,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -36,6 +38,7 @@ class DecodeBenchConnectorMetadata(KVConnectorMetadata):
     Contains information about which requests need their KV cache filled
     with dummy values for benchmarking purposes.
     """
+
     # request_id -> (block_ids, num_tokens_to_fill)
     reqs_to_fill: dict[str, tuple[list[int], int]]
 
@@ -52,13 +55,11 @@ class DecodeBenchConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config, role)
 
-        self.connector_scheduler: Optional[
-            DecodeBenchConnectorScheduler] = None
-        self.connector_worker: Optional[DecodeBenchConnectorWorker] = None
+        self.connector_scheduler: DecodeBenchConnectorScheduler | None = None
+        self.connector_worker: DecodeBenchConnectorWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = DecodeBenchConnectorScheduler(
-                vllm_config)
+            self.connector_scheduler = DecodeBenchConnectorScheduler(vllm_config)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = DecodeBenchConnectorWorker(vllm_config)
 
@@ -70,20 +71,22 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata,
-                          DecodeBenchConnectorMetadata)
+        assert isinstance(self._connector_metadata, DecodeBenchConnectorMetadata)
         self.connector_worker.start_fill_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         # All operations are synchronous, so nothing to wait for
         pass
 
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata",
-                      **kwargs: Any) -> None:
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs: Any,
+    ) -> None:
         # This connector doesn't save KV cache (benchmarking only)
         pass
 
@@ -99,20 +102,23 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
-            request, num_computed_tokens)
+            request, num_computed_tokens
+        )
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens)
+            request, blocks, num_external_tokens
+        )
 
     def build_connector_meta(
-            self, scheduler_output: "SchedulerOutput") -> KVConnectorMetadata:
+        self, scheduler_output: "SchedulerOutput"
+    ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
@@ -120,7 +126,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         self.connector_scheduler.request_finished(request)
         return False, None
@@ -170,15 +176,17 @@ class DecodeBenchConnectorScheduler:
 
         logger.debug(
             "DecodeBenchConnector: Request %s will fill %d tokens in KV cache",
-            req_id, num_tokens_to_fill)
+            req_id,
+            num_tokens_to_fill,
+        )
 
         # Return False for synchronous operation - the fill is fast enough
         # that async overhead isn't worth it
         return num_tokens_to_fill, False
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
         """
         Called after blocks are allocated. Store the block IDs so we can
         fill them with dummy values.
@@ -194,26 +202,31 @@ class DecodeBenchConnectorScheduler:
 
         # Calculate how many blocks we need to fill
         # num_external_tokens are the tokens we said we'd provide
-        num_blocks_to_fill = (num_external_tokens + self.block_size -
-                              1) // self.block_size
+        num_blocks_to_fill = (
+            num_external_tokens + self.block_size - 1
+        ) // self.block_size
 
         # Store the blocks to fill
-        self._pending_fills[req_id] = (block_ids[:num_blocks_to_fill],
-                                       num_external_tokens)
+        self._pending_fills[req_id] = (
+            block_ids[:num_blocks_to_fill],
+            num_external_tokens,
+        )
         self._filled_requests.add(req_id)
 
         logger.debug(
             "DecodeBenchConnector: Allocated %d blocks for request %s",
-            num_blocks_to_fill, req_id)
+            num_blocks_to_fill,
+            req_id,
+        )
 
     def build_connector_meta(
-            self, scheduler_output: "SchedulerOutput") -> KVConnectorMetadata:
+        self, scheduler_output: "SchedulerOutput"
+    ) -> KVConnectorMetadata:
         """
         Build metadata containing information about which blocks to fill
         with dummy KV values.
         """
-        meta = DecodeBenchConnectorMetadata(
-            reqs_to_fill=self._pending_fills.copy())
+        meta = DecodeBenchConnectorMetadata(reqs_to_fill=self._pending_fills.copy())
 
         # Clear pending fills after building metadata
         self._pending_fills.clear()
@@ -235,16 +248,17 @@ class DecodeBenchConnectorWorker:
         self.block_size = vllm_config.cache_config.block_size
 
         # Will be populated via register_kv_caches
-        self.kv_caches: Optional[dict[str, torch.Tensor]] = None
+        self.kv_caches: dict[str, torch.Tensor] | None = None
 
         # Cache for pre-filled dummy block to avoid repeated allocation
-        self._dummy_block_cache: Optional[torch.Tensor] = None
+        self._dummy_block_cache: torch.Tensor | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Store references to the KV cache tensors."""
         self.kv_caches = kv_caches
-        logger.debug("DecodeBenchConnector: Registered %d KV cache layers",
-                     len(kv_caches))
+        logger.debug(
+            "DecodeBenchConnector: Registered %d KV cache layers", len(kv_caches)
+        )
 
     def start_fill_kv(self, metadata: DecodeBenchConnectorMetadata):
         """
@@ -256,14 +270,16 @@ class DecodeBenchConnectorWorker:
         if not metadata.reqs_to_fill:
             return
 
-        assert self.kv_caches is not None, \
-            "KV caches must be registered before filling"
+        assert self.kv_caches is not None, "KV caches must be registered before filling"
 
         for req_id, (block_ids, num_tokens) in metadata.reqs_to_fill.items():
             self._fill_blocks(block_ids, num_tokens)
             logger.debug(
-                "DecodeBenchConnector: Filled %d blocks (%d tokens) for "
-                "request %s", len(block_ids), num_tokens, req_id)
+                "DecodeBenchConnector: Filled %d blocks (%d tokens) for request %s",
+                len(block_ids),
+                num_tokens,
+                req_id,
+            )
 
     def _fill_blocks(self, block_ids: list[int], num_tokens: int):
         """
@@ -282,15 +298,14 @@ class DecodeBenchConnectorWorker:
             # Create dummy block cache once per device/dtype
             if self._dummy_block_cache is None:
                 block_shape = kv_cache.shape[1:]
-                self._dummy_block_cache = torch.full(block_shape,
-                                                     0.015,
-                                                     dtype=kv_cache.dtype,
-                                                     device=kv_cache.device)
+                self._dummy_block_cache = torch.full(
+                    block_shape, 0.015, dtype=kv_cache.dtype, device=kv_cache.device
+                )
 
             # Convert block_ids to tensor on device
-            block_ids_tensor = torch.tensor(block_ids,
-                                            dtype=torch.long,
-                                            device=kv_cache.device)
+            block_ids_tensor = torch.tensor(
+                block_ids, dtype=torch.long, device=kv_cache.device
+            )
 
             # Filter invalid block IDs
             valid_mask = block_ids_tensor < kv_cache.shape[0]
@@ -301,5 +316,5 @@ class DecodeBenchConnectorWorker:
                 kv_cache[valid_block_ids] = self._dummy_block_cache
 
         logger.debug(
-            "DecodeBenchConnector: Filled %d blocks with dummy values",
-            len(block_ids))
+            "DecodeBenchConnector: Filled %d blocks with dummy values", len(block_ids)
+        )
