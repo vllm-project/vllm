@@ -126,7 +126,7 @@ class ElasticEPScalingState:
                 else self._progress_existing_engine()
             )
         return (
-            self._progress_removing_worker()
+            self._progress_removing_engine()
             if self.worker_type == "removing"
             else self._progress_remaining_engine()
         )
@@ -341,7 +341,7 @@ class ElasticEPScalingState:
             assert self.state == ScaleDownRemainingEngineState.COMPLETE
             return True
 
-    def _progress_removing_worker(self) -> bool:
+    def _progress_removing_engine(self) -> bool:
         state = self.state
 
         if state == ScaleDownRemovingEngineState.PREPARE:
