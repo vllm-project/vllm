@@ -2,8 +2,8 @@
 
 This guide will help you quickly get started with vLLM to perform:
 
-- [Offline batched inference][quickstart-offline]
-- [Online serving using OpenAI-compatible server][quickstart-online]
+- [Offline batched inference](#offline-batched-inference)
+- [Online serving using OpenAI-compatible server](#openai-compatible-server)
 
 ## Prerequisites
 
@@ -42,11 +42,9 @@ uv pip install vllm --torch-backend=auto
 !!! note
     For more detail and non-CUDA platforms, please refer [here](installation/README.md) for specific instructions on how to install vLLM.
 
-[](){ #quickstart-offline }
-
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/basic/basic.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
 
 The first line of this example imports the classes [LLM][vllm.LLM] and [SamplingParams][vllm.SamplingParams]:
 
@@ -57,7 +55,7 @@ The first line of this example imports the classes [LLM][vllm.LLM] and [Sampling
 from vllm import LLM, SamplingParams
 ```
 
-The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here][sampling-params].
+The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](../api/README.md#inference-parameters).
 
 !!! important
     By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the Hugging Face model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
@@ -135,8 +133,6 @@ for output in outputs:
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         ```
 
-[](){ #quickstart-online }
-
 ## OpenAI-Compatible Server
 
 vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
@@ -150,7 +146,7 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct
 
 !!! note
     By default, the server uses a predefined chat template stored in the tokenizer.
-    You can learn about overriding it [here][chat-template].
+    You can learn about overriding it [here](../serving/openai_compatible_server.md#chat-template).
 !!! important
     By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 
@@ -201,7 +197,7 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
     print("Completion result:", completion)
     ```
 
-A more detailed client example can be found here: <gh-file:examples/online_serving/openai_completion_client.py>
+A more detailed client example can be found here: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
 
 ### OpenAI Chat Completions API with vLLM
 
@@ -253,4 +249,4 @@ Currently, vLLM supports multiple backends for efficient Attention computation a
 If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
 
 !!! warning
-    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see <gh-file:docker/Dockerfile> for instructions on how to install it.
+    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.

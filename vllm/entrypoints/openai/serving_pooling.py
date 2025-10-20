@@ -32,6 +32,7 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.asyncio import merge_async_iterators
 from vllm.utils.tensor_serial import ENCODING_FORMAT_TYPE, encoding_pooling_output
+from vllm.utils.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
 

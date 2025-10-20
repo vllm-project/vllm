@@ -49,10 +49,11 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1073,9 +1074,8 @@ def vllm_topk_softmax(
         topk_indices,
         token_expert_indices,
         gating_output,
+        renormalize,
     )
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights, topk_indices
 
@@ -1112,11 +1112,9 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
-
     topk_func = dispatch_topk_func()
     topk_weights, topk_ids = topk_func(
-        topk_weights, topk_ids, token_expert_indices, gating_output_float, renormalize
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
     return topk_weights, topk_ids, token_expert_indices
@@ -1145,7 +1143,11 @@ def fused_topk_bias(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@torch.compile(
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+)
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,

@@ -8,7 +8,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationMode
-from vllm.utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
+from vllm.utils.torch_utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
 
 
 def test_version():
