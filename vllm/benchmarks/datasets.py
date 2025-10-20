@@ -1126,10 +1126,10 @@ class RandomMultiModalDataset(RandomDataset):
             for tok_id, token in tokenizer.added_tokens_decoder.items()
             if token.special
         )
-        logger.info("Special tokens: %s", repr(prohibited_tokens))
+        logger.debug("Special tokens: %s", repr(prohibited_tokens))
         all_tokens = np.arange(vocab_size)
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
-        logger.info(
+        logger.debug(
             "Sampling from %d out of %d (vocab size)", len(allowed_tokens), vocab_size
         )
         # Generate prefix once
