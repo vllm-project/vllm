@@ -660,7 +660,8 @@ def runai_safetensors_weights_iterator(
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
-        device = f"cuda:{torch.cuda.current_device()}" if current_platform.is_cuda() else None
+        is_cuda = current_platform.is_cuda()
+        device = f"cuda:{torch.cuda.current_device()}" if is_cuda else None
         if device is not None:
             streamer.stream_files(hf_weights_files, device=device)
         else:
