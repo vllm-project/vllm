@@ -776,7 +776,7 @@ class AsyncLLM(EngineClient):
 
     async def handle_fault(self, instruction: str, timeout: int = 300) -> None:
         """send fault tolerance instruction to the engine"""
-        self.engine_core.handle_fault(instruction, timeout)
+        await self.engine_core.handle_fault(instruction, timeout)
 
     async def exception_reporter(self):
         """report exception in engine core"""

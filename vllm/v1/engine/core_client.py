@@ -514,6 +514,9 @@ class ClientGuard:
         """
         while True:
             sender_identity, message = self.recv_msg(self.fault_receiver_socket)
+            assert message is not None, (
+                "message should not be None at fault tolerance scenario"
+            )
             self.engine_exception_q.put_nowait(FaultInfo.from_json(json.loads(message)))
 
     def shutdown_guard(self):
@@ -654,6 +657,14 @@ class MPClient(EngineCoreClient):
             # todo 拉起ClientGuard
             if vllm_config.fault_tolerance_config.enable_fault_tolerance:
                 self.engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+                assert addresses.fault_report_addr is not None, (
+                    "addresses.fault_report_addr should not be None at fault tolerance"
+                    " scenario"
+                )
+                assert addresses.client_cmd_addr is not None, (
+                    "addresses.client_cmd_addr should not be None at fault tolerance"
+                    " scenario"
+                )
                 self.client_guard = ClientGuard(
                     addresses.fault_report_addr,
                     addresses.client_cmd_addr,
@@ -741,7 +752,7 @@ class MPClient(EngineCoreClient):
         """report exception from engine_core"""
         engine_exception_dict = {}
         if self.engine_exception_q:
-            fault_info: FaultInfo = self.engine_exception_q.get()
+            fault_info: FaultInfo = await self.engine_exception_q.get()
             engine_exception_dict[fault_info.engine_id] = "Unhealthy"
         return engine_exception_dict
 
