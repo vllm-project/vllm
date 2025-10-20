@@ -197,6 +197,11 @@ class EplbState:
     """
     The buffer to store the expert weights during transfer.
     """
+    buffer_ready_event: torch.cuda.Event | None = None
+    """
+    CUDA event recorded when the async worker finishes filling the buffer.
+    The main thread waits on this before consuming the buffer.
+    """
     rebalanced: bool = False
     """
     The flag indicates whether the experts rebalance have been computed.
@@ -745,6 +750,10 @@ class EplbState:
             return
         try:
             assert self.new_physical_to_logical_map is not None
+            if self.buffer_ready_event is not None:
+                stream = torch.cuda.current_stream(device=self.cuda_device_index)
+                stream.wait_event(self.buffer_ready_event)
+                self.buffer_ready_event = None
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer_to_transfer],
                 expert_weights_buffer=self.expert_buffer,
