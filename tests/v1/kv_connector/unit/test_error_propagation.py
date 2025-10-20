@@ -38,7 +38,7 @@ def abort_scheduler():
     return create_scheduler(vllm_config)
 
 
-def test_502_error_propagation_sync_load(abort_scheduler: Scheduler):
+def test_error_propagation_sync_load(abort_scheduler: Scheduler):
     """test invalid_block_ids with abort policy -> FINISHED_ERROR (sync load)"""
     num_prompt_blocks = 100
     num_external_computed_blocks = 99
@@ -92,7 +92,7 @@ def test_502_error_propagation_sync_load(abort_scheduler: Scheduler):
     assert len(abort_scheduler.running) == 0
 
 
-def test_502_error_propagation_async_load(abort_scheduler: Scheduler):
+def test_error_propagation_async_load(abort_scheduler: Scheduler):
     """test invalid_block_ids with abort policy -> FINISHED_ERROR (async load)"""
     num_prompt_blocks = 100
     num_external_computed_blocks = 99
