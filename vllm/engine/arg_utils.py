@@ -1632,7 +1632,7 @@ class EngineArgs:
         fault_tolerance_config = FaultToleranceConfig(
             enable_fault_tolerance=self.enable_fault_tolerance,
             engine_recovery_timeout=self.engine_recovery_timeout,
-            fault_report_addr = self.fault_report_addr
+            fault_report_addr=self.fault_report_addr,
         )
 
         config = VllmConfig(
