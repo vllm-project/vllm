@@ -97,7 +97,10 @@ class AWQConfig(QuantizationConfig):
     ) -> Union["LinearMethodBase", "QuantizeMethodBase"] | None:
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
-                prefix, self.modules_to_not_convert, self.packed_modules_mapping
+                prefix,
+                self.modules_to_not_convert,
+                self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
