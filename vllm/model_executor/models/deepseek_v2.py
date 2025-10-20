@@ -204,10 +204,8 @@ class DeepseekV2MoE(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        if (
-            config.n_shared_experts is None
-            or rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        ):
+        self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+        if config.n_shared_experts is None or self.is_rocm_aiter_moe_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -239,7 +237,7 @@ class DeepseekV2MoE(nn.Module):
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=1.0
-            if not rocm_aiter_ops.is_fused_moe_enabled()
+            if not self.is_rocm_aiter_moe_enabled
             else self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
@@ -275,7 +273,7 @@ class DeepseekV2MoE(nn.Module):
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
-            if not rocm_aiter_ops.is_fused_moe_enabled():
+            if not self.is_rocm_aiter_moe_enabled:
                 final_hidden_states *= self.routed_scaling_factor
         elif self.shared_experts is not None:
             assert shared_output is not None
