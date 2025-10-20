@@ -33,7 +33,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     routing_method_type: int = 2,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
-
+    topk_group = topk_group if topk_group is not None else 0
     assert top_k <= global_num_experts
     assert top_k <= 10
     # assert topk_group <= 4
