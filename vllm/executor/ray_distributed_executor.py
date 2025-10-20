@@ -19,12 +19,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (
-    _run_task_with_lock,
+from vllm.utils.async_utils import make_async
+from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
     get_open_port,
-    make_async,
 )
 from vllm.v1.outputs import SamplerOutput
 
@@ -217,7 +216,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rpc_rank=rank)
+                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
+                    vllm_config=self.vllm_config, rpc_rank=rank
+                )
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -225,7 +226,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rpc_rank=rank)
+                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
+                    vllm_config=self.vllm_config, rpc_rank=rank
+                )
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(
@@ -303,7 +306,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 continue
             worker_node_and_gpu_ids.append(
                 ray.get(worker.get_node_and_gpu_ids.remote())
-            )  # type: ignore
+            )  # type: ignore[attr-defined]
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_gpus = defaultdict(list)  # node id -> list of gpu ids
@@ -495,7 +498,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if async_run_tensor_parallel_workers_only:
             ray_workers = self.non_driver_workers
         ray_worker_outputs = [
-            worker.execute_method.remote(sent_method, *args, **kwargs)
+            worker.execute_method.remote(  # type: ignore[attr-defined]
+                sent_method, *args, **kwargs
+            )
             for worker in ray_workers
         ]
 
@@ -715,7 +720,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             tasks.append(
                 asyncio.create_task(
                     _run_task_with_lock(
-                        driver_worker.execute_method.remote,
+                        driver_worker.execute_method.remote,  # type: ignore[attr-defined]
                         self.pp_locks[pp_rank],
                         "execute_model",
                         execute_model_req,
@@ -733,7 +738,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             "worker loop is disabled for VLLM_USE_RAY_SPMD_WORKER=1"
         )
         coros = [
-            worker.execute_method.remote("start_worker_execution_loop")
+            worker.execute_method.remote("start_worker_execution_loop")  # type: ignore[attr-defined]
             for worker in self.non_driver_workers
         ]
         return await asyncio.gather(*coros)
@@ -742,3 +747,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Assume that the Ray workers are healthy.
         # TODO: check the health of the Ray workers
         return
+
+
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args, **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)
