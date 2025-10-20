@@ -654,7 +654,6 @@ def multi_thread_safetensors_weights_iterator(
             yield from state_dict.items()
 
 
-
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
