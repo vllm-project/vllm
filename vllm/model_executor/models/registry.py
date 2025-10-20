@@ -247,6 +247,7 @@ _MULTIMODAL_MODELS = {
         "aya_vision",
         "AyaVisionForConditionalGeneration",
     ),
+    "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": (
         "chameleon",
