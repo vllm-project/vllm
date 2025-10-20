@@ -43,11 +43,6 @@ vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
-hopper_only = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
-    reason="Requires CUDA and Hopper (SM90)",
-)
-
 
 @dataclass
 class BatchedMMConfig:
@@ -99,7 +94,6 @@ class BatchedMMTensors:
         return BatchedMMTensors(A, B, C, num_expert_tokens)
 
 
-@hopper_only
 @pytest.mark.parametrize("num_experts", [8, 32])
 @pytest.mark.parametrize("max_tokens_per_expert", [32, 224, 512])
 @pytest.mark.parametrize("K", [128, 1024])
@@ -119,6 +113,14 @@ def test_batched_mm(
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
+
+    # float8_e4m3fn not supported on cuda arch < 89s
+    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
+        89
+    ):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
 
     if (per_act_token_quant or block_shape is not None) and not use_fp8_w8a8:
         pytest.skip("Don't test blocking for non-quantized types.")
@@ -225,7 +227,6 @@ def test_batched_mm(
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
-@hopper_only
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -247,6 +248,14 @@ def test_fused_moe_batched_experts(
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
+
+    # float8_e4m3fn not supported on cuda arch < 89s
+    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
+        89
+    ):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
 
     if topk > e:
         pytest.skip("topk > e")
