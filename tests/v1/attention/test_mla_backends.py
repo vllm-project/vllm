@@ -352,7 +352,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
-    from vllm.v1.attention.backends.mla.common import QueryLenSupport
     from vllm.v1.attention.backends.utils import QueryLenSupport
 
     batch_spec = BATCH_SPECS[batch_spec_name]
@@ -462,14 +461,20 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
                 query_len_support = getattr(
-                    builder_cls.reorder_spec, "query_len_support", QueryLenSupport.SINGLE_ONLY
+                    builder_cls.reorder_spec,
+                    "query_len_support",
+                    QueryLenSupport.SINGLE_ONLY,
                 )
                 supports_spec = query_len_support != QueryLenSupport.SINGLE_ONLY
                 is_decode.append(supports_spec)
             else:
-                threshold = getattr(builder_cls.reorder_spec, "reorder_batch_threshold", None)
+                threshold = getattr(
+                    builder_cls.reorder_spec, "reorder_batch_threshold", None
+                )
                 query_len_support = getattr(
-                    builder_cls.reorder_spec, "query_len_support", QueryLenSupport.SINGLE_ONLY
+                    builder_cls.reorder_spec,
+                    "query_len_support",
+                    QueryLenSupport.SINGLE_ONLY,
                 )
                 within_threshold = q_len <= threshold if threshold else False
                 if (
@@ -480,7 +485,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                     first_q_len = query_lens[0]
                     within_threshold = q_len == first_q_len
                 is_decode.append(within_threshold)
-
 
         # Split q into nope and rope components
         q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)

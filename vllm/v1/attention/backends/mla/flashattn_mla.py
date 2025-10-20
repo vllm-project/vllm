@@ -71,7 +71,9 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     # process small prefills with decode pathway
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(512, query_len_support=QueryLenSupport.VARLEN)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(
+        512, query_len_support=QueryLenSupport.VARLEN
+    )
 
     def __init__(
         self,

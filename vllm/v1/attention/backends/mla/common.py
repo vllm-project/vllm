@@ -190,7 +190,6 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import ClassVar, Generic, TypeVar
 
 import torch
@@ -225,17 +224,13 @@ from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    ReorderSpec,
     QueryLenSupport,
+    ReorderSpec,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-
-
-
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -475,7 +470,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # query length <= threshold are classified as decode requests.
     # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1, query_len_support=QueryLenSupport.SINGLE_ONLY)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(
+        1, query_len_support=QueryLenSupport.SINGLE_ONLY
+    )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -601,7 +598,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             )
 
         assert self.reorder_spec.reorder_batch_threshold is not None
-        supports_spec_decode = self.reorder_spec.query_len_support != QueryLenSupport.SINGLE_ONLY
+        supports_spec_decode = (
+            self.reorder_spec.query_len_support != QueryLenSupport.SINGLE_ONLY
+        )
         self._init_reorder_batch_threshold(
             self.reorder_spec.reorder_batch_threshold, supports_spec_decode
         )
@@ -759,7 +758,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_spec.reorder_batch_threshold,
-                require_uniform=(self.reorder_spec.query_len_support != QueryLenSupport.VARLEN),
+                require_uniform=(
+                    self.reorder_spec.query_len_support != QueryLenSupport.VARLEN
+                ),
             )
         )
 

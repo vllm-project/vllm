@@ -32,10 +32,9 @@ _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 if current_platform.is_rocm():
     import aiter
-    from vllm.triton_utils import tl, triton
-    from vllm.utils.torch_utils import direct_register_custom_op
     from aiter.ops.triton.utils.device_info import get_num_sms
 
+    from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))

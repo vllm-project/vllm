@@ -50,6 +50,7 @@ PAD_SLOT_ID = -1
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
 
+
 class QueryLenSupport(Enum):
     """Defines the level of query length support for an attention backend's
     decode pipeline.
