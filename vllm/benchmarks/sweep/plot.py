@@ -18,6 +18,7 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
 
 def _plot_fig(
     fig_path: Path,
+    fig_title: str,
     fig_data: list[dict[str, object]],
     curve_by: list[str],
     *,
@@ -64,6 +65,8 @@ def _plot_fig(
             markers=True,
         )
 
+    ax.set_title(fig_title)
+
     if log_y:
         ax.set_yscale("log")
 
@@ -101,6 +104,8 @@ def plot(
         all_data,
         key=lambda item: tuple((k, str(item[k])) for k in fig_by),
     ):
+        fig_group = tuple(fig_group)
+
         fig_path = output_dir / (
             "-".join(
                 (
@@ -112,9 +117,13 @@ def plot(
             .replace("..", "__")  # Sanitize
             + ".png"
         )
+        fig_title = (
+            ", ".join(f"{k}={v}" for k, v in fig_group) if fig_group else "(All data)"
+        )
 
         _plot_fig(
             fig_path,
+            fig_title,
             fig_data,
             curve_by,
             var_x=var_x,
