@@ -47,9 +47,9 @@ EMBED_DTYPE_TO_NUMPY_DTYPE_VIEW = {
 
 ENDIANNESS = ["native", "big", "little"]
 
-EMBED_DTYPE_TYPE = Literal["float32", "float16", "bfloat16", "fp8_e4m3", "fp8_e5m2"]
-ENDIANNESS_TYPE = Literal["native", "big", "little"]
-ENCODING_FORMAT_TYPE = Literal["float", "base64", "bytes"]
+EmbedDType = Literal["float32", "float16", "bfloat16", "fp8_e4m3", "fp8_e5m2"]
+Endianness = Literal["native", "big", "little"]
+EncodingFormat = Literal["float", "base64", "bytes"]
 
 
 def tensor2binary(
