@@ -12,10 +12,10 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+import einops
 import torch
-from einops import rearrange
 
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def xformers_attn_seqlens_wrapper(
@@ -30,7 +30,7 @@ def xformers_attn_seqlens_wrapper(
     context_layer = xops.memory_efficient_attention_forward(
         q, k, v, attn_bias=attn_bias, p=0, scale=None
     )
-    context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
+    context_layer = einops.rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
     return context_layer
 
 
@@ -71,7 +71,7 @@ def flash_attn_maxseqlen_wrapper(
             from flash_attn import flash_attn_varlen_func
         else:
             from vllm.vllm_flash_attn import flash_attn_varlen_func
-    q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
         k,
@@ -83,7 +83,7 @@ def flash_attn_maxseqlen_wrapper(
         dropout_p=0.0,
         causal=False,
     )
-    context_layer = rearrange(
+    context_layer = einops.rearrange(
         output, "(b s) h d -> s b (h d)", b=batch_size
     ).contiguous()
     return context_layer
