@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 from tqdm import tqdm
@@ -14,7 +13,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M,
-    deep_gemm_block_shape,
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
 )
@@ -28,14 +26,18 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.utils import has_deep_gemm, run_once
-from vllm.utils.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
+from vllm.utils import has_deep_gemm
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    m_grouped_fp8_gemm_nt_contiguous,
+)
+from vllm.utils.func_utils import run_once
 
 logger = init_logger(__name__)
 
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
-    align = deep_gemm_block_shape()[0]
+    align = get_mk_alignment_for_contiguous_layout()[0]
     return align <= M and N % align == 0 and K % align == 0
 
 
@@ -54,7 +56,7 @@ def _valid_deep_gemm(
     M = hidden_states.size(0)
     _, K, N = w2.size()
 
-    align = deep_gemm_block_shape()[0]
+    align = get_mk_alignment_for_contiguous_layout()[0]
 
     if not _valid_deep_gemm_shape(M, N, K):
         logger.debug_once(
@@ -124,7 +126,7 @@ def warmup_deepgemm_gg_contiguous_kernels(
 
     assert w1.size(0) == w2.size(0), "w1 and w2 must have the same number of experts"
 
-    block_m = deep_gemm_block_shape()[0]
+    block_m = get_mk_alignment_for_contiguous_layout()[0]
     num_experts = w1.size(0)
     device = w1.device
 
@@ -173,7 +175,7 @@ def warmup_deepgemm_gg_contiguous_kernels(
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config: FusedMoEQuantConfig):
         super().__init__(quant_config)
-        assert quant_config.block_shape == deep_gemm_block_shape()
+        assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
         assert quant_config.quant_dtype == torch.float8_e4m3fn
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
@@ -204,7 +206,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
         block_m = self.block_shape[0]
@@ -228,12 +230,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         assert a1q_scale is not None
@@ -255,7 +257,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             M=topk_ids.size(0),
             num_topk=topk_ids.size(1),
             local_num_experts=local_num_experts,
-            alignment=deep_gemm_block_shape()[0],
+            alignment=get_mk_alignment_for_contiguous_layout()[0],
             expert_tokens_meta=expert_tokens_meta,
         )
 
@@ -284,7 +286,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
-        a2q_scale: Optional[torch.Tensor] = None
+        a2q_scale: torch.Tensor | None = None
         a2q, a2q_scale = per_token_group_quant_fp8(
             act_out, self.block_shape[1], column_major_scales=True, out_q=quant_out
         )
@@ -317,9 +319,9 @@ def deep_gemm_moe_fp8(
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
     apply_router_weight_on_input=False,
 ) -> torch.Tensor:
     """
@@ -364,7 +366,7 @@ def deep_gemm_moe_fp8(
         w2_scale=w2_scale,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
-        block_shape=deep_gemm_block_shape(),
+        block_shape=get_mk_alignment_for_contiguous_layout(),
     )
 
     fn = mk.FusedMoEModularKernel(

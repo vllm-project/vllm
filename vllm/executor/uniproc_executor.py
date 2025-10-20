@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
 from multiprocessing import Lock
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -12,7 +13,8 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port, run_method
+from vllm.utils import run_method
+from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -36,7 +38,7 @@ class UniProcExecutor(ExecutorBase):
             shared_worker_lock=Lock(),
         )
 
-        self.async_output_thread: Optional[ThreadPoolExecutor] = None
+        self.async_output_thread: ThreadPoolExecutor | None = None
         if self.max_concurrent_batches > 1:
             self.async_output_thread = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
@@ -60,10 +62,10 @@ class UniProcExecutor(ExecutorBase):
 
     def collective_rpc(
         self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
+        method: str | Callable,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
         non_block: bool = False,
     ) -> list[Any]:
         if kwargs is None:

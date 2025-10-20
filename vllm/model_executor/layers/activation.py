@@ -3,7 +3,6 @@
 """Custom activation functions."""
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -18,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import LazyDict
+from vllm.utils.collection_utils import LazyDict
 
 logger = init_logger(__name__)
 
@@ -486,7 +485,7 @@ class ScaledActivation(nn.Module):
         act_module: nn.Module,
         intermediate_size: int,
         input_is_parallel: bool = True,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.act = act_module

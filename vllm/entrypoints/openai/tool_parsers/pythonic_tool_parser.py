@@ -4,7 +4,7 @@
 import ast
 import json
 from collections.abc import Sequence
-from typing import Any, Union
+from typing import Any
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -124,7 +124,7 @@ class PythonicToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if not current_text.startswith("["):
             return DeltaMessage(content=delta_text)
 
@@ -236,7 +236,7 @@ def _handle_single_tool(call: ast.Call) -> ToolCall:
     )
 
 
-def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
+def _make_valid_python(text: str) -> tuple[str, str] | None:
     bracket_stack = []
     for index, char in enumerate(text):
         if char in {"[", "(", "{"}:
@@ -308,7 +308,7 @@ def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
 
 def _compute_tool_delta(
     previously_sent_args: str, new_call: ToolCall, index: int, withheld_suffix: str
-) -> Union[DeltaToolCall, None]:
+) -> DeltaToolCall | None:
     new_call_args = new_call.function.arguments
     if withheld_suffix:
         assert new_call_args.endswith(withheld_suffix)

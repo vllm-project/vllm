@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -193,7 +193,7 @@ def sanity_check_mm_encoder_outputs(
 
 def scatter_mm_placeholders(
     embeds: torch.Tensor,
-    is_embed: Optional[torch.Tensor],
+    is_embed: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     Scatter the multimodal embeddings into a contiguous tensor that represents
@@ -221,7 +221,7 @@ def scatter_mm_placeholders(
 
 def gather_mm_placeholders(
     placeholders: torch.Tensor,
-    is_embed: Optional[torch.Tensor],
+    is_embed: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     Reconstructs the embeddings from the placeholder tokens.
@@ -238,7 +238,7 @@ def gather_mm_placeholders(
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    runner_only_attn_layers: Optional[set[str]] = None,
+    runner_only_attn_layers: set[str] | None = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -270,7 +270,7 @@ def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, "Attention"],
     runner_kv_caches: list[torch.Tensor],
-    num_attn_module: Optional[int] = 1,
+    num_attn_module: int | None = 1,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -328,8 +328,12 @@ def is_residual_scattered_for_sp(
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled, and the number of
-    input tokens is one of the compilation sizes.
+    parallelism and tensor parallelism is enabled.
+
+    This follows the same logic as SequenceParallelismPass.is_applicable():
+    - In full-graph compilation mode (no splitting ops or using inductor graph
+      partition), SP is always applied
+    - Otherwise, SP is only applied for specific shapes in compile_sizes
     """
     if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
         return False
@@ -343,5 +347,10 @@ def is_residual_scattered_for_sp(
     # to be a multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
 
-    # Currently, SP is only enabled for static size fx graphs.
+    if (
+        not vllm_config.compilation_config.splitting_ops
+        or vllm_config.compilation_config.use_inductor_graph_partition
+    ):
+        return True
+
     return num_input_tokens in vllm_config.compilation_config.compile_sizes

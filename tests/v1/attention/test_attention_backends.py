@@ -3,7 +3,6 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
-from typing import Optional, Union
 
 import pytest
 import torch
@@ -19,7 +18,8 @@ from tests.v1.attention.utils import (
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
+from vllm.utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     set_kv_cache_layout,
@@ -202,7 +202,7 @@ def run_attention_backend(
     key: torch.Tensor,
     value: torch.Tensor,
     kv_cache: torch.Tensor,
-    sliding_window: Optional[int] = None,
+    sliding_window: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -289,7 +289,7 @@ def run_attention_backend(
 def _test_backend_correctness(
     batch_spec: BatchSpec,
     model: str,
-    backend_to_test: list[Union[_Backend, str]],
+    backend_to_test: list[_Backend | str],
     mask_mod,
     *,
     block_size: int = 16,
@@ -424,13 +424,14 @@ def _test_backend_correctness(
     for backend_name in backend_to_test:
         # FlashAttentionm + FlexAttention:
         #   [2, num_blocks, block_size, num_kv_heads, head_size]
-        # FlashInfer:
+        # FlashInfer + Triton:
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
-        if backend_name == _Backend.FLASHINFER:
+        if backend_name in (_Backend.FLASHINFER, _Backend.TRITON_ATTN):
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
+        if backend_name == _Backend.FLASHINFER:
             # For FlashInfer default to HND layout and
             kv_cache_for_backend = (
                 kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
