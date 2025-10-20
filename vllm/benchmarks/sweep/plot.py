@@ -92,6 +92,7 @@ def plot(
     max_x: float | None,
     bin_x: float | None,
     log_y: bool,
+    file_prefix: str,
     dry_run: bool,
 ):
     all_data = [
@@ -107,7 +108,8 @@ def plot(
         fig_group = tuple(fig_group)
 
         fig_path = output_dir / (
-            "-".join(
+            file_prefix
+            + "-".join(
                 (
                     "FIGURE",
                     *(f"{k}={v}" for k, v in fig_group),
@@ -191,6 +193,13 @@ def main():
         help="Use logarithmic scaling for the y-axis.",
     )
     parser.add_argument(
+        "--file-prefix",
+        type=str,
+        default="",
+        help="If set, prepends this to the filename of the saved figures to "
+        "distinguish them from other runs of this script.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="If set, prints the location of the figures without drawing them.",
@@ -210,6 +219,7 @@ def main():
         max_x=args.max_x,
         bin_x=args.bin_x,
         log_y=args.log_y,
+        file_prefix=args.file_prefix,
         dry_run=args.dry_run,
     )
 
