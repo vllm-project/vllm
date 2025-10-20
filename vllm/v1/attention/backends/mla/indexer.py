@@ -218,7 +218,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 
-    reorder_spec: ReorderSpec = ReorderSpec(1)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

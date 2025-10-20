@@ -298,7 +298,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Attention backend's reorder spec which controls if and
     # how to reorder the request before actually execute the
     # model (default: no reorder)
-    reorder_spec: ReorderSpec = ReorderSpec(None)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(None)
 
     @abstractmethod
     def __init__(

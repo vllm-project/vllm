@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import numpy as np
 import torch
@@ -349,7 +349,7 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
-    reorder_spec: ReorderSpec = ReorderSpec(1)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
 
     def __init__(
         self,

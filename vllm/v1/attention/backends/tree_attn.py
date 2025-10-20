@@ -22,7 +22,6 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    ReorderSpec,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -189,7 +188,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             device=device,
         )
 
-        self.reorder_spec: ReorderSpec = ReorderSpec(self.tree_attn_bias.shape[0])
+        self.reorder_spec.reorder_batch_threshold = self.tree_attn_bias.shape[0]
 
     def build(
         self,

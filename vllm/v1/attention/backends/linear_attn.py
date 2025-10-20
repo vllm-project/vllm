@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -34,7 +35,7 @@ class LinearAttentionMetadata:
 
 
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
-    reorder_spec: ReorderSpec = ReorderSpec(1)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
 
     def __init__(
         self,

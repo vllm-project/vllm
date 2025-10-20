@@ -19,7 +19,7 @@ M = TypeVar("M")
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
-    reorder_spec: ReorderSpec = ReorderSpec(1)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
     cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )

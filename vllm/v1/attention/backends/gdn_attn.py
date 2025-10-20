@@ -3,6 +3,7 @@
 """Backend for GatedDeltaNet attention."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -62,7 +63,7 @@ class GDNAttentionMetadata:
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_spec: ReorderSpec = ReorderSpec(1)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
 
     def __init__(
         self,

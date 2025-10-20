@@ -3,6 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -253,7 +254,7 @@ class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
     cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    reorder_spec: ReorderSpec = ReorderSpec(1, split_extend=True)
+    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1, split_extend=True)
 
     def __init__(
         self,
