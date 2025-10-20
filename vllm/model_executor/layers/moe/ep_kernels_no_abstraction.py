@@ -183,11 +183,11 @@ if __name__ == "__main__":
     all_topk_idx = torch.cat(all_topk_idx, dim=0)
     all_topk_weights = torch.cat(all_topk_weights, dim=0)
 
+    # Verification
     expert_range_start = rank * local_num_experts
     expert_range_end = (rank + 1) * local_num_experts
     recv_i = -1
     expert_inputs_ground_truth = []
-    # Verification
     for i in range(batch_size):
         activated_on_this_rank = False
         for j in range(topk):
