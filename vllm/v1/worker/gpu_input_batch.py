@@ -482,21 +482,6 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
-        # Populate self-spec buffers if selective KV indices are provided
-        if request.selective_kv_indices is not None:
-            num_selective = len(request.selective_kv_indices)
-            if num_selective > 0:
-                self.selective_kv_indices_cpu_tensor[
-                    req_index, :num_selective] = torch.tensor(
-                        request.selective_kv_indices, dtype=torch.int32)
-                self.num_selective_kv_indices_cpu_tensor[
-                    req_index] = num_selective
-
-        # Populate full KV start offset
-        if request.full_kv_start_offset > 0:
-            self.full_kv_start_offset_cpu_tensor[
-                req_index] = request.full_kv_start_offset
-
         return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
@@ -631,22 +616,6 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
                     self.allowed_token_ids_mask_cpu_tensor[i1]
 
-        # Swap self-spec buffers
-        tmp_selective_kv = self.selective_kv_indices_cpu_tensor[i1, ...]
-        self.selective_kv_indices_cpu_tensor[i1, ...] = \
-            self.selective_kv_indices_cpu_tensor[i2, ...]
-        self.selective_kv_indices_cpu_tensor[i2, ...] = tmp_selective_kv
-
-        self.num_selective_kv_indices_cpu_tensor[i1], \
-            self.num_selective_kv_indices_cpu_tensor[i2] = \
-            self.num_selective_kv_indices_cpu_tensor[i2], \
-            self.num_selective_kv_indices_cpu_tensor[i1]
-
-        self.full_kv_start_offset_cpu_tensor[i1], \
-            self.full_kv_start_offset_cpu_tensor[i2] = \
-            self.full_kv_start_offset_cpu_tensor[i2], \
-            self.full_kv_start_offset_cpu_tensor[i1]
-
         # Swap streaming cache buffers
         self.sink_sizes_cpu_tensor[i1], self.sink_sizes_cpu_tensor[i2] = \
             self.sink_sizes_cpu_tensor[i2], self.sink_sizes_cpu_tensor[i1]
@@ -759,21 +728,6 @@ class InputBatch:
                 last_req_index, None)
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
-
-            # Copy self-spec buffers
-            num_selective = self.num_selective_kv_indices_cpu_tensor[
-                last_req_index]
-            if num_selective > 0:
-                self.selective_kv_indices_cpu_tensor[
-                    empty_index, :num_selective] = \
-                    self.selective_kv_indices_cpu_tensor[
-                        last_req_index, :num_selective]
-                self.num_selective_kv_indices_cpu_tensor[
-                    empty_index] = num_selective
-
-            self.full_kv_start_offset_cpu_tensor[
-                empty_index] = self.full_kv_start_offset_cpu_tensor[
-                    last_req_index]
 
             # Copy streaming cache buffers
             self.sink_sizes_cpu_tensor[empty_index] = \
