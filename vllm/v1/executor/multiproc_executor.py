@@ -10,7 +10,7 @@ import time
 import traceback
 import weakref
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cached_property, partial
@@ -48,7 +48,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds
+from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -179,11 +179,11 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(
+    def execute_model(  # type: ignore[override]
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
-    ):
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         if not self.has_connector:
             # get output only from a single worker (output_rank)
             (output,) = self.collective_rpc(
