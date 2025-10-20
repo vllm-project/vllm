@@ -7,9 +7,10 @@ from collections.abc import Callable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
-from vllm.utils import import_from_path
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.protocol import (
@@ -114,6 +115,17 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
+
+    def prepare_structured_tag(
+        self,
+        original_tag: str | None,
+        tool_server: ToolServer | None,
+    ) -> str:
+        """
+        Instance method that is implemented for preparing the structured tag
+        Otherwise, None is returned
+        """
+        return None
 
 
 class ReasoningParserManager:
