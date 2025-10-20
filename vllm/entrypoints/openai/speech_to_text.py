@@ -247,6 +247,11 @@ class OpenAISpeechToText(OpenAIServing):
                 + ("`text`, `json` or `verbose_json`")
             )
 
+        if (request.response_format == "verbose_json"
+                and not self.model_cls.supports_segment_timestamp):
+            return self.create_error_response(
+                f"Currently do not support verbose_json for {request.model}")
+
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
