@@ -448,7 +448,8 @@ def main():
     )
     parser.add_argument(
         "--scale-y",
-        action="store_true",
+        type=str,
+        default=None,
         help="The scale to use for the y-axis. "
         "Currently only accepts string values such as 'log' and 'sqrt'. "
         "See also: https://seaborn.pydata.org/generated/seaborn.objects.Plot.scale.html",
