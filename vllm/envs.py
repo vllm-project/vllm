@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -205,6 +205,7 @@ if TYPE_CHECKING:
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
@@ -569,9 +570,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_PREFIX": lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
-    "VLLM_LOG_STATS_INTERVAL": lambda: val
-    if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0.0
-    else 10.0,
+    "VLLM_LOG_STATS_INTERVAL": lambda: (
+        val
+        if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0.0
+        else 10.0
+    ),
     # Trace function calls
     # If set to 1, vllm will trace function calls
     # Useful for debugging
@@ -597,28 +600,30 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ),
     ),
     # If set, vllm will use flashinfer sampler
-    "VLLM_USE_FLASHINFER_SAMPLER": lambda: bool(
-        int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])
-    )
-    if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
-    else None,
+    "VLLM_USE_FLASHINFER_SAMPLER": lambda: (
+        bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
+        if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
+        else None
+    ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
-    "VLLM_CPU_KVCACHE_SPACE": lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
-    if "VLLM_CPU_KVCACHE_SPACE" in os.environ
-    else None,
+    "VLLM_CPU_KVCACHE_SPACE": lambda: (
+        int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
+        if "VLLM_CPU_KVCACHE_SPACE" in os.environ
+        else None
+    ),
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND": lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
     # (CPU backend only) CPU cores not used by OMP threads .
     # Those CPU cores will not be used by OMP threads of a rank.
-    "VLLM_CPU_NUM_OF_RESERVED_CPU": lambda: int(
-        os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")
-    )
-    if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
-    else None,
+    "VLLM_CPU_NUM_OF_RESERVED_CPU": lambda: (
+        int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0"))
+        if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
+        else None
+    ),
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
     # need to set this to "0" (False).
@@ -780,9 +785,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
-    "VLLM_PLUGINS": lambda: None
-    if "VLLM_PLUGINS" not in os.environ
-    else os.environ["VLLM_PLUGINS"].split(","),
+    "VLLM_PLUGINS": lambda: (
+        None
+        if "VLLM_PLUGINS" not in os.environ
+        else os.environ["VLLM_PLUGINS"].split(",")
+    ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
@@ -842,9 +849,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # and performance comparisons. Currently only affects MPLinearKernel
     # selection
     # (kernels: MacheteLinearKernel, MarlinLinearKernel, ExllamaLinearKernel)
-    "VLLM_DISABLED_KERNELS": lambda: []
-    if "VLLM_DISABLED_KERNELS" not in os.environ
-    else os.environ["VLLM_DISABLED_KERNELS"].split(","),
+    "VLLM_DISABLED_KERNELS": lambda: (
+        []
+        if "VLLM_DISABLED_KERNELS" not in os.environ
+        else os.environ["VLLM_DISABLED_KERNELS"].split(",")
+    ),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
@@ -1066,11 +1075,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     == "1",
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
-    "VLLM_TPU_BUCKET_PADDING_GAP": lambda: int(
-        os.environ["VLLM_TPU_BUCKET_PADDING_GAP"]
-    )
-    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ
-    else 0,
+    "VLLM_TPU_BUCKET_PADDING_GAP": lambda: (
+        int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
+        if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ
+        else 0
+    ),
     "VLLM_TPU_MOST_MODEL_LEN": lambda: maybe_convert_int(
         os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)
     ),
@@ -1367,6 +1376,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
         os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")
     ),
+    # Force DeepEP to use intranode kernel for inter-node communication in
+    # high throughput mode. This is useful archive higher prefill throuhgput
+    # on system supports multi-node nvlink (e.g GB200).
+    "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE", "0"))
+    ),
     # Allow DeepEP to use nvlink for internode_ll kernel, turn this on for
     # better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK": lambda: bool(
@@ -1538,9 +1553,9 @@ def compute_hash() -> str:
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
         # it's not a user error, it's a bug
-        assert key in environment_variables, (
-            "Please update environment_variables_to_hash in envs.py"
-        )
+        assert (
+            key in environment_variables
+        ), "Please update environment_variables_to_hash in envs.py"
 
     factors = [environment_variables[key]() for key in environment_variables_to_hash]
 

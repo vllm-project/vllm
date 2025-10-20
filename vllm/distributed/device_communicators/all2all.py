@@ -277,7 +277,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         num_rdma_bytes = None
         num_qps_per_rank = None
 
-        if self.internode:
+        if self.internode and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE:
             num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
