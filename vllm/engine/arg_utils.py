@@ -367,8 +367,8 @@ class EngineArgs:
     cudagraph_capture_sizes: list[int] | None = (
         CompilationConfig.cudagraph_capture_sizes
     )
-    max_cudagraph_capture_size: int | None = (
-        CompilationConfig.max_cudagraph_capture_size
+    max_cudagraph_capture_size: int | None = get_field(
+        CompilationConfig, "max_cudagraph_capture_size"
     )
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
