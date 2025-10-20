@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import Any
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.attention.backends.registry import _Backend
@@ -84,6 +84,34 @@ def maybe_get_vit_flash_attn_backend(
     return attn_backend, flash_attn_varlen_func
 
 
+class MMEncoderAttentionMaskFactory:
+    """A dummy attention mask factory for MMEncoderAttention."""
+
+    def get_flash_attn_mask_kwargs(
+        self,
+        **kwargs,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def get_xformers_attn_mask_kwargs(
+        self,
+        **kwargs,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def get_sdpa_attn_mask_kwargs(
+        self,
+        **kwargs,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def get_pallas_attn_mask_kwargs(
+        self,
+        **kwargs,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+
 @CustomOp.register("mm_encoder_attn")
 class MMEncoderAttention(CustomOp):
     """Multi-headed attention without any cache, used for multimodal encoder."""
@@ -97,6 +125,7 @@ class MMEncoderAttention(CustomOp):
         # This has no effect, it is only here to make it easier to swap
         # between Attention and MultiHeadAttention
         prefix: str = "",
+        attn_mask_factory: MMEncoderAttentionMaskFactory | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -104,6 +133,8 @@ class MMEncoderAttention(CustomOp):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.layer_name = prefix
+
+        self.attn_mask_factory = attn_mask_factory
 
         assert self.num_heads % self.num_kv_heads == 0, (
             f"num_heads ({self.num_heads}) is not "
@@ -216,7 +247,7 @@ class MMEncoderAttention(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
         from torch_xla.experimental.custom_kernel import flash_attention
 
@@ -237,7 +268,7 @@ class MMEncoderAttention(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
@@ -256,7 +287,7 @@ class MMEncoderAttention(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
         from xformers import ops as xops
 
@@ -266,9 +297,14 @@ class MMEncoderAttention(CustomOp):
         query, key, value = self.reshape_qkv_to_4d(
             query, key, value, bsz, q_len, kv_len
         )
+        mask_kwargs = (
+            self.attn_mask_factory.get_xformers_attn_mask_kwargs(**kwargs)
+            if self.attn_mask_factory is not None
+            else {}
+        )
 
         out = xops.memory_efficient_attention_forward(
-            query, key, value, scale=self.scale
+            query, key, value, scale=self.scale, **mask_kwargs
         )
         return out.reshape(bsz, q_len, -1)
 
@@ -277,7 +313,7 @@ class MMEncoderAttention(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
@@ -286,21 +322,28 @@ class MMEncoderAttention(CustomOp):
             query, key, value, bsz, q_len, kv_len
         )
 
-        cu_seqlens_q = torch.arange(
+        if self.attn_mask_factory is not None:
+            mask_kwargs = self.attn_mask_factory.get_flash_attn_mask_kwargs(
+                **kwargs,
+            )
+        else:
+            cu_seqlens_q = torch.arange(
                 0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device
             )
-        cu_seqlens_k = torch.arange(
-            0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
-        )
+            cu_seqlens_k = torch.arange(
+                0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
+            )
+            mask_kwargs = dict(
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+            )
+
         out = self._flash_attn_varlen_func(
             query,
             key,
             value,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=q_len,
-            max_seqlen_k=kv_len,
             softmax_scale=self.scale,
+            **mask_kwargs,
         )
         return out.reshape(bsz, q_len, -1)
 
@@ -309,23 +352,23 @@ class MMEncoderAttention(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
-        return self._forward_sdpa(query, key, value, attn_mask_factory)
+        return self._forward_sdpa(query, key, value, **kwargs)
 
     def forward_cuda(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
         if self.is_flash_attn_backend:
-            return self._forward_fa(query, key, value, attn_mask_factory)
+            return self._forward_fa(query, key, value, **kwargs)
         elif self.attn_backend == _Backend.XFORMERS:
-            return self._forward_xformers(query, key, value, attn_mask_factory)
+            return self._forward_xformers(query, key, value, **kwargs)
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            return self._forward_sdpa(query, key, value, attn_mask_factory)
+            return self._forward_sdpa(query, key, value, **kwargs)
         else:
             raise NotImplementedError(
                 f"MMEncoderAttention does not support {self.attn_backend} backend on CUDA."
@@ -336,26 +379,26 @@ class MMEncoderAttention(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
         assert self.attn_backend == _Backend.TORCH_SDPA, (
             f"MMEncoderAttention on CPU only supports TORCH_SDPA backend, "
             f"but got {self.attn_backend}."
         )
-        return self._forward_sdpa(query, key, value, attn_mask_factory)
+        return self._forward_sdpa(query, key, value, **kwargs)
 
     def forward_tpu(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask_factory: Callable | None = None,
+        **kwargs,
     ):
         assert self.attn_backend == _Backend.PALLAS, (
             f"MMEncoderAttention on TPU only supports PALLAS backend, "
             f"but got {self.attn_backend}."
         )
-        return self._forward_pallas(query, key, value, attn_mask_factory)
+        return self._forward_pallas(query, key, value, **kwargs)
 
     # def forward(
     #     self,
