@@ -21,7 +21,7 @@ MODULE_ATTRS = {
     "AsyncLLMEngine": ".engine.async_llm_engine:AsyncLLMEngine",
     "LLMEngine": ".engine.llm_engine:LLMEngine",
     "LLM": ".entrypoints.llm:LLM",
-    "initialize_ray_cluster": ".executor.ray_utils:initialize_ray_cluster",
+    "initialize_ray_cluster": ".v1.executor.ray_utils:initialize_ray_cluster",
     "PromptType": ".inputs:PromptType",
     "TextPrompt": ".inputs:TextPrompt",
     "TokensPrompt": ".inputs:TokensPrompt",
