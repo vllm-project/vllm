@@ -47,15 +47,6 @@ import yaml
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
-from vllm.utils.nccl import (
-    find_nccl_include_paths,
-    find_nccl_library,
-)
-
-_ = (
-    find_nccl_include_paths,
-    find_nccl_library,
-)
 
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
