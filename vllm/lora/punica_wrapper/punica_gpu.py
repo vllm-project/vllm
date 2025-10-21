@@ -7,7 +7,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Optional, Union, final
+from typing import final
 
 import torch
 
@@ -32,7 +32,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self,
         max_num_batched_tokens: int,
         max_batches: int,
-        device: Union[torch.device, str],
+        device: torch.device | str,
         **kwargs,
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
@@ -50,7 +50,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def update_metadata(
         self,
         mapping: LoRAMapping,
-        lora_index_to_id: list[Optional[int]],
+        lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
@@ -101,36 +101,29 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         lora_b_stacked: tuple[torch.Tensor, ...],
-        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
         **kwargs,
     ) -> None:
         """
-        Performs GEMM and bias addition for multiple slices of lora_b.
+        Performs GEMM for multiple slices of lora_b.
 
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
-                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] +
-                    lora_bias_stacked[i]
+                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i]
                 offset += slice
 
         Args:
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]):
-                bias's weight
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool): Defaults to True.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        if lora_bias_stacked is not None:
-            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0, y.size(0))
-            self._apply_bias(token_lora_indices, y, output_slices, lora_bias_stacked)
 
         assert x.ndim == 3
         assert x.size(0) == len(output_slices)
@@ -183,11 +176,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         lora_b_stacked: tuple[torch.Tensor, ...],
-        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
         scale: float,
         output_slices: tuple[int, ...],
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """
@@ -200,36 +192,31 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     @ lora_a_stacked[indices[i], layer_idx, :, :]
                     @ lora_b_stacked[indices[i], layer_idx, :, :]
                     * scale
-                    ).squeeze(0)+lora_bias_stacked[i]
-
+                    ).squeeze(0)
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weight.
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-        if lora_bias_stacked is not None:
-            assert len(lora_bias_stacked) == len(output_slices)
-            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0, y.size(0))
-            y = self._apply_bias(
-                token_lora_indices, y, output_slices, lora_bias_stacked
-            )
 
-        if buffer is None:
-            r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, refer to:
-            # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros(  # type: ignore
-                (len(output_slices), x.size(0), r),
-                dtype=torch.float32,
-                device=x.device,
-            )
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        r = lora_b_stacked[0].size(-1)
+        # We set the buffer to be float32 by default, refer to:
+        # https://github.com/triton-lang/triton/issues/1387
+        # Note: buffer is zeroed inside the shrink op
+        buffer = torch.empty(
+            (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
+        )
+
         self.add_shrink(
             buffer,  # type: ignore
             x,
@@ -241,7 +228,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y,
             buffer,  # type: ignore
             lora_b_stacked,
-            None,
             output_slices,
             add_inputs=True,
             **kwargs,
@@ -255,7 +241,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_b_stacked: torch.Tensor,
         scale,
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """
@@ -277,10 +263,15 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
-        if buffer is None:
-            # We set the buffer to be float32 by default, refer to:
-            # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
+
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        # We set the buffer to be float32 by default, refer to:
+        # https://github.com/triton-lang/triton/issues/1387
+        # Note: buffer is zeroed inside the shrink op
+        buffer = torch.empty((x.size(0), r), dtype=torch.float32, device=x.device)
 
         lora_shrink(
             x,

@@ -5,9 +5,7 @@
 /vllm/attention @LucasWilkinson
 /vllm/attention/backends/abstract.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/executor/executor_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill @22quinn
-/vllm/worker/worker_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill @22quinn
 /vllm/model_executor/layers/fused_moe @mgoin
-/vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill @NickLucche
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
@@ -26,7 +24,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/config/cache.py @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
 
 # vLLM V1
-/vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
 /vllm/v1/attention @LucasWilkinson
 /vllm/v1/attention/backends/flashinfer.py @mgoin
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
@@ -60,7 +57,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/offloading @ApostaC
 
 # Transformers backend
-/vllm/model_executor/models/transformers.py @hmellor
+/vllm/model_executor/models/transformers @hmellor
 /tests/models/test_transformers.py @hmellor
 
 # Docs
@@ -121,3 +118,11 @@ mkdocs.yaml @hmellor
 
 # KVConnector installation files
 /requirements/kv_connectors.txt @NickLucche
+
+# Pooling models
+/examples/*/pooling/ @noooop
+/tests/models/*/pooling* @noooop
+/tests/entrypoints/pooling @noooop
+/vllm/config/pooler.py @noooop
+/vllm/pooling_params.py @noooop
+/vllm/model_executor/layers/pooler.py @noooop

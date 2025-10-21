@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Optional, Union
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,7 +21,7 @@ from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublis
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import AsyncMPClient, EngineCoreClient, SyncMPClient
@@ -41,7 +41,7 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
 def make_request(
-    params: SamplingParams, prompt_tokens_ids: Optional[list[int]] = None
+    params: SamplingParams, prompt_tokens_ids: list[int] | None = None
 ) -> EngineCoreRequest:
     if not prompt_tokens_ids:
         prompt_tokens_ids = PROMPT_TOKENS
@@ -113,9 +113,7 @@ async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
 
 
 # Dummy utility function to monkey-patch into engine core.
-def echo(
-    self, msg: str, err_msg: Optional[str] = None, sleep: Optional[float] = None
-) -> str:
+def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None) -> str:
     print(f"echo util function called: {msg}, {err_msg}")
     if sleep is not None:
         time.sleep(sleep)
@@ -317,7 +315,7 @@ def echo_dc(
     self,
     msg: str,
     return_list: bool = False,
-) -> Union[MyDataclass, list[MyDataclass]]:
+) -> MyDataclass | list[MyDataclass]:
     print(f"echo dc util function called: {msg}")
     val = None if msg is None else MyDataclass(msg)
     # Return dataclass to verify support for returning custom types
@@ -330,7 +328,7 @@ def echo_dc_dict(
     self,
     msg: str,
     return_dict: bool = False,
-) -> Union[MyDataclass, dict[str, MyDataclass]]:
+) -> MyDataclass | dict[str, MyDataclass]:
     print(f"echo dc dict util function called: {msg}")
     val = None if msg is None else MyDataclass(msg)
     # Return dict of dataclasses to verify support for returning dicts

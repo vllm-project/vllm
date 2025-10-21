@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import logging
 
 from vllm.config import VllmConfig
-from vllm.plugins import load_plugins_by_group
+from vllm.plugins import IO_PROCESSOR_PLUGINS_GROUP, load_plugins_by_group
 from vllm.plugins.io_processors.interface import IOProcessor
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +37,7 @@ def get_io_processor(
 
     # Load all installed plugin in the group
     multimodal_data_processor_plugins = load_plugins_by_group(
-        "vllm.io_processor_plugins"
+        IO_PROCESSOR_PLUGINS_GROUP
     )
 
     loadable_plugins = {}

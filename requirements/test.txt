@@ -476,7 +476,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.8.2
+mistral-common==1.8.5
     # via -r requirements/test.in
 mlflow==2.22.0
     # via terratorch
@@ -1014,8 +1014,6 @@ sentence-transformers==3.2.1
     # via
     #   -r requirements/test.in
     #   mteb
-sentencepiece==0.2.0
-    # via mistral-common
 setuptools==77.0.3
     # via
     #   lightning-utilities

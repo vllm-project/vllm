@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -21,29 +21,29 @@ class _HfExamplesInfo:
     extras: Mapping[str, str] = field(default_factory=dict)
     """Extra models to use for testing this architecture."""
 
-    tokenizer: Optional[str] = None
+    tokenizer: str | None = None
     """Set the tokenizer to load for this architecture."""
 
     tokenizer_mode: TokenizerMode = "auto"
     """Set the tokenizer type for this architecture."""
 
-    speculative_model: Optional[str] = None
+    speculative_model: str | None = None
     """
     The default model to use for testing this architecture, which is only used
     for speculative decoding.
     """
 
-    min_transformers_version: Optional[str] = None
+    min_transformers_version: str | None = None
     """
     The minimum version of HF Transformers that is required to run this model.
     """
 
-    max_transformers_version: Optional[str] = None
+    max_transformers_version: str | None = None
     """
     The maximum version of HF Transformers that this model runs on.
     """
 
-    transformers_version_reason: Optional[str] = None
+    transformers_version_reason: str | None = None
     """
     The reason for the minimum/maximum version requirement.
     """
@@ -67,34 +67,31 @@ class _HfExamplesInfo:
 
     is_available_online: bool = True
     """
-    Set this to ``False`` if the name of this architecture no longer exists on
+    Set this to `False` if the name of this architecture no longer exists on
     the HF repo. To maintain backwards compatibility, we have not removed them
     from the main model registry, so without this flag the registry tests will
     fail.
     """
 
     trust_remote_code: bool = False
-    """The ``trust_remote_code`` level required to load the model."""
-
-    v0_only: bool = False
-    """The model is only available with the vLLM V0 engine."""
+    """The `trust_remote_code` level required to load the model."""
 
     hf_overrides: dict[str, Any] = field(default_factory=dict)
-    """The ``hf_overrides`` required to load the model."""
+    """The `hf_overrides` required to load the model."""
 
-    max_model_len: Optional[int] = None
+    max_model_len: int | None = None
     """
     The maximum model length to use for this model. Some models default to a
     length that is too large to fit into memory in CI.
     """
 
-    revision: Optional[str] = None
+    revision: str | None = None
     """
     The specific revision (commit hash, tag, or branch) to use for the model.
     If not specified, the default revision will be used.
     """
 
-    max_num_seqs: Optional[int] = None
+    max_num_seqs: int | None = None
     """Maximum number of sequences to be processed in a single iteration."""
 
     use_original_num_layers: bool = False
@@ -109,7 +106,7 @@ class _HfExamplesInfo:
         on_fail: Literal["error", "skip", "return"],
         check_min_version: bool = True,
         check_max_version: bool = True,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         If the installed transformers version does not meet the requirements,
         perform the given action.
@@ -250,6 +247,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
+    "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
@@ -264,7 +262,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
-        extras={"tiny": "bigcode/tiny_starcoder_py"},
+        extras={
+            "tiny": "bigcode/tiny_starcoder_py",
+            "santacoder": "bigcode/gpt_bigcode-santacoder",
+        },
         min_transformers_version="4.55.1",
         transformers_version_reason="HF model broken in 4.55.0",
     ),
@@ -329,6 +330,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "guard": "meta-llama/Llama-Guard-3-1B",
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "tiny": "hmellor/tiny-random-LlamaForCausalLM",
         },
     ),
     "LLaMAForCausalLM": _HfExamplesInfo(
@@ -485,6 +487,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
+    "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
+        "naver/splade-v3", is_available_online=False
+    ),
     # [Multimodal]
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
@@ -561,6 +566,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"),
+    "BeeForConditionalGeneration": _HfExamplesInfo(
+        "Open-Bee/Bee-8B-RL",
+        trust_remote_code=True,
+    ),
     "Blip2ForConditionalGeneration": _HfExamplesInfo(
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
@@ -647,6 +656,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
         trust_remote_code=True,
     ),
+    "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
+        "lightonai/LightOnOCR-1B",
+        is_available_online=False,
+    ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         max_model_len=10240,
@@ -690,7 +703,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
-        v0_only=True,
     ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
@@ -748,6 +760,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen-VL",
         extras={"chat": "Qwen/Qwen-VL-Chat"},
         trust_remote_code=True,
+        max_transformers_version="4.53.3",
+        transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
         hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
@@ -771,6 +785,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         min_transformers_version="4.57",
         is_available_online=False,
+    ),
+    "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="4.57",
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
@@ -901,11 +920,11 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
         "allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"
     ),
-    "TransformersMoEForMultimodalLM": _HfExamplesInfo(
+    "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="4.57.0.dev0"
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
@@ -913,6 +932,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
         "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+    ),
+    "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(
+        "google/gemma-3-4b-it"
     ),
 }
 

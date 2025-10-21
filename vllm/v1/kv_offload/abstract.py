@@ -30,7 +30,6 @@ The class provides the following primitives:
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
@@ -122,7 +121,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_store(
         self, block_hashes: Iterable[BlockHash]
-    ) -> Optional[PrepareStoreOutput]:
+    ) -> PrepareStoreOutput | None:
         """
         Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until

@@ -3,10 +3,10 @@
 """A TPU worker class."""
 
 import os
-from typing import Any, Callable, Optional, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import torch
-import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
@@ -25,7 +25,8 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -182,8 +183,8 @@ class TPUWorker:
             if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
 
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
+                # Use an empty tensor instead of `None` to force Dynamo to pass
+                # it by reference, rather by specializing on the value `None`.
                 tpu_kv_cache = torch.tensor([], dtype=dtype).to(self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:
@@ -257,7 +258,7 @@ class TPUWorker:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None:
         output = self.model_runner.execute_model(scheduler_output)
         # every worker's output is needed when kv_transfer_group is set up
         return output if self.is_driver_worker or has_kv_transfer_group() else None
@@ -293,6 +294,9 @@ class TPUWorker:
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+    def reset_mm_cache(self) -> None:
+        self.model_runner.reset_mm_cache()
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
@@ -314,7 +318,7 @@ class TPUWorker:
         self,
         vllm_config: VllmConfig,
         rank: int,
-        distributed_init_method: Optional[str] = None,
+        distributed_init_method: str | None = None,
         local_rank: int = -1,
     ) -> None:
         """Initialize the distributed environment."""

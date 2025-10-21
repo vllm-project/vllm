@@ -3,7 +3,6 @@
 """Utility functions for attention-related v1 tests."""
 
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import pytest
 import torch
@@ -21,7 +20,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -150,14 +149,14 @@ def create_vllm_config(
     model_name: str = "meta-llama/Meta-Llama-3-8B",
     tensor_parallel_size: int = 1,
     max_model_len: int = 1024,
-    dtype: Union[ModelDType, torch.dtype] = "auto",
+    dtype: ModelDType | torch.dtype = "auto",
     num_gpu_blocks: int = 1000,
     block_size: int = 16,
     max_num_seqs: int = 256,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     add_mock_model_methods: bool = True,
-    hf_config_override: Optional[dict] = None,
+    hf_config_override: dict | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -252,7 +251,7 @@ class BackendConfig:
     name: str
     env_vars: dict
     comp_config: dict  # compilation config
-    specific_gpu_arch: Optional[tuple] = None
+    specific_gpu_arch: tuple | None = None
 
 
 # Define all backend configurations of full cudagraph to be tested
