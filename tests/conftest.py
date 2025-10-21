@@ -60,7 +60,8 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import is_list_of, set_default_torch_num_threads
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 logger = init_logger(__name__)
 

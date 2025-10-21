@@ -291,7 +291,14 @@ def sequence_parallelism_pass_on_test_model(
         sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
         func_pass = FixFunctionalizationPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
-
+        assert (
+            sequence_parallelism_pass.compilation_config.splitting_ops
+            == vllm_config.compilation_config.splitting_ops
+        )
+        assert (
+            sequence_parallelism_pass.compilation_config.use_inductor_graph_partition
+            == vllm_config.compilation_config.use_inductor_graph_partition
+        )
         passes_for_backend: list[VllmInductorPass] = [
             noop_pass,
             sequence_parallelism_pass,

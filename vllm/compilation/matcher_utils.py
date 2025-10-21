@@ -164,8 +164,6 @@ class MatcherQuantFP8(MatcherCustomOp):
         input: torch.Tensor,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # TODO(luka): why does empty_like produce a permute but
-        #  empty via shape doesn't?
         result = torch.empty(
             input.shape, device=input.device, dtype=self.quant_key.dtype
         )

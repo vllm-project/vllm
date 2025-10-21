@@ -38,11 +38,13 @@ from vllm.logger import init_logger
 from vllm.utils import (
     _maybe_force_spawn,
     decorate_logs,
+    get_mp_context,
+    set_process_title,
+)
+from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
-    get_mp_context,
     get_open_port,
-    set_process_title,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
