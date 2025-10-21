@@ -1526,7 +1526,9 @@ def in_the_same_node_as(
         ranks = list(range(world_size))
 
     # local tensor in each process to store the result
-    is_in_the_same_node = torch.tensor([0] * world_size, dtype=torch.int32)
+    is_in_the_same_node = torch.tensor(
+        [0] * world_size, dtype=torch.int32, device="cpu"
+    )
 
     magic_message = b"magic_message"
     shm = None
