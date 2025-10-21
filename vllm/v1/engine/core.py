@@ -1137,7 +1137,7 @@ class EngineCoreProc(EngineCore):
 
     def _check_busy_loop_active(self):
         if self.enable_fault_tolerance and not self.busy_loop_active.is_set():
-            raise InterruptedError("Engine busy loop is paused.")
+            raise EngineLoopPausedError("Engine busy loop is paused.")
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""

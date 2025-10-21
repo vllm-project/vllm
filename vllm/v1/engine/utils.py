@@ -1227,13 +1227,15 @@ class FaultHandler:
 
         if instruction == "pause":
             for unhealthy_engine in unhealthy_engine_list:
-                engine_indexes.remove(unhealthy_engine.engine_id)
+                engine_indexes.remove(int(unhealthy_engine.engine_id))
 
         kwargs = {"timeout": timeout}
         for engine_index in engine_indexes:
             identity = self.client_cmd_registry.get(engine_index)
             serialized_instruction = serialize_method_call(instruction, **kwargs)
-            self.cmd_socket.send_multipart([identity, b"", serialized_instruction])
+            self.cmd_socket.send_multipart(
+                [identity, b"", serialized_instruction.encode("utf-8")]
+            )
 
         poller = zmq.Poller()
         poller.register(self.cmd_socket, zmq.POLLIN)
@@ -1253,10 +1255,10 @@ class FaultHandler:
                     return False
                 identity, _, response = parts
                 response_dict = json.loads(response.decode("utf-8"))
-                engine_id = response_dict.get("engine_id")
+                engine_id = response_dict.get("engine_index")
                 success = response_dict.get("success", False)
                 if engine_id in engine_indexes:
-                    engine_indexes.remove(engine_id)
+                    engine_indexes.remove(int(engine_id))
                 if not success:
                     logger.error(
                         "Engine %s reported failure: %s",

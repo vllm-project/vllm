@@ -502,7 +502,7 @@ class ClientGuard:
             logger.error("Unexpected error occurred while receiving message: %s", e)
             return (None, None)
 
-    def handle_fault(self, instruction: str, timeout: int) -> bool:
+    async def handle_fault(self, instruction: str, timeout: int) -> bool:
         """
         Executes fault tolerance measures based on the fault tolerance instructions
          received from the api_server.
@@ -512,7 +512,7 @@ class ClientGuard:
         to handle system anomalies, ensuring stable operation or graceful degradation
         of the relevant components.
         """
-        return run_method(
+        return await run_method(
             self.fault_handler, "handle_fault", args=(instruction, timeout), kwargs={}
         )
 
@@ -835,7 +835,7 @@ class MPClient(EngineCoreClient):
 
     async def handle_fault(self, instruction: str, timeout: int) -> None:
         """handle fault of current instance by instruction"""
-        execute_result = self.client_guard.handle_fault(instruction, timeout)
+        execute_result = await self.client_guard.handle_fault(instruction, timeout)
         if not execute_result:
             logger.error("execute fail tolerance instruction, shutdown vllm instance")
             self.shutdown()
