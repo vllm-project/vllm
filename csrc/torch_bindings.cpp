@@ -189,6 +189,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int stride1) -> ()");
   ops.impl("top_k_per_row", torch::kCUDA, &top_k_per_row);
 
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, int numRows, "
+      "int stride0, int stride1) -> ()");
+  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
+
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
