@@ -132,7 +132,7 @@ WORKDIR /workspace
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+    uv pip install --python /opt/venv/bin/python3 --prerelease=allow -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # cuda arch list used by torch
