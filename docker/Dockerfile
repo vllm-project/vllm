@@ -206,6 +206,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
+        && export CC="sccache gcc" \
+        && export CXX="sccache g++" \
+        && export NVCC="sccache nvcc" \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
