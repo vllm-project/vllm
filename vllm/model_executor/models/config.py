@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 @lru_cache
 def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls) -> set[str]:
     dynamic_kwargs: set[str] = set()
