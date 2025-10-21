@@ -685,6 +685,10 @@ class MoriAll2AllManager(All2AllManagerBase):
         from mori.ops import EpDispatchCombineConfig
         from mori.ops.dispatch_combine import EpDispatchCombineKernelType
 
+        from vllm.platforms import current_platform
+
+        assert quant_dtype is None or quant_dtype == current_platform.fp8_dtype()
+
         # Default values (can be overridden by JSON)
         warp_num_per_block = 8
         block_num = 80
