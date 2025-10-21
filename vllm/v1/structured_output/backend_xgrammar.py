@@ -198,6 +198,25 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.matcher.reset()
 
 
+# cf https://github.com/mlc-ai/xgrammar/blob/main/cpp/json_schema_converter.cc
+string_supported_formats = {
+    "email",
+    "date",
+    "time",
+    "date-time",
+    "duration",
+    "ipv4",
+    "ipv6",
+    "hostname",
+    "uuid",
+    "uri",
+    "uri-reference",
+    "uri-template",
+    "json-pointer",
+    "relative-json-pointer",
+}
+
+
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
@@ -217,7 +236,11 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Unsupported keywords for strings
-        if obj.get("type") == "string" and "format" in obj:
+        if (
+            obj.get("type") == "string"
+            and "format" in obj
+            and obj["format"] not in string_supported_formats
+        ):
             return True
 
         # Unsupported keywords for objects
