@@ -789,7 +789,7 @@ class AsyncLLM(EngineClient):
 
     async def exception_reporter(self):
         """report exception in engine core"""
-        return self.engine_core.exception_reporter()
+        return await self.engine_core.fault_reporter()
 
     @property
     def is_running(self) -> bool:

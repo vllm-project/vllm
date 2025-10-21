@@ -49,6 +49,7 @@ from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
     FaultHandler,
+    get_queue_snapshot,
     launch_core_engines,
 )
 from vllm.v1.executor.abstract import Executor
@@ -257,7 +258,7 @@ class EngineCoreClient(ABC):
     async def handle_fault(self, instruction: str, timeout: int) -> None:
         raise NotImplementedError
 
-    async def exception_reporter(self):
+    async def fault_reporter(self):
         raise NotImplementedError
 
 
@@ -435,6 +436,7 @@ class ClientGuard:
         cmd_addr: str,
         engine_registry: dict[int, bytes],
         engine_exception_q: asyncio.Queue[FaultInfo],
+        engine_exception_q_lock: asyncio.Lock,
     ):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
@@ -448,9 +450,16 @@ class ClientGuard:
             ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
         )
 
-        self.fault_handler = FaultHandler(self.cmd_socket, self.engine_registry)
-
         self.engine_exception_q: asyncio.Queue[FaultInfo] = engine_exception_q
+
+        self.engine_exception_q_lock = engine_exception_q_lock
+
+        self.fault_handler = FaultHandler(
+            self.cmd_socket,
+            self.engine_registry,
+            self.engine_exception_q,
+            self.engine_exception_q_lock,
+        )
 
         Thread(
             target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
@@ -521,7 +530,9 @@ class ClientGuard:
             assert message is not None, (
                 "message should not be None at fault tolerance scenario"
             )
-            self.engine_exception_q.put_nowait(FaultInfo.from_json(json.loads(message)))
+            # TODO Asynchronous issuance of pause commands and design of engine
+            #  core status
+            self.engine_exception_q.put_nowait(FaultInfo.from_json(message))
 
     def shutdown_guard(self):
         self.fault_receiver_socket.close()
@@ -664,12 +675,14 @@ class MPClient(EngineCoreClient):
                     " scenario"
                 )
                 self.engine_registry = addresses.engine_core_guard_identities
+                self.engine_exception_q_lock = asyncio.Lock()
                 assert self.engine_registry is not None
                 self.client_guard = ClientGuard(
                     addresses.fault_report_addr,
                     addresses.client_cmd_addr,
                     self.engine_registry,
                     self.engine_exception_q,
+                    self.engine_exception_q_lock,
                 )
             success = True
         finally:
@@ -823,13 +836,15 @@ class MPClient(EngineCoreClient):
             logger.error("execute fail tolerance instruction, shutdown vllm instance")
             self.shutdown()
 
-    async def exception_reporter(self):
-        """report exception from engine_core"""
+    async def fault_reporter(self):
         engine_exception_dict = {}
-        if self.engine_exception_q:
-            fault_info: FaultInfo = await self.engine_exception_q.get()
+        exception_snapshot = await get_queue_snapshot(
+            self.engine_exception_q, self.engine_exception_q_lock
+        )
+
+        for fault_info in exception_snapshot:
             engine_exception_dict[fault_info.engine_id] = "Unhealthy"
-        return engine_exception_dict
+        return json.dumps(engine_exception_dict).encode("utf-8")
 
 
 def _process_utility_output(

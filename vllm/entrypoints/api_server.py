@@ -78,7 +78,7 @@ async def send_fault_tolerance_instruction(request: Request) -> Response:
 async def get_fault_info() -> Response:
     """Health check."""
     assert engine is not None
-    engine_exception_dict = engine.exception_reporter()
+    engine_exception_dict = await engine.exception_reporter()
     return Response(engine_exception_dict, status_code=200)
 
 

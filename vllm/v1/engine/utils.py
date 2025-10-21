@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import asyncio
 import contextlib
 import json
 import os
@@ -1185,21 +1185,57 @@ def generate_identity_group(peer1, peer2, use, n):
     return identitys
 
 
+async def get_queue_snapshot(queue: asyncio.Queue, queue_lock: asyncio.Lock) -> list:
+    """Thread-safe snapshot of the exception queue."""
+    """复制队列元素到列表（保留队列内容）"""
+    async with queue_lock:  # 加锁确保复制期间无其他协程修改队列
+        items = []
+        # get item at first
+        while not queue.empty():
+            item = queue.get_nowait()
+            items.append(item)
+        # put item into queue again
+        for item in items:
+            queue.put_nowait(item)
+    return items
+
+
 class FaultHandler:
-    def __init__(self, cmd_socket: zmq.Socket, client_cmd_registry: dict) -> None:
+    def __init__(
+        self,
+        cmd_socket: zmq.Socket,
+        client_cmd_registry: dict,
+        engine_exception_q: asyncio.Queue[FaultInfo],
+        engine_exception_q_lock: asyncio.Lock,
+    ) -> None:
         self.cmd_socket = cmd_socket
         self.client_cmd_registry = client_cmd_registry
+        self.engine_exception_q = engine_exception_q
+        self.engine_exception_q_lock = engine_exception_q_lock
 
-    def handle_fault(self, instruction: str, timeout) -> bool:
+    async def handle_fault(self, instruction: str, timeout) -> bool:
+        # TODO: If the engine does not exist, the loop will time out and throw an error
+        #  Short-term solution: Iterate through exception_q to get the exception index,
+        #  remove it, and then issue the command
+        #  Final solution: Implement a thread-safe dictionary to mark statuses
+        unhealthy_engine_list = await get_queue_snapshot(
+            self.engine_exception_q, self.engine_exception_q_lock
+        )
+        engine_indexes = [engine_index for engine_index in self.client_cmd_registry]
+
+        if instruction == "pause":
+            for unhealthy_engine in unhealthy_engine_list:
+                engine_indexes.remove(unhealthy_engine.engine_id)
+
         kwargs = {"timeout": timeout}
-        for identity in self.client_cmd_registry.values():
+        for engine_index in engine_indexes:
+            identity = self.client_cmd_registry.get(engine_index)
             serialized_instruction = serialize_method_call(instruction, **kwargs)
             self.cmd_socket.send_multipart([identity, b"", serialized_instruction])
 
         poller = zmq.Poller()
         poller.register(self.cmd_socket, zmq.POLLIN)
 
-        engine_indexes = [engine_index for engine_index in self.client_cmd_registry]
         while engine_indexes:
             socks = dict(poller.poll(timeout))
             if self.cmd_socket not in socks:
@@ -1208,7 +1244,6 @@ class FaultHandler:
                     engine_indexes,
                 )
                 return False
-
             try:
                 parts = self.cmd_socket.recv_multipart()
                 if len(parts) != 3:
@@ -1216,13 +1251,10 @@ class FaultHandler:
                     return False
                 identity, _, response = parts
                 response_dict = json.loads(response.decode("utf-8"))
-
                 engine_id = response_dict.get("engine_id")
                 success = response_dict.get("success", False)
-
                 if engine_id in engine_indexes:
                     engine_indexes.remove(engine_id)
-
                 if not success:
                     logger.error(
                         "Engine %s reported failure: %s",
@@ -1230,7 +1262,6 @@ class FaultHandler:
                         response_dict.get("reason", "unknown"),
                     )
                     return False
-
             except Exception as e:
                 logger.error("Error while receiving response: %s", e)
                 return False
