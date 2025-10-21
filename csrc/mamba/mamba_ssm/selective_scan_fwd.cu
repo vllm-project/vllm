@@ -167,7 +167,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     //     smem_bc[state_idx] = B[state_idx * params.B_dstate_stride] * C[state_idx * params.C_dstate_stride];
     // }
 
-    const int kChunkSize = params.cache_enabled ? params.block_size : kNThreads * kNItems;
+    constexpr int kChunkSize = kNThreads * kNItems;
 
     // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
     const int iteration_chunk_size = params.cache_enabled ? params.block_size : 2048;
