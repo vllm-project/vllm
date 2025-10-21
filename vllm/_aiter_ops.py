@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from collections.abc import Callable
-from functools import wraps
 
 import torch
 
@@ -10,12 +10,12 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
-def is_aiter_supported(func: Callable) -> Callable:
+def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
     ROCm AITER package is supported on gfx9 archs.
     """
 
-    @funcutils.wraps(func)
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         # checks the platform, device arch and aiter library existance.
         from importlib.util import find_spec
@@ -409,81 +409,81 @@ class rocm_aiter_ops:
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_enabled(cls) -> bool:
         """Verifies device specs and availability of aiter main env variable."""
         return cls._AITER_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_linear_fp8_enaled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_rmsnorm_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_fusion_moe_shared_experts_enabled(cls) -> bool:
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._MLA_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_pa_attn_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._PG_ATTN_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_triton_unified_attn_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
 
     @classmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def is_triton_rotary_embed_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
 
     @staticmethod
-    @is_aiter_supported
+    @if_aiter_supported
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
