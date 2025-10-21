@@ -26,8 +26,6 @@ def _make_empty_scheduler_output():
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
         kv_connector_metadata=SharedStorageConnectorMetadata(),
     )
 
