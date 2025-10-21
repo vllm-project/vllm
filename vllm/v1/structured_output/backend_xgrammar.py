@@ -198,8 +198,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.matcher.reset()
 
 
-# cf https://github.com/mlc-ai/xgrammar/blob/main/cpp/json_schema_converter.cc
-string_supported_formats = {
+# cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
+STRING_SUPPORTED_FORMATS = {
     "email",
     "date",
     "time",
