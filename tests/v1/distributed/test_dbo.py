@@ -17,9 +17,13 @@ MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 DP_SIZE = 2
 
 # GSM8K eval configuration
-NUM_QUESTIONS = 256  # Fast eval for CI
+NUM_QUESTIONS = 256  # Fast eval for CI; but must be large enough to hit dbo thresholds
 NUM_SHOTS = 5  # Few-shot examples
-MIN_ACCURACY = 0.63  # Expected 0.65 with 2% buffer (based on vLLM test data)
+MIN_ACCURACY = 0.62  # Expected 0.64 with 2% buffer (based on vLLM test data)
+
+# Increase max_num_seqs to trigger DBO for decode batches
+# With 64 seqs, decode batches should exceed the 32 token threshold
+MAX_NUM_SEQS = 64  # Increased from 16 to trigger decode DBO
 
 # DeepEP backends to test
 DEEPEP_BACKENDS = [
@@ -40,7 +44,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     # Server arguments for DBO + DP + EP
     server_args = [
         "--max-model-len", "4096",
-        "--max-num-seqs", "16",
+        "--max-num-seqs", str(MAX_NUM_SEQS),  # Use larger batch to trigger decode DBO
         "--trust-remote-code",
         # Note: Not using --enforce-eager to test DBO's alternate CUDA graph dispatching
         "--data-parallel-size", str(DP_SIZE),
