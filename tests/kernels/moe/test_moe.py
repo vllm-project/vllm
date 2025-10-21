@@ -18,8 +18,6 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import get_marlin_moe_workspace_size
-from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_make_workspace_new
 from tests.kernels.moe.utils import fused_moe
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -33,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
+    get_marlin_moe_workspace_size,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
@@ -42,6 +41,7 @@ from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_make_workspace_new,
     marlin_permute_bias,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -1135,7 +1135,7 @@ def test_batched_fused_marlin_moe(
 
     max_blocks_per_sm = get_marlin_moe_workspace_size(quant_dtype)
     workspace = marlin_make_workspace_new(a.device, max_blocks_per_sm)
-    
+
     # Reference
     fused_marlin_moe_kwargs = kwargs | {
         "hidden_states": a,

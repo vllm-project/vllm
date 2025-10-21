@@ -30,7 +30,7 @@ from vllm.scalar_type import ScalarType, scalar_types
 
 
 def get_marlin_moe_workspace_size(quant_type: ScalarType) -> int:
-    """Get the workspace size (max_blocks_per_sm) for Marlin MoE based on quantization type."""
+    """Get the workspace size (max_blocks_per_sm) for Marlin MoE based on quant type."""
     bit4_scalar_types = [
         scalar_types.uint4,
         scalar_types.uint4b8,
