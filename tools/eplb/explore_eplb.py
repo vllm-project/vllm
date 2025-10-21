@@ -172,11 +172,11 @@ def get_eplb_stats(llm):
         }
 
     except Exception as e:
-        logger.error(f"Error extracting stats: {e}", exc_info=True)
+        logger.exception("Error extracting stats: %s", e)
         return None
 
 
-def print_stats(stats, label="Stats"):
+def print_stats(stats, label="Stats", top_k_experts=10):
     """Print statistics in a readable format."""
     if not stats:
         print(f"\n{label}: No stats available")
@@ -195,56 +195,65 @@ def print_stats(stats, label="Stats"):
     )
     print(f"Layers: {stats['num_layers']}")
 
-    print(
-        f"\n{'Layer':<8} {'Total Tokens':<15} {'Mean Load':<12} {'Max Load':<12} "
-        f"{'Balancedness':<12}"
-    )
+    # Show top loaded experts per layer
+    print(f"\nTop {top_k_experts} Most Loaded Logical Experts (by layer):")
     print("-" * 80)
 
     for layer_stat in stats["per_layer_stats"]:
-        print(
-            f"{layer_stat['layer']:<8} "
-            f"{layer_stat['total_tokens']:<15.0f} "
-            f"{layer_stat['mean_load']:<12.1f} "
-            f"{layer_stat['max_load']:<12.0f} "
-            f"{layer_stat['balancedness']:<12.3f}"
-        )
+        layer_idx = layer_stat["layer"]
+        logical_load = layer_stat["logical_load"]
+        total_load = sum(logical_load)
 
-    # Show expert mappings for first layer
-    print("\nFirst Layer Expert Mappings (Physical → Logical):")
-    phys_to_log = stats["physical_to_logical_map"][0]
-    replica_counts = stats["logical_replica_count"][0]
+        if total_load == 0:
+            print(f"\nLayer {layer_idx}: No load recorded")
+            continue
 
-    # Group by logical expert
-    logical_to_physical = {}
-    for phys_id, log_id in enumerate(phys_to_log):
-        if log_id not in logical_to_physical:
-            logical_to_physical[log_id] = []
-        logical_to_physical[log_id].append(phys_id)
+        # Get top K experts by load
+        expert_loads = [
+            (expert_id, load) for expert_id, load in enumerate(logical_load) if load > 0
+        ]
+        expert_loads.sort(key=lambda x: x[1], reverse=True)
 
-    print(f"{'Logical Expert':<18} {'Replicas':<10} {'Physical Expert IDs'}")
-    print("-" * 60)
-    for log_id in sorted(logical_to_physical.keys())[:10]:  # Show first 10
-        phys_ids = logical_to_physical[log_id]
-        print(f"Expert {log_id:<12} {len(phys_ids):<10} {phys_ids}")
+        print(f"\nLayer {layer_idx} (Total tokens: {total_load:.0f}):")
+        print(f"  {'Expert ID':<12} {'Load':<12} {'Percentage':<12} {'Replicas'}")
+        print("  " + "-" * 55)
 
-    if len(logical_to_physical) > 10:
-        print(f"... ({len(logical_to_physical) - 10} more)")
+        replica_counts = stats["logical_replica_count"][layer_idx]
+        for expert_id, load in expert_loads[:top_k_experts]:
+            percentage = (load / total_load) * 100
+            num_replicas = replica_counts[expert_id]
+            print(
+                f"  {expert_id:<12} {load:<12.0f} {percentage:<11.2f}% {num_replicas}"
+            )
+
+        if len(expert_loads) > top_k_experts:
+            remaining_load = sum(load for _, load in expert_loads[top_k_experts:])
+            remaining_pct = (remaining_load / total_load) * 100
+            print(
+                "  ... (%d more experts, %.1f%% of load)",
+                len(expert_loads) - top_k_experts,
+                remaining_pct,
+            )
 
 
-def compare_stats(before, after, tp_size):
-    """Compare before and after stats, showing expert movements between GPUs."""
+def analyze_and_save_rearrangement(
+    before, after, tp_size, rearrangement_num, output_dir
+):
+    """Analyze expert movements and save per-layer details to files."""
     if not before or not after:
-        print("\nCannot compare: missing stats")
-        return
+        logger.warning("Cannot analyze: missing stats")
+        return None
 
-    print(f"\n{'=' * 80}")
-    print(
-        f"Expert Movements: Step {before['current_step']} → Step {after['current_step']}"
+    rearrange_dir = (
+        Path(output_dir) / "rearrangements" / f"rearrangement_{rearrangement_num}"
     )
-    print(f"{'=' * 80}")
+    rearrange_dir.mkdir(parents=True, exist_ok=True)
 
-    # Show movements for each layer
+    all_layer_data = []
+    total_experts_moved = 0
+    total_gpu_movements = {}  # (from_gpu, to_gpu) -> count across all layers
+
+    # Analyze movements for each layer
     for layer_idx in range(len(before["physical_to_logical_map"])):
         before_map = before["physical_to_logical_map"][layer_idx]
         after_map = after["physical_to_logical_map"][layer_idx]
@@ -253,7 +262,6 @@ def compare_stats(before, after, tp_size):
         experts_per_gpu = num_physical // tp_size
 
         # Track which logical expert is on which GPU before and after
-        # logical_expert_id -> (before_gpu, after_gpu)
         logical_gpu_map = {}
 
         for phys_idx in range(num_physical):
@@ -272,7 +280,6 @@ def compare_stats(before, after, tp_size):
             logical_gpu_map[after_logical]["after"].add(gpu_id)
 
         # Count movements between GPUs
-        # A logical expert "moved" if it exists on different GPUs before vs after
         movements_summary = {}  # (from_gpu, to_gpu) -> count
         moved_experts = []
 
@@ -284,60 +291,113 @@ def compare_stats(before, after, tp_size):
             new_gpus = after_gpus - before_gpus  # GPUs where expert appeared
             removed_gpus = before_gpus - after_gpus  # GPUs where expert disappeared
 
-            if new_gpus or removed_gpus:
+            # Count as movement if expert was added to any new GPU(s)
+            # This means weights had to be transferred to those GPU(s)
+            if new_gpus:
                 moved_experts.append(
                     {
                         "logical_id": logical_id,
-                        "before_gpus": sorted(before_gpus),
-                        "after_gpus": sorted(after_gpus),
-                        "added_to": sorted(new_gpus),
-                        "removed_from": sorted(removed_gpus),
+                        "before_gpus": sorted(list(before_gpus)),
+                        "after_gpus": sorted(list(after_gpus)),
+                        "added_to": sorted(list(new_gpus)),
+                        "removed_from": sorted(list(removed_gpus)),
                     }
                 )
 
                 # Track GPU-to-GPU movements
-                for from_gpu in removed_gpus:
-                    for to_gpu in new_gpus:
-                        key = (from_gpu, to_gpu)
-                        movements_summary[key] = movements_summary.get(key, 0) + 1
+                # For each new GPU, we need to identify where the weights came from
+                if removed_gpus:
+                    # Expert was moved from some GPU(s) to new GPU(s)
+                    for from_gpu in removed_gpus:
+                        for to_gpu in new_gpus:
+                            key = (from_gpu, to_gpu)
+                            movements_summary[key] = movements_summary.get(key, 0) + 1
+                            total_gpu_movements[key] = (
+                                total_gpu_movements.get(key, 0) + 1
+                            )
+                else:
+                    # Expert was replicated (added to new GPU but still on original GPU)
+                    # Source could be any of the before_gpus
+                    for source_gpu in before_gpus:
+                        for to_gpu in new_gpus:
+                            key = (source_gpu, to_gpu)
+                            movements_summary[key] = movements_summary.get(key, 0) + 1
+                            total_gpu_movements[key] = (
+                                total_gpu_movements.get(key, 0) + 1
+                            )
 
-        if moved_experts:
+        total_experts_moved += len(moved_experts)
+
+        # Save layer data
+        layer_data = {
+            "layer_idx": layer_idx,
+            "num_experts_moved": len(moved_experts),
+            "gpu_to_gpu_movements": {
+                f"{k[0]}_to_{k[1]}": v for k, v in movements_summary.items()
+            },
+            "moved_experts": moved_experts,
+        }
+        all_layer_data.append(layer_data)
+
+        # Save individual layer file
+        layer_file = rearrange_dir / f"layer_{layer_idx}.json"
+        with open(layer_file, "w") as f:
+            json.dump(layer_data, f, indent=2)
+
+    # Save summary file
+    summary = {
+        "rearrangement_num": rearrangement_num,
+        "step_before": before["current_step"],
+        "step_after": after["current_step"],
+        "total_experts_moved": total_experts_moved,
+        "total_gpu_movements": {
+            f"{k[0]}_to_{k[1]}": v for k, v in total_gpu_movements.items()
+        },
+        "per_layer_summary": [
+            {"layer": ld["layer_idx"], "experts_moved": ld["num_experts_moved"]}
+            for ld in all_layer_data
+        ],
+    }
+
+    summary_file = rearrange_dir / "summary.json"
+    with open(summary_file, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    logger.info(
+        "Saved rearrangement #%d details to %s", rearrangement_num, rearrange_dir
+    )
+
+    return summary
+
+
+def print_rearrangement_summary(summary):
+    """Print a summary of the rearrangement."""
+    if not summary:
+        return
+
+    print(f"\n{'=' * 80}")
+    print(
+        f"Rearrangement #{summary['rearrangement_num']}: "
+        f"Step {summary['step_before']} → Step {summary['step_after']}"
+    )
+    print(f"{'=' * 80}")
+
+    print(f"\nTotal logical experts moved: {summary['total_experts_moved']}")
+
+    if summary["total_gpu_movements"]:
+        print("\nCross-GPU movements (aggregated across all layers):")
+        for movement_key, count in sorted(summary["total_gpu_movements"].items()):
+            from_gpu, to_gpu = movement_key.split("_to_")
+            print(f"  GPU {from_gpu} → GPU {to_gpu}: {count} expert(s)")
+
+    print("\nPer-layer summary:")
+    for layer_summary in summary["per_layer_summary"]:
+        if layer_summary["experts_moved"] > 0:
             print(
-                f"\nLayer {layer_idx}: {len(moved_experts)} logical expert(s) changed GPU placement"
+                "  Layer %d: %d expert(s) moved",
+                layer_summary["layer"],
+                layer_summary["experts_moved"],
             )
-
-            # Show GPU-to-GPU movement summary
-            if movements_summary:
-                print("\n  Cross-GPU movements:")
-                for (from_gpu, to_gpu), count in sorted(movements_summary.items()):
-                    print(f"    GPU {from_gpu} → GPU {to_gpu}: {count} expert(s)")
-
-            # Show detailed movements (first 10)
-            print("\n  Detailed expert movements:")
-            print(
-                f"  {'Logical ID':<12} {'Before GPUs':<20} {'After GPUs':<20} {'Change'}"
-            )
-            print("  " + "-" * 75)
-
-            for move in moved_experts[:10]:
-                before_str = str(move["before_gpus"])
-                after_str = str(move["after_gpus"])
-
-                change_parts = []
-                if move["added_to"]:
-                    change_parts.append(f"+{move['added_to']}")
-                if move["removed_from"]:
-                    change_parts.append(f"-{move['removed_from']}")
-                change_str = " ".join(change_parts)
-
-                print(
-                    f"  {move['logical_id']:<12} {before_str:<20} {after_str:<20} {change_str}"
-                )
-
-            if len(moved_experts) > 10:
-                print(f"  ... ({len(moved_experts) - 10} more)")
-        else:
-            print(f"\nLayer {layer_idx}: No expert movements")
 
 
 def main(args):
@@ -349,17 +409,17 @@ def main(args):
     logger.info("=" * 80)
     logger.info("EPLB Exploration Script")
     logger.info("=" * 80)
-    logger.info(f"Model: {args.model}")
-    logger.info(f"Number of prompts: {args.num_prompts}")
-    logger.info(f"TP Size: {args.tp}")
-    logger.info(f"EPLB Window Size: {args.eplb_window_size}")
-    logger.info(f"EPLB Step Interval: {args.eplb_step_interval}")
-    logger.info(f"Redundant Experts: {args.num_redundant_experts}")
-    logger.info(f"Seed: {args.seed}")
+    logger.info("Model: %s", args.model)
+    logger.info("Number of prompts: %d", args.num_prompts)
+    logger.info("TP Size: %d", args.tp)
+    logger.info("EPLB Window Size: %d", args.eplb_window_size)
+    logger.info("EPLB Step Interval: %d", args.eplb_step_interval)
+    logger.info("Redundant Experts: %d", args.num_redundant_experts)
+    logger.info("Seed: %s", args.seed)
     logger.info("=" * 80)
 
     # Load prompts
-    logger.info(f"\nLoading {args.num_prompts} prompts from sonnet dataset...")
+    logger.info("\nLoading %d prompts from sonnet dataset...", args.num_prompts)
     prompts = load_prompts(
         model_name=args.model,
         num_prompts=args.num_prompts,
@@ -368,8 +428,8 @@ def main(args):
         prefix_len=args.prefix_len,
         seed=args.seed,
     )
-    logger.info(f"Loaded {len(prompts)} prompts")
-    logger.info(f"Example prompt: {prompts[0][:100]}...")
+    logger.info("Loaded %d prompts", len(prompts))
+    logger.info("Example prompt: %s...", prompts[0][:100])
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     eplb_config = EPLBConfig(
         window_size=args.eplb_window_size,
@@ -406,11 +466,23 @@ def main(args):
         logger.error("EPLB is not enabled or stats unavailable!")
         return
 
-    print_stats(initial_stats, "Initial State")
+    print_stats(initial_stats, "Initial State", top_k_experts=args.top_k_experts)
+
+    # Create output directories
+    output_dir = Path(args.output_dir)
+    snapshots_dir = output_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     # Track all snapshots
     snapshots = [initial_stats]
     previous_step = initial_stats["current_step"]
+    rearrangement_summaries = []
+
+    # Save initial snapshot
+    initial_snapshot_file = snapshots_dir / "snapshot_0_initial.json"
+    with open(initial_snapshot_file, "w") as f:
+        json.dump(initial_stats, f, indent=2)
+    logger.info("Saved initial snapshot to %s", initial_snapshot_file)
 
     logger.info("\nProcessing prompts and tracking rearrangements...")
 
@@ -424,62 +496,82 @@ def main(args):
         batch_prompts = prompts[start_idx:end_idx]
 
         # Generate
-        outputs = llm.generate(batch_prompts, sampling_params)
+        llm.generate(batch_prompts, sampling_params)
 
         # Check current step
         current_stats = get_eplb_stats(llm)
         if current_stats:
             current_step = current_stats["current_step"]
             logger.info(
-                f"Batch {batch_idx + 1}/{num_batches}: Step {current_step}/{current_stats['step_interval']}"
+                "Batch %d/%d: Step %d/%d",
+                batch_idx + 1,
+                num_batches,
+                current_step,
+                current_stats["step_interval"],
             )
 
             # Check if rearrangement just happened
             # Step counter wraps to 0 after reaching step_interval
             if current_step == 0 and previous_step > 0:
-                logger.info(f"\n🔄 Rearrangement #{len(snapshots)} detected!")
+                rearrangement_num = len(snapshots)
+                logger.info("Rearrangement #%d detected!", rearrangement_num)
                 snapshots.append(current_stats)
-                print_stats(current_stats, f"After Rearrangement #{len(snapshots) - 1}")
 
-                # Compare with previous snapshot
-                if len(snapshots) >= 2:
-                    compare_stats(snapshots[-2], snapshots[-1], args.tp)
+                # Save snapshot
+                snapshot_file = (
+                    snapshots_dir / f"snapshot_{rearrangement_num}_after_rearrange.json"
+                )
+                with open(snapshot_file, "w") as f:
+                    json.dump(current_stats, f, indent=2)
+                logger.info("Saved snapshot to %s", snapshot_file)
+
+                # Analyze and save rearrangement details
+                summary = analyze_and_save_rearrangement(
+                    snapshots[-2], snapshots[-1], args.tp, rearrangement_num, output_dir
+                )
+                if summary:
+                    rearrangement_summaries.append(summary)
+                    print_rearrangement_summary(summary)
 
             previous_step = current_step
 
-    logger.info(f"\nGenerated {len(prompts)} outputs")
+    logger.info("\nGenerated %d outputs", len(prompts))
 
-    # Summary
+    # Final summary
     num_rearrangements = len(snapshots) - 1
     if num_rearrangements > 0:
         print(f"\n{'=' * 80}")
-        print(f"SUMMARY: {num_rearrangements} rearrangement(s) occurred")
+        print(f"FINAL SUMMARY: {num_rearrangements} rearrangement(s) occurred")
         print(f"{'=' * 80}")
-        for i in range(num_rearrangements):
+        for i, summary in enumerate(rearrangement_summaries, 1):
             print(
-                f"Rearrangement #{i + 1}: Step {snapshots[i]['current_step']} → Step {snapshots[i + 1]['current_step']}"
+                f"Rearrangement #{i}: {summary['total_experts_moved']} experts moved "
+                f"(Step {summary['step_before']} → {summary['step_after']})"
             )
     else:
         logger.info("\nNo rearrangements occurred during this run.")
         logger.info(
-            f"Current step: {snapshots[-1]['current_step']}/{snapshots[-1]['step_interval']}"
+            "Current step: %d/%d",
+            snapshots[-1]["current_step"],
+            snapshots[-1]["step_interval"],
         )
         logger.info("Try running with more prompts or lower step_interval")
 
-    # Save results
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Save overall summary
+    overall_summary_file = output_dir / "overall_summary.json"
+    overall_summary = {
+        "num_rearrangements": num_rearrangements,
+        "rearrangement_summaries": rearrangement_summaries,
+    }
+    with open(overall_summary_file, "w") as f:
+        json.dump(overall_summary, f, indent=2)
 
-        results = {
-            "snapshots": snapshots,
-            "num_rearrangements": num_rearrangements,
-        }
-
-        with open(output_path, "w") as f:
-            json.dump(results, f, indent=2)
-
-        logger.info(f"\nResults saved to {output_path}")
+    logger.info("\n%s", "=" * 80)
+    logger.info("All results saved to %s", output_dir)
+    logger.info("  - Snapshots: %s", snapshots_dir)
+    logger.info("  - Rearrangements: %s", output_dir / "rearrangements")
+    logger.info("  - Overall summary: %s", overall_summary_file)
+    logger.info("%s", "=" * 80)
 
 
 if __name__ == "__main__":
@@ -523,7 +615,10 @@ if __name__ == "__main__":
         "--max-len", type=int, default=2048, help="Max model sequence length"
     )
     parser.add_argument(
-        "--output", type=str, default="eplb_results.json", help="Output JSON file path"
+        "--output-dir",
+        type=str,
+        default="eplb_results",
+        help="Output directory for all results",
     )
     parser.add_argument(
         "--eplb-window-size",
@@ -545,6 +640,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--batch-size", type=int, default=10, help="Batch size for processing prompts"
+    )
+    parser.add_argument(
+        "--top-k-experts",
+        type=int,
+        default=10,
+        help="Number of top loaded experts to display per layer",
     )
 
     args = parser.parse_args()
