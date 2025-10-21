@@ -12,6 +12,7 @@ from einops import rearrange, repeat
 from transformers import BatchFeature, CLIPVisionConfig
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -27,7 +28,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 # from process.image_process import (
 #     DeepseekOCRProcessor, count_tiles)
-from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor as DeepseekOCRProcessor
+from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor, count_tiles
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -131,6 +132,7 @@ class DeepseekOCRDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -140,7 +142,7 @@ class DeepseekOCRDummyInputsBuilder(
             "image": self._get_dummy_images(
                 width = max_image_size.width,
                 height = max_image_size.height,
-                count=num_images,
+                num_images=num_images,
             )
         }
 
@@ -153,10 +155,9 @@ class DeepseekOCRMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        
-        
-        # print(mm_data)
+
         if mm_data:
             processed_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**mm_kwargs),
@@ -180,7 +181,6 @@ class DeepseekOCRMultiModalProcessor(
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             images_spatial_crop=MultiModalFieldConfig.batched("image"),
-            # image_embeds=MultiModalFieldConfig.batched("image2"),
             images_crop=MultiModalFieldConfig.batched("image"),
         )
 
@@ -205,14 +205,11 @@ class DeepseekOCRMultiModalProcessor(
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
 
-                
-                width = images[0][-1][0][0]
-                height = images[0][-1][0][1]
+                size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=width,
-                    image_height=height,
-                    # flag = True,
+                    image_width=size.width,
+                    image_height=size.height,
                     cropping=CROP_MODE,
                 )
             return [image_token_id] * num_image_tokens
@@ -225,30 +222,34 @@ class DeepseekOCRMultiModalProcessor(
             )
         ]
 
-    def _cached_apply_hf_processor(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], MultiModalKwargs, bool]:
-        # The processor logic is different for len(images) <= 2 vs > 2
-        # Since the processing cache assumes that the processor output is
-        # invariant of how many images are passed per prompt, we only
-        # perform caching for the most common case
-        if mm_data_items.get_count("image", strict=False) > 2:
-            # This code path corresponds to the cache being disabled
-            return self._apply_hf_processor_main(
-                prompt=prompt,
-                mm_items=mm_data_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                enable_hf_prompt_update=True,
-            )
+    # TODO(Isotr0py): Check if we still need this workaround for
+    # deepseek-ocr processor.
+    # def _cached_apply_hf_processor(
+    #     self,
+    #     prompt: str | list[int],
+    #     mm_data_items: MultiModalDataItems,
+    #     hf_processor_mm_kwargs: Mapping[str, object],
+    #     tokenization_kwargs: Mapping[str, object],
+    #     mm_uuids: MultiModalUUIDDict | None = None,
+    # ) -> tuple[list[int], MultiModalKwargs, bool]:
+    #     # The processor logic is different for len(images) <= 2 vs > 2
+    #     # Since the processing cache assumes that the processor output is
+    #     # invariant of how many images are passed per prompt, we only
+    #     # perform caching for the most common case
+    #     if mm_data_items.get_count("image", strict=False) > 2:
+    #         # This code path corresponds to the cache being disabled
+    #         return self._apply_hf_processor_main(
+    #             prompt=prompt,
+    #             mm_items=mm_data_items,
+    #             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    #             enable_hf_prompt_update=True,
+    #         )
 
-        return super()._cached_apply_hf_processor(
-            prompt=prompt,
-            mm_data_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-        )
+    #     return super()._cached_apply_hf_processor(
+    #         prompt=prompt,
+    #         mm_data_items=mm_data_items,
+    #         hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    #     )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
