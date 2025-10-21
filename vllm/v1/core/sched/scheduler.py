@@ -283,6 +283,14 @@ class Scheduler(SchedulerInterface):
 
                 self.kv_cache_manager.free(preempted_req)
                 self.encoder_cache_manager.free(preempted_req)
+
+                # The hidden_states_cache is used in requests that
+                # use all pooling + chunked prefill.
+                # If the request is preempted, the hidden_states_cache
+                # needs to be cleared and recalculated.
+                if preempted_req.pooling_params is not None:
+                    preempted_req.pooling_params.hidden_states_cache.clear()
+
                 preempted_req.status = RequestStatus.PREEMPTED
                 preempted_req.num_computed_tokens = 0
                 preempted_req.num_preemptions += 1
