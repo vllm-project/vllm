@@ -18,7 +18,7 @@ class PolicyFactory:
         """
 
         policy: dict[EPLBPolicyType, type[EplbPolicy]] = {
-            "default_eplb": DefaultEplb,
+            "default": DefaultEplb,
         }
         selected_policy = policy.get(policy_type, DefaultEplb)
         return selected_policy()
