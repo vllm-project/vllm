@@ -168,6 +168,19 @@ def _cached_get_attn_backend(
             )
             vllm_config.cache_config.block_size = new_block_size
 
+    # Adjust kv cache layout if the selected backend requires a specific one
+    device_capability = current_platform.get_device_capability()
+    required_layout = backend.get_required_kv_cache_layout(device_capability)
+    if required_layout is not None:
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+        set_kv_cache_layout(required_layout)
+        logger.info(
+            "Using %s KV cache layout for %s backend.",
+            required_layout,
+            backend.get_name(),
+        )
+
     return backend
 
 

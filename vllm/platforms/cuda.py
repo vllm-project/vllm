@@ -344,27 +344,12 @@ class CudaPlatformBase(Platform):
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
         selected_backend_class_str = backend_to_class_str(selected_backend)
-        selected_backend_class = resolve_obj_by_qualname(selected_backend_class_str)
         engine_version = "V1" if use_v1 else "V0"
         logger.info(
             "Using %s backend on %s engine.",
             selected_backend.name,
             engine_version,
         )
-
-        # Set required kv cache layout if any
-        required_layout = selected_backend_class.get_required_kv_cache_layout(
-            device_capability
-        )
-        if required_layout is not None:
-            from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-            set_kv_cache_layout(required_layout)
-            logger.info(
-                "Using %s KV cache layout for %s backend.",
-                required_layout,
-                selected_backend.name,
-            )
 
         return selected_backend_class_str
 
