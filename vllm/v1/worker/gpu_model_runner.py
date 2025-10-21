@@ -250,7 +250,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.is_multimodal_pruning_enabled = False
         self.max_model_len = model_config.max_model_len
 
-        self.kv_scales_calculated = False
+        # Always set to false after the first forward pass
+        self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -1330,12 +1331,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_cache_group_id
                 ]
 
-            # Determine if we need to calculate KV scales on this forward pass.
-            # Only True on the first pass when calculate_kv_scales is enabled.
-            enable_kv_scales_calculation = (
-                self.cache_config.calculate_kv_scales
-                and not self.kv_scales_calculated)
-
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
@@ -1355,7 +1350,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
                 if self.dcp_world_size > 1
                 else None,
-                enable_kv_scales_calculation=enable_kv_scales_calculation,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -2500,16 +2494,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
-        if attn_metadata is not None:
-            metadata_list = (
-                attn_metadata.values()
-                if isinstance(attn_metadata, dict)
-                else [attn_metadata]
-            )
-            if any(
-                getattr(m, "enable_kv_scales_calculation", False) for m in metadata_list
-            ):
-                cudagraph_runtime_mode = CUDAGraphMode.NONE
+        # KV scales calculation involves dynamic operations that are incompatible
+        # with CUDA graph capture.
+        if self.calculate_kv_scales:
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -2535,9 +2523,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             # Mark KV scales as calculated after the first forward pass
-            if (self.cache_config.calculate_kv_scales
-                    and not self.kv_scales_calculated):
-                self.kv_scales_calculated = True
+            self.calculate_kv_scales = False
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:

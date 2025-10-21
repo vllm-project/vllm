@@ -836,17 +836,13 @@ def maybe_calc_kv_scales(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
+    self = forward_context.no_compile_layers[layer_name]
 
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-
-    if attn_metadata is None or not getattr(
-        attn_metadata, "enable_kv_scales_calculation", False
-    ):
+    # Only calculate if the layer's calculate_kv_scales flag is True
+    # This flag gets set to False after the first forward pass
+    if not self.calculate_kv_scales:
         return
 
-    self = forward_context.no_compile_layers[layer_name]
     self.calc_kv_scales(query, key, value)
 
 

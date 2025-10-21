@@ -94,8 +94,6 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
-    enable_kv_scales_calculation: bool = False
-
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
