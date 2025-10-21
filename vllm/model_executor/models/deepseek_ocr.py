@@ -259,7 +259,12 @@ class DeepseekOCRMultiModalProcessor(
 class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
-        "model.layers.": "language_model.model.layers",
+        # map prefix for language backbone
+        "model.embed_tokens.": "language_model.model.embed_tokens.",
+        "model.layers.": "language_model.model.layers.",
+        "model.norm.": "language_model.model.norm.",
+        "lm_head.": "language_model.lm_head.",
+        # remove "model." prefix for other components
         "model.": "",
     },
     orig_to_new_substr={
@@ -517,30 +522,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return None
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
-    
-
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        
-
-
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
-            # print(len(multimodal_embeddings))
-            # print(input_ids.shape)
-            # print(type(inputs_embeds))
-            # print(inputs_embeds.shape)
-            
-        return inputs_embeds
 
     def forward(self,
                 input_ids: torch.Tensor,
