@@ -311,7 +311,12 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
 
     # get allocated block IDs
     req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
-    invalid_block_ids = {req_block_ids[invalid_block_idx]}
+    invalid_block_id = req_block_ids[invalid_block_idx]
+    invalid_block_ids = {invalid_block_id}
+
+    # verify the block is in the block pool before we report it as invalid
+    block = fail_scheduler.kv_cache_manager.block_pool.blocks[invalid_block_id]
+    assert block is not None
 
     # report invalid blocks - request should fail
     model_runner_output = create_model_runner_output(
@@ -355,3 +360,10 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     except KeyError:
         # expected - request completely removed from tracking
         pass
+
+    # critical: verify invalid block was evicted from prefix cache
+    # the block should no longer have a hash (hash is reset on eviction)
+    assert block.block_hash is None, (
+        f"Invalid block {invalid_block_id} should have been evicted from cache "
+        f"(hash should be None), but hash is still {block.block_hash}"
+    )
