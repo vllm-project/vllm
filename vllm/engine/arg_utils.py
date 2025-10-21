@@ -32,6 +32,7 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import _Backend
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -452,6 +453,9 @@ class EngineArgs:
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+    mm_encoder_attn_backend: _Backend | str | None = (
+        MultiModalConfig.mm_encoder_attn_backend
+    )
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
@@ -919,6 +923,10 @@ class EngineArgs:
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"]
         )
         multimodal_group.add_argument(
+            "--mm-encoder-attn-backend",
+            **multimodal_kwargs["mm_encoder_attn_backend"],
+        )
+        multimodal_group.add_argument(
             "--interleave-mm-strings", **multimodal_kwargs["interleave_mm_strings"]
         )
         multimodal_group.add_argument(
@@ -1165,6 +1173,7 @@ class EngineArgs:
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
+            mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
