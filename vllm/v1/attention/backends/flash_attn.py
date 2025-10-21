@@ -146,9 +146,9 @@ class FlashAttentionBackend(AttentionBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        device_capability: int,
+        device_capability: DeviceCapability,
     ) -> str | None:
-        if has_sink and device_capability < 90:
+        if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         return None
 
