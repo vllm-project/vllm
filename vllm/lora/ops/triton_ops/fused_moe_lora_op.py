@@ -132,7 +132,7 @@ def _fused_moe_lora_kernel(
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
         a = tl.load(
             a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining,
+            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
             other=0.0,
         )
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
@@ -176,6 +176,7 @@ def _fused_moe_lora(
     block_size_n: int,
     block_size_k: int,
     group_size_m: int,
+    split_k: int,
     mul_routed_weight: bool = False,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
@@ -203,6 +204,7 @@ def _fused_moe_lora(
         "BLOCK_SIZE_N": block_size_n,
         "BLOCK_SIZE_K": block_size_k,
         "GROUP_SIZE_M": group_size_m,
+        "SPLIT_K": split_k,
     }
 
     w1_lora_a_stacked = lora_a_stacked[0]
@@ -283,6 +285,8 @@ def _fused_moe_lora(
         -1, a_intermediate_cache1.shape[3]
     )
 
+    # Set split_k = 1 for expand calls
+    config["SPLIT_K"] = 1
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
