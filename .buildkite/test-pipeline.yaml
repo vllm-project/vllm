@@ -1131,6 +1131,20 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
+##### H100 test #####
+- label: Distributed Tests (H100) # optional
+  gpu: h100
+  working_dir: "/vllm-workspace/"
+  num_gpus: 2
+  commands: 
+    - pytest -v -s tests/v1/distributed/test_dbo.py
+  source_file_dependencies:
+    - docker/Dockerfile # To catch DeepEP updates
+    - vllm/model_executor/layers/fused_moe
+    - vllm/distributed/device_communicators
+    - vllm/v1/worker/
+    - vllm/v1/attention/backends/utils.py
+
 ##### H200 test #####
 - label: Distributed Tests (H200) # optional
   gpu: h200
