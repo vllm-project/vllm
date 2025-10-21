@@ -46,6 +46,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    KVCacheLayoutType,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -241,7 +242,9 @@ class FlashInferBackend(AttentionBackend):
         return DeviceCapability(12, 1)
 
     @classmethod
-    def get_required_kv_cache_layout(cls, capability: DeviceCapability) -> str | None:
+    def get_required_kv_cache_layout(
+        cls, capability: DeviceCapability
+    ) -> KVCacheLayoutType | None:
         if capability >= DeviceCapability(10, 0) and capability <= DeviceCapability(
             10, 3
         ):

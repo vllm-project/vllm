@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 if TYPE_CHECKING:
     from vllm.config.cache import BlockSize, CacheDType
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
 class AttentionType:
@@ -232,7 +233,9 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def get_required_kv_cache_layout(cls, capability: "DeviceCapability") -> str | None:
+    def get_required_kv_cache_layout(
+        cls, capability: "DeviceCapability"
+    ) -> "KVCacheLayoutType | None":
         """
         Some backends require a specific kv cache layout.
         This function returns the required layout if any.

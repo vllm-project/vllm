@@ -17,7 +17,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backends.utils import AttentionCGSupport, KVCacheLayoutType
 
 logger = init_logger(__name__)
 
@@ -63,7 +63,9 @@ class FlashInferMLABackend(MLACommonBackend):
         return DeviceCapability(12, 1)
 
     @classmethod
-    def get_required_kv_cache_layout(cls, capability: DeviceCapability) -> str | None:
+    def get_required_kv_cache_layout(
+        cls, capability: DeviceCapability
+    ) -> "KVCacheLayoutType | None":
         return "HND"
 
 
