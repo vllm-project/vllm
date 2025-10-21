@@ -69,9 +69,7 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
-    reorder_batch_threshold: int = 512  # process small prefills with decode pathway
 
     def __init__(
         self,
@@ -112,6 +110,11 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 
         if vllm_is_batch_invariant():
             self.max_num_splits = 1
+
+        # process small prefills with decode pathway
+        self._init_reorder_batch_threshold(512)
+
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def _schedule_decode(
         self, num_reqs, cu_query_lens, max_query_len, seqlens, max_seq_len, causal

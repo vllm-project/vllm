@@ -3,7 +3,6 @@
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import torch
 
@@ -64,8 +63,6 @@ class RocmAttentionMetadata:
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -83,6 +80,8 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+
+        self.cudagraph_support = AttentionCGSupport.ALWAYS
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata

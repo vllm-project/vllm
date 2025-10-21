@@ -259,8 +259,6 @@ class AiterFlashAttentionMetadata:
 class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
-    cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -284,6 +282,8 @@ class AiterFlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
         self.total_tokens: int = 0
+
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata

@@ -348,7 +348,7 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int
 
     def __init__(
         self,

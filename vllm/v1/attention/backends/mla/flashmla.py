@@ -69,10 +69,7 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
-    reorder_batch_threshold: int = 512  # process small prefills with decode pathway
-    # ^ TODO(matt): tune this
 
     def __init__(
         self,
@@ -94,6 +91,11 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
         device_properties = torch.cuda.get_device_properties(self.device)
         num_sms = device_properties.multi_processor_count
+
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+        # process small prefills with decode pathway
+        # TODO(matt): tune this
+        self._init_reorder_batch_threshold(512)
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.cg_buf_tile_scheduler_metadata = torch.zeros(

@@ -270,13 +270,7 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    # When using TRTLLM attention with cudagraphs, we can use UNIFORM_BATCH
-    # mode. This will be overridden in the initializer if supported.
-    cudagraph_support: AttentionCGSupport = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int
 
     def __init__(
         self,
@@ -360,6 +354,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.must_use_trtllm_decode = can_use_trtllm and self.has_spec_decode
         if self.must_use_trtllm_decode:
             self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+        else:
+            self.cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 

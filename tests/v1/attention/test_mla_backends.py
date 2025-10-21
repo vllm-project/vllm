@@ -459,17 +459,15 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         is_decode = []
         for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
             builder_cls, _ = try_get_attention_backend(backend)
+            dummy_builder = builder_cls(kv_cache_spec, [], vllm_config, device)
+            query_len_support = getattr(
+                dummy_builder, "query_len_support", QueryLenSupport.SINGLE_ONLY
+            )
             if is_spec_decode_test:
-                query_len_support = getattr(
-                    builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
-                )
                 supports_spec = query_len_support != QueryLenSupport.SINGLE_ONLY
                 is_decode.append(supports_spec)
             else:
-                threshold = getattr(builder_cls, "reorder_batch_threshold", None)
-                query_len_support = getattr(
-                    builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
-                )
+                threshold = getattr(dummy_builder, "reorder_batch_threshold", None)
                 within_threshold = q_len <= threshold if threshold else False
                 if (
                     within_threshold

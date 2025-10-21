@@ -207,7 +207,7 @@ class XFormersAttentionMetadata:
 class XFormersAttentionMetadataBuilder(
     AttentionMetadataBuilder[XFormersAttentionMetadata]
 ):
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int
 
     def __init__(
         self,
@@ -217,6 +217,7 @@ class XFormersAttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1)
 
         assert XFORMERS_AVAILABLE
         self.block_size = kv_cache_spec.block_size

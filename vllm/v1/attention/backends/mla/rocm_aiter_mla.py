@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import torch
 
@@ -62,12 +61,6 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
-    # TODO(luka, lucas): audit this as part of:
-    #  https://github.com/vllm-project/vllm/issues/22945
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -88,6 +81,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+
+        # TODO(luka, lucas): audit this as part of:
+        #  https://github.com/vllm-project/vllm/issues/22945
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         # Preparing persistent buffers
         # TODO: we can disambiguate between decode and mixed-prefill decode here

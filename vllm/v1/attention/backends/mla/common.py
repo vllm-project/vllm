@@ -195,6 +195,7 @@ from typing import ClassVar, Generic, TypeVar
 
 import torch
 from tqdm import tqdm
+from typing_extensions import override
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -495,7 +496,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # query length <= threshold are classified as decode requests.
     # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -620,17 +621,22 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=device,
             )
 
-        supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
-        self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode
-        )
+        # This can be overwritten by subclasses where applicable
+        self._init_reorder_batch_threshold(1)
 
-        # Validate consistency between query_len_support and reorder_batch_threshold
-        if self.query_len_support == QueryLenSupport.SINGLE_ONLY:
-            assert self.reorder_batch_threshold == 1, (
-                f"reorder_batch_threshold must be 1 when query_len_support is "
-                f"SINGLE_ONLY, got {self.reorder_batch_threshold}"
+    @override
+    def _init_reorder_batch_threshold(
+        self,
+        reorder_batch_threshold: int = 1,
+        supports_spec_as_decode: bool | None = None,
+    ) -> None:
+        if supports_spec_as_decode is None:
+            supports_spec_as_decode = (
+                self.query_len_support != QueryLenSupport.SINGLE_ONLY
             )
+        super()._init_reorder_batch_threshold(
+            reorder_batch_threshold, supports_spec_as_decode
+        )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc

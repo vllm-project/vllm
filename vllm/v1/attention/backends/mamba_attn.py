@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import abc
-from typing import ClassVar, TypeVar
+from typing import TypeVar
 
 import torch
 
@@ -18,10 +18,7 @@ M = TypeVar("M")
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
-    reorder_batch_threshold: int = 1
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
+    reorder_batch_threshold: int
 
     def __init__(
         self,
@@ -43,6 +40,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             dtype=torch.int32,
             device=device,
         )
+        self._init_reorder_batch_threshold(1)
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
