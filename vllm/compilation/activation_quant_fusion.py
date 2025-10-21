@@ -82,7 +82,7 @@ if check_aiter_fp8_linear_support():
     import aiter as rocm_aiter
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
-    from vllm.utils import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
     rocm_aiter_fp8_quant_group_size = 128
