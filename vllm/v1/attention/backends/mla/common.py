@@ -554,6 +554,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        self.dcp_kv_cache_interleave_size = parallel_config.dcp_kv_cache_interleave_size
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -783,9 +784,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
             # Note(hc): The context lengths in the perspective of dcp rank0.
-            cp_context_lens_cpu = torch.ceil(
-                context_lens_cpu.float() / self.dcp_world_size
-            ).int()
+            cp_context_lens_cpu = (
+                torch.ceil(
+                    context_lens_cpu.float()
+                    / (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
+                ).int()
+                * self.dcp_kv_cache_interleave_size
+            )
             origin_context_lens = context_lens_cpu.tolist()
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
@@ -972,6 +977,7 @@ def reorg_kvcache(
     chunk_size: int,
     chunk_idx: int,
     toks: int,
+    interleave_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     reorg kvcache after cp local gather to tp layout for attn kernel.
@@ -986,6 +992,7 @@ def reorg_kvcache(
             chunked_context_metadata building.
         chunk_idx: chunk idx of chunked_prefill.
         toks: the number of tokens for local gather cache.
+        interleave_size: Interleave size of kv_cache storage.
     """
     kv_c_segments = []
     k_pe_segments = []
@@ -999,11 +1006,23 @@ def reorg_kvcache(
             chunk_context_len = min(
                 chunk_context_len, origin_context_len - chunk_size * chunk_idx
             )
-        cp_target_rank = (chunk_context_len - 1) % cp_world_size
+
+        interleave_remainder = chunk_context_len % (interleave_size * cp_world_size)
+        if interleave_remainder > 0:
+            cp_target_rank = interleave_remainder // interleave_size
+            cp_target_rank_remainder = interleave_remainder % interleave_size
+        else:
+            cp_target_rank = cp_world_size
+            cp_target_rank_remainder = interleave_size
+
         cur_seq_len = 0
         for rank in range(cp_world_size):
             if rank > cp_target_rank and cp_chunk_seq_len:
-                real_cp_chunk_seq_len = cp_chunk_seq_len - 1
+                real_cp_chunk_seq_len = cp_chunk_seq_len - interleave_size
+            elif rank == cp_target_rank and cp_chunk_seq_len:
+                real_cp_chunk_seq_len = (
+                    cp_chunk_seq_len - interleave_size + cp_target_rank_remainder
+                )
             else:
                 real_cp_chunk_seq_len = cp_chunk_seq_len
             if real_cp_chunk_seq_len:
@@ -1253,6 +1272,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
                 get_current_vllm_config()
             )
+        )
+        self.dcp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(
@@ -1632,6 +1654,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 chunk_size=prefill_metadata.chunked_context.chunk_size,
                 chunk_idx=i,
                 toks=toks,
+                interleave_size=self.dcp_kv_cache_interleave_size,
             )
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
