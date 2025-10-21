@@ -426,7 +426,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
 
                     local_features = torch.cat((local_features_2[:, 1:], local_features_1.flatten(2).permute(0, 2, 1)), dim=-1)
-                    print(local_features.shape)
                     local_features = self.projector(local_features)
 
 
