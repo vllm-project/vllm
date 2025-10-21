@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 
@@ -10,6 +10,7 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import aiter_ops
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -91,114 +92,65 @@ def apply_penalties(
     return logits
 
 
-def rocm_unquantized_gemm_wrapper():
-    """Creates a wrapper function with the signature (x, weight, bias)"""
-    # Get configuration from environment variables
-    from vllm.platforms.rocm import on_gfx9
-
-    ON_MI300 = on_gfx9()
-    use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM and ON_MI300
-    use_aiter = (
-        envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR and ON_MI300
-    )
-
-    def inner_function(
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ):
-        k = weight.shape[1]
-        _use_skinny = (
-            use_skinny
-            and x.dtype in [torch.float16, torch.bfloat16]
-            and k % 8 == 0
-            and bias is None
-        )
-
-        if _use_skinny is not True:
-            if use_aiter:
-                return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
-            return torch.nn.functional.linear(x, weight, bias)
-
-        x_view = x.view(-1, x.size(-1))
-        n = x_view.shape[0]
-        m = weight.shape[0]
-        cu_count = current_platform.get_cu_count()
-
-        if m > 8 and 0 < n <= 4:
-            out = ops.wvSplitK(weight, x_view, cu_count)
-            return out.view(*x.shape[:-1], weight.shape[0])
-        elif m % 4 == 0 and n == 1 and k <= 8192:
-            out = ops.LLMM1(weight, x_view, 4)
-            return out.view(*x.shape[:-1], weight.shape[0])
-
-        if use_aiter:
-            return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
-        return torch.nn.functional.linear(x, weight, bias)
-
-    return inner_function
-
-
 def default_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ):
     return torch.nn.functional.linear(x, weight, bias)
 
 
-# def rocm_unquantized_gemm_impl(
-#     x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
-# ) -> torch.Tensor:
-#     from vllm.platforms.rocm import on_gfx9
+def rocm_unquantized_gemm_impl(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    from vllm.platforms.rocm import on_gfx9
 
-#     k = weight.shape[1]
-#     use_skinny = (
-#         envs.VLLM_ROCM_USE_SKINNY_GEMM
-#         and on_gfx9()
-#         and x.dtype in [torch.float16, torch.bfloat16]
-#         and k % 8 == 0
-#     )
+    k = weight.shape[1]
+    use_skinny = (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and on_gfx9()
+        and x.dtype in [torch.float16, torch.bfloat16]
+        and k % 8 == 0
+    )
 
-#     if use_skinny is not True:
-#         return torch.nn.functional.linear(x, weight, bias)
+    if use_skinny is not True:
+        return torch.nn.functional.linear(x, weight, bias)
 
-#     x_view = x.view(-1, x.size(-1))
-#     n = x_view.shape[0]
-#     m = weight.shape[0]
-#     cu_count = current_platform.get_cu_count()
+    x_view = x.view(-1, x.size(-1))
+    n = x_view.shape[0]
+    m = weight.shape[0]
+    cu_count = current_platform.get_cu_count()
 
-#     if m > 8 and 0 < n <= 4:
-#         out = ops.wvSplitK(weight, x_view, cu_count, bias)
-#         return out.view(*x.shape[:-1], weight.shape[0])
-#     elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-#         out = ops.LLMM1(weight, x_view, 4)
-#         return out.view(*x.shape[:-1], weight.shape[0])
-#     return torch.nn.functional.linear(x, weight, bias)
-
-
-# def rocm_unquantized_gemm_impl_fake(
-#     x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
-# ) -> torch.Tensor:
-#     return x.new_empty((*x.shape[:-1], weight.shape[0]))
+    if m > 8 and 0 < n <= 4:
+        out = ops.wvSplitK(weight, x_view, cu_count, bias)
+        return out.view(*x.shape[:-1], weight.shape[0])
+    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+        out = ops.LLMM1(weight, x_view, 4)
+        return out.view(*x.shape[:-1], weight.shape[0])
+    return torch.nn.functional.linear(x, weight, bias)
 
 
-# def rocm_unquantized_gemm(
-#     layer: torch.nn.Module,
-#     x: torch.Tensor,
-#     weight: torch.Tensor,
-#     bias: Optional[torch.Tensor] = None,
-# ) -> torch.Tensor:
-#     return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
+def rocm_unquantized_gemm_impl_fake(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
-# direct_register_custom_op(
-#     op_name="rocm_unquantized_gemm_impl",
-#     op_func=rocm_unquantized_gemm_impl,
-#     fake_impl=rocm_unquantized_gemm_impl_fake,
-# )
+def rocm_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
+
+
+direct_register_custom_op(
+    op_name="rocm_unquantized_gemm_impl",
+    op_func=rocm_unquantized_gemm_impl,
+    fake_impl=rocm_unquantized_gemm_impl_fake,
+)
 
 
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
@@ -246,16 +198,71 @@ def cpu_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ):
     return layer.cpu_linear(x, weight, bias)
 
 
+def rocm_unquantized_gemm_wrapper():
+    """Creates a wrapper function with the signature (x, weight, bias)"""
+    # Get configuration from environment variables
+    from vllm.platforms.rocm import on_gfx9
+
+    ON_MI300 = on_gfx9()
+    use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM and ON_MI300
+    use_aiter = (
+        envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR and ON_MI300
+    )
+
+    def inner_function(
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ):
+        k = weight.shape[1]
+        _use_skinny = (
+            use_skinny and x.dtype in [torch.float16, torch.bfloat16] and k % 8 == 0
+        )
+
+        if _use_skinny is not True:
+            if use_aiter:
+                return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+            return torch.nn.functional.linear(x, weight, bias)
+
+        x_view = x.view(-1, x.size(-1))
+        n = x_view.shape[0]
+        m = weight.shape[0]
+        cu_count = current_platform.get_cu_count()
+
+        if m > 8 and 0 < n <= 4:
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.view(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.view(*x.shape[:-1], weight.shape[0])
+
+        if use_aiter:
+            return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+        return torch.nn.functional.linear(x, weight, bias)
+
+    return inner_function
+
+
 def dispatch_unquantized_gemm() -> Callable[
-    [torch.nn.Module, torch.Tensor, torch.Tensor, Optional[torch.Tensor]], torch.Tensor
+    [torch.nn.Module, torch.Tensor, torch.Tensor, torch.Tensor | None], torch.Tensor
 ]:
-    if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+
+    if (
+        current_platform.is_rocm()
+        and envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_LINEAR
+        and on_gfx9()
+    ):
         return rocm_unquantized_gemm_wrapper()
+    if current_platform.is_rocm():
+        return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
     else:

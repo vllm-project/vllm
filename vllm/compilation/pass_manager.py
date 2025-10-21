@@ -5,7 +5,7 @@ import functools
 from torch import fx as fx
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import set_env_var
@@ -77,9 +77,11 @@ class PostGradPassManager(CustomGraphPass):
 
         shape = get_pass_context().runtime_shape
         for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
+            if pass_.is_applicable(shape):
                 pass_(graph)
                 VllmInductorPass.dump_prefix += 1
+            else:
+                logger.debug("Skipping %s with shape %s", pass_, shape)
 
         # post-cleanup goes before fix_functionalization
         # because it requires a functional graph
@@ -92,30 +94,53 @@ class PostGradPassManager(CustomGraphPass):
 
     def configure(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
-        if self.pass_config.enable_noop:
-            self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_sequence_parallelism:
-            self.passes += [SequenceParallelismPass(config)]
-            if self.pass_config.enable_async_tp:
-                self.passes += [AsyncTPPass(config)]
+        # Set the current vllm config to allow tracing CustomOp instances
+        with set_current_vllm_config(config, check_compile=False):
+            if self.pass_config.enable_noop:
+                self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_fi_allreduce_fusion:
-            self.passes += [AllReduceFusionPass(config)]
+            if self.pass_config.enable_sequence_parallelism:
+                self.passes += [SequenceParallelismPass(config)]
+                if self.pass_config.enable_async_tp:
+                    self.passes += [AsyncTPPass(config)]
 
-        if self.pass_config.enable_fusion:
-            if is_rocm_aiter_rmsnorm_enabled():
-                self.passes += [RMSNormAiterQuantFusionPass(config)]
+            if self.pass_config.enable_fi_allreduce_fusion:
+                self.passes += [AllReduceFusionPass(config)]
 
-            self.passes += [RMSNormQuantFusionPass(config)]
-            self.passes += [ActivationQuantFusionPass(config)]
+            if self.pass_config.enable_fusion:
+                if is_rocm_aiter_rmsnorm_enabled():
+                    self.passes += [RMSNormAiterQuantFusionPass(config)]
+                self.passes += [RMSNormQuantFusionPass(config)]
+                self.passes += [ActivationQuantFusionPass(config)]
 
-        if self.pass_config.enable_attn_fusion:
-            self.passes += [AttnFusionPass(config)]
+            if self.pass_config.enable_attn_fusion:
+                self.passes += [AttnFusionPass(config)]
 
-        # needs a functional graph
-        self.post_cleanup = PostCleanupPass(config)
-        self.fix_functionalization = FixFunctionalizationPass(config)
+            # needs a functional graph
+            self.post_cleanup = PostCleanupPass(config)
+            self.fix_functionalization = FixFunctionalizationPass(config)
+
+        # [HACK: Bug with Inductor graph partition and torch.compile cache]
+        # In PyTorch 2.9, torch.compile has a bug where the graph
+        # partition is not taken into account during caching.
+        # Because vLLM's Mode.VLLM_COMPILE is the only mode that uses
+        # Inductor graph partition, and VLLM_COMPILE implies there
+        # is a PostGradPassManager, we put the list of operators to graph
+        # partition into the PostGradPassManager's uuid (which
+        # then gets incorporated into Inductor's FX graph cache key).
+        # Remove this hack whenever torch.compile fixes it.
+
+        # This is the list of operators that vLLM asks Inductor to split.
+        self.inductor_splitting_ops = []
+        if (
+            config.compilation_config.use_inductor_graph_partition
+            and config.compilation_config.splitting_ops is not None
+        ):
+            # Sort them so we're not dependent on the ordering.
+            self.inductor_splitting_ops = sorted(
+                config.compilation_config.splitting_ops
+            )
 
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)
@@ -127,8 +152,16 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {"pass_config": self.pass_config.uuid(), "passes": []}
+        state = {
+            "pass_config": self.pass_config.uuid(),
+            "passes": [],
+            "inductor_splitting_ops": [],
+        }
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
+
+        # See [HACK: Bug with Inductor graph partition and torch.compile cache]
+        state["inductor_splitting_ops"].extend(self.inductor_splitting_ops)
+
         return InductorPass.hash_dict(state)

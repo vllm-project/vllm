@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
@@ -35,14 +34,11 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
-
-import torch
-import torch.distributed
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
@@ -87,8 +83,8 @@ class MiniMaxText01RMSNormTP(CustomOp):
     def forward(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert residual is None, "RMSNorm does not support residual connection."
         return self._forward(x)
 
@@ -102,7 +98,7 @@ class MiniMaxText01LinearKernel:
         kv_caches: torch.Tensor,
         slope_rate: torch.Tensor,
         block_size: int,
-        layer_idx: Optional[int] = None,
+        layer_idx: int | None = None,
         **kwargs,
     ) -> torch.Tensor:
         slope_rate = slope_rate.to(torch.float32)
@@ -154,9 +150,9 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         max_position: int,
         block_size: int,
         num_hidden_layer: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         layer_idx: int = 0,
         linear_layer_idx: int = 0,
         prefix: str = "linear_attn",

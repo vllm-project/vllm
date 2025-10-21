@@ -33,11 +33,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   ops.def(
-      "silu_mul_fp8_quant_deep_gemm_cuda(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s, int group_size, "
-      "bool use_ue8m0, int num_parallel_tokens) -> ()");
-  ops.impl("silu_mul_fp8_quant_deep_gemm_cuda", torch::kCUDA,
-           &silu_mul_fp8_quant_deep_gemm_cuda);
+      "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
+      "y_q, Tensor! y_s,"
+      "bool use_ue8m0) -> ()");
+  ops.impl("persistent_masked_m_silu_mul_quant", torch::kCUDA,
+           &persistent_masked_m_silu_mul_quant);
 
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
@@ -118,11 +118,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
-  // Activation function used in SwiGLU from ROCm/vllm
-  ops.def("scaled_silu_and_mul(Tensor! out, Tensor input, Tensor scale) -> ()");
-  ops.impl("scaled_silu_and_mul", torch::kCUDA, &scaled_silu_and_mul);
-
-  // Activation function used in SwiGLU from upstream
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
@@ -179,12 +174,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
-
-  // Polynomial Normalization.
-  ops.def(
-      "poly_norm(Tensor! out, Tensor input, Tensor weight, Tensor bias, float "
-      "epsilon) -> ()");
-  ops.impl("poly_norm", torch::kCUDA, &poly_norm);
 
   // Apply repetition penalties to logits in-place
   ops.def(
@@ -732,6 +721,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "int quant_block_size, str kv_cache_dtype) -> ()");
   cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
                  &indexer_k_quant_and_cache);
+
+  cache_ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
+      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+  cache_ops.impl("cp_gather_indexer_k_quant_cache", torch::kCUDA,
+                 &cp_gather_indexer_k_quant_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

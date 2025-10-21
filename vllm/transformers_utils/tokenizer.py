@@ -7,7 +7,7 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import huggingface_hub
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -21,23 +21,21 @@ from vllm.transformers_utils.utils import check_gguf_file
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.lora.request import LoRARequest
     from vllm.transformers_utils.tokenizer_base import TokenizerBase
 else:
     ModelConfig = Any
-    LoRARequest = Any
     TokenizerBase = Any
 
 logger = init_logger(__name__)
 
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast, TokenizerBase]
+AnyTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast | TokenizerBase
 
 
 def decode_tokens(
     tokenizer: AnyTokenizer,
     token_ids: list[int],
     *,
-    skip_special_tokens: Optional[bool] = None,
+    skip_special_tokens: bool | None = None,
 ) -> str:
     """
     Backend-agnostic equivalent of HF's
@@ -56,9 +54,9 @@ def encode_tokens(
     tokenizer: AnyTokenizer,
     text: str,
     *,
-    truncation: Optional[bool] = None,
-    max_length: Optional[int] = None,
-    add_special_tokens: Optional[bool] = None,
+    truncation: bool | None = None,
+    max_length: int | None = None,
+    add_special_tokens: bool | None = None,
 ) -> list[int]:
     """
     Backend-agnostic equivalent of HF's
@@ -137,12 +135,12 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
 
 def get_tokenizer(
-    tokenizer_name: Union[str, Path],
+    tokenizer_name: str | Path,
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
-    revision: Optional[str] = None,
-    download_dir: Optional[str] = None,
+    revision: str | None = None,
+    download_dir: str | None = None,
     **kwargs,
 ) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""

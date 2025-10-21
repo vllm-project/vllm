@@ -58,7 +58,6 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTransc
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )

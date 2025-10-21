@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
-
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def use_swizzle_gemm(n: int, k: int, dtype: torch.dtype) -> bool:
@@ -20,10 +18,10 @@ def use_swizzle_gemm(n: int, k: int, dtype: torch.dtype) -> bool:
 def rocm_aiter_tuned_gemm_impl(
     input: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    out_dtype: Optional[torch.dtype] = None,
-    scale_a: Optional[torch.Tensor] = None,
-    scale_b: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    scale_a: torch.Tensor | None = None,
+    scale_b: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # This AITER function can be used for
     # - BF16 and FP16 matmul
@@ -40,10 +38,10 @@ def rocm_aiter_tuned_gemm_impl(
 def rocm_aiter_tuned_gemm_fake(
     input: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    out_dtype: Optional[torch.dtype] = None,
-    scale_a: Optional[torch.Tensor] = None,
-    scale_b: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    scale_a: torch.Tensor | None = None,
+    scale_b: torch.Tensor | None = None,
 ) -> torch.Tensor:
     m = input.shape[0]
     n = weight.shape[0]
@@ -61,22 +59,32 @@ if current_platform.is_rocm():
         dispatch_key=current_platform.dispatch_key,
     )
 
+    from aiter.tuned_gemm import tgemm as aiter_tgemm
+
+else:
+    aiter_tgemm = None
+
 
 class aiter_ops:
     @staticmethod
     def rocm_aiter_tuned_gemm(
         input: torch.Tensor,  # [M, K]
         weight: torch.Tensor,  # [N, K]
-        bias: Optional[torch.Tensor] = None,
-        out_dtype: Optional[torch.dtype] = None,
-        scale_a: Optional[torch.Tensor] = None,
-        scale_b: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
+        out_dtype: torch.dtype | None = None,
+        scale_a: torch.Tensor | None = None,
+        scale_b: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_tuned_gemm(
-            input,
-            weight,
-            bias=bias,
-            out_dtype=out_dtype,
-            scale_a=scale_a,
-            scale_b=scale_b,
+        # return torch.ops.vllm.rocm_aiter_tuned_gemm(
+        #     input,
+        #     weight,
+        #     bias=bias,
+        #     out_dtype=out_dtype,
+        #     scale_a=scale_a,
+        #     scale_b=scale_b,
+        # )
+        assert aiter_tgemm is not None, "aiter_tgemm is not imported"
+
+        return aiter_tgemm.mm(
+            input, weight, otype=out_dtype, scale_a=scale_a, scale_b=scale_b, bias=bias
         )

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from concurrent.futures import Future
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -13,7 +14,7 @@ from vllm.executor.uniproc_executor import (  # noqa
     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0,
 )
 from vllm.executor.uniproc_executor import UniProcExecutor as UniProcExecutorV0  # noqa
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -91,10 +92,10 @@ class Executor(ExecutorBase):
 
     def collective_rpc(
         self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
+        method: str | Callable,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
         non_block: bool = False,
     ) -> list[Any]:
         raise NotImplementedError
@@ -103,7 +104,7 @@ class Executor(ExecutorBase):
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
-    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         output = self.collective_rpc(
             "execute_model", args=(scheduler_output,), non_block=non_block
         )
@@ -112,7 +113,7 @@ class Executor(ExecutorBase):
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch")
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
         output = self.collective_rpc("take_draft_token_ids")
         return output[0]
 

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -150,8 +149,8 @@ class EAGLE(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import torch
 from packaging import version
@@ -9,13 +9,13 @@ from packaging import version
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import aiter_ops
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -38,9 +38,9 @@ if current_platform.is_rocm():
     def rocm_aiter_gemm_a8w8_bpreshuffle_impl(
         input: torch.Tensor,
         weight: torch.Tensor,
-        out_dtype: Optional[torch.dtype] = None,
-        scale_a: Optional[torch.Tensor] = None,
-        scale_b: Optional[torch.Tensor] = None,
+        out_dtype: torch.dtype | None = None,
+        scale_a: torch.Tensor | None = None,
+        scale_b: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # This AITER function can be used for
         # - per-token activations + per-channel weights
@@ -60,9 +60,9 @@ if current_platform.is_rocm():
     def rocm_aiter_gemm_a8w8_bpreshuffle_fake(
         input: torch.Tensor,
         weight: torch.Tensor,
-        out_dtype: Optional[torch.dtype] = None,
-        scale_a: Optional[torch.Tensor] = None,
-        scale_b: Optional[torch.Tensor] = None,
+        out_dtype: torch.dtype | None = None,
+        scale_a: torch.Tensor | None = None,
+        scale_b: torch.Tensor | None = None,
     ) -> torch.Tensor:
         m = input.shape[0]
         n = weight.shape[0]
@@ -125,7 +125,7 @@ CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 
 def per_tensor_dequantize(
-    tensor: torch.Tensor, inv_scale: Union[float, torch.Tensor]
+    tensor: torch.Tensor, inv_scale: float | torch.Tensor
 ) -> torch.Tensor:
     fake_qweight = tensor.to(torch.float16)
     dq_weight = fake_qweight * inv_scale
@@ -450,6 +450,8 @@ def dispatch_w8a8_scaled_mm(
     preferred_backend: str, per_tensor_weights: bool, per_tensor_activations: bool
 ) -> Callable[..., torch.Tensor]:
     if per_tensor_weights and per_tensor_activations:
+        if preferred_backend == "aiter":
+            return rocm_aiter_per_tensor_w8a8_scaled_mm
         if preferred_backend == "rocm":
             return rocm_per_tensor_w8a8_scaled_mm
         if preferred_backend == "flashinfer":
@@ -490,7 +492,7 @@ class Fp8LinearOp:
         self,
         act_quant_static: bool,
         act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
-        pad_output: Optional[bool] = None,
+        pad_output: bool | None = None,
     ):
         # AITER is only supported on ROCm and only for FP8_FNUZ
         # and at the moment are MI300 series
@@ -522,7 +524,7 @@ class Fp8LinearOp:
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
             pad_output = (
-                config.level < CompilationLevel.PIECEWISE
+                config.mode < CompilationMode.VLLM_COMPILE
                 and self.preferred_backend == "torch"
             )
         else:
@@ -542,10 +544,10 @@ class Fp8LinearOp:
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        out_dtype: Optional[torch.dtype] = None,
-        input_scale: Optional[torch.Tensor] = None,
-        input_scale_ub: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
+        out_dtype: torch.dtype | None = None,
+        input_scale: torch.Tensor | None = None,
+        input_scale_ub: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_scale computed from x.
@@ -571,6 +573,14 @@ class Fp8LinearOp:
         else:
             qinput, x_scale = input_2d, input_scale
 
+        # Must have dim() conditions
+        # In per-token quant scenario, when the number of token is 1,
+        # the scale will only have 1 elements.
+        # Without checking the dim(),
+        # we cannot distingushes between per-tensor and per-token quant.
+        # Example:
+        # When the number of token is 1, per-token scale is [[1]]
+        # When per-tensor scale is [1] or ().
         per_tensor_weights = (weight_scale.numel() == 1) and weight_scale.dim() < 2
         per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
@@ -599,8 +609,8 @@ class Fp8LinearOp:
 def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    input_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.

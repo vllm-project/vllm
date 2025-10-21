@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-from typing import Optional
 
 import uvloop
 
@@ -22,9 +21,9 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (
     FlexibleArgumentParser,
     decorate_logs,
-    get_tcp_uri,
     set_process_title,
 )
+from vllm.utils.network_utils import get_tcp_uri
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor.abstract import Executor
@@ -179,7 +178,7 @@ def run_multi_api_server(args: argparse.Namespace):
     hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
     assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
-    api_server_manager: Optional[APIServerProcessManager] = None
+    api_server_manager: APIServerProcessManager | None = None
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, num_api_servers
