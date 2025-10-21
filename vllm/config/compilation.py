@@ -770,21 +770,17 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
-        # Allow eager/inductor for piecewise compilation by default.
-        # Additionally allow opting into an experimental/custom backend by
-        # specifying its fully-qualified class path. For now we explicitly
-        # permit the MirageBackend.
-        if self.mode == CompilationMode.VLLM_COMPILE:
-            allowed_backends = {
-                "",
-                "eager",
-                "inductor",
-                "vllm.compilation.mirage_backend.MirageBackend",
-            }
-            if self.backend not in allowed_backends:
-                raise ValueError(
-                    f"Invalid backend for piecewise compilation: {self.backend}"
-                )
+        # Currently only eager and inductor backend are supported.
+        # for piecewise compilation. Custom backends are not suppported for
+        # piecewise compilation. Update when more backends are supported.
+        if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
+            "",
+            "eager",
+            "inductor",
+        ]:
+            raise ValueError(
+                f"Invalid backend for piecewise compilation: {self.backend}"
+            )
 
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
@@ -815,17 +811,16 @@ class CompilationConfig:
         ]:
             if self.backend in torch_backends:
                 return self.backend
+            if self.backend == "mirage":
+                from vllm.compilation.mirage_backend import MirageBackend
+                return MirageBackend(vllm_config)
             return resolve_obj_by_qualname(self.backend)
 
         assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:
             logger.info("Using OOT custom backend for compilation.")
 
-        # Custom/experimental backend specified by fully-qualified class name.
-        # Currently support MirageBackend.
-        if self.backend == "vllm.compilation.mirage_backend.MirageBackend":
-            from vllm.compilation.mirage_backend import MirageBackend
-            return MirageBackend(vllm_config)
+        from vllm.compilation.backends import VllmBackend
 
         # TODO[@lucaskabela]: See if we can forward prefix
         # https://github.com/vllm-project/vllm/issues/27045
