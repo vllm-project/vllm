@@ -140,7 +140,7 @@ print(result[0].outputs[0].text)
 
 ### Online Channelwise Quantization
 
-For improved accuracy with online quantization, vLLM supports **channelwise quantization** using the `compressed-tensors` quantization method. This approach quantizes weights on a per-channel basis during model loading, providing better accuracy than per-tensor quantization while still requiring no calibration data.
+vLLM supports **channelwise quantization** using the `compressed-tensors` quantization method. This approach quantizes weights on a per-channel basis during model loading, providing better accuracy than per-tensor quantization while still requiring no calibration data.
 
 To enable channelwise online quantization, use both the `--quantization` and `--quantization-schema` flags:
 
@@ -169,7 +169,6 @@ This mode provides:
 - **Per-channel weight quantization**: Each output channel of weight matrices gets its own scale factor, preserving more information than per-tensor scaling
 - **Dynamic per-token activation quantization**: Activations are quantized dynamically per token for maximum accuracy
 - **No calibration required**: Quantization happens automatically during model loading based on the weight statistics
-- **Better accuracy**: Channelwise quantization typically provides better accuracy than per-tensor quantization, especially for models with varying weight distributions across channels
 
 !!! note
     Channelwise quantization is currently supported for FP8 (W8A8) with the `compressed-tensors` quantization method. It uses static per-channel quantization for weights and dynamic per-token quantization for activations.
