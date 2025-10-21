@@ -1623,11 +1623,6 @@ class Scheduler(SchedulerInterface):
 
                 affected_req_ids.add(request.request_id)
 
-        # evict invalid blocks from the prefix cache to prevent future
-        # requests from reusing corrupted data
-        if marked_invalid_block_ids:
-            self.kv_cache_manager.evict_blocks(marked_invalid_block_ids)
-
         return affected_req_ids, total_affected_tokens
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
@@ -1676,6 +1671,9 @@ class Scheduler(SchedulerInterface):
                 total_failed_tokens,
                 all_failed_req_ids,
             )
+            # evict invalid blocks from the prefix cache to prevent future
+            # requests from reusing corrupted data
+            self.kv_cache_manager.evict_blocks(invalid_block_ids)
             return all_failed_req_ids
 
         logger.warning(
@@ -1684,6 +1682,10 @@ class Scheduler(SchedulerInterface):
             total_failed_requests,
             total_failed_tokens,
         )
+        # evict invalid blocks from the prefix cache to prevent future
+        # requests from reusing corrupted data
+        self.kv_cache_manager.evict_blocks(invalid_block_ids)
+
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
