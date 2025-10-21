@@ -41,14 +41,16 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import LayerBlockType, common_broadcastable_dtype
+from vllm.utils import LayerBlockType
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
+    from vllm.attention.backends.registry import _Backend
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
+    _Backend = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -306,6 +309,7 @@ class ModelConfig:
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
+    mm_encoder_attn_backend: InitVar[_Backend | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -423,6 +427,7 @@ class ModelConfig:
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
+        mm_encoder_attn_backend: _Backend | str | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -732,6 +737,7 @@ class ModelConfig:
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
+                mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,

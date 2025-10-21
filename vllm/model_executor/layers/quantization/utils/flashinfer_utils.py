@@ -282,3 +282,9 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
         f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
         f" expected one of {allowed_backends}"
     )
+
+
+def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
+    # TODO(shuw@nvidia): Update when new backends are added.
+    backends_supporting_global_sf = (FlashinferMoeBackend.CUTLASS,)
+    return backend in backends_supporting_global_sf
