@@ -235,6 +235,24 @@ def _plot_fig(
             f"Cannot find {var_y=!r} in parameter sweep results. "
             f"Available variables: {df.columns.tolist()}"
         )
+    for k in row_by:
+        if k not in df.columns:
+            raise ValueError(
+                f"Cannot find row_by={k!r} in parameter sweep results. "
+                f"Available variables: {df.columns.tolist()}"
+            )
+    for k in col_by:
+        if k not in df.columns:
+            raise ValueError(
+                f"Cannot find col_by={k!r} in parameter sweep results. "
+                f"Available variables: {df.columns.tolist()}"
+            )
+    for k in curve_by:
+        if k not in df.columns:
+            raise ValueError(
+                f"Cannot find curve_by={k!r} in parameter sweep results. "
+                f"Available variables: {df.columns.tolist()}"
+            )
 
     df = filter_by.apply(df)
     df = bin_by.apply(df)
