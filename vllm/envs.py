@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: str | None = None
-    VLLM_LOGITS_PROCESSOR_THREADS: int | None = None
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
@@ -57,8 +56,6 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
-    VLLM_USE_RAY_SPMD_WORKER: bool = False
-    VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -139,10 +136,9 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
-    VLLM_RAY_DP_PACK_STRATEGY: str = "strict"
+    VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: bool | None = None
-    VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
@@ -246,7 +242,7 @@ def maybe_convert_bool(value: str | None) -> bool | None:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils import is_torch_equal_or_newer
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
@@ -567,15 +563,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_STREAM": lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX": lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
-    # if set, vllm will call logits processors in a thread pool with this many
-    # threads. This is useful when using custom logits processors that either
-    # (a) launch additional CUDA kernels or (b) do significant CPU-bound work
-    # while not holding the python GIL, or both.
-    "VLLM_LOGITS_PROCESSOR_THREADS": lambda: int(
-        os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0")
-    )
-    if "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ
-    else None,
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: val
@@ -634,22 +621,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK": lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
     # (CPU backend only) whether to use SGL kernels, optimized for small batch.
     "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
-    # If the env var is set, then all workers will execute as separate
-    # processes from the engine, and we use the same mechanism to trigger
-    # execution on all workers.
-    # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
-    "VLLM_USE_RAY_SPMD_WORKER": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))
-    ),
-    # If the env var is set, it uses the Ray's Compiled Graph
-    # (previously known as ADAG) API which optimizes the
-    # control plane overhead.
-    # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-    # Note that this variable is set to 1 in V1 by default
-    # when ray distributed executor is used.
-    "VLLM_USE_RAY_COMPILED_DAG": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))
-    ),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
     # different pipeline-parallel stages.
@@ -657,20 +628,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "auto": use the default channel type
     # - "nccl": use NCCL for communication
     # - "shm": use shared memory and gRPC for communication
-    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE": env_with_choices(
         "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto", ["auto", "nccl", "shm"]
     ),
     # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
-    # VLLM_USE_RAY_COMPILED_DAG is not set.
+    # (experimental feature) in Ray's Compiled Graph.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
     ),
     # If the env var is set, it uses a Ray Communicator wrapping
     # vLLM's pipeline parallelism communicator to interact with Ray's
     # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
-    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
     ),
@@ -1039,6 +1007,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #   for non-master nodes, allocate as many DP ranks as can fit;
     # - "strict":
     #   allocate exactly data-parallel-size-local DP ranks to each picked node;
+    # - "span":
+    #   Should be used only when a single DP rank requires multiple nodes.
+    #   allocate one DP rank over as many nodes as required for set world_size;
     # This environment variable is ignored if data-parallel-backend is not Ray.
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
@@ -1063,13 +1034,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
     ),
-    # Whether to turn on the outlines cache for V0
-    # This cache is unbounded and on disk, so it's not safe to use in
-    # an environment with potentially malicious users.
-    "VLLM_V0_USE_OUTLINES_CACHE": lambda: os.environ.get(
-        "VLLM_V0_USE_OUTLINES_CACHE", "0"
-    )
-    == "1",
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.

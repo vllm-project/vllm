@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ensure we perform lazy loading in vllm/__init__.py.
-i.e: appears only within the ``if typing.TYPE_CHECKING:`` guard,
+i.e: appears only within the `if typing.TYPE_CHECKING:` guard,
 **except** for a short whitelist.
 """
 
