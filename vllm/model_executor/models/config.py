@@ -511,13 +511,16 @@ class Qwen2_5_VLMultiModalConfig(VerifyAndUpdateConfig):
         """
         Update model config for Qwen2.5-VL to ensure correct behavior.
         """
-        from transformers.models.qwen2_5_vl.\
-            processing_qwen2_5_vl import Qwen2_5_VLProcessorKwargs
+        from transformers.models.qwen2_5_vl.processing_qwen2_5_vl import (
+            Qwen2_5_VLProcessorKwargs,
+        )
+
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs\
-            (Qwen2_5_VLProcessorKwargs)
+        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs(
+            Qwen2_5_VLProcessorKwargs
+        )
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if dynamic_kwargs and mm_config.mm_processor_dynamic_kwargs is None:
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
@@ -535,13 +538,14 @@ class Glm4vMultiModalConfig(VerifyAndUpdateConfig):
         """
         Update model config for Glm4v to ensure correct behavior.
         """
-        from transformers.models.glm4v.\
-            processing_glm4v import Glm4vProcessorKwargs
+        from transformers.models.glm4v.processing_glm4v import Glm4vProcessorKwargs
+
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs\
-            (Glm4vProcessorKwargs)
+        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs(
+            Glm4vProcessorKwargs
+        )
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if dynamic_kwargs and mm_config.mm_processor_dynamic_kwargs is None:
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
@@ -559,13 +563,16 @@ class Qwen2_5OmniMultiModalConfig(VerifyAndUpdateConfig):
         """
         Update model config for Qwen2.5-Omni to ensure correct behavior.
         """
-        from transformers.models.qwen2_5_omni.\
-            processing_qwen2_5_omni import Qwen2_5OmniProcessorKwargs
+        from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
+            Qwen2_5OmniProcessorKwargs,
+        )
+
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs\
-            (Qwen2_5OmniProcessorKwargs)
+        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs(
+            Qwen2_5OmniProcessorKwargs
+        )
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if dynamic_kwargs and mm_config.mm_processor_dynamic_kwargs is None:
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
@@ -583,13 +590,16 @@ class Qwen3_VLMultiModalConfig(VerifyAndUpdateConfig):
         """
         Update model config for Qwen3-VL to ensure correct behavior.
         """
-        from transformers.models.qwen3_vl.\
-            processing_qwen3_vl import Qwen3_VLProcessorKwargs
+        from transformers.models.qwen3_vl.processing_qwen3_vl import (
+            Qwen3_VLProcessorKwargs,
+        )
+
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs\
-            (Qwen3_VLProcessorKwargs)
+        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs(
+            Qwen3_VLProcessorKwargs
+        )
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if dynamic_kwargs and mm_config.mm_processor_dynamic_kwargs is None:
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
@@ -607,13 +617,16 @@ class Qwen3OmniMoeMultiModalConfig(VerifyAndUpdateConfig):
         """
         Update model config for Qwen3-VL to ensure correct behavior.
         """
-        from transformers.models.qwen3_omni_moe.\
-            processing_qwen3_omni_moe import Qwen3OmniMoeProcessorKwargs
+        from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
+            Qwen3OmniMoeProcessorKwargs,
+        )
+
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs\
-            (Qwen3OmniMoeProcessorKwargs)
+        dynamic_kwargs = _collect_dynamic_keys_from_processing_kwargs(
+            Qwen3OmniMoeProcessorKwargs
+        )
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if dynamic_kwargs and mm_config.mm_processor_dynamic_kwargs is None:
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
