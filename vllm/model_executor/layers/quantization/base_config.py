@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
+from vllm.model_executor.parameter import BasevLLMParameter
+
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.models.utils import WeightsMapper
@@ -47,6 +49,18 @@ class QuantizeMethodBase(ABC):
         This can be used for example, to transpose weights for computation.
         """
         return
+
+    def process_weights_before_loading(
+        self,
+        layer: nn.Module,
+        param: torch.nn.Parameter | BasevLLMParameter,
+        weight: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Process the weight before loading.
+
+        This can be used for pre-load quantization to save memory usage.
+        """
+        return {}
 
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:

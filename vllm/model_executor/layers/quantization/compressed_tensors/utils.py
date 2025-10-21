@@ -5,8 +5,18 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 
 import regex as re
+import torch
 from compressed_tensors import CompressionFormat
+from compressed_tensors.quantization import QuantizationArgs
+from compressed_tensors.quantization.quant_args import QuantizationType
+from compressed_tensors.quantization.utils.helpers import (
+    calculate_qparams,
+    calculate_range,
+)
+from torch import Tensor
 from torch.nn import Module
+
+from vllm.platforms import current_platform
 
 
 def is_activation_quantization_format(format: str) -> bool:
@@ -214,3 +224,24 @@ def _match_fused_layer(
             unfused_matches.append(None)
 
     return unfused_matches[0] if all(unfused_matches) else None
+
+
+def fp8_channelwise_quantize(x: Tensor, channel_dim: int = -1) -> tuple[Tensor, Tensor]:
+    """
+    Quantizes a tensor using fp8 channelwise quantization inplace
+    """
+    assert x.numel() > 0, "Input tensor must not be empty"
+    assert x.dim() >= 1, "Input tensor must have at least 1 dimension"
+
+    quantization_args = QuantizationArgs(
+        num_bits=8, type=QuantizationType.FLOAT, symmetric=True, strategy="channel"
+    )
+    min_val, max_val = torch.aminmax(x, dim=channel_dim, keepdims=True)
+    scale, zero_point = calculate_qparams(min_val, max_val, quantization_args)
+    bit_min, bit_max = calculate_range(quantization_args, x.device)
+    x.div_(scale)
+    if zero_point is not None:
+        x.add_(zero_point.to(x.dtype))
+    torch.clamp_(x, bit_min, bit_max)
+    quantized = x.to(current_platform.fp8_dtype())
+    return quantized, scale
