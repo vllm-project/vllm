@@ -120,11 +120,17 @@ async def test_function_tool_use(
 
     assert len(response.output) >= 1
     tool_call = None
+    reasoning = None
     for out in response.output:
         if out.type == "function_call":
             tool_call = out
+        if out.type == "reasoning":
+            reasoning = out
+    assert tool_call is not None
     assert tool_call.type == "function_call"
     assert json.loads(tool_call.arguments) is not None
+    assert reasoning is not None
+    assert reasoning.type == "reasoning"
 
 
 @pytest.mark.asyncio
@@ -170,6 +176,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI):
     for out in response.output:
         if out.type == "function_call":
             tool_call = out
+    assert tool_call is not None
     assert tool_call.type == "function_call"
     assert tool_call.name == "get_weather"
     args = json.loads(tool_call.arguments)
