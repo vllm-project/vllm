@@ -293,10 +293,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        # Set mamba block size to max_model_len (this may get
-        # override by prefix caching logic later)
-        cache_config.mamba_block_size = model_config.max_model_len
-
         # TODO(@tdoublep) find a better way to do this than whitelist
         MAMBA2_MODELS = [
             "BambaForCausalLM",
@@ -319,6 +315,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "support for prefix caching: disabling."
                 )
                 cache_config.enable_prefix_caching = False
+        else:
+            cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(tdoublep): remove once cascade attention is supported
         logger.info(
@@ -397,7 +395,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
-            # mamba SSD kernel uses a chunk_size, e.g. 256
+            # Mamba2 SSD kernel uses a chunk_size, e.g. 256
             # Align the block to the kernel: use lowest multiple of chunk_size
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
@@ -415,7 +413,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             def lcm(a, b):
                 return a * b // gcd(a, b)
 
-            base_chunk_size = model_config.get_mamba_chunk_size()
+            base_chunk_size = (
+                cache_config.mamba_block_size or model_config.get_mamba_chunk_size()
+            )
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)

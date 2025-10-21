@@ -54,7 +54,12 @@ from vllm.config import (
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.cache import (
+    BlockSize,
+    CacheDType,
+    MambaDType,
+    PrefixCachingHashAlgo,
+)
 from vllm.config.device import Device
 from vllm.config.model import (
     ConvertOption,
@@ -528,6 +533,7 @@ class EngineArgs:
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
+    mamba_block_size: int | None = None
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -885,6 +891,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
+        )
+        cache_group.add_argument(
+            "--mamba-block-size", **cache_kwargs["mamba_block_size"]
         )
 
         # Multimodal related configs
@@ -1343,6 +1352,14 @@ class EngineArgs:
             f"dcp_size={self.decode_context_parallel_size}."
         )
 
+        # Validate mamba_block_size
+        assert self.mamba_block_size is None or self.enable_prefix_caching, (
+            "--mamba-block-size requires --enable-prefix-caching"
+        )
+        assert self.mamba_block_size is None or (
+            self.mamba_block_size > 0 and self.mamba_block_size % 256 == 0
+        ), f"--mamba-block-size must be a multiple of 256, got {self.mamba_block_size}"
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1359,6 +1376,7 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            mamba_block_size=self.mamba_block_size,
         )
 
         ray_runtime_env = None
