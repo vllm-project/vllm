@@ -50,7 +50,8 @@ from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid, supports_kw
+from vllm.utils import random_uuid
+from vllm.utils.func_utils import supports_kw
 
 logger = init_logger(__name__)
 
@@ -1498,18 +1499,25 @@ def resolve_chat_template_kwargs(
     tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
     chat_template: str,
     chat_template_kwargs: dict[str, Any],
+    raise_on_unexpected: bool = True,
 ) -> dict[str, Any]:
+    # We exclude chat_template from kwargs here, because
+    # chat template has been already resolved at this stage
+    unexpected_vars = {"chat_template", "tokenize"}
+    if raise_on_unexpected and (
+        unexpected_in_kwargs := unexpected_vars & chat_template_kwargs.keys()
+    ):
+        raise ValueError(
+            "Found unexpected chat template kwargs from request: "
+            f"{unexpected_in_kwargs}"
+        )
+
     fn_kw = {
         k
         for k in chat_template_kwargs
         if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
     }
-
     template_vars = _cached_resolve_chat_template_kwargs(chat_template)
-
-    # We exclude chat_template from kwargs here, because
-    # chat template has been already resolved at this stage
-    unexpected_vars = {"chat_template"}
     accept_vars = (fn_kw | template_vars) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
@@ -1521,7 +1529,6 @@ def apply_hf_chat_template(
     tools: list[dict[str, Any]] | None,
     *,
     model_config: ModelConfig,
-    tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
@@ -1538,17 +1545,18 @@ def apply_hf_chat_template(
             "does not define one."
         )
 
+    resolved_kwargs = resolve_chat_template_kwargs(
+        tokenizer=tokenizer,
+        chat_template=hf_chat_template,
+        chat_template_kwargs=kwargs,
+    )
+
     try:
-        resolved_kwargs = resolve_chat_template_kwargs(
-            tokenizer=tokenizer,
-            chat_template=hf_chat_template,
-            chat_template_kwargs=kwargs,
-        )
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
-            tokenize=tokenize,
+            tokenize=False,
             **resolved_kwargs,
         )
 

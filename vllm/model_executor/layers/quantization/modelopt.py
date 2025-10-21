@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
+    is_flashinfer_supporting_global_sf,
     register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
@@ -72,7 +73,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.parameter import ModelWeightParameter, PerTensorScaleParameter
 from vllm.scalar_type import scalar_types
-from vllm.utils import next_power_of_2
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -926,21 +926,25 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
 
-        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
-            assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
-            self.backend = "flashinfer-trtllm"
-        elif has_flashinfer():
-            self.backend = "flashinfer-cutlass"
-        elif cutlass_fp4_supported():
-            self.backend = "cutlass"
-        elif is_fp4_marlin_supported():
-            self.backend = "marlin"
-        else:
+        self.backend = "none"
+        if envs.VLLM_NVFP4_GEMM_BACKEND is None:
+            if has_flashinfer():
+                self.backend = "flashinfer-cutlass"
+            elif cutlass_fp4_supported():
+                self.backend = "cutlass"
+            elif is_fp4_marlin_supported():
+                self.backend = "marlin"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
+            self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
+            assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
+
+        if self.backend == "none":
             raise ValueError(
-                "Current platform does not support NVFP4"
-                " quantization. Please use Blackwell and"
-                " above."
+                "No valid NVFP4 GEMM backend found. "
+                "Please check your platform capability."
             )
+
+        logger.info_once(f"Using {self.backend} for NVFP4 GEMM")
 
     def create_weights(
         self,
@@ -1109,26 +1113,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
-        if self.backend == "flashinfer-trtllm":
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
-        elif self.backend == "flashinfer-cutlass":
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
+        if self.backend.startswith("flashinfer-"):
+            backend_name = self.backend[len("flashinfer-") :]
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
+            assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
 
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
-
-
-def _get_tile_tokens_dim(num_tokens: int, top_k: int, num_experts: int) -> int:
-    # Guess tokens per expert assuming perfect expert distribution first.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_power_of_2(num_tokens_per_expert)
-    # Cap to 8-64 tokens per CTA tile as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-    return tile_tokens_dim
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
@@ -1224,6 +1218,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
         weight_loader = extra_weight_attrs.get("weight_loader")
+        global_num_experts = extra_weight_attrs.get("global_num_experts")
         # GEMM 1
         w13_weight = ModelWeightParameter(
             data=torch.empty(
@@ -1302,14 +1297,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
 
+        use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(
+            self.flashinfer_moe_backend
+        )
+        global_scale_num_experts = global_num_experts if use_global_sf else num_experts
+
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(num_experts, 2, dtype=torch.float32),
+            data=torch.empty(global_scale_num_experts, 2, dtype=torch.float32),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(num_experts, dtype=torch.float32),
+            data=torch.empty(global_scale_num_experts, dtype=torch.float32),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
@@ -1328,8 +1328,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ):
         from flashinfer import nvfp4_block_scale_interleave
         from flashinfer.fused_moe.core import (
-            _maybe_get_cached_w2_permute_indices,
             _maybe_get_cached_w3_w1_permute_indices,
+            get_w2_permute_indices_with_cache,
         )
 
         """Prepare quantized weights for kernel (done offline with weights)."""
@@ -1390,7 +1390,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 )
             )
 
-            permute_indices = _maybe_get_cached_w2_permute_indices(
+            permute_indices = get_w2_permute_indices_with_cache(
                 self._cache_permute_indices,
                 gemm2_weights_fp4[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -1401,7 +1401,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 .contiguous()
             )
 
-            permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+            permute_sf_indices = get_w2_permute_indices_with_cache(
                 self._cache_permute_indices,
                 gemm2_scales_linear_fp4[i].view(torch.uint8),
                 epilogue_tile_m,
@@ -1464,7 +1464,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
 
         # Common processing for input scales and alphas
-        w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(torch.float32)
+        use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(
+            self.flashinfer_moe_backend
+        )
+        if use_global_sf:
+            # For backends provide by Flashinfer, the input global scales are
+            # shared across all experts.
+            w13_input_scale = (
+                layer.w13_input_scale.max().to(torch.float32).expand(layer.num_experts)
+            )
+        else:
+            w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(torch.float32)
         layer.g1_alphas = Parameter(
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
             requires_grad=False,
@@ -1476,14 +1486,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         # GEMM 2 processing
+        if use_global_sf:
+            # For backends provide by Flashinfer, the input global scales are
+            # shared across all experts.
+            w2_input_scale = (
+                layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
+            )
+        else:
+            w2_input_scale = layer.w2_input_scale
         layer.g2_alphas = Parameter(
-            (layer.w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
+            (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
             requires_grad=False,
         )
 
         # This is for quantization, so we need to invert it.
         layer.w2_input_scale_quant = Parameter(
-            (1 / layer.w2_input_scale).to(torch.float32), requires_grad=False
+            (1 / w2_input_scale).to(torch.float32), requires_grad=False
         )
 
         # TensorRT-LLM specific processing
@@ -1542,23 +1560,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w2_input_scale_quant
         else:
             # Non-TRT-LLM processing (Cutlass or non-flashinfer)
-            assert layer.w13_weight_scale.shape[2] % 16 == 0, (
-                "Expected weight_scale.dim(1) to be divisible by 16"
-            )
-            assert layer.w13_weight_scale.dtype == torch.float8_e4m3fn, (
-                "Weight Blockscale must be represented as FP8-E4M3"
-            )
             w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
             layer.w13_weight_scale = Parameter(
                 w13_blockscale_swizzled, requires_grad=False
             )
 
-            assert layer.w2_weight_scale.shape[2] % 16 == 0, (
-                "Expected weight_scale.dim(1) to be divisible by 16"
-            )
-            assert layer.w2_weight_scale.dtype == torch.float8_e4m3fn, (
-                "Weight Blockscale must be represented as FP8-E4M3"
-            )
             w2_blockscale_swizzled = swizzle_blockscale(layer.w2_weight_scale)
             layer.w2_weight_scale = Parameter(
                 w2_blockscale_swizzled, requires_grad=False
@@ -1672,9 +1678,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 routed_scaling_factor=None,
-                tile_tokens_dim=_get_tile_tokens_dim(
-                    x.shape[0], top_k, layer.local_num_experts
-                ),
+                tile_tokens_dim=None,
                 routing_method_type=routing_method_type,
                 do_finalize=True,
             )[0]
