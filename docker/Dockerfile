@@ -136,6 +136,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python3 --pre apache-tvm-ffi==0.1.0b15 \
     --prerelease=allow \
     && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+    --prerelease=allow \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # cuda arch list used by torch
@@ -468,6 +469,7 @@ COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --pre apache-tvm-ffi==0.1.0b15 \
+        --prerelease=allow \
         dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
