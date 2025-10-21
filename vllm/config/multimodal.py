@@ -127,8 +127,10 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
-    mm_processor_dynamic_kwargs: list[str] | None = None
-    """ avoid caching the kwargs in this list for mm_processor e.g., ["fps"]"""
+    mm_processor_dynamic_kwargs: set[str] = Field(default=None, init=False)
+    """Request-scoped processor kwargs (e.g., 'fps') treated as dynamic: 
+    excluded from processor construction/cache to avoid rebuilds,
+    but still allowed at call time if supported."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
