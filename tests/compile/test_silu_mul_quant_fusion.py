@@ -92,6 +92,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         assert silu_and_mul_nvfp4_quant_supported
 
         self.silu_and_mul = SiluAndMul()
+        self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
 
         # create nvfp4 weight
         w = torch.rand((hidden_size, hidden_size))
