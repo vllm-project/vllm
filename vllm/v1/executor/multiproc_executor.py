@@ -179,7 +179,7 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(
+    def execute_model(  # type: ignore[override]
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
@@ -204,6 +204,7 @@ class MultiprocExecutor(Executor):
         )
 
         # aggregate all workers output to a single output
+        assert self.kv_output_aggregator is not None
         if non_block:
             return self.kv_output_aggregator.async_aggregate(outputs, self.output_rank)
         return self.kv_output_aggregator.aggregate(outputs, self.output_rank)

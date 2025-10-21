@@ -26,7 +26,7 @@ from vllm.utils import (
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
 
