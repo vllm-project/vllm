@@ -1188,15 +1188,15 @@ def generate_identity_group(peer1, peer2, use, n):
 def get_queue_snapshot(queue: asyncio.Queue, queue_lock: asyncio.Lock) -> list:
     """Thread-safe snapshot of the exception queue."""
     """复制队列元素到列表（保留队列内容）"""
-    with queue_lock:  # 加锁确保复制期间无其他协程修改队列
+    async with queue_lock:  # 加锁确保复制期间无其他协程修改队列
         items = []
-        # 先取出所有元素
+        # get item at first
         while not queue.empty():
             item = queue.get_nowait()
             items.append(item)
-        # 再放回队列
+        # put item into queue again
         for item in items:
-            queue.put(item)
+            queue.put_nowait(item)
     return items
 
 
