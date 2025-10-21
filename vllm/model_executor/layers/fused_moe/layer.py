@@ -49,11 +49,15 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    is_flashinfer_supporting_global_sf,
+)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, direct_register_custom_op, has_deep_ep, has_pplx, round_up
+from vllm.utils import cdiv, has_deep_ep, has_pplx, round_up
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
@@ -1288,6 +1292,7 @@ class FusedMoE(CustomOp):
             "intermediate_size_per_partition": self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
+            "global_num_experts": self.global_num_experts,
         }
         # need full intermediate size pre-sharding for WNA16 act order
         if self.quant_method.__class__.__name__ in (
@@ -1631,13 +1636,25 @@ class FusedMoE(CustomOp):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
-        if expert_id == -1:
+        quant_method_name = self.quant_method.__class__.__name__
+        global_expert_id = expert_id
+        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+
+        allow_flashinfer = getattr(self.quant_method, "allow_flashinfer", False)
+        moe_backend = getattr(self.quant_method, "flashinfer_moe_backend", None)
+
+        use_global_sf = (
+            allow_flashinfer
+            and is_flashinfer_supporting_global_sf(moe_backend)
+            and "input_scale" in weight_name
+            and quant_method_name == "ModelOptNvFp4FusedMoE"
+        )
+
+        if expert_id == -1 and not use_global_sf:
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
 
-        quant_method_name = self.quant_method.__class__.__name__
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
@@ -1722,7 +1739,9 @@ class FusedMoE(CustomOp):
                 )
 
             self._load_single_value(
-                param=param, loaded_weight=loaded_weight, expert_id=expert_id
+                param=param,
+                loaded_weight=loaded_weight,
+                expert_id=global_expert_id if use_global_sf else expert_id,
             )
             return True if return_success else None
 
