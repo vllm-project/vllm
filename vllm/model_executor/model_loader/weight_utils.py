@@ -667,7 +667,7 @@ def runai_safetensors_weights_iterator(
             return f"cuda:{torch.cuda.current_device()}" if is_cuda else None
 
         if is_distributed and (device := get_device()):
-            streamer.stream_files(hf_weights_files, device=device, is_distributed=True)
+            streamer.stream_files(hf_weights_files, s3_credentials=None, device=device, is_distributed=True)
         else:
             streamer.stream_files(hf_weights_files)
         total_tensors = sum(
