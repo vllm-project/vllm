@@ -1481,7 +1481,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
     # FlattenLogprobs.
     "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
-    # (EPLB-related envs moved to config: use ParallelConfig.eplb_config)
 }
 
 # --8<-- [end:env-vars-definition]
