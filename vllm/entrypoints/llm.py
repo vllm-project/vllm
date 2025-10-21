@@ -285,6 +285,16 @@ class LLM:
         else:
             structured_outputs_instance = StructuredOutputsConfig()
 
+        # warn about single-process data parallel usage.
+        _dps = int(kwargs.get("data_parallel_size", 1))
+        if _dps > 1:
+            logger.warning_once(
+                f"LLM(data_parallel_size={_dps}) is not well supported for single-"
+                "process usage and may hang. If you encounter hangs, please use "
+                "the explicit multi-process data-parallel example at "
+                "'examples/offline_inference/data_parallel.py'."
+            )
+
         engine_args = EngineArgs(
             model=model,
             runner=runner,
