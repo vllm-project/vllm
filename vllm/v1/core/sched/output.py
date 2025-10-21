@@ -167,7 +167,9 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    # ids of structured outputs requests included in the bitmask, in order.
+    # ids of structured outputs requests included in the bitmask, in the
+    # same order as the corresponding stacked rows of the bitmask.
+    # There may be more than one row per request in the case of speculative decoding.
     structured_output_request_ids: list[str]
     # the bitmask for the whole batch
     grammar_bitmask: "npt.NDArray[np.int32] | None"

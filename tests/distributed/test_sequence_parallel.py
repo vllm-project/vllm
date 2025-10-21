@@ -18,7 +18,7 @@ import pytest
 from vllm.config.compilation import CompilationMode
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -273,14 +273,14 @@ def _compare_sp(
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.fast(),
+    "hmellor/tiny-random-LlamaForCausalLM": SPTestSettings.fast(),
     "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8": SPTestSettings.fp8_quant(),
 }
 
 SP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
-    "meta-llama/Llama-3.2-1B-Instruct",
+    "hmellor/tiny-random-LlamaForCausalLM",
     "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
 ]
 

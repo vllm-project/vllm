@@ -30,12 +30,12 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import (
     decorate_logs,
-    get_hash_fn_by_name,
-    make_zmq_socket,
-    resolve_obj_by_qualname,
     set_process_title,
 )
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -290,14 +290,11 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
-    def execute_model_with_error_logging(
-        self,
-        model_fn: Callable[[SchedulerOutput], ModelRunnerOutput],
-        scheduler_output: SchedulerOutput,
-    ) -> ModelRunnerOutput:
+    @contextmanager
+    def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
         try:
-            return model_fn(scheduler_output)
+            yield
         except Exception as err:
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
@@ -321,15 +318,16 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model_with_error_logging(
-            self.model_executor.execute_model,  # type: ignore
-            scheduler_output,
-        )
+
+        with self.log_error_detail(scheduler_output):
+            model_output = self.model_executor.execute_model(scheduler_output)
+
+        assert isinstance(model_output, ModelRunnerOutput)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
 
-        return (engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0)
+        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
         if self.use_spec_decode and model_executed:
@@ -386,14 +384,12 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output = batch_queue.pop()
-        model_output = self.execute_model_with_error_logging(
-            lambda _: future.result(), scheduler_output
-        )
+        with self.log_error_detail(scheduler_output):
+            model_output = future.result()
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-
         return engine_core_outputs, model_executed
 
     def shutdown(self):
