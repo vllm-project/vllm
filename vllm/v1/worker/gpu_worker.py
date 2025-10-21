@@ -176,10 +176,7 @@ class Worker(WorkerBase):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
                 if dp_local_rank is None:
-                    dp_local_rank = (
-                        self.parallel_config.data_parallel_rank
-                        % self.parallel_config.data_parallel_size_local
-                    )
+                    dp_local_rank = self.parallel_config.data_parallel_rank
 
                 tp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
