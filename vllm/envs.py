@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: str | None = None
-    VLLM_LOGITS_PROCESSOR_THREADS: int | None = None
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
@@ -113,6 +112,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -138,10 +138,9 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
-    VLLM_RAY_DP_PACK_STRATEGY: str = "strict"
+    VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: bool | None = None
-    VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
@@ -198,7 +197,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
@@ -245,7 +244,7 @@ def maybe_convert_bool(value: str | None) -> bool | None:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils import is_torch_equal_or_newer
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
@@ -566,15 +565,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_STREAM": lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX": lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
-    # if set, vllm will call logits processors in a thread pool with this many
-    # threads. This is useful when using custom logits processors that either
-    # (a) launch additional CUDA kernels or (b) do significant CPU-bound work
-    # while not holding the python GIL, or both.
-    "VLLM_LOGITS_PROCESSOR_THREADS": lambda: int(
-        os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0")
-    )
-    if "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ
-    else None,
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: val
@@ -914,6 +904,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
         in ("true", "1")
     ),
+    # Whether to use aiter fusion shared experts ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
+        in ("true", "1")
+    ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")
@@ -1032,6 +1028,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #   for non-master nodes, allocate as many DP ranks as can fit;
     # - "strict":
     #   allocate exactly data-parallel-size-local DP ranks to each picked node;
+    # - "span":
+    #   Should be used only when a single DP rank requires multiple nodes.
+    #   allocate one DP rank over as many nodes as required for set world_size;
     # This environment variable is ignored if data-parallel-backend is not Ray.
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
@@ -1056,13 +1055,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
     ),
-    # Whether to turn on the outlines cache for V0
-    # This cache is unbounded and on disk, so it's not safe to use in
-    # an environment with potentially malicious users.
-    "VLLM_V0_USE_OUTLINES_CACHE": lambda: os.environ.get(
-        "VLLM_V0_USE_OUTLINES_CACHE", "0"
-    )
-    == "1",
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
@@ -1343,7 +1335,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
-        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
+        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
