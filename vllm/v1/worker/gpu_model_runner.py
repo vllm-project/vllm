@@ -293,6 +293,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             elif self.speculative_config.method == "self_specs":
                 # NOTE(brian1009): self_specs does not need drafter
                 self.drafter = None
+            elif self.speculative_config.method == "self_spec_ngram":
+                # Self-spec with n-gram assistance during ACCUMULATING phase
+                self.drafter = NgramProposer(self.vllm_config)
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -2787,6 +2790,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, NgramProposer)
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids, self.input_batch.req_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                self.input_batch.spec_decode_unsupported_reqs)
+        elif self.speculative_config.method == "self_spec_ngram":
+            # Self-spec with n-gram: propose drafts for all requests
+            # Scheduler will override with pending_output_tokens when transitioning to VERIFYING
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(

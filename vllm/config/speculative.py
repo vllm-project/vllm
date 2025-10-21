@@ -32,7 +32,8 @@ logger = init_logger(__name__)
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp", "self_specs"]
+                            "longcat_flash_mtp", "mtp", "self_specs",
+                            "self_spec_ngram"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -237,6 +238,10 @@ class SpeculativeConfig:
                 # Self-speculative decoding doesn't use a separate model
                 # Keep model as None
                 pass
+            elif self.method == "self_spec_ngram":
+                # Self-spec with n-gram assistance
+                # Keep model as None (uses ngram proposer)
+                self.model = "ngram"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without "
@@ -248,9 +253,10 @@ class SpeculativeConfig:
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
 
-        if self.method in ("ngram", "[ngram]"):
-            # Unified to "ngram" internally
-            self.method = "ngram"
+        if self.method in ("ngram", "[ngram]", "self_spec_ngram"):
+            # Unified to "ngram" or "self_spec_ngram" internally
+            if self.method in ("ngram", "[ngram]"):
+                self.method = "ngram"
             # Set default values if not provided
             if (self.prompt_lookup_min is None
                     and self.prompt_lookup_max is None):
@@ -566,11 +572,11 @@ class SpeculativeConfig:
         return self.method in ("eagle", "eagle3", "mtp")
 
     def use_self_specs(self) -> bool:
-        return self.method == "self_specs"
+        return self.method in ("self_specs", "self_spec_ngram")
 
     def __repr__(self) -> str:
         method = self.method
-        if method == "ngram" or method == "self_specs":
+        if method in ("ngram", "self_specs", "self_spec_ngram"):
             model = None
         elif self.draft_model_config is not None:
             model = self.draft_model_config.model
