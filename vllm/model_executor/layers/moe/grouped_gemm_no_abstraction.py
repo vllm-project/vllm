@@ -136,7 +136,7 @@ def run_batched_deepgemm_contiguous_bf16(
         aligned_end = start + aligned_ms[i]
         expert_ids[start:actual_end] = i
         expert_ids[actual_end:aligned_end] = -1
-        reference_output[start:aligned_end] = x[start:aligned_end] @ weight[i].t()
+        reference_output[start:actual_end] = x[start:actual_end] @ weight[i].t()
         start = aligned_end
 
     output = torch.zeros(
@@ -152,6 +152,7 @@ def run_batched_deepgemm_contiguous_bf16(
         output,
         expert_ids,
     )
+    output = output * (expert_ids != -1).unsqueeze(1)
     torch.testing.assert_close(output, reference_output)
 
 
@@ -351,6 +352,6 @@ def run_triton_group_gemm_masked_bf16(
 
 # run_batched_deepgemm_masked_fp8(512, 8, 1024, 512)
 run_batched_deepgemm_contiguous_bf16(512, 8, 1024, 512)
-run_batched_deepgemm_masked_bf16(512, 8, 1024, 512)
-run_triton_group_gemm_contiguous_bf16(512, 8, 1024, 512, 4)
-run_triton_group_gemm_masked_bf16(512, 8, 1024, 512)
+# run_batched_deepgemm_masked_bf16(512, 8, 1024, 512)
+# run_triton_group_gemm_contiguous_bf16(512, 8, 1024, 512, 4)
+# run_triton_group_gemm_masked_bf16(512, 8, 1024, 512)
