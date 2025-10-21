@@ -187,7 +187,7 @@ class DecodeBenchConnectorScheduler:
         Returns:
             (num_tokens_to_fill, is_async)
             - num_tokens_to_fill: number of uncomputed tokens minus 1
-              (we fill everything except the last token for decode)
+                (we fill everything except the last token for decode)
             - is_async: False (synchronous filling)
         """
         req_id = request.request_id
