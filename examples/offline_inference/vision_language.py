@@ -153,23 +153,6 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Dots-OCR
-def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    prompts = [f"<|img|><|imgpad|><|endofimg|>{question}" for question in questions]
-    engine_args = EngineArgs(
-        model="rednote-hilab/dots.ocr",
-        limit_mm_per_prompt={modality: 1},
-        trust_remote_code=True,
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -210,6 +193,45 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     prompts = [
         f"<|User|>: <image>\n{question}\n\n<|Assistant|>:" for question in questions
     ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "deepseek-ai/DeepSeek-OCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    prompts = [
+        f"<|User|>: <image>\n{question}\n\n<|Assistant|>:" for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Dots-OCR
+def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [f"<|img|><|imgpad|><|endofimg|>{question}" for question in questions]
+    engine_args = EngineArgs(
+        model="rednote-hilab/dots.ocr",
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1738,9 +1760,10 @@ model_example_map = {
     "bee": run_bee,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
-    "dots_ocr": run_dots_ocr,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
+    "deepseek_ocr": run_deepseek_ocr,
+    "dots_ocr": run_dots_ocr,
     "ernie45_vl": run_ernie45_vl,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
