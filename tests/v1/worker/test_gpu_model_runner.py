@@ -434,9 +434,9 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
         attn_backend = attn_group.backend
         break
 
-    expected_kv_cache_shape = list(attn_backend.get_kv_cache_shape(
-        NUM_BLOCKS, BLOCK_SIZE, n_heads, head_size
-    ))
+    expected_kv_cache_shape = list(
+        attn_backend.get_kv_cache_shape(NUM_BLOCKS, BLOCK_SIZE, n_heads, head_size)
+    )
 
     # TODO mla test
     default_stride = tuple(range(5))
