@@ -624,6 +624,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)
             )
 
+        if self._use_trtllm_ragged_prefill:
+            self._workspace_buffer = torch.empty(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=device
+            )
+
         if self._use_cudnn_prefill:
             self.cudnn_workspace = torch.empty(
                 CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
@@ -1253,12 +1258,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
-            # Initialize workspace buffer for trtllm_ragged
-            self._workspace_buffer = torch.zeros(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device=get_current_vllm_config().device_config.device,
-            )
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
@@ -1363,12 +1362,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return_lse=return_softmax_lse,
         )
 
-        # Log output statistics
         if isinstance(ret, tuple):
-            out, lse = ret
             return ret[0], ret[1].transpose(0, 1).contiguous()
-        else:
-            return ret
+        return ret
 
     def _run_prefill_new_tokens_cudnn(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
