@@ -716,15 +716,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
-            if self.block_quant:
-                # For block-quantized weights, enable the CUTLASS block-scale path
-                self.flashinfer_moe_fn = partial(
-                    flashinfer_cutlass_moe_fp8,
-                    moe=self.moe,
-                    use_deepseek_fp8_block_scale=True,
-                )
-            else:
-                self.flashinfer_moe_fn = flashinfer_cutlass_moe_fp8
+            self.flashinfer_moe_fn = partial(
+                flashinfer_cutlass_moe_fp8,
+                moe=self.moe,
+                use_deepseek_fp8_block_scale=self.block_quant is not None,
+            )
 
         self.allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
         self.allow_cutlass_block_scaled_grouped_gemm = (
