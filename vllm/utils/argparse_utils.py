@@ -241,7 +241,6 @@ class FlexibleArgumentParser(ArgumentParser):
                     *args[1:model_idx],
                     *args[rest_start_idx:],
                 ]
-                print("args", args)
             except StopIteration:
                 pass
 
@@ -471,9 +470,7 @@ class FlexibleArgumentParser(ArgumentParser):
         extension: str = file_path.split(".")[-1]
         if extension not in ("yaml", "yml"):
             raise ValueError(
-                "Config file must be of a yaml/yml type.\
-                              %s supplied",
-                extension,
+                f"Config file must be of a yaml/yml type. {extension} supplied"
             )
 
         # only expecting a flat dictionary of atomic types
@@ -485,9 +482,8 @@ class FlexibleArgumentParser(ArgumentParser):
                 config = yaml.safe_load(config_file)
         except Exception as ex:
             logger.error(
-                "Unable to read the config file at %s. \
-                Make sure path is correct",
-                file_path,
+                f"Unable to read the config file at {file_path}. "
+                "Make sure path is correct"
             )
             raise ex
 

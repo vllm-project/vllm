@@ -55,7 +55,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, has_deep_ep, has_pplx, round_up
+from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils import has_deep_ep, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id

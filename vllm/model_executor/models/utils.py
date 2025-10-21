@@ -23,10 +23,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (
-    cdiv,
     is_pin_memory_available,
     is_uva_available,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
     get_cuda_view_from_cpu_tensor,

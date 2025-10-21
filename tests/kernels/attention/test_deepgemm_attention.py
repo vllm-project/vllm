@@ -6,7 +6,8 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import cdiv, has_deep_gemm
+from vllm.utils.math_utils import cdiv
+from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
     _ceil_to_ue8m0,
     calc_diff,

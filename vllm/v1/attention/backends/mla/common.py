@@ -220,7 +220,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
-from vllm.utils import cdiv, round_down
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,

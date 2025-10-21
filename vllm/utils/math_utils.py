@@ -8,7 +8,7 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
-def next_power_of_2(n) -> int:
+def next_power_of_2(n: int) -> int:
     """The next power of 2 (inclusive)"""
     if n < 1:
         return 1

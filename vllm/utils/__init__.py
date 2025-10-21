@@ -7,27 +7,16 @@ import enum
 import getpass
 import importlib
 import inspect
-import json
 import multiprocessing
 import os
 import signal
 import sys
 import tempfile
-import textwrap
 import threading
 import traceback
 import uuid
 import warnings
 import weakref
-from argparse import (
-    Action,
-    ArgumentDefaultsHelpFormatter,
-    ArgumentParser,
-    ArgumentTypeError,
-    RawDescriptionHelpFormatter,
-    _ArgumentGroup,
-)
-from collections import defaultdict
 from collections.abc import (
     Callable,
     Sequence,
@@ -39,14 +28,39 @@ from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 
 import cloudpickle
 import psutil
-import regex as re
 import setproctitle
 import torch
-import yaml
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
+
+# Import utilities from specialized modules for backward compatibility
+from vllm.utils.argparse_utils import (
+    FlexibleArgumentParser,
+    SortedHelpFormatter,
+    StoreBoolean,
+)
+from vllm.utils.math_utils import (
+    cdiv,
+    next_power_of_2,
+    prev_power_of_2,
+    round_down,
+    round_up,
+)
+
+__all__ = [
+    # Argparse utilities
+    "FlexibleArgumentParser",
+    "SortedHelpFormatter",
+    "StoreBoolean",
+    # Math utilities
+    "cdiv",
+    "next_power_of_2",
+    "prev_power_of_2",
+    "round_down",
+    "round_up",
+]
 
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
@@ -157,16 +171,6 @@ def update_environment_variables(envs: dict[str, str]):
         os.environ[k] = v
 
 
-# Math utilities - imported from math_utils module
-from vllm.utils.math_utils import (
-    cdiv,
-    next_power_of_2,
-    prev_power_of_2,
-    round_down,
-    round_up,
-)
-
-
 @cache
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
@@ -257,14 +261,6 @@ def weak_bind(
             unbound(inst, *args, **kwargs)
 
     return weak_bound
-
-
-# Argument parsing utilities - imported from argparse_utils module
-from vllm.utils.argparse_utils import (
-    FlexibleArgumentParser,
-    SortedHelpFormatter,
-    StoreBoolean,
-)
 
 
 class AtomicCounter:
