@@ -31,7 +31,7 @@ class FinishReason(enum.IntEnum):
     length - max_tokens was consumed, or max_model_len was reached
     abort - aborted by client
     error - retryable request-level internal error (e.g., KV load failure).
-            Invariant: always converted to 503 Service Unavailable.
+            Invariant: always converted to 500 Internal Server Error.
 
     """
 

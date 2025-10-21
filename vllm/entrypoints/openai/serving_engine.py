@@ -438,6 +438,12 @@ class OpenAIServing:
             for i, current_beam in enumerate(all_beams):
                 result = output[i]
 
+                # check for error finish reason and abort beam search
+                if result.outputs[0].finish_reason == "error":
+                    raise RuntimeError(
+                        "Beam search encountered an internal error during generation"
+                    )
+
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
