@@ -520,7 +520,7 @@ def _build_sam(
 
 class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
 
-    def get_abs_pos(abs_pos, tgt_size):
+    def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int):
         # abs_pos: L, C
         # tgt_size: M
         # return: M, C
@@ -533,8 +533,7 @@ class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
         dtype = abs_pos.dtype
 
         if src_size != tgt_size:
-            old_pos_embed = old_pos_embed.view(1, src_size, src_size, dim).permute(0, 3, 1,
-                                                                                        2).contiguous()
+            old_pos_embed = old_pos_embed.view(1, src_size, src_size, dim).permute(0, 3, 1, 2).contiguous()
             old_pos_embed = old_pos_embed.to(torch.float32)
             new_pos_embed = F.interpolate(
                 old_pos_embed,
@@ -553,18 +552,6 @@ class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
 
     def forward(self, pixel_values: torch.Tensor, patch_embeds: torch.Tensor | None = None) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
-        target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(
-            pixel_values.to(dtype=target_dtype)
-        )  # shape = [*, width, grid, grid]
-        patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
-
-        class_embeds = self.class_embedding.expand(batch_size, 1, -1)
-        embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        embeddings = embeddings + self.position_embedding(self.position_ids)
-
-        batch_size = pixel_values.shape[0]
-        target_dtype = self.patch_embedding.weight.dtype
         if patch_embeds is not None:
             patch_embeds = patch_embeds
         else:
@@ -573,7 +560,7 @@ class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
 
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        embeddings = embeddings + get_abs_pos(self.position_embedding(self.position_ids), embeddings.size(1))
+        embeddings = embeddings + self.get_abs_pos(self.position_embedding(self.position_ids), embeddings.size(1))
         return embeddings
 
 
