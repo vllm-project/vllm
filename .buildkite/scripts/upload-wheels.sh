@@ -64,6 +64,9 @@ if [[ $normal_wheel == *"cu126"* ]]; then
 elif [[ $normal_wheel == *"cu128"* ]]; then
     # if $normal_wheel matches cu128, do not upload the index.html
     echo "Skipping index files for cu128 wheels"
+elif [[ $normal_wheel == *"cu130"* ]]; then
+    # if $normal_wheel matches cu130=, do not upload the index.html
+    echo "Skipping index files for cu130 wheels"
 else
     # only upload index.html for cu129 wheels (default wheels) as it
     # is available on both x86 and arm64
@@ -81,6 +84,9 @@ if [[ $normal_wheel == *"cu126"* ]]; then
 elif [[ $normal_wheel == *"cu128"* ]]; then
     # if $normal_wheel matches cu128, do not upload the index.html
     echo "Skipping index files for cu128 wheels"
+elif [[ $normal_wheel == *"cu130"* ]]; then
+    # if $normal_wheel matches cu130, do not upload the index.html
+    echo "Skipping index files for cu130 wheels"
 else
     # only upload index.html for cu129 wheels (default wheels) as it
     # is available on both x86 and arm64
