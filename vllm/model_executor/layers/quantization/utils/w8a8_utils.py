@@ -573,6 +573,12 @@ class Fp8LinearOp:
         else:
             qinput, x_scale = input_2d, input_scale
 
+        # It seems that there are some linear layer loader
+        # loads per-tensor quant weight scale as 2 dimensional tensor
+        # so the only way to know if weight is per tensor quantized
+        # is to check the number of elements in the weight scale tensor.
+        per_tensor_weights = weight_scale.numel() == 1
+
         # Must have dim() conditions
         # In per-token quant scenario, when the number of token is 1,
         # the scale will only have 1 elements.
@@ -581,7 +587,6 @@ class Fp8LinearOp:
         # Example:
         # When the number of token is 1, per-token scale is [[1]]
         # When per-tensor scale is [1] or ().
-        per_tensor_weights = (weight_scale.numel() == 1) and weight_scale.dim() < 2
         per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
         if self.use_aiter_and_is_supported and not (
