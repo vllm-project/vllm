@@ -54,5 +54,5 @@ class KVEventsConfig:
     def __post_init__(self):
         if self.publisher is None and self.enable_kv_cache_events:
             self.publisher = "zmq"
-        else:
+        elif self.publisher is None:
             self.publisher = "null"
