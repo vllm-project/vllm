@@ -30,6 +30,7 @@ class ModelRequestData(NamedTuple):
     prompts: list[str]
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
+    sampling_params: list[SamplingParams] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -201,6 +202,8 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
 
 
 def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+
     assert modality == "image"
 
     model_name = "deepseek-ai/DeepSeek-OCR"
@@ -210,15 +213,31 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
+        logits_processors=[NGramPerReqLogitsProcessor],
     )
 
     prompts = [
-        f"<|User|>: <image>\n{question}\n\n<|Assistant|>:" for question in questions
+        "<|User|>: <image>\n<|grounding|>Given the layout of the image.\n\n<|Assistant|>:"
+        for question in questions
+    ]
+    sampling_params = [
+        SamplingParams(
+            temperature=0.2,
+            max_tokens=64,
+            extra_args=dict(
+                ngram_size=30,
+                window_size=90,
+                # whitelist: <td>, </td>
+                whitelist_token_ids={128821, 128822},
+            ),
+        )
+        for _ in questions
     ]
 
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
+        sampling_params=sampling_params,
     )
 
 
@@ -2026,8 +2045,12 @@ def main(args):
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(
-        temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
+    sampling_params = (
+        SamplingParams(
+            temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
+        )
+        if req_data.sampling_params is None
+        else req_data.sampling_params
     )
 
     assert args.num_prompts > 0
