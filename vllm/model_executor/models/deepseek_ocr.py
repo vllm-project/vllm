@@ -1,20 +1,15 @@
 
 """Inference-only Deepseek-OCR model compatible with HuggingFace weights."""
-import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from einops import rearrange, repeat
 from transformers import BatchFeature, CLIPVisionConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
@@ -26,8 +21,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
-# from process.image_process import (
-#     DeepseekOCRProcessor, count_tiles)
 from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor, count_tiles
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
@@ -36,17 +29,13 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper, 
 
 from .deepencoder import build_sam_vit_b, DeepCLIPVisionTransformer
 from .deepseek_vl2 import MlpProjector
-# from deepencoder.clip_sdpa import build_clip_l
-# from deepencoder.build_linear import MlpProjector
-# from addict import Dict
-# import time
+
 
 BASE_SIZE = 1024
 IMAGE_SIZE = 640
 CROP_MODE = True
 MIN_CROPS= 2
 MAX_CROPS= 6 # max:9; If your GPU memory is small, it is recommended to set it to 6.
-PROMPT = '<image>\n<|grounding|>Convert the document to markdown.'
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
 
@@ -83,14 +72,8 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
             if image_width <= 640 and image_height <= 640:
                 crop_ratio = [1, 1]
             else:
-                # images_crop_raw, crop_ratio = hf_processor.dynamic_preprocess(image)
-
                 # find the closest aspect ratio to the target
                 crop_ratio = count_tiles(image_width, image_height, image_size=IMAGE_SIZE)
-
-                # print('===========')
-                # print('crop_ratio ', crop_ratio)
-                # print('============')
                 
             num_width_tiles, num_height_tiles = crop_ratio
         else:
@@ -148,7 +131,7 @@ class DeepseekOCRDummyInputsBuilder(
 
 class DeepseekOCRMultiModalProcessor(
         BaseMultiModalProcessor[DeepseekOCRProcessingInfo]):
-    
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -281,8 +264,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        # config.model_type ='deepseek_vl_v2'
-
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -316,6 +297,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         #     recompute_list = []
         # )
         # self.vision_model = build_clip_l()
+        # TODO(Isotr0py): convert from vision_config
         clip_vision_config = CLIPVisionConfig(
             hidden_size=1024,
             intermediate_size=4096,
@@ -326,9 +308,11 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             projection_dim=512,
             layer_norm_eps=1e-5,
         )
-        self.vision_model = DeepCLIPVisionTransformer(config=clip_vision_config)
+        self.vision_model = DeepCLIPVisionTransformer(
+            config=clip_vision_config,
+            quant_config=quant_config,
+        )
 
-        n_embed = 1280
         self.projector = MlpProjector(self.projector_config)
         self.tile_tag = config.tile_tag
         self.global_view_pos = config.global_view_pos
@@ -338,10 +322,12 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # self.projector = torch.compile(self.projector, mode="max-autotune")
 
         # special token for image token sequence format
+        n_embed = self.projector_config.n_embed
         embed_std = 1 / torch.sqrt(torch.tensor(n_embed, dtype=torch.float32))
         if self.tile_tag == "2D":
             # <|view_separator|>, <|\n|>
             self.image_newline = nn.Parameter(torch.randn(n_embed) * embed_std)
+            # This is a typo in original implementation
             self.view_seperator = nn.Parameter(torch.randn(n_embed) * embed_std)
         else:
             raise ValueError(
@@ -364,8 +350,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-
 
     def _parse_and_validate_image_input(
             self, **kwargs: object):

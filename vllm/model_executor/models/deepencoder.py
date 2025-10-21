@@ -26,28 +26,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from .clip import CLIPVisionEmbeddings, CLIPEncoder
 
 
-def get_abs_pos(abs_pos, tgt_size):
-
-    dtype = abs_pos.dtype
-
-    src_size = abs_pos.size(1)
-
-    if src_size != tgt_size:
-        old_pos_embed = abs_pos.permute(0, 3, 1, 2)
-        old_pos_embed = old_pos_embed.to(torch.float32)
-        new_pos_embed = F.interpolate(
-            old_pos_embed,
-            size=(tgt_size, tgt_size),
-            mode='bicubic',
-            antialias=True,
-            align_corners=False,
-        ).to(dtype)
-        new_pos_embed = new_pos_embed.permute(0, 2, 3, 1)
-        return new_pos_embed
-    else:
-        return abs_pos
-
-
 class MLPBlock(nn.Module):
     def __init__(
         self,
@@ -130,7 +108,7 @@ class ImageEncoderViT(nn.Module):
             embed_dim=embed_dim,
         )
 
-        self.pos_embed: Optional[nn.Parameter] = None
+        self.pos_embed: nn.Parameter | None = None
         if use_abs_pos:
             # Initialize absolute positional embedding with pretrain image size.
             self.pos_embed = nn.Parameter(
@@ -174,22 +152,39 @@ class ImageEncoderViT(nn.Module):
         self.net_2 = nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1, bias=False)
         self.net_3 = nn.Conv2d(512, 1024, kernel_size=3, stride=2, padding=1, bias=False)
 
+    def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int):
+        dtype = abs_pos.dtype
+
+        src_size = abs_pos.size(1)
+
+        if src_size != tgt_size:
+            old_pos_embed = abs_pos.permute(0, 3, 1, 2)
+            old_pos_embed = old_pos_embed.to(torch.float32)
+            new_pos_embed = F.interpolate(
+                old_pos_embed,
+                size=(tgt_size, tgt_size),
+                mode='bicubic',
+                antialias=True,
+                align_corners=False,
+            ).to(dtype)
+            new_pos_embed = new_pos_embed.permute(0, 2, 3, 1)
+            return new_pos_embed
+        else:
+            return abs_pos
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
         if self.pos_embed is not None:
-            # x = x + self.pos_embed
-            x = x + get_abs_pos(self.pos_embed, x.size(1))
+            x = x + self.get_abs_pos(self.pos_embed, x.size(1))
 
         for blk in self.blocks:
             x = blk(x)
 
         neck_output  = self.neck(x.permute(0, 3, 1, 2))
         conv2_output  = self.net_2(neck_output)
-        # print(f"conv2_output shape: {conv2_output.shape}")
         conv3_output  = self.net_3(conv2_output)
 
-        return conv3_output 
-
+        return conv3_output
 
 class Block(nn.Module):
     """Transformer blocks with support of window attention and residual propagation blocks"""
@@ -481,13 +476,13 @@ class PatchEmbed(nn.Module):
         return x
 
 
-def build_sam_vit_b(checkpoint=None):
+# TODO(Isotr0py): use vision_config to build sam model
+def build_sam_vit_b():
     return _build_sam(
         encoder_embed_dim=768,
         encoder_depth=12,
         encoder_num_heads=12,
         encoder_global_attn_indexes=[2, 5, 8, 11],
-        checkpoint=checkpoint,
     )
 
 
@@ -496,7 +491,6 @@ def _build_sam(
     encoder_depth,
     encoder_num_heads,
     encoder_global_attn_indexes,
-    checkpoint=None,
 ):
     prompt_embed_dim = 256
     image_size = 1024
