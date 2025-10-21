@@ -4015,16 +4015,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"with {min_cg_builder_name} backend (support: "
                 f"{min_cg_support})"
             )
-            if min_cg_support == AttentionCGSupport.NEVER:
-                # if not supported any full cudagraphs, just raise it.
-                msg += (
-                    "; please try cudagraph_mode=PIECEWISE, and "
-                    "make sure compilation mode is VLLM_COMPILE"
-                )
-                raise ValueError(msg)
-
             # attempt to resolve the full cudagraph related mode
-            if self.compilation_config.splitting_ops_contain_attention():
+            if min_cg_support == AttentionCGSupport.NEVER:
+                msg += "; setting cudagraph_mode=PIECEWISE"
+                cudagraph_mode = self.compilation_config.cudagraph_mode = (
+                    CUDAGraphMode.PIECEWISE
+                )
+                if not self.compilation_config.splitting_ops_contain_attention():
+                    msg += "; adding attention ops to splitting ops"
+                    self.compilation_config.add_missing_attention_splitting_ops()
+            elif self.compilation_config.splitting_ops_contain_attention():
                 msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
                 cudagraph_mode = self.compilation_config.cudagraph_mode = (
                     CUDAGraphMode.FULL_AND_PIECEWISE

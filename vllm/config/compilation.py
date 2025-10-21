@@ -806,6 +806,15 @@ class CompilationConfig:
             op in self.splitting_ops for op in self._attention_ops
         )
 
+    def add_missing_attention_splitting_ops(self):
+        if self.splitting_ops is None:
+            self.splitting_ops = list(self._attention_ops)
+            return
+
+        for op in self._attention_ops:
+            if op not in self.splitting_ops:
+                self.splitting_ops.append(op)
+
     def is_attention_compiled_piecewise(self) -> bool:
         if not self.splitting_ops_contain_attention():
             return False
