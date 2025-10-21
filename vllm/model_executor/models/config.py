@@ -22,7 +22,7 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls) -> set[str]:
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
             kw_annotations = kwargs_type_annotations[kw_type].__annotations__
-            for kw_name in kw_annotations.keys():
+            for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
     return dynamic_kwargs
 
