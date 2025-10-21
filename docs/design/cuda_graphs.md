@@ -17,7 +17,7 @@ In this document we will discuss the:
     In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
 
 !!! note
-    The following contents are mostly based on the last commit of <gh-pr:20059>.
+    The following contents are mostly based on the last commit of <https://github.com/vllm-project/vllm/pull/20059>.
 
 ## Motivation
 
@@ -92,7 +92,7 @@ where `num_tokens` can be the padded token length, and `uniform_decode` is deter
 The goal of this structure is to uniquely identify a (padded) batch with minimal possible items corresponding to a CUDA Graphs item. We are safe to exclude items like `uniform_query_len` because it is a constant at runtime for a certain setup currently. For example, it should be either `1` for a commonly pure decode or `1+num_spec_tokens` for a validation phase of speculative decode.
 
 !!! note
-    The prototype of `BatchDescriptor` may be extended for more general situations in the future, e.g., include more items, like `uniform_query_len` to support multiple different uniform decode lengths settings (<gh-pr:23679>), or other modifications needed to support CUDA Graphs for models whose inputs are not necessarily token length aware (for example, some multi-modal inputs).
+    The prototype of `BatchDescriptor` may be extended for more general situations in the future, e.g., include more items, like `uniform_query_len` to support multiple different uniform decode lengths settings (<https://github.com/vllm-project/vllm/pull/23679>), or other modifications needed to support CUDA Graphs for models whose inputs are not necessarily token length aware (for example, some multi-modal inputs).
 
 ### `CudagraphDispatcher`
 
@@ -167,7 +167,7 @@ class AttentionCGSupport(enum.Enum):
     """NO CUDA Graphs support"""
 ```
 
-Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible CUDA Graphs mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation level. For the complete fallback policy, please see the code of [initialize_cudagraph_capture][vllm.v1.worker.gpu_model_runner.GPUModelRunner.initialize_cudagraph_capture].
+Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible CUDA Graphs mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation mode. For the complete fallback policy, please see the code of [initialize_cudagraph_capture][vllm.v1.worker.gpu_model_runner.GPUModelRunner.initialize_cudagraph_capture].
 
 The following table lists backends that support full CUDA Graphs at the time of writing.
 
@@ -202,7 +202,7 @@ os.environ.setdefault("VLLM_LOGGING_LEVEL", "DEBUG")
 import vllm
 from vllm.config import CUDAGraphMode
 
-compilation_config = {"level": 3, "cudagraph_mode": "FULL_AND_PIECEWISE"}
+compilation_config = {"mode": 3, "cudagraph_mode": "FULL_AND_PIECEWISE"}
 model = vllm.LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
     dtype="auto",

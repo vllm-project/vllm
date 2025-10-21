@@ -13,13 +13,13 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from ..silly_attention import get_global_counter, reset_global_counter
@@ -61,7 +61,7 @@ def _run_simple_model(
 ):
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             use_inductor=use_inductor,
             splitting_ops=splitting_ops,
@@ -142,8 +142,7 @@ def test_simple_piecewise_compile(use_inductor):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("splitting_ops", [["silly::attention"], []])
-def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
+def test_simple_inductor_graph_partition(monkeypatch):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
@@ -152,8 +151,7 @@ def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     _run_simple_model(
-        # Inductor graph partition automatically resets splitting_ops to an empty list
-        splitting_ops=splitting_ops,
+        splitting_ops=["silly::attention"],
         use_inductor_graph_partition=True,
         use_inductor=True,
         # Since not splitting at fx graph level

@@ -16,10 +16,17 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import DeepseekV2DecoderLayer, get_spec_layer_idx_from_weight_name
+from .deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    get_spec_layer_idx_from_weight_name,
+)
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
@@ -56,6 +63,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
 
+        self.device = current_platform.device_type
+
         self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
             topk_tokens = config.index_topk
@@ -63,7 +72,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 topk_tokens,
                 dtype=torch.int32,
-                device="cuda",
+                device=self.device,
             )
         else:
             topk_indices_buffer = None
@@ -270,6 +279,10 @@ class DeepSeekMTP(nn.Module, SupportsPP):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
                         continue
 
                     # According to DeepSeek-V3 Technical Report, MTP modules

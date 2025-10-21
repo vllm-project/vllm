@@ -30,7 +30,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging.version import Version
 from transformers import PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeConfig,
@@ -78,17 +80,12 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from .qwen2_5_omni_thinker import (
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalProcessor,
     Qwen2_5OmniThinkerProcessingInfo,
 )
-
-# yapf: enable
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
     Qwen2_5_VisionRotaryEmbedding,
@@ -299,6 +296,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = vision_config.hidden_size
@@ -370,7 +368,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             )
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
             torch.get_default_dtype()
@@ -711,11 +711,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             return x
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
+        feature_extractor = self.info.get_feature_extractor()
+        hop_length = feature_extractor.hop_length
         if audios:
             # NOTE: Qwen3-Omni processor accept "audio"
             # To make sure the cache works with padding=True, we pre-padded
             # the audio to multiple of hop_length.
-            hop_length = self.info.get_feature_extractor().hop_length
             mm_data["audio"] = [
                 pad_to_hop_length(audio, hop_length)
                 if isinstance(audio, np.ndarray)
@@ -725,6 +726,14 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
+            # TODO(Isotr0py): Remove this patch after upstream fix PR
+            # released and Transformers version update:
+            # https://github.com/huggingface/transformers/pull/41473
+            if (
+                Version(TRANSFORMERS_VERSION) < Version("4.58.0")
+                and "truncation" not in mm_kwargs
+            ):
+                mm_kwargs["truncation"] = False
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -738,7 +747,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             and "feature_attention_mask" in hf_inputs
             and (audios := mm_data.get("audio", []))
         ):
-            hop_length = self.info.get_feature_extractor().hop_length
             audio_num_frames = []
             for _, audio in enumerate(audios):
                 audio_length = len(audio[0]) if isinstance(audio, tuple) else len(audio)
@@ -747,6 +755,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     if audio_length % hop_length == 0
                     else (audio_length // hop_length - 1)
                 )
+                if mm_kwargs.get("truncation", False):
+                    num_frame = min(
+                        num_frame, feature_extractor.n_samples // hop_length
+                    )
                 audio_num_frames.append(num_frame)
             hf_inputs["feature_attention_mask"] = [
                 torch.ones(num_frame) for num_frame in audio_num_frames
@@ -1135,11 +1147,17 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
         self.audio_tower = Qwen3OmniMoeAudioEncoder(thinker_config.audio_config)
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.visual = Qwen3Omni_VisionTransformer(
             vision_config=thinker_config.vision_config,
             norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
+            attn_backend_override=attn_backend_override,
         )
         self.quant_config = quant_config
 
