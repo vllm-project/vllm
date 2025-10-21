@@ -5,7 +5,7 @@
 Tests for race conditions and incorrect freeing in invalid block handling.
 
 These tests verify corretness in two scenarios:
-1. Async abort case: Blocks should not be freed immediately if async KV
+1. Async fail case: Blocks should not be freed immediately if async KV
    transfer is still in progress
 2. Sync recompute case: Blocks should not be freed for running requests
    that need to recompute invalid blocks
@@ -41,10 +41,10 @@ def _make_get_num_new_matched_tokens(
 
 
 @pytest.fixture
-def abort_scheduler():
-    """scheduler with kv_load_retry_policy='abort'"""
+def fail_scheduler():
+    """scheduler with kv_load_retry_policy='fail'"""
     vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_load_retry_policy = "abort"
+    vllm_config.kv_transfer_config.kv_load_retry_policy = "fail"
     return create_scheduler(vllm_config)
 
 
@@ -56,13 +56,13 @@ def recompute_scheduler():
     return create_scheduler(vllm_config)
 
 
-def test_async_abort_blocks_not_freed_before_transfer_complete(
-    abort_scheduler: Scheduler,
+def test_async_fail_blocks_not_freed_before_transfer_complete(
+    fail_scheduler: Scheduler,
 ):
     """
-    Test Issue 1: Async abort case - blocks protected by delay_free_blocks.
+    Test Issue 1: Async fail case - blocks protected by delay_free_blocks.
 
-    When aborting a request with async KV loading and invalid blocks:
+    When failing a request with async KV loading and invalid blocks:
     1. Connector must return delay_free_blocks=True to protect blocks
     2. Blocks should NOT be freed until transfer completion is confirmed
     3. Verifies the delay_free_blocks mechanism works correctly
@@ -74,40 +74,38 @@ def test_async_abort_blocks_not_freed_before_transfer_complete(
     num_external_computed_blocks = 99
     invalid_block_idx = 50
 
-    num_prompt_tokens = num_prompt_blocks * abort_scheduler.block_size
+    num_prompt_tokens = num_prompt_blocks * fail_scheduler.block_size
     num_external_computed_tokens = (
-        num_external_computed_blocks * abort_scheduler.block_size
+        num_external_computed_blocks * fail_scheduler.block_size
     )
 
     request = create_request(num_tokens=num_prompt_tokens)
-    abort_scheduler.add_request(request=request)
+    fail_scheduler.add_request(request=request)
 
     req_num_new_matched_tokens = {
         request.request_id: num_external_computed_tokens,
     }
 
     # mock connector indicating async load
-    abort_scheduler.connector = Mock()
-    abort_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+    fail_scheduler.connector = Mock()
+    fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, True)
     )
 
     # critical: request_finished returns delay_free_blocks=True for async transfers
     # this prevents blocks from being freed while transfer is in progress
-    abort_scheduler.connector.request_finished.return_value = (True, None)
-    abort_scheduler.connector.take_events.return_value = ()
+    fail_scheduler.connector.request_finished.return_value = (True, None)
+    fail_scheduler.connector.take_events.return_value = ()
 
-    scheduler_output = abort_scheduler.schedule()
+    scheduler_output = fail_scheduler.schedule()
 
     # request should be waiting for remote KVs
-    assert len(abort_scheduler.waiting) == 1
+    assert len(fail_scheduler.waiting) == 1
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == 0
 
     # get the allocated block IDs
-    (req_block_ids,) = abort_scheduler.kv_cache_manager.get_block_ids(
-        request.request_id
-    )
+    (req_block_ids,) = fail_scheduler.kv_cache_manager.get_block_ids(request.request_id)
     invalid_block_ids = {req_block_ids[invalid_block_idx]}
 
     # report invalid blocks (transfer not finished yet)
@@ -118,7 +116,7 @@ def test_async_abort_blocks_not_freed_before_transfer_complete(
         use_eos=True,
     )
 
-    outputs = abort_scheduler.update_from_output(scheduler_output, model_runner_output)
+    outputs = fail_scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # request should be marked as finished with error
     assert request.status == RequestStatus.FINISHED_ERROR
@@ -133,14 +131,12 @@ def test_async_abort_blocks_not_freed_before_transfer_complete(
     assert output.finish_reason == FinishReason.ERROR
 
     # critical: because delay_free_blocks=True, blocks should NOT be freed yet
-    assert request.request_id in abort_scheduler.requests, (
+    assert request.request_id in fail_scheduler.requests, (
         "Request should remain in scheduler.requests when delay_free_blocks=True"
     )
 
     # verify blocks are still allocated and protected
-    allocated_blocks = abort_scheduler.kv_cache_manager.get_block_ids(
-        request.request_id
-    )
+    allocated_blocks = fail_scheduler.kv_cache_manager.get_block_ids(request.request_id)
     assert allocated_blocks is not None
     assert len(allocated_blocks[0]) > 0, (
         "Blocks should be protected from freeing when delay_free_blocks=True"
