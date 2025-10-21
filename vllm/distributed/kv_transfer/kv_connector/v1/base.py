@@ -573,3 +573,12 @@ class KVConnectorBase_V1(ABC):
         expose connector transfer stats via Prometheus.
         """
         return None
+
+    def reset_cache(self) -> bool:
+        """
+        Reset the connector's internal cache.
+
+        Returns:
+            bool: True if the cache was successfully reset, False otherwise.
+        """
+        return False
