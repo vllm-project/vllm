@@ -492,6 +492,13 @@ class CompilationConfig:
 
     __str__ = __repr__
 
+    @field_validator("level", "mode", "splitting_ops", "cudagraph_mode", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
+
     @field_validator("compile_sizes", mode="before")
     @classmethod
     def _validate_compile_sizes(cls, value: Any) -> Any:
