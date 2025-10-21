@@ -1795,6 +1795,28 @@ def batched_moe_align_block_size(
     )
 
 
+def moe_lora_align_block_size(
+    topk_ids: torch.Tensor,
+    token_lora_mapping: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    max_loras: int,
+    sorted_token_ids: torch.Tensor,
+    experts_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+) -> None:
+    torch.ops._moe_C.moe_lora_align_block_size(
+        topk_ids,
+        token_lora_mapping,
+        num_experts,
+        block_size,
+        max_loras,
+        sorted_token_ids,
+        experts_ids,
+        num_tokens_post_pad,
+    )
+
+
 def moe_wna16_gemm(
     input: torch.Tensor,
     output: torch.Tensor,
