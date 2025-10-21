@@ -882,7 +882,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         tokenizer: AnyTokenizer,
         content: str | None = None,
-    ) -> tuple[list[FunctionCall], str | None] | None:
+    ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
 
         if not self.enable_auto_tools or not self.tool_parser:
@@ -898,7 +898,7 @@ class OpenAIServingResponses(OpenAIServing):
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
-            content = ""  # Clear content since tool is called.
+            content = None  # Clear content since tool is called.
         elif request.tool_choice == "required":
             assert content is not None
             tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
@@ -911,7 +911,7 @@ class OpenAIServingResponses(OpenAIServing):
                     for tool_call in tool_calls
                 ]
             )
-            content = ""  # Clear content since tool is called.
+            content = None  # Clear content since tool is called.
         elif request.tool_choice == "auto" or request.tool_choice == "none":
             try:
                 tool_parser = self.tool_parser(tokenizer)
