@@ -111,7 +111,6 @@ class CoreEngineProcManager:
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
-        fault_report_address: str | None = None,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -121,14 +120,18 @@ class CoreEngineProcManager:
             "executor_class": executor_class,
             "log_stats": log_stats,
         }
-        if fault_report_address:
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
             identity = generate_identity_group(
                 "core_engine_proc_manager", "clinet_guard", "report", 1
             )[0]
+            zmq_addr = (
+                f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
+                f"{vllm_config.fault_tolerance_config.fault_report_port}"
+            )
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
-                path=fault_report_address,
+                path=zmq_addr,
                 socket_type=zmq.DEALER,
                 bind=True,
                 identity=identity,
