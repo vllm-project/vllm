@@ -182,11 +182,20 @@ def test_env(
                                 expected = name
                                 assert backend.get_name() == expected
                     elif name == "FLASH_ATTN_MLA":
-                        backend = get_attn_backend(
-                            576, torch.float16, None, block_size, use_mla=use_mla
+                        from vllm.attention.utils.fa_utils import (
+                            flash_attn_supports_mla,
                         )
-                        expected = "FLASH_ATTN_MLA"
-                        assert backend.get_name() == expected
+
+                        if not flash_attn_supports_mla():
+                            pytest.skip(
+                                "FlashAttention MLA not supported on this platform"
+                            )
+                        else:
+                            backend = get_attn_backend(
+                                576, torch.float16, None, block_size, use_mla=use_mla
+                            )
+                            expected = "FLASH_ATTN_MLA"
+                            assert backend.get_name() == expected
                     else:
                         # TRITON_MLA or other fallback
                         backend = get_attn_backend(
