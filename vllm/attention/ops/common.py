@@ -168,12 +168,11 @@ def correct_attn_out(
     return out, lse
 
 
-def cp_lse_ag_out_rs(
+def _cp_lse_common(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
     ctx: CPTritonContext = None,
-    return_lse=False,
 ):
     """
     cp_attn_out: [ B, H, D ]
@@ -195,6 +194,21 @@ def cp_lse_ag_out_rs(
     lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
     out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
     assert out.is_contiguous()
+    return out, lse
+
+
+def cp_lse_ag_out_rs(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    ctx: CPTritonContext = None,
+    return_lse: bool = False,
+):
+    """
+    cp_attn_out: [ B, H, D ]
+    cp_attn_lse: [ B, H ]
+    """
+    out, lse = _cp_lse_common(cp_attn_out, cp_attn_lse, cp_group, ctx=ctx)
     out = cp_group.reduce_scatter(out, dim=1)
 
     if return_lse:
@@ -215,22 +229,7 @@ def cp_lse_ag_out_ar(
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
-    if cp_group.world_size == 1:
-        return cp_attn_out
-
-    if ctx is None:
-        ctx = CPTritonContext()
-
-    lses = torch.empty(
-        (cp_group.world_size,) + cp_attn_lse.shape,
-        dtype=cp_attn_lse.dtype,
-        device=cp_attn_lse.device,
-    )
-
-    cp_attn_lse = cp_attn_lse.contiguous()
-    lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
-    out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
-    assert out.is_contiguous()
+    out, lse = _cp_lse_common(cp_attn_out, cp_attn_lse, cp_group, ctx=ctx)
     out = cp_group.all_reduce(out)
     return out
 

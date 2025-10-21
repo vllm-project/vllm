@@ -18,7 +18,7 @@ from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
-    get_prefill_context_model_parallel_world_size,
+    get_pcp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -1103,7 +1103,7 @@ class FusedMoE(CustomOp):
         pcp_size_ = (
             pcp_size
             if pcp_size is not None
-            else get_prefill_context_model_parallel_world_size()
+            else get_pcp_group().world_size
         )
 
         self.is_sequence_parallel = is_sequence_parallel

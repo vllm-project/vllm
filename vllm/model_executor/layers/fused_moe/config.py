@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed import (
     get_dp_group,
-    get_prefill_context_model_parallel_rank,
+    get_pcp_group,
     get_tensor_model_parallel_rank,
 )
 from vllm.logger import init_logger
@@ -763,7 +763,7 @@ class FusedMoEParallelConfig:
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
         pcp_size = pcp_size_
-        pcp_rank = get_prefill_context_model_parallel_rank() if pcp_size_ > 1 else 0
+        pcp_rank = get_pcp_group().rank_in_group if pcp_size_ > 1 else 0
 
         if not use_ep:
             return FusedMoEParallelConfig(

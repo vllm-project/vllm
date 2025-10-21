@@ -341,7 +341,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             "SlidingWindowManager can only be used for sliding window groups"
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
-        assert pcp_world_size == 1, "CP not support sliding window attn now."
+        assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
@@ -481,7 +481,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
-        assert pcp_world_size == 1, "CP not support chunked local attn now."
+        assert pcp_world_size == 1, "PCP not support chunked local attn now."
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (
@@ -572,7 +572,7 @@ class MambaManager(SingleTypeKVCacheManager):
             "MambaManager can only be used for mamba groups"
         )
         assert dcp_world_size == 1, "DCP not support mamba now."
-        assert pcp_world_size == 1, "CP not support mamba now."
+        assert pcp_world_size == 1, "PCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )

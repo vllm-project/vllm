@@ -1093,16 +1093,6 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
-def get_prefill_context_model_parallel_world_size():
-    """Return world size for the tensor model parallel group."""
-    return get_pcp_group().world_size
-
-
-def get_prefill_context_model_parallel_rank():
-    """Return my rank for the tensor model parallel group."""
-    return get_pcp_group().rank_in_group
-
-
 @deprecated(
     "`get_pipeline_model_parallel_group` has been replaced with "
     "`get_pp_group` and may be removed in v0.12. Please use "
@@ -1474,16 +1464,6 @@ def get_tensor_model_parallel_world_size():
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
-
-
-def get_decode_context_model_parallel_world_size():
-    """Return world size for the decode context model parallel group."""
-    return get_dcp_group().world_size
-
-
-def get_decode_context_model_parallel_rank():
-    """Return my rank for the decode context model parallel group."""
-    return get_dcp_group().rank_in_group
 
 
 def get_node_count() -> int:
