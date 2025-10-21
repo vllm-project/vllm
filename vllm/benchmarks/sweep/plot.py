@@ -24,14 +24,14 @@ class PlotFilterBase(ABC):
         for op_key in PLOT_FILTERS:
             if op_key in s:
                 key, value = s.split(op_key)
-                return PLOT_FILTERS[op_key](key, float(value.removeprefix(op_key)))
+                return PLOT_FILTERS[op_key](key, value.removeprefix(op_key))
         else:
             raise ValueError(
                 f"Invalid operator for plot filter '{s}'. "
                 f"Valid operators are: {set(PLOT_FILTERS)}",
             )
 
-    def __init__(self, var: str, target: float) -> None:
+    def __init__(self, var: str, target: str) -> None:
         super().__init__()
 
         self.var = var
@@ -52,25 +52,25 @@ class PlotEqualTo(PlotFilterBase):
 class PlotLessThan(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df[df[self.var] < self.target]
+        return df[df[self.var] < float(self.target)]
 
 
 class PlotLessThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df[df[self.var] <= self.target]
+        return df[df[self.var] <= float(self.target)]
 
 
 class PlotGreaterThan(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df[df[self.var] > self.target]
+        return df[df[self.var] > float(self.target)]
 
 
 class PlotGreaterThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df[df[self.var] >= self.target]
+        return df[df[self.var] >= float(self.target)]
 
 
 # NOTE: The ordering is important! Match longer op_keys first
