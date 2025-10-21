@@ -430,8 +430,10 @@ class MLACommonMetadata(Generic[D]):
     ) = None
 
     def __post_init__(self):
-        if self.head_dim is not None:
-            MLACommonBackend.validate_head_size(self.head_dim)
+        if self.head_dim is not None and not MLACommonBackend.supports_head_size(
+            self.head_dim
+        ):
+            raise ValueError(f"Head dimension {self.head_dim} is not supported by MLA.")
 
 
 M = TypeVar("M", bound=MLACommonMetadata)

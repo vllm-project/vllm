@@ -184,15 +184,8 @@ class TritonAttentionBackend(AttentionBackend):
         return TritonAttentionMetadataBuilder
 
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        # Triton Attention supports any head size above 32
-        if head_size < 32:
-            raise ValueError(
-                f"Head size {head_size} is not supported by TritonAttention."
-                f"Head sizes need to be larger or equal 32 for this backend. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size >= 32
 
     @classmethod
     def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
