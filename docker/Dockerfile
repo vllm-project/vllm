@@ -179,10 +179,10 @@ RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
 # max jobs used by Ninja to build extensions
-ARG max_jobs=2
+ARG max_jobs=16
 ENV MAX_JOBS=${max_jobs}
 # number of threads used by nvcc
-ARG nvcc_threads=8
+ARG nvcc_threads=32
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
