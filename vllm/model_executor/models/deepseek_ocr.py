@@ -46,6 +46,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
+    BASE_SIZE,
+    CROP_MODE,
+    IMAGE_SIZE,
     DeepseekOCRProcessor,
     count_tiles,
 )
@@ -57,11 +60,6 @@ from vllm.v1.sample.logits_processor import (
 
 from .deepencoder import DeepCLIPVisionTransformer, build_sam_vit_b
 from .deepseek_vl2 import MlpProjector
-
-# TODO(ywang96): Make these configurable
-BASE_SIZE = 1024
-IMAGE_SIZE = 640
-CROP_MODE = True
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
