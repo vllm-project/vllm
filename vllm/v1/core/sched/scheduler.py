@@ -1633,7 +1633,7 @@ class Scheduler(SchedulerInterface):
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
         """
-        fail = (
+        should_fail = (
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.kv_load_retry_policy == "fail"
         )
@@ -1663,7 +1663,7 @@ class Scheduler(SchedulerInterface):
         if not total_failed_requests:
             return set()
 
-        if fail:
+        if should_fail:
             logger.warning(
                 "Failing %d request(s) due to KV load failure "
                 "(retry_policy=fail, %d tokens affected).",
