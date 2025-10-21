@@ -6,6 +6,29 @@ DecodeBenchConnector: A KV Connector for decode instance performance testing.
 This connector emulates a prefill-decode disaggregated setting by filling
 the KV cache with dummy values, allowing measurement of decoder performance
 under larger input sequence lengths (ISL) in resource-limited environments.
+
+Usage:
+    To use this connector for benchmarking, configure it in the kv_transfer_config:
+
+    Example:
+        vllm serve <model> --kv-transfer-config '{
+            "kv_connector": "DecodeBenchConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "fill_mean": 0.015,
+                "fill_std": 0.0
+            }
+        }'
+
+    Then run your benchmark with desired input/output lengths:
+        vllm bench serve --base-url http://127.0.0.1:8000 --model <model> \\
+            --dataset-name random --random-input-len 40000 \\
+            --random-output-len 100 --max-concurrency 10
+
+    Configuration options (via kv_connector_extra_config):
+        - fill_mean (float): Mean value for random normal fill (default: 0.015)
+        - fill_std (float): Standard deviation for random fill (default: 0.0)
+          Set to 0 for constant values, >0 for random sampling
 """
 
 from dataclasses import dataclass
@@ -157,27 +180,32 @@ class DecodeBenchConnectorScheduler:
 
         Returns:
             (num_tokens_to_fill, is_async)
-            - num_tokens_to_fill: total tokens in the request minus 1
+            - num_tokens_to_fill: number of uncomputed tokens minus 1
               (we fill everything except the last token for decode)
             - is_async: False (synchronous filling)
         """
         req_id = request.request_id
 
         # Only fill once per request on first scheduling
-        if req_id in self._filled_requests or num_computed_tokens > 0:
+        if req_id in self._filled_requests:
             return 0, False
 
-        # Fill all tokens except the last one (which will be decoded)
+        # Calculate how many tokens we need to fill
+        # Fill all uncomputed tokens except the last one (which will be decoded)
         # This simulates having processed a long prefill
-        num_tokens_to_fill = max(0, request.num_tokens - 1)
+        num_uncomputed_tokens = request.num_tokens - num_computed_tokens
+        num_tokens_to_fill = max(0, num_uncomputed_tokens - 1)
 
         if num_tokens_to_fill == 0:
             return 0, False
 
         logger.debug(
-            "DecodeBenchConnector: Request %s will fill %d tokens in KV cache",
+            "DecodeBenchConnector: Request %s will fill %d tokens in KV cache "
+            "(num_tokens=%d, num_computed=%d)",
             req_id,
             num_tokens_to_fill,
+            request.num_tokens,
+            num_computed_tokens,
         )
 
         # Return False for synchronous operation - the fill is fast enough
