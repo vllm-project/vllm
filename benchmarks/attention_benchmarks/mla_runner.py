@@ -9,7 +9,6 @@ needing full VllmConfig integration.
 """
 
 import importlib
-from typing import Optional
 
 import numpy as np
 import torch
@@ -56,7 +55,7 @@ def create_minimal_vllm_config(
     model_name: str = "deepseek-v3",
     block_size: int = 128,
     max_num_seqs: int = 256,
-    mla_dims: Optional[dict] = None,
+    mla_dims: dict | None = None,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -259,15 +258,15 @@ def _build_attention_metadata(
     max_kv = max(kv_lens)
 
     # Build query start locations
-    q_start_cpu = np.array(
+    q_start_cpu = torch.tensor(
         [0] + [sum(q_lens[: i + 1]) for i in range(len(q_lens))],
-        dtype=np.int32,
+        dtype=torch.int32,
     )
-    q_start_gpu = torch.from_numpy(q_start_cpu).to(device)
+    q_start_gpu = q_start_cpu.to(device)
 
     # Build sequence lengths
-    seq_lens_cpu = np.array(kv_lens, dtype=np.int32)
-    seq_lens_gpu = torch.from_numpy(seq_lens_cpu).to(device)
+    seq_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32)
+    seq_lens_gpu = seq_lens_cpu.to(device)
 
     # Build num_computed_tokens (context length for each request)
     context_lens = [kv_len - q_len for q_len, kv_len in zip(q_lens, kv_lens)]
@@ -489,22 +488,23 @@ def _create_backend_impl(
         impl.dcp_world_size = 1
         impl.dcp_rank = 0
 
+    # Create KV cache spec for MockLayer
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    kv_cache_spec = FullAttentionSpec(
+        block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
+        num_kv_heads=1,  # MLA uses 1 KV head
+        head_size=576,  # MLA head dim
+        dtype=torch.float16,
+    )
+
     # Create mock layer
-    layer = MockLayer(device, impl=impl)
+    layer = MockLayer(device, impl=impl, kv_cache_spec=kv_cache_spec)
 
     # Create builder instance if needed
     builder_instance = None
     if backend_cfg["builder_class"]:
         builder_class = getattr(backend_module, backend_cfg["builder_class"])
-
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-        kv_cache_spec = FullAttentionSpec(
-            block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
-            num_kv_heads=1,  # MLA uses 1 KV head
-            head_size=576,  # MLA head dim
-            dtype=torch.float16,
-        )
 
         # Populate static_forward_context so builder can find the layer
         # MockLayer inherits from AttentionLayerBase, so isinstance checks pass
@@ -525,7 +525,7 @@ def _create_backend_impl(
 # ============================================================================
 
 
-def _extract_mla_dims_from_config(config) -> Optional[dict]:
+def _extract_mla_dims_from_config(config) -> dict | None:
     """
     Extract MLA dimensions from BenchmarkConfig if all required fields are present.
 
@@ -776,8 +776,8 @@ def _run_mla_benchmark_batched(
 def run_mla_benchmark(
     backend: str,
     config,
-    reorder_batch_threshold: Optional[int] = None,
-    num_kv_splits: Optional[int] = None,
+    reorder_batch_threshold: int | None = None,
+    num_kv_splits: int | None = None,
 ) -> dict:
     """
     Unified MLA benchmark runner for all backends.

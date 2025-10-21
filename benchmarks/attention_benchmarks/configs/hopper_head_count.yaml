@@ -9,23 +9,133 @@ backends:
   - flashattn_mla
   - flashmla
 
-# Standard decode workloads
+# Comprehensive batch spec matrix: batch sizes × sequence lengths
+# Batch sizes: 1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128
+# Sequence lengths: 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k
 batch_specs:
-  - "32q1s1k"     # 32 decode requests, 1k KV cache
-  - "64q1s1k"     # 64 decode requests, 1k KV cache
-  - "64q1s4k"     # 64 decode requests, 4k KV cache
-  - "128q1s1k"    # 128 decode requests, 1k KV cache
-  - "128q1s4k"    # 128 decode requests, 4k KV cache
+  # Batch size: 1
+  - "1q1s1k"
+  - "1q1s2k"
+  - "1q1s4k"
+  - "1q1s8k"
+  - "1q1s16k"
+  - "1q1s32k"
+  - "1q1s64k"
+  - "1q1s128k"
 
-# Model configuration - will test different head counts
-# Note: You'll need to run this multiple times with different num_q_heads values
-# Or modify benchmark.py to support head_counts parameter
+  # Batch size: 2
+  - "2q1s1k"
+  - "2q1s2k"
+  - "2q1s4k"
+  - "2q1s8k"
+  - "2q1s16k"
+  - "2q1s32k"
+  - "2q1s64k"
+  - "2q1s128k"
+
+  # Batch size: 4
+  - "4q1s1k"
+  - "4q1s2k"
+  - "4q1s4k"
+  - "4q1s8k"
+  - "4q1s16k"
+  - "4q1s32k"
+  - "4q1s64k"
+  - "4q1s128k"
+
+  # Batch size: 8
+  - "8q1s1k"
+  - "8q1s2k"
+  - "8q1s4k"
+  - "8q1s8k"
+  - "8q1s16k"
+  - "8q1s32k"
+  - "8q1s64k"
+  - "8q1s128k"
+
+  # Batch size: 16
+  - "16q1s1k"
+  - "16q1s2k"
+  - "16q1s4k"
+  - "16q1s8k"
+  - "16q1s16k"
+  - "16q1s32k"
+  - "16q1s64k"
+  - "16q1s128k"
+
+  # Batch size: 24
+  - "24q1s1k"
+  - "24q1s2k"
+  - "24q1s4k"
+  - "24q1s8k"
+  - "24q1s16k"
+  - "24q1s32k"
+  - "24q1s64k"
+  - "24q1s128k"
+
+  # Batch size: 32
+  - "32q1s1k"
+  - "32q1s2k"
+  - "32q1s4k"
+  - "32q1s8k"
+  - "32q1s16k"
+  - "32q1s32k"
+  - "32q1s64k"
+  - "32q1s128k"
+
+  # Batch size: 48
+  - "48q1s1k"
+  - "48q1s2k"
+  - "48q1s4k"
+  - "48q1s8k"
+  - "48q1s16k"
+  - "48q1s32k"
+  - "48q1s64k"
+  - "48q1s128k"
+
+  # Batch size: 64
+  - "64q1s1k"
+  - "64q1s2k"
+  - "64q1s4k"
+  - "64q1s8k"
+  - "64q1s16k"
+  - "64q1s32k"
+  - "64q1s64k"
+  - "64q1s128k"
+
+  # Batch size: 96
+  - "96q1s1k"
+  - "96q1s2k"
+  - "96q1s4k"
+  - "96q1s8k"
+  - "96q1s16k"
+  - "96q1s32k"
+  - "96q1s64k"
+  - "96q1s128k"
+
+  # Batch size: 128
+  - "128q1s1k"
+  - "128q1s2k"
+  - "128q1s4k"
+  - "128q1s8k"
+  - "128q1s16k"
+  - "128q1s32k"
+  - "128q1s64k"
+  - "128q1s128k"
+
+# Model configuration
 model:
   num_layers: 10
   head_dim: 576        # MLA uses 576
-  num_q_heads: 128     # Test with: 16, 32, 64, 128, 256
+  num_q_heads: 128     # Default value (will be overridden by sweep)
   num_kv_heads: 1      # MLA uses single KV head
   block_size: 128
+
+# Model parameter sweep - test different head counts
+model_parameter_sweep:
+  param_name: "num_q_heads"
+  values: [16, 32, 64, 128, 256]
+  label_format: "{backend}_heads_{value}"
 
 # Benchmark settings
 benchmark:
@@ -38,13 +148,6 @@ benchmark:
 output:
   csv: "hopper_head_count_results.csv"
   json: "hopper_head_count_results.json"
-
-# To test different head counts, run:
-# for heads in 16 32 64 128 256; do
-#   python benchmark.py --config configs/hopper_head_count.yaml \
-#     --num-q-heads $heads \
-#     --output-csv hopper_heads_${heads}.csv
-# done
 
 # Expected outcome:
 # - Determine which backend is faster on Hopper

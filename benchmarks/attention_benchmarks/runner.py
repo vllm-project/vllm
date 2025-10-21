@@ -227,8 +227,19 @@ def _create_backend_impl(
         kv_cache_dtype="auto",
     )
 
+    # Create KV cache spec for MockLayer
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
+    kv_cache_spec = AttentionSpec(
+        block_size=config.block_size,
+        num_kv_heads=config.num_kv_heads,
+        head_size=config.head_dim,
+        dtype=dtype,
+        use_mla=False,
+    )
+
     # Create mock layer
-    layer = MockLayer(device)
+    layer = MockLayer(device, kv_cache_spec=kv_cache_spec)
 
     return backend_class, impl, layer, dtype
 
