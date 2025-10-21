@@ -50,6 +50,9 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         "--data-parallel-size", str(DP_SIZE),
         "--enable-expert-parallel",
         "--enable-dbo",
+         # Fix threshold so we know we trigger DBO
+        "--dbo-decode-token-threshold", "16",  
+        "--dbo-prefill-token-threshold", "256",
         "--all2all-backend", all2all_backend,
     ]
 
