@@ -707,8 +707,8 @@ async def create_embedding(
     elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, EmbeddingBytesResponse):
-        return Response(
-            content=b"".join(generator.body),
+        return StreamingResponse(
+            content=generator.body,
             headers={"metadata": generator.metadata},
             media_type=generator.media_type,
         )
@@ -745,8 +745,8 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, PoolingBytesResponse):
-        return Response(
-            content=b"".join(generator.body),
+        return StreamingResponse(
+            content=generator.body,
             headers={"metadata": generator.metadata},
             media_type=generator.media_type,
         )
