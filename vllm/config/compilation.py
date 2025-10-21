@@ -336,13 +336,9 @@ class CompilationConfig:
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
 
-    In the vLLM V1 Engine, this flag only applies for
-    CompilationMode.VLLM_COMPILE (aka -O3).
-    Note that this is orthogonal to the cudagraph capture logic
-    outside of compilation.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=PIECEWISE
-    instead.
+    minor release, i.e. v0.12.0 or v1.0.0. Please use cudagraph_mode=FULL_AND
+    _PIECEWISE instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -367,7 +363,7 @@ class CompilationConfig:
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
+    minor release, i.e. v0.12.0 or v1.0.0. Please use cudagraph_mode=
     FULL_AND_PIECEWISE instead.
     """
     cudagraph_specialize_lora: bool = True
@@ -690,25 +686,8 @@ class CompilationConfig:
 
         return VllmBackend(vllm_config)
 
-    def init_with_cudagraph_sizes(self, cudagraph_capture_sizes: list[int]) -> None:
-        """To complete the initialization of config,
-        we need to know the cudagraph sizes."""
-
-        if self.cudagraph_capture_sizes is None:
-            self.cudagraph_capture_sizes = cudagraph_capture_sizes
-        else:
-            # de-duplicate the sizes provided by the config
-            dedup_sizes = list(set(self.cudagraph_capture_sizes))
-            if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
-                logger.info(
-                    (
-                        "cudagraph sizes specified by model runner"
-                        " %s is overridden by config %s"
-                    ),
-                    cudagraph_capture_sizes,
-                    dedup_sizes,
-                )
-            self.cudagraph_capture_sizes = dedup_sizes
+    def post_init_cudagraph_sizes(self) -> None:
+        """To complete the initialization of config"""
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
@@ -726,19 +705,8 @@ class CompilationConfig:
                     computed_compile_sizes.append(x)
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
-        # sort to make sure cudagraph capture sizes are in ascending order
+        # make sure the sizes are in ascending order
         self.cudagraph_capture_sizes.sort()
-        max_cudagraph_capture_size = (
-            self.cudagraph_capture_sizes[-1] if self.cudagraph_capture_sizes else 0
-        )
-        if self.max_cudagraph_capture_size is not None:
-            assert self.max_cudagraph_capture_size == max_cudagraph_capture_size, (
-                f"max_cudagraph_capture_size:{self.max_cudagraph_capture_size}"
-                " should be consistent with the max value of "
-                f"cudagraph_capture_sizes:{max_cudagraph_capture_size}"
-            )
-        else:
-            self.max_cudagraph_capture_size = max_cudagraph_capture_size
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [
