@@ -116,7 +116,7 @@ class PassConfig:
     dictionary mapping each world size to the threshold in MB
         { <world size>: <max size in mb> }
     Unspecified world sizes will fallback to
-        _FI_ALLREDUCE_MAX_INPUT_SIZES = {
+        FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
             "9.0": {
                 2: 64,  # 64MB
                 4: 2,  # 2MB
@@ -146,6 +146,15 @@ class PassConfig:
         # return None if world size is not supported by flashinfer
         return max_sizes.get(world_size)
 
+    @staticmethod
+    def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
+        from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
+        from vllm.platforms import current_platform
+
+        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
+            current_platform.get_device_capability().as_version_str(), {}
+        )
+
     def uuid(self):
         """
         Produces a hash unique to the pass configuration.
@@ -172,29 +181,10 @@ class PassConfig:
                     "Allreduce + rms norm + quant (fp8) fusion might not work"
                 )
 
-        # import here to avoid circular dependencies
-        from vllm.platforms import current_platform
-
-        # Default tuned max size of the input tensor
-        # per world size per device capability
-        # to use flashinfer fused allreduce
-        fi_allreduce_fusion_max_size_mb = {
-            "9.0": {
-                2: 64,  # 64MB
-                4: 2,  # 2MB
-                8: 1,  # 1MB
-            },
-            "10.0": {
-                2: 64,  # 64MB
-                4: 32,  # 32MB
-                8: 1,  # 1MB
-            },
+        self.fi_allreduce_fusion_max_size_mb = {
+            **PassConfig.default_fi_allreduce_fusion_max_size_mb(),
+            **self.fi_allreduce_fusion_max_size_mb,
         }
-        device_capability = current_platform.get_device_capability().as_version_str()
-
-        max_sizes = fi_allreduce_fusion_max_size_mb.get(device_capability, {})
-        max_sizes.update(self.fi_allreduce_fusion_max_size_mb)
-        self.fi_allreduce_fusion_max_size_mb = max_sizes
 
 
 @config

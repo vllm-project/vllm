@@ -2148,22 +2148,7 @@ class FusedMoE(CustomOp):
                 states = self.maybe_all_reduce_tensor_model_parallel(states)
             return states
 
-        if self.shared_experts is not None:
-            if current_platform.is_tpu():
-                # TODO: Once the OOM issue for the TPU backend is resolved, we
-                # will switch to using the moe_forward custom op.
-                shared_output, fused_output = self.forward_impl(
-                    hidden_states, router_logits
-                )
-            else:
-                shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                    hidden_states, router_logits, self.layer_name
-                )
-            return (
-                reduce_output(shared_output[..., :og_hidden_states], do_combine=False),
-                reduce_output(fused_output[..., :og_hidden_states]),
-            )
-        else:
+        if self.shared_experts is None:
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
@@ -2176,12 +2161,26 @@ class FusedMoE(CustomOp):
             if self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(fused_output, tuple)
                 fused_output, zero_expert_result = fused_output
-                return (
-                    reduce_output(fused_output[..., :og_hidden_states])
-                    + zero_expert_result
+                return (reduce_output(fused_output) + zero_expert_result)[
+                    ..., :og_hidden_states
+                ]
+            else:
+                return reduce_output(fused_output)[..., :og_hidden_states]
+        else:
+            if current_platform.is_tpu():
+                # TODO: Once the OOM issue for the TPU backend is resolved, we
+                # will switch to using the moe_forward custom op.
+                shared_output, fused_output = self.forward_impl(
+                    hidden_states, router_logits
                 )
             else:
-                return reduce_output(fused_output[..., :og_hidden_states])
+                shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
+                    hidden_states, router_logits, self.layer_name
+                )
+            return (
+                reduce_output(shared_output, do_combine=False)[..., :og_hidden_states],
+                reduce_output(fused_output)[..., :og_hidden_states],
+            )
 
     def forward_cuda(
         self,
