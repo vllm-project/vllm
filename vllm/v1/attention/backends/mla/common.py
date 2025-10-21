@@ -1509,7 +1509,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             max_kv_len=prefill.chunked_context.max_seq_lens[chunk_idx],
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
-            o_sf_scale=-1.0,
+            o_sf_scale=1.0,
             batch_size=prefill.query_seq_lens.shape[0],
             window_left=-1,
             cum_seq_lens_q=prefill.query_start_loc,
