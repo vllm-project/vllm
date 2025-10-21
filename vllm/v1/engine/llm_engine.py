@@ -326,8 +326,10 @@ class LLMEngine:
         self.processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self, device: Device | None = None):
-        self.engine_core.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, device: Device | None = None, reset_connector: bool = False
+    ):
+        self.engine_core.reset_prefix_cache(reset_connector=reset_connector)
 
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)

@@ -1240,8 +1240,17 @@ class Scheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
 
-    def reset_prefix_cache(self) -> bool:
-        return self.kv_cache_manager.reset_prefix_cache()
+    def reset_prefix_cache(self, reset_connector: bool = False) -> bool:
+        reset_success = self.kv_cache_manager.reset_prefix_cache()
+        if reset_connector:
+            reset_success = reset_success and self.reset_connector_cache()
+        return reset_success
+
+    def reset_connector_cache(self) -> bool:
+        if self.connector is None:
+            logger.warning("reset_connector called but no KV connector configured.")
+            return False
+        return self.connector.reset_cache()
 
     def make_stats(
         self,

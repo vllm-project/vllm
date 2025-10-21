@@ -124,8 +124,10 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self, device: Device | None = None) -> None:
-        """Reset the prefix cache"""
+    async def reset_prefix_cache(
+        self, device: Device | None = None, reset_connector: bool = False
+    ) -> None:
+        """Reset the prefix cache and optionally any configured connector cache"""
         ...
 
     @abstractmethod
