@@ -17,7 +17,7 @@ class PolicyFactory:
         constrained number of expert shuffle
         """
 
-        policy: dict[EPLBPolicyType, type[EplbPolicy]] = {
+        policy: dict[EPLBPolicy, type[EplbPolicy]] = {
             "default": DefaultEplb,
         }
         selected_policy = policy.get(policy_type, DefaultEplb)
