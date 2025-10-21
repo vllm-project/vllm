@@ -1355,6 +1355,37 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
+
+        logger.info("[FlashInfer] _run_prefill_new_tokens_fi called")
+
+        # Log input tensor shapes and dtypes
+        logger.info(
+            f"[FlashInfer] Input shapes - q: {q.shape}, k: {k.shape}, v: {v.shape}"
+        )
+        logger.info(
+            f"[FlashInfer] Input dtypes - q: {q.dtype}, k: {k.dtype}, v: {v.dtype}"
+        )
+
+        # Log input tensor statistics
+        logger.debug(
+            f"[FlashInfer] q stats - min: {q.min().item():.6f}, max: {q.max().item():.6f}, mean: {q.mean().item():.6f}, std: {q.std().item():.6f}"
+        )
+        logger.debug(
+            f"[FlashInfer] k stats - min: {k.min().item():.6f}, max: {k.max().item():.6f}, mean: {k.mean().item():.6f}, std: {k.std().item():.6f}"
+        )
+        logger.debug(
+            f"[FlashInfer] v stats - min: {v.min().item():.6f}, max: {v.max().item():.6f}, mean: {v.mean().item():.6f}, std: {v.std().item():.6f}"
+        )
+
+        # Log metadata information
+        logger.info(f"[FlashInfer] Metadata - max_query_len: {prefill.max_query_len}")
+        logger.info(
+            f"[FlashInfer] Metadata - query_start_loc: {prefill.query_start_loc.tolist()}"
+        )
+
+        # Log attention parameters
+        logger.info(f"[FlashInfer] Attention params - return_lse: {return_softmax_lse}")
+
         ret = prefill.prefill_main.run(
             q=q,
             k=k,
@@ -1362,10 +1393,32 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return_lse=return_softmax_lse,
         )
 
+        # Log output statistics
         if isinstance(ret, tuple):
+            out, lse = ret
+            logger.info(
+                f"[FlashInfer] Output shapes - out: {out.shape}, lse: {lse.shape}"
+            )
+            logger.debug(
+                f"[FlashInfer] Output stats - min: {out.min().item():.6f}, max: {out.max().item():.6f}, mean: {out.mean().item():.6f}, std: {out.std().item():.6f}"
+            )
+            logger.debug(
+                f"[FlashInfer] LSE stats - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}, mean: {lse.mean().item():.6f}, std: {lse.std().item():.6f}"
+            )
             # Convert from (q_len, num_heads) to (num_heads, q_len)
+            logger.info(
+                "[FlashInfer] _run_prefill_new_tokens_fi completed - returning tuple"
+            )
             return ret[0], ret[1].transpose(0, 1).contiguous()
-        return ret
+        else:
+            logger.info(f"[FlashInfer] Output shape - out: {ret.shape}")
+            logger.debug(
+                f"[FlashInfer] Output stats - min: {ret.min().item():.6f}, max: {ret.max().item():.6f}, mean: {ret.mean().item():.6f}, std: {ret.std().item():.6f}"
+            )
+            logger.info(
+                "[FlashInfer] _run_prefill_new_tokens_fi completed - returning single tensor"
+            )
+            return ret
 
     def _run_prefill_new_tokens_cudnn(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
@@ -1413,12 +1466,80 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
+
+        logger.info(
+            f"[FlashInfer] _run_prefill_context_chunk_fi called - chunk_idx: {chunk_idx}"
+        )
+
+        # Log input tensor shapes and dtypes
+        logger.info(
+            f"[FlashInfer] Chunk {chunk_idx} - Input shapes - q: {q.shape}, k: {k.shape}, v: {v.shape}"
+        )
+        logger.info(
+            f"[FlashInfer] Chunk {chunk_idx} - Input dtypes - q: {q.dtype}, k: {k.dtype}, v: {v.dtype}"
+        )
+
+        # Log input tensor statistics
+        logger.debug(
+            f"[FlashInfer] Chunk {chunk_idx} - q stats - min: {q.min().item():.6f}, max: {q.max().item():.6f}, mean: {q.mean().item():.6f}, std: {q.std().item():.6f}"
+        )
+        logger.debug(
+            f"[FlashInfer] Chunk {chunk_idx} - k stats - min: {k.min().item():.6f}, max: {k.max().item():.6f}, mean: {k.mean().item():.6f}, std: {k.std().item():.6f}"
+        )
+        logger.debug(
+            f"[FlashInfer] Chunk {chunk_idx} - v stats - min: {v.min().item():.6f}, max: {v.max().item():.6f}, mean: {v.mean().item():.6f}, std: {v.std().item():.6f}"
+        )
+
+        # Log chunk-specific metadata
+        if prefill.chunked_context is not None:
+            logger.info(
+                f"[FlashInfer] Chunk {chunk_idx} - seq_lens: {prefill.chunked_context.seq_lens[chunk_idx].tolist()}"
+            )
+            logger.info(
+                f"[FlashInfer] Chunk {chunk_idx} - max_seq_lens: {prefill.chunked_context.max_seq_lens[chunk_idx]}"
+            )
+            logger.info(
+                f"[FlashInfer] Chunk {chunk_idx} - cu_seq_lens: {prefill.chunked_context.cu_seq_lens[chunk_idx].tolist()}"
+            )
+            logger.info(
+                f"[FlashInfer] Chunk {chunk_idx} - seq_tot: {prefill.chunked_context.seq_tot[chunk_idx]}"
+            )
+        logger.info(
+            f"[FlashInfer] Chunk {chunk_idx} - Metadata - max_query_len: {prefill.max_query_len}"
+        )
+        logger.info(
+            f"[FlashInfer] Chunk {chunk_idx} - query_start_loc: {prefill.query_start_loc.tolist()}"
+        )
+
         attn_out, lse = prefill.prefill_chunks[chunk_idx].run(
             q=q,
             k=k,
             v=v,
             return_lse=True,
         )
+
+        # Log output statistics
+        logger.info(
+            f"[FlashInfer] Chunk {chunk_idx} - Output shapes - attn_out: {attn_out.shape}, lse: {lse.shape}"
+        )
+        logger.debug(
+            f"[FlashInfer] Chunk {chunk_idx} - Output stats - min: {attn_out.min().item():.6f}, max: {attn_out.max().item():.6f}, mean: {attn_out.mean().item():.6f}, std: {attn_out.std().item():.6f}"
+        )
+        logger.info(f"[FlashInfer] Chunk {chunk_idx} - LSE values after attention:")
+        logger.info(
+            f"[FlashInfer] Chunk {chunk_idx} - LSE stats - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}, mean: {lse.mean().item():.6f}, std: {lse.std().item():.6f}"
+        )
+        logger.info(
+            f"[FlashInfer] Chunk {chunk_idx} - LSE shape: {lse.shape}, dtype: {lse.dtype}"
+        )
+        logger.debug(
+            f"[FlashInfer] Chunk {chunk_idx} - LSE first 10 values: {lse.flatten()[:10].tolist()}"
+        )
+
+        logger.info(
+            f"[FlashInfer] _run_prefill_context_chunk_fi completed - chunk_idx: {chunk_idx}"
+        )
+
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
@@ -1455,6 +1576,61 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         assert prefill.query_seq_lens is not None
 
+        logger.info("[TRT-LLM Ragged] _run_prefill_new_tokens_trtllm_ragged called")
+
+        # Log input tensor shapes and dtypes
+        logger.info(
+            f"[TRT-LLM Ragged] Input shapes - q: {q.shape}, k: {k.shape}, v: {v.shape}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Input dtypes - q: {q.dtype}, k: {k.dtype}, v: {v.dtype}"
+        )
+
+        # Log input tensor statistics
+        logger.debug(
+            f"[TRT-LLM Ragged] q stats - min: {q.min().item():.6f}, max: {q.max().item():.6f}, mean: {q.mean().item():.6f}, std: {q.std().item():.6f}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] k stats - min: {k.min().item():.6f}, max: {k.max().item():.6f}, mean: {k.mean().item():.6f}, std: {k.std().item():.6f}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] v stats - min: {v.min().item():.6f}, max: {v.max().item():.6f}, mean: {v.mean().item():.6f}, std: {v.std().item():.6f}"
+        )
+
+        # Log metadata information
+        logger.info(
+            f"[TRT-LLM Ragged] Metadata - query_seq_lens: {prefill.query_seq_lens.tolist()}, max_query_len: {prefill.max_query_len}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Metadata - batch_size: {prefill.query_seq_lens.shape[0]}, query_start_loc: {prefill.query_start_loc.tolist()}"
+        )
+
+        # Log attention parameters
+        logger.info(
+            f"[TRT-LLM Ragged] Attention params - bmm1_scale: {self.scale:.6f}, is_causal: True, return_lse: {return_softmax_lse}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] Workspace buffer size: {self._workspace_buffer.shape[0]}"
+        )
+
+        out = torch.zeros(
+            q.shape[0],
+            q.shape[1],
+            v.shape[2],
+            device=q.device,
+            dtype=q.dtype,
+        )
+        lse = torch.full(
+            (q.shape[0], q.shape[1]),
+            float("-inf"),
+            device=q.device,
+            dtype=torch.float32,
+        )
+
+        logger.debug(
+            f"[TRT-LLM Ragged] Pre-allocated output shapes - out: {out.shape}, lse: {lse.shape}"
+        )
+
         ret = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -1474,11 +1650,31 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             is_causal=True,
             return_lse=return_softmax_lse,
             attention_sinks=None,
+            out=out,
+            lse=lse,
         )
+
+        # Log output statistics
+        logger.info(
+            f"[TRT-LLM Ragged] Output shapes - out: {out.shape}, lse: {lse.shape}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] Output stats - min: {out.min().item():.6f}, max: {out.max().item():.6f}, mean: {out.mean().item():.6f}, std: {out.std().item():.6f}"
+        )
+        if return_softmax_lse:
+            logger.debug(
+                f"[TRT-LLM Ragged] LSE stats - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}, mean: {lse.mean().item():.6f}, std: {lse.std().item():.6f}"
+            )
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
+            logger.info(
+                "[TRT-LLM Ragged] _run_prefill_new_tokens_trtllm_ragged completed - returning tuple"
+            )
             return ret[0], ret[1].transpose(0, 1).contiguous()
+        logger.info(
+            "[TRT-LLM Ragged] _run_prefill_new_tokens_trtllm_ragged completed - returning single tensor"
+        )
         return ret
 
     def _run_prefill_context_chunk_trtllm_ragged(
@@ -1490,6 +1686,57 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
 
+        logger.info(
+            f"[TRT-LLM Ragged] _run_prefill_context_chunk_trtllm_ragged called - chunk_idx: {chunk_idx}"
+        )
+
+        # Log input tensor shapes and dtypes
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Input shapes - q: {q.shape}, k: {k.shape}, v: {v.shape}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Input dtypes - q: {q.dtype}, k: {k.dtype}, v: {v.dtype}"
+        )
+
+        # Log input tensor statistics
+        logger.debug(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - q stats - min: {q.min().item():.6f}, max: {q.max().item():.6f}, mean: {q.mean().item():.6f}, std: {q.std().item():.6f}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - k stats - min: {k.min().item():.6f}, max: {k.max().item():.6f}, mean: {k.mean().item():.6f}, std: {k.std().item():.6f}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - v stats - min: {v.min().item():.6f}, max: {v.max().item():.6f}, mean: {v.mean().item():.6f}, std: {v.std().item():.6f}"
+        )
+
+        # Log chunk-specific metadata
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - seq_lens: {prefill.chunked_context.seq_lens[chunk_idx].tolist()}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - max_seq_lens: {prefill.chunked_context.max_seq_lens[chunk_idx]}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - cu_seq_lens: {prefill.chunked_context.cu_seq_lens[chunk_idx].tolist()}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - seq_tot: {prefill.chunked_context.seq_tot[chunk_idx]}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Metadata - max_query_len: {prefill.max_query_len}, batch_size: {prefill.query_seq_lens.shape[0]}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - query_start_loc: {prefill.query_start_loc.tolist()}"
+        )
+
+        # Log attention parameters
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Attention params - bmm1_scale: {self.scale:.6f}, o_sf_scale: 1.0, is_causal: False"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Workspace buffer size: {self._workspace_buffer.shape[0]}"
+        )
+
         out = torch.zeros(
             q.shape[0],
             q.shape[1],
@@ -1497,6 +1744,20 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             device=q.device,
             dtype=q.dtype,
         )
+        lse = torch.full(
+            (q.shape[0], q.shape[1]),
+            float("-inf"),
+            device=q.device,
+            dtype=torch.float32,
+        )
+
+        logger.debug(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Pre-allocated output shapes - out: {out.shape}, lse: {lse.shape}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Initialized LSE with -inf - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}"
+        )
+
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -1507,7 +1768,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             max_kv_len=prefill.chunked_context.max_seq_lens[chunk_idx],
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
-            o_sf_scale=1.0,  # NOTE(yming): why -1.0?
+            o_sf_scale=-1.0,
             batch_size=prefill.query_seq_lens.shape[0],
             window_left=-1,
             cum_seq_lens_q=prefill.query_start_loc,
@@ -1516,7 +1777,50 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             is_causal=False,
             return_lse=True,
             out=out,
+            lse=lse,
         )
+
+        # Log output statistics
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Output shapes - attn_out: {attn_out.shape}, lse: {lse.shape}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - Output stats - min: {attn_out.min().item():.6f}, max: {attn_out.max().item():.6f}, mean: {attn_out.mean().item():.6f}, std: {attn_out.std().item():.6f}"
+        )
+        logger.info(f"[TRT-LLM Ragged] Chunk {chunk_idx} - LSE values after attention:")
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - LSE stats - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}, mean: {lse.mean().item():.6f}, std: {lse.std().item():.6f}"
+        )
+        logger.info(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - LSE shape: {lse.shape}, dtype: {lse.dtype}"
+        )
+        logger.debug(
+            f"[TRT-LLM Ragged] Chunk {chunk_idx} - LSE first 10 values: {lse.flatten()[:10].tolist()}"
+        )
+
+        # Set LSE to -inf for sequences where seq_lens is 0
+        seq_lens = prefill.chunked_context.seq_lens[chunk_idx]
+        zero_mask = seq_lens == 0
+        if zero_mask.any():
+            logger.info(
+                f"[TRT-LLM Ragged] Chunk {chunk_idx} - Found {zero_mask.sum().item()} sequences with seq_lens=0, setting their LSE to -inf"
+            )
+            # Get query lengths for each sequence
+            query_start_loc = prefill.query_start_loc
+            for seq_idx in range(len(seq_lens)):
+                if zero_mask[seq_idx]:
+                    q_start = query_start_loc[seq_idx].item()
+                    q_end = query_start_loc[seq_idx + 1].item()
+                    # Set LSE to -inf for all query tokens in this sequence
+                    lse[q_start:q_end, :] = float("-inf")
+            logger.info(
+                f"[TRT-LLM Ragged] Chunk {chunk_idx} - LSE stats after masking - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}, mean: {lse.mean().item():.6f}"
+            )
+
+        logger.info(
+            f"[TRT-LLM Ragged] _run_prefill_context_chunk_trtllm_ragged completed - chunk_idx: {chunk_idx}"
+        )
+
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
