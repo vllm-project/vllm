@@ -6,7 +6,7 @@ KV cache helper for store.
 
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import torch
 
@@ -16,6 +16,9 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 
 logger = init_logger(__name__)
 
@@ -123,12 +126,16 @@ class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
 
-    def __init__(self, world_size: int):
+    def __init__(self, expected_finished_count: int):
         # Complete transfer tracker. Used to track finished requests
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
-        self._expected_finished_reqs = world_size
+        self._expected_finished_count = expected_finished_count
+
+    @classmethod
+    def from_connector(cls, connector: "KVConnectorBase_V1", world_size: int):
+        return cls(connector.get_finished_count() or world_size)
 
     def aggregate(
         self, outputs: list[ModelRunnerOutput], output_rank: int = 0
@@ -142,7 +149,7 @@ class KVOutputAggregator:
         ) -> None:
             for req_id in req_ids or ():
                 remaining_count = remaining_count_dict.get(
-                    req_id, self._expected_finished_reqs
+                    req_id, self._expected_finished_count
                 )
                 remaining_count_dict[req_id] = remaining_count - 1
                 if remaining_count_dict[req_id] == 0:
@@ -158,17 +165,17 @@ class KVOutputAggregator:
             if not kv_output:
                 continue
             # Allow the worker to dynamically update the expected number of
-            # finished sending/recving for new requests
+            # finished sending/recving for new requests.
             if (
-                kv_output.expected_finished_reqs > 0
-                and kv_output.expected_finished_reqs != self._expected_finished_reqs
+                kv_output.expected_finished_count > 0
+                and kv_output.expected_finished_count != self._expected_finished_count
             ):
                 logger.debug(
                     "Expected finished requests updated from %d to %d",
-                    self._expected_finished_reqs,
-                    kv_output.expected_finished_reqs,
+                    self._expected_finished_count,
+                    kv_output.expected_finished_count,
                 )
-                self._expected_finished_reqs = kv_output.expected_finished_reqs
+                self._expected_finished_count = kv_output.expected_finished_count
 
             update_finished_set(
                 kv_output.finished_sending, self._send_remaining_count, finished_sending
@@ -202,7 +209,7 @@ class KVOutputAggregator:
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
             invalid_block_ids=invalid_block_ids,
-            expected_finished_reqs=self._expected_finished_reqs,
+            expected_finished_count=self._expected_finished_count,
         )
 
         return output
