@@ -50,7 +50,7 @@ repos:
   - id: mypy-local
     name: Run mypy for local Python installation
     entry: python tools/pre_commit/mypy.py 0 "local"
-    stages: [commit] # Don't run in CI
+    stages: [pre-commit] # Don't run in CI
     <<: &mypy_common
       language: python
       types_or: [python, pyi]
