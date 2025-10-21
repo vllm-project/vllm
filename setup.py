@@ -644,7 +644,7 @@ def get_vllm_version() -> str:
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
-    version = "0.11.0rc2.dev+g08d26a1"
+    version = "0.11.1rc2.dev+ge9fce7b"
     override_version(version)
     sep = ""
 
