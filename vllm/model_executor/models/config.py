@@ -17,13 +17,13 @@ logger = init_logger(__name__)
 
 def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls) -> set[str]:
     dynamic_kwargs: set[str] = set()
-    kwargs_annotations = getattr(kwargs_cls, "__annotations__", {})
+    # get kwargs annotations in processor
+    kwargs_type_annotations = getattr(kwargs_cls, "__annotations__", {})
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
-        if kw_type in kwargs_annotations:
-            kw_annotations = kwargs_annotations[kw_type].__annotations__
-            for _, kw_value in kw_annotations.items():
-                if hasattr(kw_value, "__annotations__"):
-                    dynamic_kwargs.update(kw_value.__annotations__.keys())
+        if kw_type in kwargs_type_annotations:
+            kw_annotations = kwargs_type_annotations[kw_type].__annotations__
+            for kw_name in kw_annotations.keys():
+                dynamic_kwargs.add(kw_name)
     return dynamic_kwargs
 
 
