@@ -104,13 +104,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
                 logger.info("Using PPLX all2all manager.")
-            elif self.all2all_backend == "pplx_efa":
-                from .all2all import PPLXEfaAll2AllManager
+            elif self.all2all_backend == "rose":
+                from .all2all import RoseAll2AllManager
 
-                self.all2all_manager = PPLXEfaAll2AllManager(
-                    self.cpu_group, self.device
-                )
-                logger.info("Using PPLX EFA all2all manager.")
+                self.all2all_manager = RoseAll2AllManager(self.cpu_group, self.device)
+                logger.info("Using PPLX Rose all2all manager.")
             elif self.all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
 
