@@ -184,7 +184,7 @@ class Worker(WorkerBase):
                     * self.parallel_config.tensor_parallel_size
                 )
 
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_RANK % TP_PP_WORLD_SIZE
+                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
                 self.local_rank += dp_local_rank * tp_pp_world_size
                 assert self.local_rank <= torch.cuda.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
