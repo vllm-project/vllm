@@ -25,14 +25,16 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
-from process.image_process import (
-    DeepseekOCRProcessor, count_tiles)
+# from process.image_process import (
+#     DeepseekOCRProcessor, count_tiles)
+from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor as DeepseekOCRProcessor
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper, init_vllm_registered_model, maybe_prefix)
 
 from .deepencoder import build_sam_vit_b
+from .deepseek_vl2 import MlpProjector
 from .clip import CLIPVisionModel
 # from deepencoder.clip_sdpa import build_clip_l
 # from deepencoder.build_linear import MlpProjector
@@ -256,7 +258,11 @@ class DeepseekOCRMultiModalProcessor(
 class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
-        "language.": "language_model.",
+        "model.layers.": "language_model.model.layers",
+        "model.": "",
+    },
+    orig_to_new_substr={
+        ".transformer.": ".encoder.",
     })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -545,14 +551,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         hidden_states = self.language_model(input_ids,
                                             positions,
                                             intermediate_tensors,
@@ -563,23 +561,11 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+    ) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
 
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
-        processed_weights = []
-        
-        for name, tensor in weights:
-            if 'sam_model' in name or 'vision_model' in name or 'projector' in name or 'image_newline' in name or 'view_seperator' in name:
-                new_name = name.replace('model.', '', 1)
-            else:
-                new_name = 'language.' + name
-
-            processed_weights.append((new_name, tensor))
-        
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        autoloaded_weights = loader.load_weights(processed_weights, mapper=self.hf_to_vllm_mapper)
+        autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return autoloaded_weights
