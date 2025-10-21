@@ -3482,7 +3482,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
-                use_cudagraphs = cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                use_cudagraphs = (
+                    cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                    and not self.speculative_config.enforce_eager
+                )
                 self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
 
         # This is necessary to avoid blocking DP.
