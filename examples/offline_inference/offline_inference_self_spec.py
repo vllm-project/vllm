@@ -57,7 +57,17 @@ def parse_args():
     parser.add_argument("--max_num_batched_tokens", type=int, default=8192, help="Maximum batched tokens")
     parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
     parser.add_argument("--enable_sspec", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--num_speculative_tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--sspec_method", type=str, default="self_specs",
+                        choices=["self_specs", "self_spec_ngram"],
+                        help="Self-speculative method: self_specs (baseline) or self_spec_ngram (with n-gram assistance)")
+    parser.add_argument("--num_speculative_tokens", type=int, default=8,
+                        help="Self-spec threshold: number of tokens to accumulate before VERIFYING (default: 8)")
+    parser.add_argument("--ngram_draft_tokens", type=int, default=3,
+                        help="Number of draft tokens proposed by n-gram per step (for self_spec_ngram, default: 3)")
+    parser.add_argument("--prompt_lookup_max", type=int, default=None,
+                        help="Max n-gram window size (for self_spec_ngram). If not set, uses ngram_draft_tokens")
+    parser.add_argument("--prompt_lookup_min", type=int, default=None,
+                        help="Min n-gram window size (for self_spec_ngram). If not set, uses ngram_draft_tokens")
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--disable_log_stats", action="store_true", help="Disable log stats")
@@ -73,11 +83,22 @@ def parse_args():
 def get_speculative_config(args):
     """Get self-speculative decoding configuration based on arguments."""
     if args.enable_sspec:
-        return {
-            "method": "self_specs",
+        config = {
+            "method": args.sspec_method,
             "model": None,
-            "num_speculative_tokens": args.num_speculative_tokens,
+            "num_speculative_tokens": args.num_speculative_tokens,  # Self-spec threshold (ACCUMULATING → VERIFYING)
         }
+
+        # Add n-gram parameters for self_spec_ngram
+        if args.sspec_method == "self_spec_ngram":
+            # Use prompt_lookup_max/min if provided, otherwise use ngram_draft_tokens
+            lookup_max = args.prompt_lookup_max if args.prompt_lookup_max is not None else args.ngram_draft_tokens
+            lookup_min = args.prompt_lookup_min if args.prompt_lookup_min is not None else args.ngram_draft_tokens
+
+            config["prompt_lookup_max"] = lookup_max  # Number of n-gram draft tokens per step
+            config["prompt_lookup_min"] = lookup_min
+
+        return config
     return None
 
 
@@ -135,8 +156,21 @@ def main():
 
     if speculative_config is not None:
         llm_kwargs["speculative_config"] = speculative_config
-        print(f"Using self-speculative decoding with {speculative_config['num_speculative_tokens']} tokens")
+        print(f"\n{'='*70}")
+        print(f"SELF-SPECULATIVE DECODING CONFIGURATION")
+        print(f"{'='*70}")
+        print(f"Method: {speculative_config['method']}")
+        print(f"Self-spec threshold (ACCUMULATING → VERIFYING): {speculative_config['num_speculative_tokens']} tokens")
+        if speculative_config['method'] == 'self_spec_ngram':
+            print(f"N-gram drafts per step: {speculative_config['prompt_lookup_max']} tokens (max)")
+            print(f"                        {speculative_config['prompt_lookup_min']} tokens (min)")
+            print(f"")
+            print(f"Expected behavior:")
+            print(f"  - During ACCUMULATING: N-gram proposes ~{speculative_config['prompt_lookup_max']} drafts/step")
+            print(f"  - Reaches threshold in ~{speculative_config['num_speculative_tokens'] // speculative_config['prompt_lookup_max']} steps (with good acceptance)")
+            print(f"  - Then VERIFYING: All {speculative_config['num_speculative_tokens']} tokens verified with full KV")
         print(f"Sparse attention config: sink_size={args.sink_size}, recent_ratio={args.recent_ratio}")
+        print(f"{'='*70}\n")
     else:
         print("Self-speculative decoding disabled")
 
