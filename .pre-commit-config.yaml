@@ -1,8 +1,0 @@
-repos:
-  - repo: local
-    hooks:
-      - id: mypy-local
-        name: mypy
-        entry: mypy
-        language: system
-        types: [python]
