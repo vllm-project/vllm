@@ -1040,10 +1040,22 @@ class EagleProposer:
                 logger.info("Loading EAGLE LM head weights from the target model.")
                 self.model.lm_head = target_language_model.lm_head
         else:
-            logger.info(
-                "The EAGLE head's lm_head will be loaded separately"
-                " from the target model."
-            )
+            if (
+                hasattr(self.model, "lm_head")
+                and hasattr(target_language_model, "lm_head")
+                and not self.model.has_own_lm_head
+            ):
+                logger.info(
+                    "Assuming the EAGLE head shares the same lm_head"
+                    " with the target model."
+                )
+                del self.model.lm_head
+                self.model.lm_head = target_language_model.lm_head
+            else:
+                logger.info(
+                    "The EAGLE head's lm_head will be loaded separately"
+                    " from the target model."
+                )
 
     @torch.inference_mode()
     def dummy_run(
