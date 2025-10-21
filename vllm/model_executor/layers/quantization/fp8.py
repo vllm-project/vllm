@@ -1113,9 +1113,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             TritonOrDeepGemmExperts,
         )
 
-        assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
-            "Marlin and ROCm AITER are not supported with all2all yet."
-        )
+        assert not self.use_marlin, "Marlin is not supported with all2all yet."
 
         assert self.moe_quant_config is not None
 

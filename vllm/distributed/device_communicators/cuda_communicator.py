@@ -111,6 +111,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import DeepEPLLAll2AllManager
 
                 self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+            elif self.all2all_backend == "mori":
+                from .all2all import MoriAll2AllManager
+
+                self.all2all_manager = MoriAll2AllManager(self.cpu_group)
+                logger.info("Using Mori all2all manager.")
             elif self.all2all_backend == "flashinfer_all2allv":
                 from .all2all import FlashInferAllToAllManager
 
