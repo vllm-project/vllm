@@ -77,7 +77,7 @@ def _fused_moe_lora_kernel(
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
     max_loras = tl.num_programs(axis=2)
-    grid_k = tl.cdiv(K, BLOCK_SIZE_K*SPLIT_K)
+    grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
