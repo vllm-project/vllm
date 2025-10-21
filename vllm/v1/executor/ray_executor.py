@@ -405,8 +405,11 @@ class RayDistributedExecutor(Executor):
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         """Execute the model on the Ray workers.
 
+        The scheduler output to use should have been provided in
+        a prior call to execute_model().
+
         Args:
-            scheduler_output: The scheduler output to execute.
+            grammar_output: The structured outputs grammar bitmask, if applicable.
             non_block: If True, the method will return a Future.
 
         Returns:
