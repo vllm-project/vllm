@@ -18,6 +18,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import make_async
+from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
@@ -151,6 +152,11 @@ class ExecutorBase(ABC):
     def stop_remote_worker_execution_loop(self) -> None:
         """Releases parallel workers from model loop."""
         return
+
+    def reinitialize_distributed(
+        self, reconfig_request: "ReconfigureDistributedRequest"
+    ) -> None:
+        raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."

@@ -1237,8 +1237,7 @@ class DPEngineCoreProc(EngineCoreProc):
             parallel_config.data_parallel_master_port
         )
 
-        if hasattr(self.model_executor, "reinitialize_distributed"):
-            self.model_executor.reinitialize_distributed(reconfig_request)  # type: ignore[attr-defined]
+        self.model_executor.reinitialize_distributed(reconfig_request)
         if reconfig_request.new_data_parallel_size > old_dp_size:
             assert self.available_gpu_memory_for_kv_cache > 0
             # pass available_gpu_memory_for_kv_cache from existing

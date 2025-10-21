@@ -112,7 +112,7 @@ class LLMEngine:
         self.output_processor = OutputProcessor(
             self.tokenizer, log_stats=self.log_stats
         )
-        endpoint = getattr(self.observability_config, "otlp_traces_endpoint", None)
+        endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
             tracer = init_tracer("vllm.llm_engine", endpoint)
             self.output_processor.tracer = tracer
