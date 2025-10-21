@@ -319,14 +319,12 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
-        assert isinstance(future, Future)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
             if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)  # type: ignore[assignment]
+                model_output = self.model_executor.sample_tokens(grammar_output)
 
-        assert model_output is not None
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )

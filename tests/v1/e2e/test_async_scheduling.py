@@ -19,7 +19,8 @@ def test_preempt_and_async_scheduling_e2e(
     sample_json_schema, monkeypatch: pytest.MonkeyPatch
 ):
     """Test consistency of combos of async scheduling, preemption,
-    uni/multiproc executor, and various sampling parameters."""
+    uni/multiproc executor, and various sampling parameters
+    including structured outputs."""
 
     first_prompt = (
         "The following numbers of the sequence "
