@@ -623,7 +623,8 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.time() - torch_compile_start_time
-        logger.debug("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        if is_local_first_rank():
+            logger.debug("Dynamo bytecode transform time: %.2f s", dynamo_time)
         self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
