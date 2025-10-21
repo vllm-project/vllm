@@ -21,7 +21,6 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
 @functools.lru_cache
@@ -103,6 +102,6 @@ class EncoderOnlyAttention(Attention):
             **kwargs,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> None:
         # Does not need KV cache
         return None
