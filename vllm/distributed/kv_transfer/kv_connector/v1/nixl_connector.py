@@ -663,6 +663,7 @@ class NixlConnectorWorker:
         Helper class for tensor parallel and KV topology information for
         mapping between local and remote TP workers.
         """
+
         tp_size: int
         tp_rank: int
         remote_tp_size: dict[EngineId, int]
@@ -729,9 +730,10 @@ class NixlConnectorWorker:
             else:
                 # P TP > D TP case, D reads from |tp_ratio| remote workers.
                 tp_ratio = -tp_ratio
-                if self.replicates_kv_cache(remote_tp_size):
+                if self.is_mla:
                     # When cache is replicated on remote, we only need to read
-                    # from one remote (they all have the same cache).
+                    # from one remote (they all have the same cache). Fan out
+                    # transfers to avoid bottlenecks on single remote.
                     return [self.tp_rank * tp_ratio]
                 return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
 
@@ -741,7 +743,6 @@ class NixlConnectorWorker:
         ) -> list[int]:
             remote_tp_size = self.remote_tp_size[remote_engine_id]
             return self.get_target_remote_ranks(remote_tp_size)
-
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         if NixlWrapper is None:
@@ -1336,7 +1337,7 @@ class NixlConnectorWorker:
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
-        tp_ratio = self.kv_topo.tp_ratio(engine_id)
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(engine_id)
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
         indexes_into_remote = (
@@ -1785,8 +1786,9 @@ class NixlConnectorWorker:
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
-            meta.remote_engine_id)
-        tp_ratio = self.kv_topo.tp_ratio(meta.remote_engine_id)
+            meta.remote_engine_id
+        )
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote_engine_id)
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             logger.debug(
@@ -1844,7 +1846,7 @@ class NixlConnectorWorker:
         # Number of D TP workers that will read from dst P. Propagate tp_ratio
         # on notification so that dst worker can wait before freeing blocks.
         # Cap to 1 when P TP > D TP: only a single rank will read from remote.
-        tp_ratio = max(1, self.kv_topo.tp_ratio(dst_engine_id))
+        tp_ratio = max(1, self.kv_topo.tp_ratio_from_engine_id(dst_engine_id))
         notif_id = f"{request_id}:{tp_ratio}".encode()
 
         # Full prefix cache hit: do not need to read remote blocks,
