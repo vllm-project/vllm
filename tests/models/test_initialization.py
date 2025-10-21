@@ -104,6 +104,11 @@ def can_initialize(
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+        extra_args = {}
+        if model_arch == "PrithviGeoSpatialMAE":
+            extra_args["enable_mm_embeds"] = True
+
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
