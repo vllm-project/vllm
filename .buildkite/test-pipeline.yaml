@@ -384,7 +384,12 @@ steps:
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
       --ignore=lora/test_chatglm3_tp.py \
       --ignore=lora/test_llama_tp.py \
-      --ignore=lora/test_llm_with_multi_loras.py
+      --ignore=lora/test_llm_with_multi_loras.py \
+      --ignore=lora/test_olmoe_tp.py \
+      --ignore=lora/test_deepseekv2_tp.py \
+      --ignore=lora/test_gptoss.py \
+      --ignore=lora/test_qwen3moe_tp.py
+      
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests # 15min
@@ -977,6 +982,7 @@ steps:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - pytest -v -s distributed/test_sequence_parallel.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
@@ -1064,6 +1070,7 @@ steps:
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
+    - pytest -v -s -x lora/test_olmoe_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
