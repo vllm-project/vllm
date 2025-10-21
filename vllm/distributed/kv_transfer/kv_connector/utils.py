@@ -331,9 +331,10 @@ class TpKVTopology:
         else:
             # P TP > D TP case, D reads from |tp_ratio| remote workers.
             tp_ratio = -tp_ratio
-            if self.replicates_kv_cache(remote_tp_size):
+            if self.is_mla:
                 # When cache is replicated on remote, we only need to read
-                # from one remote (they all have the same cache).
+                # from one remote (they all have the same cache). Fan out
+                # transfers to avoid bottlenecks on single remote.
                 return [self.tp_rank * tp_ratio]
             return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
 

@@ -36,7 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorStats,
     PromMetric,
     PromMetricT,
-)π
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -874,6 +874,7 @@ class NixlConnectorWorker:
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
         # Populated dynamically during handshake based on remote configuration.
         # Keep track of regions at different tp_ratio values. tp_ratio->handles
+        # FIXME change to remote tp_size
         self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
         self.dst_xfer_side_handles: defaultdict[EngineId, dict[int, int]] = defaultdict(
@@ -1493,7 +1494,7 @@ class NixlConnectorWorker:
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
-        tp_ratio = self.kv_topo.tp_ratio(engine_id)
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(engine_id)
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
         indexes_into_remote = (
@@ -2049,8 +2050,9 @@ class NixlConnectorWorker:
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
-            meta.remote_engine_id)
-        tp_ratio = self.kv_topo.tp_ratio(meta.remote_engine_id)
+            meta.remote_engine_id
+        )
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote_engine_id)
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             remote_block_size = self.kv_topo.remote_block_size[meta.remote_engine_id]
