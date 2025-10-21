@@ -595,6 +595,12 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "incomplete"
                 elif context.finish_reason == "abort":
                     status = "cancelled"
+                elif context.finish_reason == "error":
+                    return self.create_error_response(
+                        "Internal server error",
+                        err_type="InternalServerError",
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
             else:
                 status = "incomplete"
         else:
@@ -603,6 +609,14 @@ class OpenAIServingResponses(OpenAIServing):
             assert final_res is not None
             assert len(final_res.outputs) == 1
             final_output = final_res.outputs[0]
+
+            # finish_reason='error' indicates a retryable request-level internal error
+            if final_output.finish_reason == "error":
+                return self.create_error_response(
+                    "Internal server error",
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
@@ -1194,6 +1208,17 @@ class OpenAIServingResponses(OpenAIServing):
                 continue
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
+                # finish_reason='error' indicates a retryable error
+                if output.finish_reason == "error":
+                    error_data = self.create_streaming_error_response(
+                        "Internal server error",
+                        err_type="InternalServerError",
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    yield _increment_sequence_number_and_return(
+                        StreamingResponsesResponse.model_validate_json(error_data)
+                    )
+                    return
                 if reasoning_parser:
                     delta_message = reasoning_parser.extract_reasoning_streaming(
                         previous_text=previous_text,
@@ -1488,6 +1513,18 @@ class OpenAIServingResponses(OpenAIServing):
         is_first_function_call_delta = False
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
+
+            # finish_reason='error' indicates a retryable error
+            if ctx.finish_reason == "error":
+                error_data = self.create_streaming_error_response(
+                    "Internal server error",
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                yield _increment_sequence_number_and_return(
+                    StreamingResponsesResponse.model_validate_json(error_data)
+                )
+                return
 
             if ctx.is_expecting_start():
                 current_output_index += 1
