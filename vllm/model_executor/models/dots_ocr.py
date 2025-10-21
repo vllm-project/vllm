@@ -256,6 +256,7 @@ class DotsVisionAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
 
@@ -288,7 +289,9 @@ class DotsVisionAttention(nn.Module):
         )
         # Select attention backend
         self.attn_backend = get_vit_attn_backend(
-            self.hidden_size_per_attention_head, torch.get_default_dtype()
+            self.hidden_size_per_attention_head,
+            torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         self.use_upstream_fa = False
 
@@ -510,6 +513,7 @@ class DotsVisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
 
@@ -521,6 +525,7 @@ class DotsVisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.norm1 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
         self.mlp = DotsSwiGLUFFN(
@@ -561,6 +566,7 @@ class DotsVisionTransformer(nn.Module):
         require_post_norm: bool | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -571,7 +577,9 @@ class DotsVisionTransformer(nn.Module):
         head_dim = config.embed_dim // config.num_attention_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
             torch.get_default_dtype()
@@ -591,6 +599,7 @@ class DotsVisionTransformer(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{i}",
                     use_data_parallel=use_data_parallel,
+                    attn_backend_override=attn_backend_override,
                 )
                 for i in range(num_layers)
             ]
@@ -750,11 +759,17 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             self.config.vision_config = vision_config
         else:
             vision_config = self.config.vision_config
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.vision_tower = DotsVisionTransformer(
             vision_config,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
             use_data_parallel=self.use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
             vllm_config=vllm_config,
