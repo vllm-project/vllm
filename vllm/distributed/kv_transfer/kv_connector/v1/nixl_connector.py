@@ -872,7 +872,7 @@ class NixlConnectorWorker:
                 ):
                     logger.info_once(
                         "'enable_permute_local_kv' flag is enabled while "
-                        "device KV Layout with NHD, init host buffer with"
+                        "device KV Layout is NHD. Init host buffer with"
                         " HND to better support Decode/Prefill TP_ratio > 1."
                     )
                     # Since NHD will not support Decode/Prefill TP_ratio > 1,
