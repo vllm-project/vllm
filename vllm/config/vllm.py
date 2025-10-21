@@ -538,6 +538,13 @@ class VllmConfig:
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             )
 
+            # enable mrope custom op with triton kernel when model uses mrope
+            if (
+                self.model_config.uses_mrope
+                and "-mrope" not in self.compilation_config.custom_ops
+            ):
+                self.compilation_config.custom_ops.append("+mrope")
+
         if self.parallel_config.enable_dbo:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
