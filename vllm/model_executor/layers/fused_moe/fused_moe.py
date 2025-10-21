@@ -2137,13 +2137,18 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             B_bias=self.w2_bias,
         )
 
-        ops.moe_sum(intermediate_cache3, output)
+        # separate function is required for MoE + LoRA
+        self.moe_sum(intermediate_cache3, output)
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        ops.moe_sum(input, output)
 
 
 def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig,
+    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(quant_config),
+        shared_experts,
     )
