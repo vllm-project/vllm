@@ -139,7 +139,8 @@ struct sm100_fp8_config_M64_swap_ab {
   using TileShape = Shape<_128, _64, _256>;
   using ClusterShape = Shape<_4, _1, _1>;
 
-   // Use ScaledEpilogueColumnBias instead of ScaledEpilogueBias when doing swap AB
+  // Use ScaledEpilogueColumnBias instead of ScaledEpilogueBias when doing swap
+  // AB
   using Cutlass3xGemm = conditional_t<
       EnableBias,
       cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogueColumnBias,
@@ -178,7 +179,8 @@ struct sm100_fp8_config_M16_swap_ab {
   using TileShape = Shape<_128, _32, _128>;
   using ClusterShape = Shape<_4, _1, _1>;
 
-   // Use ScaledEpilogueColumnBias instead of ScaledEpilogueBias when doing swap AB
+  // Use ScaledEpilogueColumnBias instead of ScaledEpilogueBias when doing swap
+  // AB
   using Cutlass3xGemm = conditional_t<
       EnableBias,
       cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogueColumnBias,
