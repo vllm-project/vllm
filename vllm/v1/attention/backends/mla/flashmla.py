@@ -78,6 +78,27 @@ class FlashMLABackend(MLACommonBackend):
     def get_max_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(10, 3)
 
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if use_sparse:
+            from vllm.attention.ops.flashmla import is_flashmla_sparse_supported
+
+            return is_flashmla_sparse_supported()[1]
+        else:
+            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+
+            return is_flashmla_dense_supported()[1]
+
 
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
