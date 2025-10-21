@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
@@ -14,10 +15,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
+@lru_cache
 def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls) -> set[str]:
     dynamic_kwargs: set[str] = set()
     # get kwargs annotations in processor
+    # merge text_kwargs / images_kwargs / videos_kwargs / audio_kwargs
     kwargs_type_annotations = getattr(kwargs_cls, "__annotations__", {})
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
