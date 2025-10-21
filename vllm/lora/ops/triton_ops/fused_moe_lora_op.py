@@ -236,7 +236,9 @@ def _fused_moe_lora(
     b_ptr = _get_ptr(lora_a_stacked, device)
 
     grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        split_k
+        * triton.cdiv(EM, META["BLOCK_SIZE_M"])
+        * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
         lora_a_stacked[0].shape[0],
     )
