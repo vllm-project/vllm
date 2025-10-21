@@ -668,13 +668,8 @@ def runai_safetensors_weights_iterator(
 
         if is_distributed and (device := get_device()):
             streamer.stream_files(hf_weights_files, device=device, is_distributed=True)
-            tensor_source = (
-                (name, tensor.clone().detach())
-                for name, tensor in streamer.get_tensors()
-            )
         else:
             streamer.stream_files(hf_weights_files)
-            tensor_source = streamer.get_tensors()
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
