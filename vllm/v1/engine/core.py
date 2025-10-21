@@ -390,10 +390,9 @@ class EngineCore:
 
                 if exec_result is None:
                     # Call sample tokens.
-                    sample_future = self.model_executor.sample_tokens(
+                    future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
-                    future = cast(Future[ModelRunnerOutput], sample_future)
                 else:
                     # No sampling required (e.g. all requests finished).
                     future = cast(Future[ModelRunnerOutput], exec_future)
@@ -432,10 +431,7 @@ class EngineCore:
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )
-            sample_future = self.model_executor.sample_tokens(
-                grammar_output, non_block=True
-            )
-            future = cast(Future[ModelRunnerOutput], sample_future)
+            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed

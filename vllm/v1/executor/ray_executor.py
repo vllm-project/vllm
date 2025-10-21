@@ -398,7 +398,7 @@ class RayDistributedExecutor(Executor):
         self.scheduler_output = scheduler_output
         return COMPLETED_NONE_FUTURE if non_block else None
 
-    def sample_tokens(
+    def sample_tokens(  # type: ignore[override]
         self,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,

@@ -185,7 +185,7 @@ class MultiprocExecutor(Executor):
             "execute_model", scheduler_output, non_block=non_block
         )
 
-    def sample_tokens(
+    def sample_tokens(  # type: ignore[override]
         self,
         grammar_output: GrammarOutput | None,
         non_block: bool = False,
