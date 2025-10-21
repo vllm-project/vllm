@@ -425,13 +425,19 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     # This test checks if GPUModelRunner initializes correctly when an attention
     # backend enforces a non-default KV cache stride order.
     n_heads = model_runner.model_config.get_num_kv_heads(model_runner.parallel_config)
-    expected_kv_cache_shape = [
-        2,
-        NUM_BLOCKS,
-        BLOCK_SIZE,
-        n_heads,
-        model_runner.model_config.get_head_size(),
-    ]
+    head_size = model_runner.model_config.get_head_size()
+
+    # Get the expected shape from the backend's get_kv_cache_shape method
+    # to ensure compatibility with different backends (triton vs flexattention)
+    attn_backend = None
+    for attn_group in model_runner._attn_group_iterator():
+        attn_backend = attn_group.backend
+        break
+
+    expected_kv_cache_shape = list(attn_backend.get_kv_cache_shape(
+        NUM_BLOCKS, BLOCK_SIZE, n_heads, head_size
+    ))
+
     # TODO mla test
     default_stride = tuple(range(5))
     # Permutation that gets you back to expected kv shape
