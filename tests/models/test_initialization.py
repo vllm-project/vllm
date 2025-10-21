@@ -133,6 +133,7 @@ def can_initialize(
             else "vllm",
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs,
+            **extra_args,
         )
 
 
