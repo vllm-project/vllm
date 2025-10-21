@@ -482,7 +482,8 @@ class FlexibleArgumentParser(ArgumentParser):
                 config = yaml.safe_load(config_file)
         except Exception as ex:
             logger.error(
-                f"Unable to read the config file at {file_path}. Check path correctness"
+                "Unable to read the config file at %s. Check path correctness",
+                file_path
             )
             raise ex
 
