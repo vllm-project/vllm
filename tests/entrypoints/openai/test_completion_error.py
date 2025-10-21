@@ -81,7 +81,7 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
 
 @pytest.mark.asyncio
 async def test_completion_error_non_stream():
-    """test finish_reason='error' returns 503 ServiceUnavailable (non-streaming)"""
+    """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
@@ -128,14 +128,14 @@ async def test_completion_error_non_stream():
     response = await serving_completion.create_completion(request)
 
     assert isinstance(response, ErrorResponse)
-    assert response.error.type == "ServiceUnavailable"
-    assert response.error.message == "Service temporarily unavailable"
-    assert response.error.code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert response.error.type == "InternalServerError"
+    assert response.error.message == "Internal server error"
+    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
 
 
 @pytest.mark.asyncio
 async def test_completion_error_stream():
-    """test finish_reason='error' returns 503 ServiceUnavailable (streaming)"""
+    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
@@ -209,7 +209,7 @@ async def test_completion_error_stream():
         chunks.append(chunk)
 
     assert len(chunks) >= 2
-    assert any("Service temporarily unavailable" in chunk for chunk in chunks), (
+    assert any("Internal server error" in chunk for chunk in chunks), (
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
