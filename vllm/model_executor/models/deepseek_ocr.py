@@ -402,8 +402,6 @@ class NoTPAttention(torch.nn.Module):
         self.qkv_proj = torch.nn.Linear(cfg.hidden_size, cfg.hidden_size * 3, bias=True)
         self.out_proj = torch.nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=True)
 
-        # self.core_attention = CoreAttention(cfg, AttnType.self_attn)
-
         self.attn_drop = cfg.attention_dropout
 
     def forward(
@@ -419,22 +417,7 @@ class NoTPAttention(torch.nn.Module):
 
             output = flash_attn_qkvpacked_func(xqkv)
             output = output.view(bsz, seqlen, -1)
-            # xq, xk, xv = torch.split(xqkv, 1, dim=2)
-            # xq = xq.squeeze(2)
-            # xk = xk.squeeze(2)
-            # xv = xv.squeeze(2)
-            # # xq, xk, xv = xqkv[:, :, 0, ...], xqkv[:, :, 1, ...], xqkv[:, :, 2, ...]
-
-            # # （B, num_head, S, head_size)
-            # xq = xq.permute(0, 2, 1, 3)
-            # xk = xk.permute(0, 2, 1, 3)
-            # xv = xv.permute(0, 2, 1, 3)
-            # # with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
-            # output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None)
-            # output = output.permute(0, 2, 1, 3).reshape(bsz, seqlen, -1)
-            # output = output.permute(0, 2, 1, 3).contiguous().view(bsz, seqlen, -1)
         else:
-            # output = flash_attn_qkvpacked_func(xqkv)
             xq, xk, xv = torch.split(xqkv, 1, dim=2)
             xq = xq.squeeze(2)
             xk = xk.squeeze(2)
@@ -445,7 +428,6 @@ class NoTPAttention(torch.nn.Module):
             xq = xq.permute(0, 2, 1, 3)
             xk = xk.permute(0, 2, 1, 3)
             xv = xv.permute(0, 2, 1, 3)
-            # with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
             output = torch.nn.functional.scaled_dot_product_attention(
                 xq, xk, xv, attn_mask=None
             )
