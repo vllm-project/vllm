@@ -1180,7 +1180,7 @@ def init_distributed_environment(
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,
-            init_method=distributed_init_method,
+            init_method=(envs.VLLM_DISTRIBUTED_INIT_METHOD_OVERRIDE or distributed_init_method),
             world_size=world_size,
             rank=rank,
             timeout=timeout,
