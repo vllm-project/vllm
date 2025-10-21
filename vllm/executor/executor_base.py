@@ -22,7 +22,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 
@@ -260,7 +260,7 @@ class ExecutorBase(ABC):
         exception."""
         self.check_health()
 
-    def init_kv_output_aggregator(self, connector: KVConnectorBase_V1) -> None:
+    def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
         """Init KVOutputAggregator"""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
             connector, self.parallel_config.world_size
