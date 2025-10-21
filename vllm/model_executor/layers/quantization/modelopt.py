@@ -548,9 +548,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
+            g1_alphas=(layer.w13_weight_scale * layer.w13_input_scale).squeeze(),
             w2_scale=layer.w2_weight_scale,
+            g2_alphas=(layer.w2_weight_scale * layer.w2_input_scale).squeeze(),
             a1_scale=layer.w13_input_scale,
+            a1_gscale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            a2_gscale=1.0 / layer.w2_input_scale,
             per_act_token_quant=False,
         )
 
@@ -1137,8 +1141,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> None:
-        from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
-            detect_nvfp4_moe_support,
+        from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (
+            detect_nvfp4_moe_support,  # noqa: E501
         )
 
         super().__init__(moe)
@@ -1727,8 +1731,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
         ):
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                flashinfer_cutlass_moe_fp4,
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+                flashinfer_cutlass_moe_fp4,  # noqa: E501
             )
 
             assert self.moe_quant_config is not None
