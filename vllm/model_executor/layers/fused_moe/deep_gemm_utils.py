@@ -10,8 +10,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import round_up
 from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+from vllm.utils.math_utils import round_up
 
 
 def expert_num_tokens_round_up_and_sum(

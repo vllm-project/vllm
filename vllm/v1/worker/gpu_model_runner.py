@@ -74,8 +74,8 @@ from vllm.utils import (
     is_pin_memory_available,
     length_from_prompt_token_ids_or_embeds,
 )
-from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import (
