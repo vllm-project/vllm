@@ -42,6 +42,7 @@ class TTModelLoader(BaseModelLoader):
             max_batch_size,
             max_seq_len=model_config.max_model_len,
             tt_data_parallel=data_parallel,
+            optimizations=model_config.override_tt_config.get("optimizations", None),
         )
         return model
 
