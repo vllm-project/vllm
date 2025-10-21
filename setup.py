@@ -12,7 +12,6 @@ import subprocess
 import sys
 from pathlib import Path
 from shutil import which
-from typing import Union
 
 import torch
 from packaging.version import Version, parse
@@ -549,7 +548,7 @@ def override_version(version_str: str = "0.9.2.dev+g3b1e4c6"):
     """
     file_path = "vllm/_version.py"
 
-    def parse_version_tuple(version: str) -> tuple[Union[int, str], ...]:
+    def parse_version_tuple(version: str) -> tuple[int | str, ...]:
         """Parse version string into tuple format"""
         # Handle different version formats
         if "+g" in version:
@@ -637,10 +636,15 @@ def override_version(version_str: str = "0.9.2.dev+g3b1e4c6"):
 
 
 def get_vllm_version() -> str:
+    # Allow overriding the version. This is useful to build platform-specific
+    # wheels (e.g. CPU, TPU) without modifying the source.
+    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
+        return env_version
+
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
-    version = "0.11.0rc2.dev+g08d26a1"
+    version = "0.11.1rc2.dev+ge9fce7b"
     override_version(version)
     sep = ""
 
@@ -816,8 +820,7 @@ setup(
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
-        # FlashInfer should be updated together with the Dockerfile
-        "flashinfer": ["flashinfer-python==0.3.1"],
+        "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
     },

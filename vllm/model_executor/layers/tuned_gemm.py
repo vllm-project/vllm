@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import torch
@@ -107,7 +106,7 @@ class TunedGemm:
         out_dtype: torch.dtype,
         scale_a: torch.Tensor,
         scale_b: torch.Tensor,
-        bias: Optional[torch.Tensor],
+        bias: torch.Tensor | None,
     ) -> torch.Tensor:
         if aiter_linear_enabled():
             return aiter_tgemm.mm(

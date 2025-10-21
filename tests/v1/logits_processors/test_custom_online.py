@@ -4,7 +4,7 @@
 import os
 import random
 import sys
-from typing import Any, Optional
+from typing import Any
 
 import openai
 import pytest
@@ -25,7 +25,7 @@ from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 
 
 def _server_with_logitproc_entrypoint(
-    env_dict: Optional[dict[str, str]],
+    env_dict: dict[str, str] | None,
     model: str,
     vllm_serve_args: list[str],
 ) -> None:
@@ -48,7 +48,7 @@ def _server_with_logitproc_entrypoint(
 
 
 def _server_with_logitproc_module(
-    env_dict: Optional[dict[str, str]],
+    env_dict: dict[str, str] | None,
     model: str,
     vllm_serve_args: list[str],
 ) -> None:

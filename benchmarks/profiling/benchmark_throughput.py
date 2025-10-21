@@ -11,7 +11,6 @@ import time
 from contextlib import contextmanager, nullcontext
 from functools import cache
 from pathlib import Path
-from typing import Optional
 
 import torch
 import uvloop
@@ -48,8 +47,8 @@ class SampleRequest:
     prompt: str
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[MultiModalDataDict] = None
-    lora_request: Optional[LoRARequest] = None
+    multi_modal_data: MultiModalDataDict | None = None
+    lora_request: LoRARequest | None = None
 
 
 def _get_prompt_for_image_model(question: str, *, model: str) -> str:
@@ -83,7 +82,7 @@ lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 def get_random_lora_request(
     args: argparse.Namespace,
-) -> tuple[LoRARequest, Optional[AnyTokenizer]]:
+) -> tuple[LoRARequest, AnyTokenizer | None]:
     global lora_tokenizer_cache
     lora_id = random.randint(1, args.max_loras)
     lora_request = LoRARequest(
@@ -101,7 +100,7 @@ def sample_requests(
 ) -> list[SampleRequest]:
     dataset_path: str = args.dataset
     num_requests: int = args.num_prompts
-    fixed_output_len: Optional[int] = args.output_len
+    fixed_output_len: int | None = args.output_len
     model: str = args.model
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
@@ -124,7 +123,7 @@ def sample_requests(
         prompt = data["conversations"][0]["value"]
         completion = data["conversations"][1]["value"]
 
-        multi_modal_data: Optional[MultiModalDataDict] = None
+        multi_modal_data: MultiModalDataDict | None = None
         if "image" in data:
             multi_modal_data = multi_modal_data or {}
             image_path = data["image"]
@@ -138,7 +137,7 @@ def sample_requests(
             prompt = _get_prompt_for_image_model(question=prompt, model=model)
 
         request_tokenizer = tokenizer
-        lora_request: Optional[LoRARequest] = None
+        lora_request: LoRARequest | None = None
         if args.enable_lora:
             lora_request, lora_tokenizer = get_random_lora_request(args)
             if lora_tokenizer:
@@ -187,7 +186,7 @@ def run_vllm(
         rpd.top_totals()
 
     @contextmanager
-    def torch_profiler_context(profile_dir: Optional[str] = None):
+    def torch_profiler_context(profile_dir: str | None = None):
         p = torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -203,7 +202,7 @@ def run_vllm(
             p.stop()
             print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
-    def get_profiling_context(profile_dir: Optional[str] = None):
+    def get_profiling_context(profile_dir: str | None = None):
         if args.profile_torch:
             return torch_profiler_context(profile_dir)
         elif args.profile_rpd:
@@ -242,7 +241,7 @@ def run_vllm(
                 max_tokens=request.expected_output_len,
             )
         )
-    lora_requests: Optional[list[LoRARequest]] = None
+    lora_requests: list[LoRARequest] | None = None
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
 
@@ -293,7 +292,7 @@ async def run_vllm_async(
         # Add the requests to the engine.
         prompts: list[TextPrompt] = []
         sampling_params: list[SamplingParams] = []
-        lora_requests: list[Optional[LoRARequest]] = []
+        lora_requests: list[LoRARequest | None] = []
         for request in requests:
             prompts.append(
                 TextPrompt(
@@ -417,7 +416,7 @@ def main(args: argparse.Namespace):
         requests = []
         for _ in range(args.num_prompts):
             request_tokenizer = tokenizer
-            lora_request: Optional[LoRARequest] = None
+            lora_request: LoRARequest | None = None
             if args.enable_lora:
                 lora_request, lora_tokenizer = get_random_lora_request(args)
                 if lora_tokenizer:

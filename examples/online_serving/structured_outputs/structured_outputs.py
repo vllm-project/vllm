@@ -1,21 +1,15 @@
 # ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from __future__ import annotations
-
 import argparse
 import asyncio
 import enum
 import os
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import openai
 import pydantic
-
-if TYPE_CHECKING:
-    from openai.types.chat import ChatCompletionChunk
-
+from openai.types.chat import ChatCompletionChunk
 
 ConstraintsFormat = Literal[
     "choice",

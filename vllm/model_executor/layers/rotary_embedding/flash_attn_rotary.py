@@ -3,7 +3,6 @@
 # Copyright (c) 2025, Tri Dao.
 # As of 2025-04-23, we require triton >= 3.0
 
-from typing import Optional, Union
 
 import torch
 import triton
@@ -220,9 +219,9 @@ def apply_rotary_2c(
     x: torch.Tensor,
     y: torch.Tensor,
     freqs: torch.Tensor,
-    seqlen_offsets: Union[int, torch.Tensor] = 0,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    max_seqlen: Optional[int] = None,
+    seqlen_offsets: int | torch.Tensor = 0,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
     interleaved=False,
     inplace=False,
     conjugate=False,

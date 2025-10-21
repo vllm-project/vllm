@@ -3,7 +3,6 @@
 """Custom activation functions."""
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -18,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import LazyDict
+from vllm.utils.collection_utils import LazyDict
 
 logger = init_logger(__name__)
 
@@ -84,14 +83,14 @@ class SiluAndMul(CustomOp):
         self.fp8_dtype = current_platform.fp8_dtype()
 
     def forward_native(
-        self, x: torch.Tensor, scale: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward_cuda(
-        self, x: torch.Tensor, scale: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
@@ -497,7 +496,7 @@ class ScaledActivation(nn.Module):
         act_module: nn.Module,
         intermediate_size: int,
         input_is_parallel: bool = True,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.act = act_module
