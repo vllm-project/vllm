@@ -16,7 +16,7 @@ To input multi-modal data, follow this schema in [vllm.inputs.EmbedsPrompt][]:
 
 You can pass prompt embeddings from Hugging Face Transformers models to the  `'prompt_embeds'` field of the prompt embedding dictionary, as shown in the following examples:
 
-<gh-file:examples/offline_inference/prompt_embed_inference.py>
+[examples/offline_inference/prompt_embed_inference.py](../../examples/offline_inference/prompt_embed_inference.py)
 
 ## Online Serving
 
@@ -41,4 +41,4 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --runner generate \
 
 Then, you can use the OpenAI client as follows:
 
-<gh-file:examples/online_serving/prompt_embed_inference_with_openai_client.py>
+[examples/online_serving/prompt_embed_inference_with_openai_client.py](../../examples/online_serving/prompt_embed_inference_with_openai_client.py)
