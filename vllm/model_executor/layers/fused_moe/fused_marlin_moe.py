@@ -24,6 +24,17 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.scalar_type import ScalarType, scalar_types
 
 
+def get_marlin_moe_workspace_size(quant_type: ScalarType) -> int:
+    """Get the workspace size (max_blocks_per_sm) for Marlin MoE based on quantization type."""
+    bit4_scalar_types = [
+        scalar_types.uint4,
+        scalar_types.uint4b8,
+        scalar_types.float4_e2m1f,
+    ]
+    num_bits = 4 if quant_type in bit4_scalar_types else 8
+    return 8 if num_bits == 8 else 4
+
+
 def _fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -61,13 +72,7 @@ def _fused_marlin_moe(
     N = marlin_moe_intermediate_size(w1, w2)
 
     if workspace is None:
-        bit4_scalar_types = [
-            scalar_types.uint4,
-            scalar_types.uint4b8,
-            scalar_types.float4_e2m1f,
-        ]
-        num_bits = 4 if quant_type in bit4_scalar_types else 8
-        max_blocks_per_sm = 8 if num_bits == 8 else 4
+        max_blocks_per_sm = get_marlin_moe_workspace_size(quant_type)
         workspace = marlin_make_workspace_new(hidden_states.device, max_blocks_per_sm)
 
     if intermediate_cache13 is None:
@@ -249,12 +254,8 @@ def fused_marlin_moe(
         scalar_types.float4_e2m1f,
     ]
 
-    bit4_scalar_types = [
-        scalar_types.uint4,
-        scalar_types.uint4b8,
-        scalar_types.float4_e2m1f,
-    ]
-    num_bits = 4 if quant_type in bit4_scalar_types else 8
+    bit4_types = [scalar_types.uint4, scalar_types.uint4b8, scalar_types.float4_e2m1f]
+    num_bits = 4 if quant_type in bit4_types else 8
 
     M, K = hidden_states.size()
     E = w1.size(0)
@@ -398,12 +399,8 @@ def batched_fused_marlin_moe(
         scalar_types.float4_e2m1f,
     ]
 
-    bit4_scalar_types = [
-        scalar_types.uint4,
-        scalar_types.uint4b8,
-        scalar_types.float4_e2m1f,
-    ]
-    num_bits = 4 if quant_type in bit4_scalar_types else 8
+    bit4_types = [scalar_types.uint4, scalar_types.uint4b8, scalar_types.float4_e2m1f]
+    num_bits = 4 if quant_type in bit4_types else 8
 
     B, BATCH_TOKENS_MAX, K = hidden_states.size()
     M = hidden_states.view(-1, K).size(0)

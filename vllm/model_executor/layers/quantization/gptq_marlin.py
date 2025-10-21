@@ -15,7 +15,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    fused_marlin_moe,
+    get_marlin_moe_workspace_size,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -654,7 +657,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
         device = layer.w13_qweight.device
-        max_blocks_per_sm = 8 if self.bits == 8 else 4
+        max_blocks_per_sm = get_marlin_moe_workspace_size(self.quant_type)
         layer.workspace = marlin_make_workspace_new(device, max_blocks_per_sm)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
