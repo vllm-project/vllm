@@ -690,58 +690,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 @router.post(
-    "/generate",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def generate(raw_request: Request):
-    handler = completion(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Completions API"
-        )
-
-    request_dict = await raw_request.json()
-    completion_request = CompletionRequest(
-        prompt=request_dict["prompt"],
-        max_tokens=request_dict["max_tokens"],
-        temperature=request_dict["temperature"],
-        top_p=request_dict["top_p"],
-        top_k=request_dict["top_k"],
-        logprobs=request_dict["logprobs"],
-        ignore_eos=request_dict["ignore_eos"],
-        return_token_ids=True,
-    )
-
-    try:
-        generator = await handler.create_completion(completion_request, raw_request)
-    except OverflowError as e:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, CompletionResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
     "/v1/embeddings",
     dependencies=[Depends(validate_json_request)],
     responses={
