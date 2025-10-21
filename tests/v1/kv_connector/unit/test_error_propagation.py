@@ -32,9 +32,9 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def fail_scheduler():
-    """scheduler with kv_load_retry_policy='fail'"""
+    """scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_load_retry_policy = "fail"
+    vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
 
 

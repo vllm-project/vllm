@@ -293,13 +293,8 @@ class OpenAIServingCompletion(OpenAIServing):
             for final_res in final_res_batch_checked:
                 for output in final_res.outputs:
                     if output.finish_reason == "error":
-                        logger.error(
-                            "Request-level error for request %s: %s",
-                            request_id,
-                            output.stop_reason or "unknown",
-                        )
                         return self.create_error_response(
-                            "Service temporarily unavailable",
+                            "Completion request failed",
                             err_type="ServiceUnavailable",
                             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
                         )
@@ -453,13 +448,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     stop_reason = output.stop_reason
 
                     if finish_reason == "error":
-                        logger.error(
-                            "Request-level error for request %s: %s",
-                            request_id,
-                            stop_reason or "unknown",
-                        )
                         error_data = self.create_streaming_error_response(
-                            "Service temporarily unavailable"
+                            "Completion request failed",
+                            err_type="ServiceUnavailable",
+                            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
                         )
                         yield f"data: {error_data}\n\n"
                         yield "data: [DONE]\n\n"

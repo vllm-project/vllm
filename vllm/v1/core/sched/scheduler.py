@@ -95,6 +95,7 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
+        self.recompute_kv_load_failures = True
         if self.vllm_config.kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported with KV connectors"
@@ -106,6 +107,10 @@ class Scheduler(SchedulerInterface):
             )
             if self.log_stats:
                 self.connector_prefix_cache_stats = PrefixCacheStats()
+            kv_load_failure_policy = (
+                self.vllm_config.kv_transfer_config.kv_load_failure_policy
+            )
+            self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1132,29 +1137,23 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
 
-        if failed_kv_load_req_ids:
-            should_fail = (
-                self.vllm_config.kv_transfer_config is not None
-                and self.vllm_config.kv_transfer_config.kv_load_retry_policy == "fail"
+        if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
+            # finish requests (which frees them) and create outputs
+            finished_reqs = self.finish_requests(
+                failed_kv_load_req_ids,
+                RequestStatus.FINISHED_ERROR,
             )
 
-            if should_fail:
-                # finish requests (which frees them) and create outputs
-                finished_reqs = self.finish_requests(
-                    failed_kv_load_req_ids,
-                    RequestStatus.FINISHED_ERROR,
-                )
-
-                for request in finished_reqs:
-                    outputs[request.client_index].append(
-                        EngineCoreOutput(
-                            request_id=request.request_id,
-                            new_token_ids=[],
-                            finish_reason=request.get_finished_reason(),
-                            trace_headers=request.trace_headers,
-                            num_cached_tokens=request.num_cached_tokens,
-                        )
+            for request in finished_reqs:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        trace_headers=request.trace_headers,
+                        num_cached_tokens=request.num_cached_tokens,
                     )
+                )
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1635,7 +1634,7 @@ class Scheduler(SchedulerInterface):
         """
         should_fail = (
             self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.kv_load_retry_policy == "fail"
+            and self.vllm_config.kv_transfer_config.kv_load_failure_policy == "fail"
         )
 
         # Handle async KV loads (WAITING_FOR_REMOTE_KVS)
@@ -1664,13 +1663,14 @@ class Scheduler(SchedulerInterface):
             return set()
 
         if should_fail:
-            logger.warning(
+            all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
+            logger.error(
                 "Failing %d request(s) due to KV load failure "
-                "(retry_policy=fail, %d tokens affected).",
+                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
                 total_failed_requests,
                 total_failed_tokens,
+                all_failed_req_ids,
             )
-            all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
             return all_failed_req_ids
 
         logger.warning(
