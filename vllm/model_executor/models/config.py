@@ -293,6 +293,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
+
         # TODO(@tdoublep) find a better way to do this than whitelist
         MAMBA2_MODELS = [
             "BambaForCausalLM",
@@ -314,7 +317,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "Hybrid or mamba-based model detected without "
                     "support for prefix caching: disabling."
                 )
-                cache_config.enable_prefix_caching = False
         else:
             cache_config.mamba_block_size = model_config.max_model_len
 
@@ -342,6 +344,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if not envs.VLLM_USE_V1:
             return
 
+        user_mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -414,7 +417,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 return a * b // gcd(a, b)
 
             base_chunk_size = (
-                cache_config.mamba_block_size or model_config.get_mamba_chunk_size()
+                user_mamba_block_size or model_config.get_mamba_chunk_size()
             )
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
