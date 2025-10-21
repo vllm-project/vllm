@@ -351,11 +351,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         self.cutlass_fp8_supported = cutlass_fp8_supported()
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
-        if (
-            envs.VLLM_USE_FLASHINFER_MOE_FP8
-            and has_flashinfer_moe()
-            and self.moe.is_act_and_mul
-        ):
+        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
@@ -554,7 +550,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         if self.flashinfer_moe_backend is not None:
-            layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
+            if self.moe.is_act_and_mul:
+                layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
             register_moe_scaling_factors(layer)
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
@@ -567,13 +564,21 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
-            g1_alphas=(layer.w13_weight_scale * layer.w13_input_scale).squeeze(),
+            g1_alphas=layer.output1_scales_gate_scalar.squeeze()
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            else None,
             w2_scale=layer.w2_weight_scale,
-            g2_alphas=(layer.w2_weight_scale * layer.w2_input_scale).squeeze(),
+            g2_alphas=layer.output2_scales_scalar.squeeze()
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            else None,
             a1_scale=layer.w13_input_scale,
-            a1_gscale=layer.w13_input_scale,
+            a1_gscale=layer.w13_input_scale
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            else None,
             a2_scale=layer.w2_input_scale,
-            a2_gscale=1.0 / layer.w2_input_scale,
+            a2_gscale=layer.w2_input_scale_inv
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            else None,
             per_act_token_quant=False,
         )
 
@@ -639,9 +644,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert not renormalize
-            assert activation == "silu", (
-                f"Expected 'silu' activation but got {activation}"
+            assert activation in ("silu", "relu2_no_mul") , (
+                f"Expected activation to be in ('silu', 'relu2_no_mul'), but got {activation}"
             )
             return flashinfer_cutlass_moe_fp8(
                 x,
