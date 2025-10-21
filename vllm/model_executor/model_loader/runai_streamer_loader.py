@@ -98,9 +98,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
         return runai_safetensors_weights_iterator(
-            hf_weights_files,
-            self.load_config.use_tqdm_on_load,
-            self._is_distributed
+            hf_weights_files, self.load_config.use_tqdm_on_load, self._is_distributed
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
