@@ -175,6 +175,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
+  // Polynomial Normalization.
+  ops.def(
+      "poly_norm(Tensor! out, Tensor input, Tensor weight, Tensor bias, float "
+      "epsilon) -> ()");
+  ops.impl("poly_norm", torch::kCUDA, &poly_norm);
+
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
