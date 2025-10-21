@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from vllm import SamplingParams
+from vllm.sampling_params import StructuredOutputsParams
 
 from ...conftest import VllmRunner
 from ...models.utils import check_outputs_equal
@@ -12,7 +13,9 @@ from ...models.utils import check_outputs_equal
 MODEL = "Qwen/Qwen3-0.6B"
 
 
-def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
+def test_preempt_and_async_scheduling_e2e(
+    sample_json_schema, monkeypatch: pytest.MonkeyPatch
+):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor, and various sampling parameters."""
 
@@ -30,6 +33,7 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
         # dict(min_tokens=20),
         dict(presence_penalty=-1.0),
         dict(bad_words=["the", " the"]),
+        dict(structured_outputs=StructuredOutputsParams(json=sample_json_schema)),
     ]
 
     default_params = dict(
