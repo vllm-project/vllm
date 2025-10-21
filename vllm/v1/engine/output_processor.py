@@ -153,8 +153,12 @@ class RequestState:
             top_p = None
             n = None
             temperature = None
-            assert request.pooling_params is not None
-            output_kind = request.pooling_params.output_kind
+            # Training requests don't have pooling_params or sampling_params
+            if request.is_training:
+                output_kind = RequestOutputKind.FINAL_ONLY
+            else:
+                assert request.pooling_params is not None
+                output_kind = request.pooling_params.output_kind
 
         return cls(
             request_id=request.request_id,
@@ -183,6 +187,8 @@ class RequestState:
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
         kv_transfer_params: Optional[dict[str, Any]] = None,
+        training_loss: Optional[float] = None,
+        training_logits: Optional[torch.Tensor] = None,
     ) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
 
         finished = finish_reason is not None
@@ -197,6 +203,12 @@ class RequestState:
             return self._new_request_output(
                 request_id, [self._new_pooling_output(pooling_output)],
                 finished)
+
+        # Training requests don't have detokenizer - return output with loss
+        # TODO(girfan): Add better indicator for training requests.
+        if self.detokenizer is None:
+            return self._new_training_output(request_id, finished,
+                                             training_loss, training_logits)
 
         output = self._new_completion_output(new_token_ids, finish_reason,
                                              stop_reason)
@@ -278,6 +290,39 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None)
+
+    def _new_training_output(
+        self,
+        request_id: str,
+        finished: bool,
+        training_loss: Optional[float] = None,
+        training_logits: Optional[torch.Tensor] = None,
+    ) -> RequestOutput:
+        """Create a RequestOutput for training requests."""
+        # Training requests don't generate text, just return loss and logits
+        empty_completion = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=[],
+            cumulative_logprob=0.0,
+            logprobs=None,
+            finish_reason=FinishReason.STOP if finished else None,
+            stop_reason=None,
+            lora_request=None,
+        )
+        return RequestOutput(
+            request_id=request_id,
+            prompt="",  # Training requests don't need prompt in output
+            prompt_token_ids=self.prompt_token_ids,
+            prompt_logprobs=None,
+            outputs=[empty_completion],
+            finished=finished,
+            kv_transfer_params=None,
+            num_cached_tokens=0,
+            metrics=self.stats,
+            training_loss=training_loss,  # Pass the training loss
+            training_logits=training_logits,  # Pass the training logits
+        )
 
     def _new_pooling_output(
         self,
@@ -409,8 +454,11 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            training_loss = engine_core_output.training_loss
+            training_logits = engine_core_output.training_logits
 
-            if pooling_output is None:
+            # TODO(girfan): Add better indicator for training requests.
+            if pooling_output is None and req_state.detokenizer is not None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
@@ -428,7 +476,7 @@ class OutputProcessor:
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                     new_token_ids, pooling_output, finish_reason, stop_reason,
-                    kv_transfer_params):
+                    kv_transfer_params, training_loss, training_logits):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)

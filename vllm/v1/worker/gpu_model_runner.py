@@ -260,6 +260,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
+        # Training manager for LoRA training (initialized after model load)
+        self.training_manager = None
+
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
@@ -580,6 +583,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                is_training=new_req_data.is_training,
+                training_config=new_req_data.training_config,
             )
             self.requests[req_id] = req_state
 
@@ -986,18 +991,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Common case (1D positions)
             self.positions.copy_to_gpu(total_num_scheduled_tokens)
 
+        # Check if this is a training batch (all requests are training)
+        is_training_batch = False
+        if self.input_batch.num_reqs > 0:
+            # Check if any request is a training request
+            training_count = sum(1 for req_id in self.input_batch.req_ids if req_id is not None and (req_state := self.requests.get(req_id)) is not None and req_state.is_training)
+            is_training_batch = (training_count == self.input_batch.num_reqs)
+            if training_count > 0 and training_count != self.input_batch.num_reqs:
+                raise ValueError("Mixed training and inference requests are not supported.")
+
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
-            # NOTE(woosuk): Due to chunked prefills, the batch may contain
-            # partial requests. While we should not sample any token
-            # from these partial requests, we do so for simplicity.
-            # We will ignore the sampled tokens from the partial requests.
-            # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1
+            if is_training_batch:
+                # For training, we need logits for ALL tokens, not just last ones
+                # Create indices for all tokens: [0, 1, 2, ..., total_num_scheduled_tokens-1]
+                logits_indices = torch.arange(total_num_scheduled_tokens,
+                                              dtype=torch.int32,
+                                              device="cpu")
+            else:
+                # For inference: select only the last token of each sequence for sampling
+                # NOTE(woosuk): Due to chunked prefills, the batch may contain
+                # partial requests. While we should not sample any token
+                # from these partial requests, we do so for simplicity.
+                # We will ignore the sampled tokens from the partial requests.
+                # TODO: Support prompt logprobs.
+                logits_indices = query_start_loc[1:] - 1
             num_draft_tokens = None
             spec_decode_metadata = None
         else:
+            if is_training_batch:
+                raise ValueError("Speculative decoding is not supported for training requests.")
+
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
@@ -1114,6 +1139,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         num_draft_tokens=self.num_draft_tokens.gpu[:num_reqs],
                     )
 
+                # Add is_training flag to metadata args for XFormers backend
+                if is_training_batch:
+                    extra_attn_metadata_args['is_training'] = True
+
                 if ubatch_slices is not None:
                     common_attn_metadata_list = split_attn_metadata(
                         ubatch_slices, common_attn_metadata)
@@ -1138,7 +1167,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Hot-Swap lora model
         if self.lora_config:
-            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+            self.set_active_loras(self.input_batch, num_scheduled_tokens, is_training_batch)
 
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
@@ -2087,8 +2116,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             invalid_req_indices,
         )
 
-    @torch.inference_mode()
     def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+        """Execute model - dispatches to training or inference based on request type.
+        
+        Args:
+            scheduler_output: Output from the scheduler
+            intermediate_tensors: Intermediate tensors from previous pipeline stage
+            
+        Returns:
+            ModelRunnerOutput (or async wrapper) or IntermediateTensors for PP
+        """
+        # Detect if this batch contains any training requests
+        has_training_requests = any(req.is_training for req in scheduler_output.scheduled_new_reqs)
+        if has_training_requests:
+            return self.execute_model_training(scheduler_output,
+                                               intermediate_tensors)
+        else:
+            return self.execute_model_inference(scheduler_output,
+                                                intermediate_tensors)
+
+    @torch.inference_mode()
+    def execute_model_inference(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -2278,6 +2330,102 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampled_token_ids=sampler_output.sampled_token_ids,
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
+        )
+
+    def execute_model_training(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> ModelRunnerOutput:
+        """
+        Execute model for training requests.
+        """
+        with record_function_or_nullcontext("Preprocess"):
+            self._update_states(scheduler_output)
+            if not scheduler_output.total_num_scheduled_tokens:
+                # Return empty output if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            if self.prepare_inputs_event is not None:
+                # Ensure prior step has finished with reused CPU tensors.
+                self.prepare_inputs_event.synchronize()
+            try:
+                # Prepare the decoder inputs.
+                # Note: For training, we still need attention metadata for the forward pass
+                (attn_metadata, logits_indices, spec_decode_metadata,
+                 num_scheduled_tokens_np, spec_decode_common_attn_metadata,
+                 max_query_len, ubatch_slices, num_tokens_after_padding
+                 ) = self._prepare_inputs(scheduler_output)
+
+            finally:
+                if self.prepare_inputs_event is not None:
+                    self.prepare_inputs_event.record()
+
+            (
+                num_scheduled_tokens,
+                num_input_tokens,
+                num_tokens_across_dp,
+                input_ids,
+                inputs_embeds,
+                positions,
+                intermediate_tensors,
+                model_kwargs,
+            ) = self._preprocess(scheduler_output, intermediate_tensors,
+                                 ubatch_slices, num_tokens_after_padding)
+
+            if ubatch_slices is not None:
+                num_input_tokens = num_input_tokens // 2
+
+            uniform_decode = False  # Training always uses non-uniform decode
+            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                               uniform_decode=uniform_decode)
+            cudagraph_runtime_mode, batch_descriptor = \
+                self.cudagraph_dispatcher.dispatch(batch_descriptor)
+
+        # Check if this is a LoRA training request
+        is_lora_training = all(req.lora_request is not None for req in scheduler_output.scheduled_new_reqs)
+        if not is_lora_training:
+            raise ValueError("Only LoRA training requests are supported.")
+
+        # Check if any request is marked as evaluation
+        is_eval_batch = any(req.training_config and req.training_config.is_eval for req in scheduler_output.scheduled_new_reqs if req.is_training)
+        if is_eval_batch:
+            # Assert that all requests are evaluation requests
+            all_eval = all(req.training_config and req.training_config.is_eval for req in scheduler_output.scheduled_new_reqs if req.is_training)
+            if not all_eval:
+                raise ValueError("Mixed training and evaluation requests are not supported.")
+
+        # Run the model WITHOUT torch.inference_mode() to enable gradients
+        with (set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_descriptor,
+                ubatch_slices=ubatch_slices,
+        ), record_function_or_nullcontext("Forward")):
+            # Keep torch.enable_grad() active for ENTIRE forward + loss computation
+            with torch.enable_grad():
+                pass
+
+        # TODO(girfan): Fix all these.
+        req_ids_output = self.input_batch.req_ids
+        req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids_output)}
+        training_losses = {}
+        training_logits = {}
+
+        return ModelRunnerOutput(
+            req_ids=req_ids_output,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=None,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            kv_connector_output=None,
+            num_nans_in_logits={},
+            training_losses=training_losses,
+            training_logits=training_logits,
         )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:

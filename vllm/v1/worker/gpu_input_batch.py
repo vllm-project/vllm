@@ -44,6 +44,9 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    is_training: bool = False
+    training_config: Optional["TrainingConfig"] = None
+
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
 
@@ -399,6 +402,10 @@ class InputBatch:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
                 pooling_params.requires_token_ids)
+        elif request.is_training:
+            # TODO(girfan): Does this self.is_training set it for the full batch?
+            self.is_training = True
+            self.training_config = request.training_config
         else:
             raise NotImplementedError("Unrecognized request type")
 
@@ -758,7 +765,8 @@ class InputBatch:
                                               non_blocking=True)
 
     def make_lora_inputs(
-        self, num_scheduled_tokens: np.ndarray
+        self, num_scheduled_tokens: np.ndarray,
+        is_training_batch: bool = False,
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
@@ -772,12 +780,16 @@ class InputBatch:
         """
 
         req_lora_mapping = self.request_lora_mapping[:self.num_reqs]
-        prompt_lora_mapping = tuple(req_lora_mapping)
         token_lora_mapping = tuple(
             req_lora_mapping.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values())
-
+        if is_training_batch:
+            # For training, we need per-token mapping since we compute logits for all tokens
+            prompt_lora_mapping = token_lora_mapping
+        else:
+            # For inference, we only need per-request mapping (for last token sampling)
+            prompt_lora_mapping = tuple(req_lora_mapping)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
     @property

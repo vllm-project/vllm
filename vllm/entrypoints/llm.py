@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import cloudpickle
+from datasets import Dataset
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
@@ -55,6 +56,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
 from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.request import TrainingConfig
+from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -62,6 +65,38 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
+
+
+def tokenize(tokenizer: AnyTokenizer, sample: dict[str, Any], max_length: Optional[int]) -> dict[str, Any]:
+    tokenized = tokenizer(
+        sample["text"],
+        truncation=True,
+        max_length=max_length,
+        padding="max_length" if max_length is not None else "do_not_pad",
+    )
+
+    tokenized["labels"] = []
+    for text, input_ids in zip(sample["text"], tokenized["input_ids"]):
+        labels = input_ids[:]
+
+        # Mask instruction part (only compute loss on response)
+        if "### Response:" in text:
+            response_start = "### Response:"
+            response_pos = text.find(response_start)
+            if response_pos != -1:
+                instruction_text = text[:response_pos + len(response_start)]
+                instruction_tokens = tokenizer.encode(instruction_text, add_special_tokens=True)
+                labels[:len(instruction_tokens)] = [-100] * len(instruction_tokens)
+
+        # Mask padding tokens
+        for i, token_id in enumerate(input_ids):
+            if token_id == tokenizer.pad_token_id:
+                labels[i] = -100
+
+        tokenized["labels"].append(labels)
+
+    return tokenized
+
 
 
 class LLM:
@@ -313,6 +348,10 @@ class LLM:
         else:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
+    def set_tokenizer_pad_token(self, pad_token: str) -> None:
+        tokenizer = self.get_tokenizer()
+        tokenizer.pad_token = pad_token
+
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
             self.default_sampling_params = (
@@ -389,6 +428,121 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
+
+    def train(
+        self,
+        train_dataset: Sequence[dict[str, Any]],
+        use_tqdm: bool,
+        lora_request: LoRARequest,
+        # Training configuration
+        num_epochs: int,
+        batch_size: int,
+        learning_rate: float = 1e-4,
+        gradient_accumulation_steps: int = 1,
+        warmup_steps: int = 0,
+        max_length: int = None,
+        # Evaluation configuration
+        eval_dataset: Optional[Sequence[dict[str, Any]]] = None,
+        eval_steps: Optional[int] = None,
+    ) -> Sequence[dict[str, Any]]:
+        tokenizer = self.get_tokenizer()
+        self.set_tokenizer_pad_token(tokenizer.eos_token)
+
+        dataset = Dataset.from_list(train_dataset + eval_dataset)
+        tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
+
+        tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
+        tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
+
+        request_ids = self._add_training_requests(tokenized_train_dataset, lora_request, use_tqdm)
+
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+
+        # TODO(girfan): Implement this.
+        total_steps = 0
+        train_losses = []
+        eval_losses = []
+        return {
+            'train_losses': train_losses,
+            'eval_losses': eval_losses,
+            'metrics': {
+                'total_steps': total_steps,
+                'num_epochs': num_epochs,
+                'final_train_loss': train_losses[-1]['loss'] if train_losses else None,
+                'final_eval_loss': eval_losses[-1]['eval_loss'] if eval_losses else None,
+            }
+        }
+
+    def _add_training_requests(
+        self,
+        training_data: Sequence[dict[str, Any]],
+        lora_request: LoRARequest,
+        use_tqdm: bool,
+    ) -> list[str]:
+        training_data_iter = training_data
+        if use_tqdm:
+            training_data_iter = tqdm(training_data_iter, desc="Adding training requests")
+
+        request_ids = []
+        for sample in training_data_iter:
+            training_config = TrainingConfig()
+            request_id = self._add_training_request(
+                sample=sample,
+                training_config=training_config,
+                lora_request=lora_request,
+            )
+            request_ids.append(request_id)
+        return request_ids
+
+    def _add_training_request(
+        self,
+        sample: dict[str, Any],
+        training_config: TrainingConfig,
+        lora_request: LoRARequest
+    ) -> str:
+        # Get EOS token ID
+        tokenizer = self.get_tokenizer()
+        eos_token_id = tokenizer.eos_token_id
+
+        # Create the training request
+        prompt_token_ids = sample["input_ids"]
+        prompt_str = sample["text"]
+        request_id = str(next(self.request_counter))
+
+        training_request = Request(
+            request_id=request_id,
+            lora_request=lora_request,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=None,
+            pooling_params=None,
+            eos_token_id=eos_token_id,
+            is_training=True,
+            training_config=training_config,
+        )
+
+        # Add to output processor first (needed for get_num_unfinished_requests)
+        # TODO(girfan): Pass the string from the request
+        self.llm_engine.output_processor.add_request(training_request, prompt_str, None, 0)
+
+        # Add to scheduler for execution
+        engine_core_client = self.llm_engine.engine_core
+
+        # Access the actual EngineCore (unwrap from InprocClient)
+        if hasattr(engine_core_client, 'engine_core'):
+            # InprocClient case
+            actual_engine_core = engine_core_client.engine_core
+            actual_engine_core.scheduler.add_request(training_request)
+        elif hasattr(engine_core_client, 'scheduler'):
+            # Direct EngineCore access
+            engine_core_client.scheduler.add_request(training_request)
+        else:
+            # For async/multiprocess case
+            raise NotImplementedError(
+                "Training with async/multiprocess engine not yet supported. "
+                "Please use the synchronous LLM class with V1 engine.")
+
+        return request_id
+
 
     def _get_modality_specific_lora_reqs(
             self, prompts: Union[PromptType, Sequence[PromptType]],

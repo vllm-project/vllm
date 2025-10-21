@@ -16,11 +16,10 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
-
 try:
     from xformers import ops as xops
     from xformers.ops.fmha.attn_bias import (
-        AttentionBias, PagedBlockDiagonalCausalWithOffsetPaddedKeysMask)
+        AttentionBias, PagedBlockDiagonalCausalWithOffsetPaddedKeysMask, LowerTriangularMask)
 
     XFORMERS_AVAILABLE = True
 except ImportError:
@@ -138,6 +137,9 @@ class XFormersAttentionMetadata:
     # Biases for different attention types.
     attn_bias: Optional["AttentionBias"] = None
 
+    # Training mode flag
+    is_training: bool = False
+
     # Self-attention prefill/decode metadata cache
     _cached_prefill_metadata: Optional["XFormersAttentionMetadata"] = None
     _cached_decode_metadata: Optional["XFormersAttentionMetadata"] = None
@@ -225,6 +227,7 @@ class XFormersAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        is_training: bool = False,
     ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -241,8 +244,9 @@ class XFormersAttentionMetadataBuilder(
         slot_mapping = common_attn_metadata.slot_mapping
 
         bias = None
-        if num_decodes > 0:
+        if num_decodes > 0 and not is_training:
             # Construct the decoder bias.
+            # Skip for training since we won't use KV cache
             decode_q_seqlens = q_seqlens[:num_decodes]
             decode_kv_seqlens = kv_seqlens[:num_decodes]
             bias = (
@@ -267,6 +271,7 @@ class XFormersAttentionMetadataBuilder(
             block_table=block_table,
             slot_mapping=slot_mapping,
             attn_bias=bias,
+            is_training=is_training,
         )
 
 
@@ -352,6 +357,18 @@ class XFormersAttentionImpl(AttentionImpl):
             # Profiling run.
             return output
 
+        # Dispatch to training-specific forward if in training mode
+        if attn_metadata.is_training:
+            return self.forward_training(
+                layer=layer,
+                query=query,
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
+
         # Cache the input KVs.
         key_cache, value_cache = kv_cache.unbind(0)
         if self.kv_sharing_target_layer_name is None:
@@ -434,4 +451,87 @@ class XFormersAttentionImpl(AttentionImpl):
                    ).view(decode_query.shape)
 
         # Reshape the output tensor.
+        return output
+
+    def forward_training(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: XFormersAttentionMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Training-specific forward pass that bypasses KV cache.
+        
+        This method directly calls xformers memory_efficient_attention_forward
+        on the Q, K, V tensors without using the KV cache, allowing gradients
+        to flow through for training.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape = [2, num_blocks, block_size, num_kv_heads, head_size]
+                      (not used in training, but kept for API compatibility)
+            attn_metadata: Metadata for attention.
+            output: shape = [num_tokens, num_heads, head_size]
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+        num_tokens = query.shape[0]
+
+        # For training, we process all tokens together
+        # Reshape tensors for xformers BMHK format: [batch, seqlen, num_heads, head_size]
+        # xformers backward doesn't support BMGHK format, so we expand K/V to num_heads
+        
+        # Query: [num_tokens, num_heads, head_size] -> [1, num_tokens, num_heads, head_size]
+        q = query.unsqueeze(0)
+        
+        # Key/Value: [num_tokens, num_kv_heads, head_size] -> [1, num_tokens, num_heads, head_size]
+        if self.num_kv_heads != self.num_heads:
+            # GQA: Expand K and V by repeating each kv_head num_queries_per_kv times
+            k = key.unsqueeze(0).unsqueeze(3).expand(
+                1, num_tokens, self.num_kv_heads, self.num_queries_per_kv, self.head_size
+            ).reshape(1, num_tokens, self.num_heads, self.head_size)
+            v = value.unsqueeze(0).unsqueeze(3).expand(
+                1, num_tokens, self.num_kv_heads, self.num_queries_per_kv, self.head_size
+            ).reshape(1, num_tokens, self.num_heads, self.head_size)
+        else:
+            # MHA: just add batch dimension
+            k = key.unsqueeze(0)
+            v = value.unsqueeze(0)
+
+        # Create causal mask for training
+        # For training with batched sequences, use BlockDiagonalCausalMask to prevent cross-sample attention
+        if hasattr(attn_metadata, 'query_start_loc') and hasattr(attn_metadata, 'seq_lens'):
+            query_start_loc = attn_metadata.query_start_loc
+            if query_start_loc is not None and len(query_start_loc) > 1:
+                # Multiple samples in batch - create block diagonal mask
+                seqlens = torch.diff(query_start_loc).tolist()
+                from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+                attn_bias = BlockDiagonalCausalMask.from_seqlens(seqlens)
+            else:
+                # Single sample - use simple causal mask
+                attn_bias = LowerTriangularMask()
+        else:
+            # Fallback to simple causal mask if metadata unavailable
+            attn_bias = LowerTriangularMask()
+
+        # Use xformers memory_efficient_attention (NOT _forward) for training
+        # This function supports both forward and backward passes
+        attn_output = xops.memory_efficient_attention(
+            q,
+            k,
+            v,
+            attn_bias=attn_bias,  # Use proper mask (block diagonal or causal)
+            p=0.0,  # No dropout
+            scale=self.scale,
+        )
+        
+        # Reshape output from [1, num_tokens, num_heads, head_size]
+        # back to [num_tokens, num_heads, head_size]
+        output[:] = attn_output.squeeze(0)
+
         return output

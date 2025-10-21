@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
-
+    from vllm.v1.request import TrainingConfig
 
 @bc_linter_include
 @dataclass
@@ -33,6 +33,8 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    is_training: bool = False
+    training_config: Optional[TrainingConfig] = None
 
     @classmethod
     def from_request(
@@ -49,6 +51,8 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            is_training=request.is_training,
+            training_config=request.training_config,
         )
 
     def __repr__(self):

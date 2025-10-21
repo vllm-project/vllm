@@ -118,6 +118,11 @@ class EngineCoreOutput(
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
+    # Training loss (for training requests)
+    training_loss: Optional[float] = None
+    # Training logits (for training requests)
+    training_logits: Optional[torch.Tensor] = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

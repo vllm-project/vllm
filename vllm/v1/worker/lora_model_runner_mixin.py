@@ -80,14 +80,15 @@ class LoRAModelRunnerMixin:
                 "LoRA is not enabled. Use --enable-lora to enable LoRA.")
 
     def set_active_loras(self, input_batch: InputBatch,
-                         num_scheduled_tokens: np.ndarray) -> None:
+                         num_scheduled_tokens: np.ndarray,
+                         is_training_batch: bool = False) -> None:
 
-        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs (inference) or np.sum(num_scheduled_tokens) (training)
         token_lora_mapping: tuple[int,
                                   ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
-                            input_batch.make_lora_inputs(num_scheduled_tokens)
+                            input_batch.make_lora_inputs(num_scheduled_tokens, is_training_batch)
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
 
