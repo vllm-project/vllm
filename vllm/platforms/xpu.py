@@ -168,7 +168,7 @@ class XPUPlatform(Platform):
                 parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
-            # spawn needs calling `if __name__ == '__main__':``
+            # spawn needs calling `if __name__ == '__main__':`
             # fork is not supported for xpu start new process.
             if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -236,8 +236,8 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             device_name = cls.get_device_name().lower()
             # client gpu a770
             if device_name.count("a770") > 0:

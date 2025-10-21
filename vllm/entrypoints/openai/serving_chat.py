@@ -70,7 +70,7 @@ from vllm.transformers_utils.tokenizers import (
     truncate_tool_call_ids,
     validate_request_params,
 )
-from vllm.utils import as_list
+from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 

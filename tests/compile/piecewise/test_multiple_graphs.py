@@ -20,6 +20,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from .. import silly_attention  # noqa: F401
@@ -193,9 +194,8 @@ def run_model(
 
 @pytest.mark.parametrize("use_inductor_graph_partition", [False, True])
 def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
-    if use_inductor_graph_partition:
-        # FIXME(luka/boyuan): this currently fails
-        pytest.skip("Inductor graph partition not supported with multi-graph")
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     outputs = []
 
