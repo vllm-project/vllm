@@ -676,7 +676,7 @@ def runai_safetensors_weights_iterator(
         )
 
         tensor_iter = tqdm(
-            tensor_source,
+            streamer.get_tensors(),
             total=total_tensors,
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
