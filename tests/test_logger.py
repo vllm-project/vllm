@@ -501,3 +501,49 @@ def test_streaming_complete_logs_full_text_content():
         assert call_args[1] == "test-streaming-full-text"
         assert call_args[2] == " (streaming complete)"
         assert call_args[5] == "streaming_complete"
+
+
+# Add vllm prefix to make sure logs go through the vllm logger
+test_logger = init_logger("vllm.test_logger")
+
+
+def mp_function(**kwargs):
+    # This function runs in a subprocess
+
+    test_logger.warning("This is a subprocess: %s", kwargs.get("a"))
+    test_logger.error("This is a subprocess error.")
+    test_logger.debug("This is a subprocess debug message: %s.", kwargs.get("b"))
+
+
+def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
+    with caplog_vllm.at_level(logging.DEBUG), caplog_mp_fork():
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("fork")
+        p = ctx.Process(
+            target=mp_function,
+            name=f"SubProcess{1}",
+            kwargs={"a": "AAAA", "b": "BBBBB"},
+        )
+        p.start()
+        p.join()
+
+    assert "AAAA" in caplog_vllm.text
+    assert "BBBBB" in caplog_vllm.text
+
+
+def test_caplog_mp_spawn(caplog_mp_spawn):
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("spawn")
+        p = ctx.Process(
+            target=mp_function,
+            name=f"SubProcess{1}",
+            kwargs={"a": "AAAA", "b": "BBBBB"},
+        )
+        p.start()
+        p.join()
+
+    assert "AAAA" in log_holder.text
+    assert "BBBBB" in log_holder.text

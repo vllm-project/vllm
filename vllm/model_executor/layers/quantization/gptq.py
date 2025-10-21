@@ -28,10 +28,11 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
 
@@ -183,7 +184,7 @@ class GPTQConfig(QuantizationConfig):
 
         return get_linear_quant_method(self, layer, prefix, GPTQLinearMethod)
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.modules_in_block_to_quantize is not None:
             self.modules_in_block_to_quantize = hf_to_vllm_mapper.apply_list(
                 self.modules_in_block_to_quantize

@@ -70,7 +70,7 @@ from vllm.transformers_utils.tokenizers import (
     truncate_tool_call_ids,
     validate_request_params,
 )
-from vllm.utils import as_list
+from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 
@@ -570,7 +570,10 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             if self.reasoning_parser:
-                reasoning_parser = self.reasoning_parser(tokenizer)
+                reasoning_parser = self.reasoning_parser(
+                    tokenizer,
+                    chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
             data = self.create_streaming_error_response(str(e))
@@ -1335,7 +1338,10 @@ class OpenAIServingChat(OpenAIServing):
 
             if self.reasoning_parser:
                 try:
-                    reasoning_parser = self.reasoning_parser(tokenizer)
+                    reasoning_parser = self.reasoning_parser(
+                        tokenizer,
+                        chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                    )
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")
                     return self.create_error_response(str(e))

@@ -63,7 +63,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker Test (CPU) # 4 mins
   timeout_in_minutes: 10
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -353,7 +353,7 @@ steps:
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: V1 Test others (CPU) # 5 mins
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -459,6 +459,7 @@ steps:
     - pytest -v -s compile/test_fusion_all_reduce.py
     - pytest -v -s compile/test_decorator.py
     - pytest -v -s compile/test_noop_elimination.py
+    - pytest -v -s compile/test_aot_compile.py
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -487,14 +488,14 @@ steps:
 
 - label: Kernels Core Operation Test # 48min
   timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
   commands:
-    - pytest -v -s kernels/core
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
@@ -603,7 +604,8 @@ steps:
   # since torchao nightly is only compatible with torch nightly currently
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
-  - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
+  # TODO(jerryzh168): resolve the above comment
+  - uv pip install --system torchao==0.13.0
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/
 
 - label: LM Eval Small Models # 53min
@@ -631,7 +633,7 @@ steps:
 
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   fast_check: false
@@ -1079,6 +1081,7 @@ steps:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - pytest -v -s distributed/test_sequence_parallel.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
