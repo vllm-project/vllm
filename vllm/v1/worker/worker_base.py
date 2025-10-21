@@ -128,14 +128,6 @@ class WorkerBase:
     def execute_model(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         raise NotImplementedError
 
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        raise NotImplementedError("Dead V0 code")
-
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
