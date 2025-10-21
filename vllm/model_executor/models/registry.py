@@ -258,6 +258,7 @@ _MULTIMODAL_MODELS = {
         "Cohere2VisionForConditionalGeneration",
     ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
+    "DeepseekVLV2ForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
     "Ernie4_5_VLMoeForConditionalGeneration": (
         "ernie45_vl",
