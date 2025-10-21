@@ -46,7 +46,12 @@ class PlotFilterBase(ABC):
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df[df[self.var] == self.target]
+        try:
+            target = float(self.target)
+        except ValueError:
+            target = self.target
+
+        return df[df[self.var] == target]
 
 
 class PlotLessThan(PlotFilterBase):
