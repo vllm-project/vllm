@@ -11,6 +11,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
+    get_dp_group,
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -18,6 +19,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -305,8 +307,13 @@ class GptOssModel(nn.Module):
         use_ep = self.parallel_config.enable_expert_parallel
         num_experts = self.config.num_local_experts
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+        # In MoE, we need to flatten the tensor parallel size across the data
+        # parallel size when EP is disabled.
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+            tp_size=get_tensor_model_parallel_world_size(),
+            dp_size=get_dp_group().world_size,
+            dp_rank=get_dp_group().rank_in_group,
+        )
 
         intermediate_size = self.config.intermediate_size
         intermediate_size_block = intermediate_size // mxfp4_block
@@ -488,8 +495,13 @@ class GptOssModel(nn.Module):
 
         use_ep = self.parallel_config.enable_expert_parallel
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+        # In MoE, we need to flatten the tensor parallel size across the data
+        # parallel size when EP is disabled.
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+            tp_size=get_tensor_model_parallel_world_size(),
+            dp_size=get_dp_group().world_size,
+            dp_rank=get_dp_group().rank_in_group,
+        )
 
         intermediate_size = self.config.intermediate_size
         per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
