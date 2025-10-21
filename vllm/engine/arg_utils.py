@@ -81,7 +81,9 @@ from vllm.transformers_utils.config import (
     maybe_override_with_speculators,
 )
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
+from vllm.utils import FlexibleArgumentParser, is_in_ray_actor
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.network_utils import get_ip
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -479,6 +481,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
     guided_decoding_disable_fallback: bool | None = None
@@ -1291,7 +1294,8 @@ class EngineArgs:
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
             CpuArchEnum.POWERPC,
             CpuArchEnum.S390X,
@@ -1304,6 +1308,13 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
+
         assert self.enable_chunked_prefill is not None
 
         sliding_window: int | None = None
