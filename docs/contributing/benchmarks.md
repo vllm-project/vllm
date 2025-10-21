@@ -929,11 +929,9 @@ throughput numbers correctly is also adjusted.
 
 ### Online Benchmark
 
-[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` over multiple configurations.
+[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
 
-#### Batch Mode
-
-The basic purpose of this script is to evaluate vLLM under different settings. Follows these steps to run the script:
+Follow these steps to run the script:
 
 1. Construct the base command to `vllm serve`, and pass it to the `--serve-cmd` option.
 2. Construct the base command to `vllm bench serve`, and pass it to the `--bench-cmd` option.
@@ -1018,9 +1016,9 @@ python -m vllm.benchmarks.sweep.serve \
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
   
-#### SLA Mode
+### SLA Auto-Tuner
 
-By passing SLA constraints via `--sla-params`, you can run this script in SLA mode, causing it to adjust either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints.
+[`vllm/benchmarks/sweep/serve_sla.py`](../../vllm/benchmarks/sweep/serve_sla.py) is a wrapper over [`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
 
 For example, to ensure E2E latency within different target values for 99% of requests:
 
@@ -1044,7 +1042,7 @@ For example, to ensure E2E latency within different target values for 99% of req
 Example command:
 
 ```bash
-python -m vllm.benchmarks.sweep.serve \
+python -m vllm.benchmarks.sweep.serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \

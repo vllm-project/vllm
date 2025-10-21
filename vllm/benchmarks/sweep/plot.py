@@ -361,10 +361,7 @@ def plot(
         )
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Plot performance curves from parameter sweep results."
-    )
+def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "OUTPUT_DIR",
         type=str,
@@ -461,8 +458,8 @@ def main():
         "then exits without drawing them.",
     )
 
-    args = parser.parse_args()
 
+def main(args: argparse.Namespace):
     output_dir = Path(args.OUTPUT_DIR)
     if not output_dir.exists():
         raise ValueError(f"No parameter sweep results under {output_dir}")
@@ -490,4 +487,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Plot performance curves from parameter sweep results."
+    )
+    add_cli_args(parser)
+
+    main(parser.parse_args())
