@@ -433,7 +433,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
-
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size
