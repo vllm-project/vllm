@@ -4645,7 +4645,6 @@ class GPUModelRunner(
         """
         if has_ec_transfer() and get_ec_transfer().is_producer:
             return {}
-        
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
