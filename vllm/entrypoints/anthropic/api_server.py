@@ -164,7 +164,6 @@ async def init_app_state(
     await state.openai_serving_models.init_static_loras()
     state.anthropic_serving_messages = AnthropicServingMessages(
         engine_client,
-        model_config,
         state.openai_serving_models,
         args.response_role,
         request_logger=request_logger,

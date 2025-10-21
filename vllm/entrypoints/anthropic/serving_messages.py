@@ -13,7 +13,6 @@ from typing import Any
 
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
@@ -51,7 +50,6 @@ class AnthropicServingMessages(OpenAIServingChat):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         response_role: str,
         *,
