@@ -368,17 +368,6 @@ def env_set_with_choices(
     return _get_validated_env_set
 
 
-# Builtin tools that should be included in the system message when
-# they are available and requested by the user.
-# Tool args are provided by MCP tool descriptions. Output
-# of the tools are stringified.
-MCP_BUILTIN_TOOLS: set[str] = {
-    "web_search_preview",
-    "code_interpreter",
-    "container",
-}
-
-
 def get_vllm_port() -> int | None:
     """Get the port from VLLM_PORT environment variable.
 
