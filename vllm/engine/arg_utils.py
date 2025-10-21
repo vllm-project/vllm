@@ -1659,6 +1659,7 @@ class EngineArgs:
             "XFORMERS",
             "ROCM_ATTN",
             "ROCM_AITER_UNIFIED_ATTN",
+            "MIRAGE"
         ]
         if (
             envs.is_set("VLLM_ATTENTION_BACKEND")
