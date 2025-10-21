@@ -1,4 +1,4 @@
-Vim # The vLLM Dockerfile is used to construct vLLM image that can be directly used
+# The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
 # Please update any changes made here to
