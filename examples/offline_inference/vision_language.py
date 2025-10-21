@@ -216,14 +216,13 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
         logits_processors=[NGramPerReqLogitsProcessor],
     )
 
-    prompts = [
-        "<|User|>: <image>\n<|grounding|>Given the layout of the image.\n\n<|Assistant|>:"
-        for question in questions
-    ]
+    # deepseek-ocr use plain prompt template
+    prompts = [f"<image>\n{question}" for question in questions]
     sampling_params = [
         SamplingParams(
             temperature=0.2,
             max_tokens=64,
+            # ngram logit processor args
             extra_args=dict(
                 ngram_size=30,
                 window_size=90,
