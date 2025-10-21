@@ -77,6 +77,7 @@ from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.v1.metrics.loggers import StatLoggerFactory
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -158,6 +159,7 @@ async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
+    stat_loggers: Optional[list[StatLoggerFactory]] = None,
     disable_frontend_multiprocessing: bool = False,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
@@ -188,6 +190,7 @@ async def build_async_engine_client_from_engine_args(
         async_llm = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
             enable_log_requests=engine_args.enable_log_requests,
             aggregate_engine_logging=engine_args.aggregate_engine_logging,
             disable_log_stats=engine_args.disable_log_stats,
