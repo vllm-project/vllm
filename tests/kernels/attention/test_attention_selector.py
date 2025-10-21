@@ -143,7 +143,7 @@ def test_env(
                             pytest.skip("CUTLASS_MLA only supports block_size 128")
                         else:
                             backend = get_attn_backend(
-                                16, torch.float16, None, block_size, use_mla=use_mla
+                                576, torch.float16, None, block_size, use_mla=use_mla
                             )
                             expected = "CUTLASS_MLA"
                             assert backend.get_name() == expected
@@ -155,7 +155,7 @@ def test_env(
                             )
                         else:
                             backend = get_attn_backend(
-                                16, torch.float16, None, block_size, use_mla=use_mla
+                                576, torch.float16, None, block_size, use_mla=use_mla
                             )
                             expected = "FLASHINFER_MLA"
                             assert backend.get_name() == expected
@@ -173,20 +173,24 @@ def test_env(
                                 pytest.skip("FlashMLA not supported on this platform")
                             else:
                                 backend = get_attn_backend(
-                                    16, torch.float16, None, block_size, use_mla=use_mla
+                                    576,
+                                    torch.float16,
+                                    None,
+                                    block_size,
+                                    use_mla=use_mla,
                                 )
                                 expected = name
                                 assert backend.get_name() == expected
                     elif name == "FLASH_ATTN_MLA":
                         backend = get_attn_backend(
-                            16, torch.float16, None, block_size, use_mla=use_mla
+                            576, torch.float16, None, block_size, use_mla=use_mla
                         )
                         expected = "FLASH_ATTN_MLA"
                         assert backend.get_name() == expected
                     else:
                         # TRITON_MLA or other fallback
                         backend = get_attn_backend(
-                            16, torch.float16, None, block_size, use_mla=use_mla
+                            576, torch.float16, None, block_size, use_mla=use_mla
                         )
                         expected = "TRITON_MLA"
                         assert backend.get_name() == expected
