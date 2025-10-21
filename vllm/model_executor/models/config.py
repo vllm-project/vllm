@@ -514,19 +514,19 @@ class Qwen2_5_VLMultiModalConfig(VerifyAndUpdateConfig):
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        video_kwargs: dict = Qwen2_5_VLProcessorKwargs.__annotations__[
-            "video_kwargs"
+        videos_kwargs: dict = Qwen2_5_VLProcessorKwargs.__annotations__[
+            "videos_kwargs"
         ].__annotations__
         dynamic_kwargs: set = {"fps"}
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if (
-            all(kwargs in video_kwargs for kwargs in dynamic_kwargs)
+            all(kwargs in videos_kwargs for kwargs in dynamic_kwargs)
             and mm_config.mm_processor_dynamic_kwargs is None
         ):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The video_kwargs of Qwen2_5_VLProcessor does not contain all dynamic "
+                "The videos_kwargs of Qwen2_5_VLProcessor does not contain all dynamic "
                 "kwargs. Please check if the dynamic kwargs are set correctly."
             )
 
@@ -540,19 +540,19 @@ class Glm4vMultiModalConfig(VerifyAndUpdateConfig):
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        video_kwargs: dict = Glm4vProcessorKwargs.__annotations__[
-            "video_kwargs"
+        videos_kwargs: dict = Glm4vProcessorKwargs.__annotations__[
+            "videos_kwargs"
         ].__annotations__
         dynamic_kwargs: set = {"fps"}
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if (
-            all(kwargs in video_kwargs for kwargs in dynamic_kwargs)
+            all(kwargs in videos_kwargs for kwargs in dynamic_kwargs)
             and mm_config.mm_processor_dynamic_kwargs is None
         ):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The video_kwargs of Glm4vProcessor does not contain all dynamic "
+                "The videos_kwargs of Glm4vProcessor does not contain all dynamic "
                 "kwargs. Please check if the dynamic kwargs are set correctly."
             )
 
@@ -566,19 +566,19 @@ class Qwen2_5OmniMultiModalConfig(VerifyAndUpdateConfig):
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        video_kwargs: dict = Qwen2_5OmniProcessorKwargs.__annotations__[
-            "video_kwargs"
+        videos_kwargs: dict = Qwen2_5OmniProcessorKwargs.__annotations__[
+            "videos_kwargs"
         ].__annotations__
         dynamic_kwargs: set = {"fps"}
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if (
-            all(kwargs in video_kwargs for kwargs in dynamic_kwargs)
+            all(kwargs in videos_kwargs for kwargs in dynamic_kwargs)
             and mm_config.mm_processor_dynamic_kwargs is None
         ):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The video_kwargs of Qwen2_5OmniProcessor does not contain all dynamic "
+                "The videos_kwargs of Qwen2_5OmniProcessor does not contain all dynamic "
                 "kwargs. Please check if the dynamic kwargs are set correctly."
             )
 
@@ -592,19 +592,19 @@ class Qwen3_VLMultiModalConfig(VerifyAndUpdateConfig):
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        video_kwargs: dict = Qwen3_VLProcessorKwargs.__annotations__[
-            "video_kwargs"
+        videos_kwargs: dict = Qwen3_VLProcessorKwargs.__annotations__[
+            "videos_kwargs"
         ].__annotations__
         dynamic_kwargs: set = {"fps"}
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if (
-            all(kwargs in video_kwargs for kwargs in dynamic_kwargs)
+            all(kwargs in videos_kwargs for kwargs in dynamic_kwargs)
             and mm_config.mm_processor_dynamic_kwargs is None
         ):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The video_kwargs of Qwen3_VLProcessor does not contain all dynamic "
+                "The videos_kwargs of Qwen3_VLProcessor does not contain all dynamic "
                 "kwargs. Please check if the dynamic kwargs are set correctly."
             )
 
@@ -618,19 +618,19 @@ class Qwen3OmniMoeMultiModalConfig(VerifyAndUpdateConfig):
         mm_config = vllm_config.model_config.multimodal_config
         if mm_config is None:
             return
-        video_kwargs: dict = Qwen3OmniMoeProcessorKwargs.__annotations__[
-            "video_kwargs"
+        videos_kwargs: dict = Qwen3OmniMoeProcessorKwargs.__annotations__[
+            "videos_kwargs"
         ].__annotations__
         dynamic_kwargs: set = {"fps"}
         # Set default dynamic kwargs to avoid rebuilding mm_processor
         if (
-            all(kwargs in video_kwargs for kwargs in dynamic_kwargs)
+            all(kwargs in videos_kwargs for kwargs in dynamic_kwargs)
             and mm_config.mm_processor_dynamic_kwargs is None
         ):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The video_kwargs of Qwen3OmniMoeProcessor does not contain "
+                "The videos_kwargs of Qwen3OmniMoeProcessor does not contain "
                 "all dynamic kwargs. Please check if the dynamic kwargs are "
                 "set correctly."
             )
