@@ -9,7 +9,7 @@ import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -85,7 +85,7 @@ class MockLayer(AttentionLayerBase):
     in get_layers_from_vllm_config when FlashInfer prefill is enabled.
     """
 
-    def __init__(self, device: torch.device, impl=None):
+    def __init__(self, device: torch.device, impl=None, kv_cache_spec=None):
         # Don't call super().__init__() as AttentionLayerBase doesn't have __init__
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
@@ -96,11 +96,17 @@ class MockLayer(AttentionLayerBase):
         self._q_scale_float = float(self._q_scale.item())
         # AttentionImpl for metadata builders to query
         self.impl = impl
+        # KV cache spec for get_kv_cache_spec
+        self._kv_cache_spec = kv_cache_spec
 
     def get_attn_backend(self):
         """Get the attention backend class (required by AttentionLayerBase)."""
         # Return None as this is just a mock layer for benchmarking
         return None
+
+    def get_kv_cache_spec(self):
+        """Get the KV cache spec (required by AttentionLayerBase)."""
+        return self._kv_cache_spec
 
 
 class MockModelConfig:
@@ -209,6 +215,21 @@ class ParameterSweep:
 
 
 @dataclass
+class ModelParameterSweep:
+    """Configuration for sweeping a model configuration parameter."""
+
+    param_name: str  # Name of the model config parameter to sweep (e.g., "num_q_heads")
+    values: list[Any]  # List of values to test
+    label_format: str = "{backend}_{param_name}_{value}"  # Result label template
+
+    def get_label(self, backend: str, value: Any) -> str:
+        """Generate a label for a specific parameter value."""
+        return self.label_format.format(
+            backend=backend, param_name=self.param_name, value=value
+        )
+
+
+@dataclass
 class BenchmarkConfig:
     """Configuration for a single benchmark run."""
 
@@ -227,14 +248,14 @@ class BenchmarkConfig:
     use_cuda_graphs: bool = False
 
     # MLA-specific
-    kv_lora_rank: Optional[int] = None
-    qk_nope_head_dim: Optional[int] = None
-    qk_rope_head_dim: Optional[int] = None
-    v_head_dim: Optional[int] = None
+    kv_lora_rank: int | None = None
+    qk_nope_head_dim: int | None = None
+    qk_rope_head_dim: int | None = None
+    v_head_dim: int | None = None
 
     # Backend-specific tuning
-    num_kv_splits: Optional[int] = None  # CUTLASS MLA
-    reorder_batch_threshold: Optional[int] = None  # FlashAttn MLA, FlashMLA
+    num_kv_splits: int | None = None  # CUTLASS MLA
+    reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
 
 
 @dataclass
@@ -246,10 +267,10 @@ class BenchmarkResult:
     std_time: float  # seconds
     min_time: float  # seconds
     max_time: float  # seconds
-    throughput_tokens_per_sec: Optional[float] = None
-    memory_allocated_mb: Optional[float] = None
-    memory_reserved_mb: Optional[float] = None
-    error: Optional[str] = None
+    throughput_tokens_per_sec: float | None = None
+    memory_allocated_mb: float | None = None
+    memory_reserved_mb: float | None = None
+    error: str | None = None
 
     @property
     def success(self) -> bool:
@@ -332,7 +353,7 @@ class BenchmarkRunner:
 class ResultsFormatter:
     """Format and display benchmark results."""
 
-    def __init__(self, console: Optional[Console] = None):
+    def __init__(self, console: Console | None = None):
         self.console = console or Console()
 
     def print_table(

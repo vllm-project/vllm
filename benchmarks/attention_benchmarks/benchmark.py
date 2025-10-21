@@ -37,7 +37,13 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from batch_spec import parse_batch_spec
-from common import BenchmarkConfig, BenchmarkResult, ParameterSweep, ResultsFormatter
+from common import (
+    BenchmarkConfig,
+    BenchmarkResult,
+    ModelParameterSweep,
+    ParameterSweep,
+    ResultsFormatter,
+)
 
 
 def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
@@ -61,6 +67,190 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
         max_time=result_dict["max"],
         throughput_tokens_per_sec=result_dict["throughput"],
     )
+
+
+def run_model_parameter_sweep(
+    backends: list[str],
+    batch_specs: list[str],
+    base_config_args: dict,
+    sweep: ModelParameterSweep,
+    console: Console,
+) -> list[BenchmarkResult]:
+    """
+    Run model parameter sweep for given backends and batch specs.
+
+    Args:
+        backends: List of backend names
+        batch_specs: List of batch specifications
+        base_config_args: Base configuration arguments (num_layers, head_dim, etc.)
+        sweep: ModelParameterSweep configuration
+        console: Rich console for output
+
+    Returns:
+        List of BenchmarkResult objects
+    """
+    all_results = []
+
+    console.print(
+        f"[yellow]Model sweep mode: testing {sweep.param_name} = {sweep.values}[/]"
+    )
+
+    total = len(backends) * len(batch_specs) * len(sweep.values)
+
+    with tqdm(total=total, desc="Benchmarking") as pbar:
+        for backend in backends:
+            for spec in batch_specs:
+                for value in sweep.values:
+                    # Create config with modified model parameter
+                    config_args = base_config_args.copy()
+                    config_args[sweep.param_name] = value
+
+                    # Create descriptive backend name
+                    backend_label = sweep.get_label(backend, value)
+                    config = BenchmarkConfig(
+                        backend=backend_label, batch_spec=spec, **config_args
+                    )
+
+                    try:
+                        # Create clean config with original backend name for actual run
+                        clean_config = replace(config, backend=backend)
+
+                        # Determine if MLA backend
+                        if backend in [
+                            "cutlass_mla",
+                            "flashinfer_mla",
+                            "flashattn_mla",
+                            "flashmla",
+                        ]:
+                            result = run_mla_benchmark(clean_config)
+                        else:
+                            result = run_standard_attention_benchmark(clean_config)
+
+                        # Replace result's config with labeled version
+                        result = replace(result, config=config)
+                        all_results.append(result)
+
+                    except Exception as e:
+                        console.print(
+                            f"[red]Error {backend} {spec} {sweep.param_name}="
+                            f"{value}: {e}[/]"
+                        )
+                        result = BenchmarkResult(
+                            config=config,
+                            mean_time=float("inf"),
+                            std_time=0,
+                            min_time=float("inf"),
+                            max_time=float("inf"),
+                            error=str(e),
+                        )
+                        all_results.append(result)
+
+                    pbar.update(1)
+
+    # Display sweep results - create separate table for each parameter value
+    console.print("\n[bold green]Model Parameter Sweep Results:[/]")
+    formatter = ResultsFormatter(console)
+
+    # Group results by parameter value and extract backend mapping
+    by_param_value = {}
+    backend_mapping = {}  # Maps labeled backend -> original backend
+
+    for r in all_results:
+        # Extract original backend and param value from labeled backend
+        # The label format is: {backend}_{param_name}_{value}
+        # We need to reverse engineer this
+        labeled_backend = r.config.backend
+
+        # Try each backend to find which one this result belongs to
+        for backend in backends:
+            for value in sweep.values:
+                expected_label = sweep.get_label(backend, value)
+                if labeled_backend == expected_label:
+                    backend_mapping[labeled_backend] = backend
+                    param_value = str(value)
+
+                    if param_value not in by_param_value:
+                        by_param_value[param_value] = []
+                    by_param_value[param_value].append(r)
+                    break
+
+    # Create a table for each parameter value
+    sorted_param_values = sorted(
+        by_param_value.keys(), key=lambda x: int(x) if x.isdigit() else x
+    )
+
+    for param_value in sorted_param_values:
+        console.print(f"\n[bold cyan]{sweep.param_name} = {param_value}[/]")
+        param_results = by_param_value[param_value]
+
+        # Create modified results with original backend names
+        modified_results = []
+        for r in param_results:
+            # Get the original backend name from our mapping
+            original_backend = backend_mapping[r.config.backend]
+            modified_config = replace(r.config, backend=original_backend)
+            modified_result = replace(r, config=modified_config)
+            modified_results.append(modified_result)
+
+        # Print table with original backend names
+        formatter.print_table(modified_results, backends, compare_to_fastest=True)
+
+    # Show optimal backend for each (param_value, batch_spec) combination
+    console.print(
+        f"\n[bold cyan]Optimal backend for each ({sweep.param_name}, batch_spec):[/]"
+    )
+
+    # Group by (param_value, batch_spec)
+    by_param_and_spec = {}
+    for r in all_results:
+        if r.success:
+            # Find which (backend, value) this result corresponds to
+            labeled_backend = r.config.backend
+            for backend in backends:
+                for value in sweep.values:
+                    expected_label = sweep.get_label(backend, value)
+                    if labeled_backend == expected_label:
+                        param_value = str(value)
+                        spec = r.config.batch_spec
+                        key = (param_value, spec)
+
+                        if key not in by_param_and_spec:
+                            by_param_and_spec[key] = []
+                        by_param_and_spec[key].append(r)
+                        break
+
+    # Sort by param value then spec
+    sorted_keys = sorted(
+        by_param_and_spec.keys(),
+        key=lambda x: (int(x[0]) if x[0].isdigit() else x[0], x[1]),
+    )
+
+    current_param_value = None
+    for param_value, spec in sorted_keys:
+        # Print header when param value changes
+        if param_value != current_param_value:
+            console.print(f"\n  [bold]{sweep.param_name}={param_value}:[/]")
+            current_param_value = param_value
+
+        results = by_param_and_spec[(param_value, spec)]
+        best = min(results, key=lambda r: r.mean_time)
+
+        # Extract original backend name using the mapping
+        backend_name = backend_mapping[best.config.backend]
+
+        # Show all backends' times for comparison
+        times_str = " | ".join(
+            [
+                f"{backend_mapping[r.config.backend]}: {r.mean_time:.6f}s"
+                for r in sorted(results, key=lambda r: r.mean_time)
+            ]
+        )
+
+        console.print(
+            f"    {spec:12s} -> [bold green]{backend_name:15s}[/] ({times_str})"
+        )
+
+    return all_results
 
 
 def run_parameter_sweep(
@@ -397,6 +587,19 @@ def main():
         else:
             args.parameter_sweep = None
 
+        # Model parameter sweep configuration
+        if "model_parameter_sweep" in yaml_config:
+            sweep_config = yaml_config["model_parameter_sweep"]
+            args.model_parameter_sweep = ModelParameterSweep(
+                param_name=sweep_config["param_name"],
+                values=sweep_config["values"],
+                label_format=sweep_config.get(
+                    "label_format", "{backend}_{param_name}_{value}"
+                ),
+            )
+        else:
+            args.model_parameter_sweep = None
+
         # Output
         if "output" in yaml_config:
             output = yaml_config["output"]
@@ -616,6 +819,28 @@ def main():
                 console.print(
                     f"\n  [yellow]Prefill always faster for batch_size={bs}[/]"
                 )
+
+    # Handle model parameter sweep mode
+    elif hasattr(args, "model_parameter_sweep") and args.model_parameter_sweep:
+        # Model parameter sweep
+        base_config_args = {
+            "num_layers": args.num_layers,
+            "head_dim": args.head_dim,
+            "num_q_heads": args.num_q_heads,
+            "num_kv_heads": args.num_kv_heads,
+            "block_size": args.block_size,
+            "device": args.device,
+            "repeats": args.repeats,
+            "warmup_iters": args.warmup_iters,
+            "profile_memory": args.profile_memory,
+        }
+        all_results = run_model_parameter_sweep(
+            backends,
+            args.batch_specs,
+            base_config_args,
+            args.model_parameter_sweep,
+            console,
+        )
 
     # Handle parameter sweep mode (unified)
     elif hasattr(args, "parameter_sweep") and args.parameter_sweep:
