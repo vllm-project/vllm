@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from typing import ClassVar
-
+import os
 import numpy as np
 import torch
 from flashinfer import (
@@ -51,7 +51,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+FLASHINFER_WORKSPACE_BUFFER_SIZE = int(os.environ.get("FLASHINFER_WORKSPACE_BUFFER_SIZE", 256 * 1024 * 1024)) 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
