@@ -15,7 +15,7 @@ def is_aiter_supported(func: Callable) -> Callable:
     ROCm AITER package is supported on gfx9 archs.
     """
 
-    @wraps(func)
+    @funcutils.wraps(func)
     def wrapper(*args, **kwargs):
         # checks the platform, device arch and aiter library existance.
         from importlib.util import find_spec
