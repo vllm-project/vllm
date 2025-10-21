@@ -30,10 +30,12 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -65,6 +67,127 @@ def cutlass_scaled_mm(
         # SM90 block FP8 requires row-major scale_b, which we do ahead of time
         scale_b=Bs if block_size is not None and is_hopper else Bs.T,
     )
+
+
+# TODO we should be able to change the type of block_size to GroupShape
+# after we resolve GroupShape compilation issue
+# https://github.com/vllm-project/vllm/issues/25270
+def _w8a8_triton_block_scaled_mm_func(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return w8a8_triton_block_scaled_mm(
+        qx, weight, x_scale, weight_scale, block_size, output_dtype
+    )
+
+
+def _w8a8_triton_block_scaled_mm_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(0)), dtype=output_dtype, device=qx.device
+    )
+
+
+direct_register_custom_op(
+    "w8a8_triton_block_scaled_mm_func",
+    _w8a8_triton_block_scaled_mm_func,
+    fake_impl=_w8a8_triton_block_scaled_mm_fake,
+)
+
+
+def _padded_cutlass(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    pad_multiple = 4
+    dim = qx.shape[0]
+    padded = (
+        dim if dim % pad_multiple == 0 else dim + pad_multiple - (dim % pad_multiple)
+    )
+
+    padded_shape = [padded, *qx.shape[1:]]
+    padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
+    padded_qx[0 : qx.shape[0], ...].copy_(qx)
+
+    padded_x_scale_shape = [*x_scale.shape[1:], padded]
+    padded_x_scale = torch.ones(
+        padded_x_scale_shape, device=x_scale.device, dtype=x_scale.dtype
+    ).permute(-1, -2)
+    padded_x_scale[0 : x_scale.shape[0], ...].copy_(x_scale)
+
+    output = cutlass_scaled_mm(
+        padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype, True
+    )
+    return output[0 : qx.shape[0], ...]
+
+
+def _padded_cutlass_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(0)), dtype=output_dtype, device=qx.device
+    )
+
+
+direct_register_custom_op(
+    "padded_cutlass",
+    _padded_cutlass,
+    fake_impl=_padded_cutlass_fake,
+)
+
+
+def _fp8_gemm_nt_op(
+    q_input: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output: torch.Tensor,
+    use_deep_gemm_e8m0: bool,
+) -> None:
+    fp8_gemm_nt(
+        (q_input, input_scale),
+        (weight, weight_scale),
+        output,
+        is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
+    )
+
+
+def _fp8_gemm_nt_op_fake(
+    q_input: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output: torch.Tensor,
+    use_deep_gemm_e8m0: bool,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    "fp8_gemm_nt_op",
+    _fp8_gemm_nt_op,
+    mutates_args=["output"],
+    fake_impl=_fp8_gemm_nt_op_fake,
+)
 
 
 # TODO fix ROCm->Triton custom path:
