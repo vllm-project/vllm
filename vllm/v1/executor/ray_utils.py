@@ -4,17 +4,16 @@
 import os
 import time
 from collections import defaultdict
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
-
-import msgspec
 
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
-from vllm.executor.msgspec_utils import decode_hook, encode_hook
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.sequence import ExecuteModelRequest, IntermediateTensors
+from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import get_ip
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -51,11 +50,6 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
-            self.input_decoder = msgspec.msgpack.Decoder(
-                ExecuteModelRequest, dec_hook=decode_hook
-            )
-            self.output_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
-
         def get_node_ip(self) -> str:
             return get_ip()
 
@@ -69,47 +63,6 @@ try:
                 )
             gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
             return node_id, gpu_ids
-
-        def execute_model_spmd(
-            self,
-            req_or_tuple: bytes | tuple[bytes, IntermediateTensors | None],
-        ) -> bytes:
-            """Execute model in SPMD fashion: used only when SPMD worker and
-            compiled DAG are both enabled.
-
-            Args:
-                req_or_tuple: A request or a tuple containing the
-                    request and intermediate tensors. Intermediate tensors are
-                    None unless if it is provided because it is > 0 pipeline
-                    stage. The request is serialized by msgspec.
-            """
-            if isinstance(req_or_tuple, bytes):
-                serialized_req, intermediate_tensors = req_or_tuple, None
-            else:
-                serialized_req, intermediate_tensors = req_or_tuple
-
-            execute_model_req = self.input_decoder.decode(serialized_req)
-
-            assert self.worker is not None, "Worker is not initialized"
-
-            # TODO(swang): This is needed right now because Ray Compiled Graph
-            # executes on a background thread, so we need to reset torch's
-            # current device.
-            if not self.compiled_dag_cuda_device_set:
-                assert self.worker.device is not None
-                current_platform.set_device(self.worker.device)
-                self.compiled_dag_cuda_device_set = True
-
-            output = self.worker._execute_model_spmd(  # type: ignore[attr-defined]
-                execute_model_req, intermediate_tensors
-            )
-            # Pipeline model request and output to the next pipeline stage.
-            if isinstance(output, IntermediateTensors):
-                output = serialized_req, output
-            else:
-                output = self.output_encoder.encode(output)
-
-            return output
 
         def setup_device_if_necessary(self):
             # TODO(swang): This is needed right now because Ray CG executes
@@ -172,6 +125,31 @@ except ImportError as e:
     # prevent garbage collection in some cases
     ray_import_err = str(e)
     RayWorkerWrapper = None  # type: ignore
+
+
+class FutureWrapper(Future):
+    """A wrapper around Ray output reference to meet the interface
+    of .execute_model(): The top level (core busy loop) expects .result() api
+    to block and return a single output.
+
+    If aggregator is provided, the outputs from all workers are aggregated upon
+    the result() call. If not only the first worker's output is returned.
+    """
+
+    def __init__(self, refs, aggregator: KVOutputAggregator | None = None):
+        super().__init__()
+        self.refs = refs
+        self.aggregator = aggregator
+
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise NotImplementedError("timeout is not supported")
+
+        if self.aggregator is None:
+            return self.refs[0].get()
+
+        outputs = [ref.get() for ref in self.refs]
+        return self.aggregator.aggregate(outputs, output_rank=0)
 
 
 def ray_is_available() -> bool:
