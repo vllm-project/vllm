@@ -354,7 +354,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose \
+    uv pip install --prerelease=allow --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # TODO (huydhn): Remove this once xformers is released for 2.9.0
