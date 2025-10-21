@@ -383,5 +383,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             config["BLOCK_SIZE_N"],
             config["BLOCK_SIZE_K"],
             config["GROUP_SIZE_M"],
+            config["SPLIT_K"],
             mul_routed_weight,
         )

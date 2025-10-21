@@ -983,6 +983,7 @@ def get_default_config(
             "BLOCK_SIZE_N": 64,
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
+            "SPLIT_K": 1,
         }
         return config
 
@@ -996,6 +997,7 @@ def get_default_config(
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 32,
+            "SPLIT_K": 1,
             "num_warps": 4,
             "num_stages": 3 if not current_platform.is_rocm() else 2,
         }
@@ -1006,19 +1008,20 @@ def get_default_config(
         bit = 4 if dtype == "int4_w4a16" else 8
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk, block_shape[1], E, bit)
         if use_moe_wna16_cuda:
-            config = {"BLOCK_SIZE_M": min(16, M)}
+            config = {"BLOCK_SIZE_M": min(16, M), "SPLIT_K": 1}
         elif M <= 20:
-            config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1}
+            config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         elif M <= 40:
-            config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1}
+            config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         else:
-            config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
+            config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
     elif M <= E:
         config = {
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 32,
             "BLOCK_SIZE_K": 64,
             "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
         }
     else:
         config = {
@@ -1026,6 +1029,7 @@ def get_default_config(
             "BLOCK_SIZE_N": 64,
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
+            "SPLIT_K": 1,
         }
     return config
 
