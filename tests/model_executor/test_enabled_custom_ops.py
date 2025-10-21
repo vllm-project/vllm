@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
 import torch
@@ -37,55 +36,56 @@ class Relu3(ReLUSquaredActivation):
 
 
 @pytest.mark.parametrize(
-    "env, torch_level, use_inductor, ops_enabled, default_on",
+    "env, torch_level, backend, ops_enabled, default_on",
     [
         # Default values based on compile level
         # - All by default (no Inductor compilation)
-        (None, 0, False, [True] * 4, True),
-        (None, 1, True, [True] * 4, True),
-        (None, 2, False, [True] * 4, True),
+        (None, 0, "eager", [True] * 4, True),
+        (None, 1, "eager", [True] * 4, True),
+        (None, 2, "eager", [True] * 4, True),
+        (None, 3, "eager", [True] * 4, True),
         # - None by default (with Inductor)
-        (None, 3, True, [False] * 4, False),
-        (None, 4, True, [False] * 4, False),
-        # - All by default (without Inductor)
-        (None, 3, False, [True] * 4, True),
-        (None, 4, False, [True] * 4, True),
+        (None, 0, "inductor", [True] * 4, True),
+        # - None by default (with Inductor)
+        (None, 1, "inductor", [False] * 4, False),
+        (None, 2, "inductor", [False] * 4, False),
+        (None, 3, "inductor", [False] * 4, False),
         # Explicitly enabling/disabling
         #
         # Default: all
         #
         # All but SiluAndMul
-        ("+rms_norm,-silu_and_mul", 0, True, [1, 0, 1, 1], True),
+        ("+rms_norm,-silu_and_mul", 0, "inductor", [1, 0, 1, 1], True),
         # Only ReLU3
-        ("none,-rms_norm,+relu3", 1, False, [0, 0, 0, 1], False),
+        ("none,-rms_norm,+relu3", 1, "eager", [0, 0, 0, 1], False),
         # All but SiluAndMul
-        ("all,-silu_and_mul", 2, True, [1, 0, 1, 1], True),
+        ("all,-silu_and_mul", 2, "inductor", [1, 0, 1, 1], True),
         # All but ReLU3 (even if ReLU2 is on)
-        ("-relu3,+relu2", 3, False, [1, 1, 1, 0], True),
+        ("-relu3,+relu2", 3, "eager", [1, 1, 1, 0], True),
         # RMSNorm and SiluAndMul
-        ("none,-relu3,+rms_norm,+silu_and_mul", 4, False, [1, 1, 0, 0], False),
+        ("none,-relu3,+rms_norm,+silu_and_mul", 3, "eager", [1, 1, 0, 0], False),
         # All but RMSNorm
-        ("-rms_norm", 3, False, [0, 1, 1, 1], True),
+        ("-rms_norm", 3, "eager", [0, 1, 1, 1], True),
         #
         # Default: none
         #
         # Only ReLU3
-        ("-silu_and_mul,+relu3", 3, True, [0, 0, 0, 1], False),
+        ("none,+relu3", 3, "inductor", [0, 0, 0, 1], False),
         # All but RMSNorm
-        ("all,-rms_norm", 4, True, [0, 1, 1, 1], True),
+        ("all,-rms_norm", 3, "inductor", [0, 1, 1, 1], True),
     ],
 )
 def test_enabled_ops(
-    env: Optional[str],
+    env: str | None,
     torch_level: int,
-    use_inductor: bool,
+    backend: str,
     ops_enabled: list[int],
     default_on: bool,
 ):
     custom_ops = env.split(",") if env else []
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            use_inductor=bool(use_inductor), level=torch_level, custom_ops=custom_ops
+            backend=backend, level=torch_level, custom_ops=custom_ops
         )
     )
     with set_current_vllm_config(vllm_config):

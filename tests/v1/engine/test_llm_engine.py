@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import random
 from typing import TYPE_CHECKING
 
@@ -13,6 +11,8 @@ from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
@@ -21,12 +21,10 @@ DTYPE = "half"
 def _vllm_model(
     apc: bool,
     vllm_runner: type[VllmRunner],
-    monkeypatch: pytest.MonkeyPatch,
     *,
     skip_tokenizer_init: bool = False,
 ):
     """Set up VllmRunner instance."""
-    monkeypatch.setenv("VLLM_USE_V1", "1")
     return vllm_runner(
         MODEL,
         dtype=DTYPE,
@@ -45,16 +43,16 @@ def _vllm_model(
     # Prefix caching
     params=[False, True],
 )
-def vllm_model(vllm_runner, request, monkeypatch):
+def vllm_model(vllm_runner, request):
     """VllmRunner test fixture parameterized by APC True/False."""
-    with _vllm_model(request.param, vllm_runner, monkeypatch) as vllm_model:
+    with _vllm_model(request.param, vllm_runner) as vllm_model:
         yield vllm_model
 
 
 @pytest.fixture(scope="function")
-def vllm_model_apc(vllm_runner, monkeypatch):
+def vllm_model_apc(vllm_runner):
     """VllmRunner test fixture with APC."""
-    with _vllm_model(True, vllm_runner, monkeypatch) as vllm_model:
+    with _vllm_model(True, vllm_runner) as vllm_model:
         yield vllm_model
 
 
@@ -65,12 +63,11 @@ def vllm_model_apc(vllm_runner, monkeypatch):
     # Prefix caching
     params=[False, True],
 )
-def vllm_model_skip_tokenizer_init(vllm_runner, request, monkeypatch):
+def vllm_model_skip_tokenizer_init(vllm_runner, request):
     """VllmRunner test fixture with APC."""
     with _vllm_model(
         request.param,
         vllm_runner,
-        monkeypatch,
         skip_tokenizer_init=True,
     ) as vllm_model:
         yield vllm_model
@@ -152,7 +149,7 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
             )
 
 
-def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
+def test_engine_metrics(vllm_runner, example_prompts):
     max_tokens = 100
     # Use spec decoding to test num_accepted_tokens_per_pos
     speculative_config = {
@@ -161,7 +158,7 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
         "prompt_lookup_min": 3,
         "num_speculative_tokens": 5,
     }
-    monkeypatch.setenv("VLLM_USE_V1", "1")
+
     with vllm_runner(
         MODEL,
         speculative_config=speculative_config,
@@ -216,8 +213,7 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
-def test_skip_tokenizer_initialization(model: str, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
+def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
     # of tokenizer and detokenizer. The generated output is expected to contain
     # token ids.

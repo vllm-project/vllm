@@ -8,7 +8,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 import warnings
-from typing import Optional
 
 import torch
 
@@ -163,9 +162,9 @@ def chunk_local_cumsum_scalar(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -200,9 +199,9 @@ def chunk_local_cumsum_vector(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = g.shape
@@ -248,9 +247,9 @@ def chunk_local_cumsum(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
     if not head_first and g.shape[1] < g.shape[2]:

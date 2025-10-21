@@ -292,6 +292,37 @@ def test_rope_customization():
     assert longchat_model_config.max_model_len == 4096
 
 
+def test_nested_hf_overrides():
+    """Test that nested hf_overrides work correctly."""
+    # Test with a model that has text_config
+    model_config = ModelConfig(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        hf_overrides={
+            "text_config": {
+                "hidden_size": 1024,
+            },
+        },
+    )
+    assert model_config.hf_config.text_config.hidden_size == 1024
+
+    # Test with deeply nested overrides
+    model_config = ModelConfig(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        hf_overrides={
+            "text_config": {
+                "hidden_size": 2048,
+                "num_attention_heads": 16,
+            },
+            "vision_config": {
+                "hidden_size": 512,
+            },
+        },
+    )
+    assert model_config.hf_config.text_config.hidden_size == 2048
+    assert model_config.hf_config.text_config.num_attention_heads == 16
+    assert model_config.hf_config.vision_config.hidden_size == 512
+
+
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="Encoder Decoder models not supported on ROCm."
 )

@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -95,13 +95,13 @@ def default_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ):
     return torch.nn.functional.linear(x, weight, bias)
 
 
 def rocm_unquantized_gemm_impl(
-    x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
     from vllm.platforms.rocm import on_gfx9
 
@@ -131,7 +131,7 @@ def rocm_unquantized_gemm_impl(
 
 
 def rocm_unquantized_gemm_impl_fake(
-    x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
     return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
@@ -140,7 +140,7 @@ def rocm_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
 
@@ -178,10 +178,7 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-    elif ops._supports_onednn and (
-        current_platform.get_cpu_architecture() == CpuArchEnum.X86
-        or ops.is_onednn_acl_supported()
-    ):
+    elif ops._supports_onednn:
         origin_weight = layer.weight
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
@@ -197,7 +194,7 @@ def cpu_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ):
     return layer.cpu_linear(x, weight, bias)
 

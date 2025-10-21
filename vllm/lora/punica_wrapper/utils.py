@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -51,7 +51,7 @@ def compute_meta(
 # TODO see if this can be vectorized
 def convert_mapping(
     mapping: "LoRAMapping",
-    lora_index_to_id: list[Optional[int]],
+    lora_index_to_id: list[int | None],
     max_loras: int,
     vocab_size: int,
     extra_vocab_size: int,
@@ -104,7 +104,7 @@ def convert_mapping(
         embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
         lora_indices[i] = lora_idx
 
-    indices_list: list[Union[list[int], torch.Tensor]] = [
+    indices_list: list[list[int] | torch.Tensor] = [
         index_mapping_indices,
         lora_indices,
         embedding_indices,

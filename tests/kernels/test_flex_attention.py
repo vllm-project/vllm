@@ -55,7 +55,6 @@ def test_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
 
     # Run with flex attention
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
 
         set_seed(seed)
@@ -72,7 +71,6 @@ def test_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
 
     # Run with default backend
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         set_seed(seed)
         with vllm_runner(
             model_name,
@@ -113,7 +111,6 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
 
     # Run with flex attention
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
         with vllm_runner(
             model_name,
@@ -126,17 +123,18 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
             flex_outputs = llm_flex.embed(prompts)
 
     # Run with default backend
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        with vllm_runner(
+    with (
+        monkeypatch.context() as m,
+        vllm_runner(
             model_name,
             runner="pooling",
             dtype=torch.bfloat16,
             tensor_parallel_size=1,
             max_model_len=100,
             enforce_eager=True,
-        ) as llm_default:
-            default_outputs = llm_default.embed(prompts)
+        ) as llm_default,
+    ):
+        default_outputs = llm_default.embed(prompts)
 
     check_embeddings_close(
         embeddings_0_lst=flex_outputs,
