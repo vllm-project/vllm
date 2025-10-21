@@ -666,7 +666,10 @@ def runai_safetensors_weights_iterator(
             return f"cuda:{torch.cuda.current_device()}" if is_cuda else None
         if is_distributed and (device := get_device()):
             streamer.stream_files(hf_weights_files, device=device, is_distributed=True)
-            tensor_source = ((name, tensor.clone().detach()) for name, tensor in streamer.get_tensors())
+            tensor_source = (
+                (name, tensor.clone().detach())
+                for name, tensor in streamer.get_tensors()
+            )
         else:
             streamer.stream_files(hf_weights_files)
             tensor_source = streamer.get_tensors()
