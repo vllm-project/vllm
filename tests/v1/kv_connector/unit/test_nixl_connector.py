@@ -398,7 +398,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # Adjust remote block length metadata to satisfy heterogeneous TP
         # invariants enforced during handshake validation.
         remote_block_lens = list(self.block_len_per_layer)
-        tp_ratio = self.kv_info.tp_ratio(remote_tp_size=remote_tp_size)
+        tp_ratio = self.kv_topo.tp_ratio(remote_tp_size)
         if remote_tp_size > self.world_size:
             # P TP > D TP case, block_len of remote is smaller
             remote_block_lens = [
@@ -615,7 +615,7 @@ class TestNixlHandshake:
 
             remote_engine_id = worker.REMOTE_ENGINE_ID
             assert worker._tp_size[remote_engine_id] == remote_tp_size
-            assert -tp_ratio == worker.kv_info.tp_ratio(remote_engine_id)
+            assert -tp_ratio == worker.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
             # ensure src_xfer_side_chunked_handles is populated with tpratio chunks
             assert -tp_ratio in worker.src_xfer_side_chunked_handles
             assert len(worker.src_xfer_side_chunked_handles[-tp_ratio]) == tp_ratio
@@ -632,8 +632,9 @@ class TestNixlHandshake:
         )
         check_handshake(2)
 
-        # NOTE flexiblity: a second remote with higher number of ranks
-        # is discovered
+        # NOTE flexiblity: a second remote with higher number of ranks is
+        # discovered. This is not a scenario we actively support right now, but
+        # the connector allows it.
         worker.REMOTE_ENGINE_ID = "remote_engine_2"
         remote_agents = worker._nixl_handshake(
             host="localhost",
