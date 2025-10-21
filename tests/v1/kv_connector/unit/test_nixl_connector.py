@@ -565,8 +565,6 @@ class TestNixlHandshake:
                 kv_cache_layout=mismatched_layout,
             )
 
-            # We don't check layout for homogeneous TP and MLA for now, as the
-            # whole block is moved.
             with pytest.raises(RuntimeError):
                 # mismatched layout is expected to fail
                 worker.add_remote_agent(meta, remote_tp_size=2)
