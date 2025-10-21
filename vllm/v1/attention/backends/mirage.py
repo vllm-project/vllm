@@ -284,6 +284,17 @@ class MirageAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = scale
+        self.num_kv_heads = num_kv_heads
+        self.alibi_slopes = alibi_slopes
+        self.sliding_window = sliding_window
+        self.kv_cache_dtype = kv_cache_dtype
+        self.logits_soft_cap = logits_soft_cap
+        self.attn_type = attn_type
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.sinks = sinks
         pass
 
     def forward(

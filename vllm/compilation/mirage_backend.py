@@ -3,6 +3,7 @@ from .backends import *
 from mirage import MPK, MPKMetadata, MirageModelConfig
 import re
 from vllm.config import ModelConfig, get_current_vllm_config
+from vllm.config.parallel import ParallelConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.models.utils import extract_layer_index
 import torch
@@ -56,14 +57,15 @@ def build_model_config(
     k_cache_tensors: list[torch.Tensor],
     v_cache_tensors: list[torch.Tensor],
     position_embeddings: torch.Tensor,
+    parallel_config: ParallelConfig,
 ) -> MirageModelConfig:
     mirage_model_config = MirageModelConfig(
         # model architecture
         hidden_size=model_config.get_hidden_size(),
         intermediate_size=getattr(model_config.hf_text_config, "intermediate_size", 0),
         vocab_size=model_config.get_vocab_size(),
-        num_q_heads=model_config.get_num_attention_heads(),
-        num_kv_heads=model_config.get_num_kv_heads(),
+        local_num_q_heads=model_config.get_num_attention_heads(parallel_config),
+        local_num_kv_heads=model_config.get_num_kv_heads(parallel_config),
         head_dim=model_config.get_head_size(),
         num_layers=getattr(model_config.hf_text_config, "num_hidden_layers", 0),
         # kv cache
@@ -78,15 +80,16 @@ def build_model_config(
 
 def build_mpk_metadata(
         vllm_config: VllmConfig, 
-        forward_context: ForwardContext,
         args: list[Any],
         transfered_tensor_names: list[str],
     ) -> MPKMetadata:
+    forward_context = get_forward_context()
     model_config = vllm_config.model_config
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
     parallel_config = vllm_config.parallel_config
     attn_metadata = forward_context.attn_metadata
+    logger.info(f"[Mirage] Forward context: {forward_context}, attn_metadata: {attn_metadata}")
     
     static_forward_context = forward_context.no_compile_layers # layer names to layers
     k_cache_tensors = []
@@ -100,7 +103,7 @@ def build_mpk_metadata(
         layer_names = index2name[layer_index]
         assert len(layer_names) == 1, "Multiple layers with the same layer index are not supported"
         layer_name = layer_names[0]
-        logger.info(f"{layer_index} {layer_name}: attention num: {len(static_forward_context[layer_name].kv_cache)}; kv_cache.shape: {static_forward_context[layer_name].kv_cache[0].shape}")
+        # logger.info(f"{layer_index} {layer_name}: attention num: {len(static_forward_context[layer_name].kv_cache)}; kv_cache.shape: {static_forward_context[layer_name].kv_cache[0].shape}")
         k_cache_tensors.append(static_forward_context[layer_name].kv_cache[0][0])
         v_cache_tensors.append(static_forward_context[layer_name].kv_cache[0][1])
         # kv_cache_tensors shape: num_layers * (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -124,7 +127,8 @@ def build_mpk_metadata(
         state_dict,
         k_cache_tensors,
         v_cache_tensors,
-        position_embeddings
+        position_embeddings,
+        parallel_config,
     )
     mpk_metadata = MPKMetadata(
         mode = "online",
@@ -139,7 +143,7 @@ def build_mpk_metadata(
         device = "cuda",
         # # model 
         weight_from_model = False,
-        model_name = model_config.model_name,
+        model_name = model_config.model,
         # model_path: Optional[str] = None
         # multi device support
         world_size = parallel_config.world_size,
@@ -218,6 +222,19 @@ class MirageBackend:
         # transform and analysis are done
         compilation_counter.num_graphs_seen += 1
         from .monitor import torch_compile_start_time
+        
+        # TODO: remove this after debugging
+        # try:
+        #     src = graph.print_readable(print_output=False)
+        # except Exception:
+        #     src = str(graph)
+        # try:
+        #     with open('mirage_backends_graph.txt', 'w') as f:
+        #         logger.info('Writing readable FX graph to mirage_backends_graph.txt')
+        #         f.write(src)
+        #         logger.info('Readable FX graph written to mirage_backends_graph.txt')
+        # except Exception:
+        #     logger.exception('Failed to write mirage_backends_graph.txt')
 
         dynamo_time = time.time() - torch_compile_start_time
         logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
@@ -232,18 +249,26 @@ class MirageBackend:
         
         transfered_tensor_names = transfer_tensor_names(placeholders)
         
-        forward_context = get_forward_context()
         
         self._called = True
         self.compiled = False
         
         def compile_or_call(*args):
+            dumb_run_called = (get_forward_context().attn_metadata is None)
+            if dumb_run_called:
+                model_config = self.vllm_config.model_config
+                dtype = model_config.dtype
+                hidden_size = model_config.get_hidden_size()
+                output_tensor = torch.zeros(1, hidden_size, device='cuda', dtype=dtype)
+                logger.info(f"[Mirage] Calling dumb_run_called, returning dummy output tensor with shape [{output_tensor.shape}]......!")
+
+                return (output_tensor,)
+            
             if not self.compiled:
                 # Compile only at the first call -- when we get real tensors
                 logger.info("[Mirage] Calling compile_or_call for the first time, compiling......!")
                 mpk_metadata = build_mpk_metadata(
                     self.vllm_config,
-                    forward_context,
                     args,
                     transfered_tensor_names,
                 )
