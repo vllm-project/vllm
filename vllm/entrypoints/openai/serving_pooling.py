@@ -258,7 +258,6 @@ class OpenAIServingPooling(OpenAIServing):
         embed_dtype: EmbedDType,
         endianness: Endianness,
     ) -> PoolingResponse | PoolingBytesResponse:
-
         def encode_float_base64():
             items: list[PoolingResponseData] = []
             num_prompt_tokens = 0
