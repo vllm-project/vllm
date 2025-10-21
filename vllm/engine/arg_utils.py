@@ -1734,6 +1734,15 @@ class EngineArgs:
                     self.enable_prefix_caching = False
                 else:
                     self.enable_prefix_caching = True
+
+            if self.prefill_context_parallel_size > 1:
+                self.enable_chunked_prefill = False
+                self.enable_prefix_caching = False
+                logger.warning(
+                    "--prefill-context-parallel-size > 1 is not compatible with "
+                    "chunked prefill and prefix caching now. Chunked prefill "
+                    "and prefix caching have been disabled."
+                )
         else:
             pooling_type = model_config.pooler_config.pooling_type
             is_causal = getattr(model_config.hf_config, "is_causal", True)
