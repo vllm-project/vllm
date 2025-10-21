@@ -1213,11 +1213,11 @@ class FaultHandler:
         self.engine_exception_q = engine_exception_q
         self.engine_exception_q_lock = engine_exception_q_lock
 
-    def handle_fault(self, instruction: str, timeout) -> bool:
+    async def handle_fault(self, instruction: str, timeout) -> bool:
         # TODO engine没有的情况 循环会超时报错
         # 短期解决方案： 遍历exception_q 获取异常index并移除 再下发指令
         # 最终方案： 实现线程安全字典 标记状态
-        unhealthy_engine_list = get_queue_snapshot(
+        unhealthy_engine_list = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
         )
         engine_indexes = [engine_index for engine_index in self.client_cmd_registry]

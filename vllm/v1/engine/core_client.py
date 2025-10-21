@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import json
 import multiprocessing
 import queue
 import sys
@@ -836,13 +837,13 @@ class MPClient(EngineCoreClient):
 
     async def fault_reporter(self):
         engine_exception_dict = {}
-        exception_snapshot = get_queue_snapshot(
+        exception_snapshot = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
         )
 
         for fault_info in exception_snapshot:
             engine_exception_dict[fault_info.engine_id] = "Unhealthy"
-        return engine_exception_dict
+        return json.dumps(engine_exception_dict).encode("utf-8")
 
 
 def _process_utility_output(
