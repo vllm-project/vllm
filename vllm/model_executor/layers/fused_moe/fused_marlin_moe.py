@@ -61,7 +61,14 @@ def _fused_marlin_moe(
     N = marlin_moe_intermediate_size(w1, w2)
 
     if workspace is None:
-        workspace = marlin_make_workspace_new(hidden_states.device, 4)
+        bit4_scalar_types = [
+            scalar_types.uint4,
+            scalar_types.uint4b8,
+            scalar_types.float4_e2m1f,
+        ]
+        num_bits = 4 if quant_type in bit4_scalar_types else 8
+        max_blocks_per_sm = 8 if num_bits == 8 else 4
+        workspace = marlin_make_workspace_new(hidden_states.device, max_blocks_per_sm)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
@@ -276,26 +283,6 @@ def fused_marlin_moe(
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, block_size_m, global_num_experts, expert_map
     )
-
-    N = marlin_moe_intermediate_size(w1, w2)
-
-    if workspace is None:
-        max_blocks_per_sm = 8 if num_bits == 8 else 4
-        workspace = marlin_make_workspace_new(hidden_states.device, max_blocks_per_sm)
-
-    required_intermediate_cache2_elems = M * topk * N
-    if (
-        intermediate_cache2 is not None
-        and intermediate_cache2.numel() < required_intermediate_cache2_elems
-    ):
-        intermediate_cache2 = None
-
-    required_intermediate_cache13_elems = M * topk * max(2 * N, K)
-    if (
-        intermediate_cache13 is not None
-        and intermediate_cache13.numel() < required_intermediate_cache13_elems
-    ):
-        intermediate_cache13 = None
 
     assert activation is not None
     moe_output = _fused_marlin_moe(
