@@ -129,7 +129,7 @@ class EmbeddingMixin(OpenAIServing):
         embed_dtype: EmbedDType = ctx.request.embed_dtype
         endianness: Endianness = ctx.request.endianness
 
-        def encoding_float_base64():
+        def encode_float_base64():
             items: list[EmbeddingResponseData] = []
             num_prompt_tokens = 0
 
@@ -161,7 +161,7 @@ class EmbeddingMixin(OpenAIServing):
                 usage=usage,
             )
 
-        def encoding_bytes():
+        def encode_bytes():
             body, items, usage = encode_pooling_bytes(
                 pooling_outputs=final_res_batch_checked,
                 embed_dtype=embed_dtype,
@@ -181,9 +181,9 @@ class EmbeddingMixin(OpenAIServing):
             )
 
         if encoding_format == "float" or encoding_format == "base64":
-            return encoding_float_base64()
+            return encode_float_base64()
         elif encoding_format == "bytes":
-            return encoding_bytes()
+            return encode_bytes()
         else:
             assert_never(encoding_format)
 
