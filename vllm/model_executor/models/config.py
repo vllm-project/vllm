@@ -526,8 +526,9 @@ class Qwen2_5_VLMultiModalConfig(VerifyAndUpdateConfig):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The videos_kwargs of Qwen2_5_VLProcessor does not contain all dynamic "
-                "kwargs. Please check if the dynamic kwargs are set correctly."
+                "The videos_kwargs of Qwen2_5_VLProcessor does not contain "
+                "all dynamic kwargs. Please check if the dynamic kwargs are "
+                "set correctly."
             )
 
 
@@ -552,9 +553,11 @@ class Glm4vMultiModalConfig(VerifyAndUpdateConfig):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The videos_kwargs of Glm4vProcessor does not contain all dynamic "
-                "kwargs. Please check if the dynamic kwargs are set correctly."
+                "The videos_kwargs of Glm4vProcessor does not contain "
+                "all dynamic kwargs. Please check if the dynamic kwargs are "
+                "set correctly."
             )
+
 
 
 class Qwen2_5OmniMultiModalConfig(VerifyAndUpdateConfig):
@@ -578,8 +581,9 @@ class Qwen2_5OmniMultiModalConfig(VerifyAndUpdateConfig):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The videos_kwargs of Qwen2_5OmniProcessor does not contain all dynamic "
-                "kwargs. Please check if the dynamic kwargs are set correctly."
+                "The videos_kwargs of Qwen2_5OmniProcessor does not contain "
+                "all dynamic kwargs. Please check if the dynamic kwargs are "
+                "set correctly."
             )
 
 
@@ -604,8 +608,9 @@ class Qwen3_VLMultiModalConfig(VerifyAndUpdateConfig):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The videos_kwargs of Qwen3_VLProcessor does not contain all dynamic "
-                "kwargs. Please check if the dynamic kwargs are set correctly."
+                "The videos_kwargs of Qwen3_VLProcessor does not contain "
+                "all dynamic kwargs. Please check if the dynamic kwargs are "
+                "set correctly."
             )
 
 
