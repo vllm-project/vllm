@@ -163,7 +163,7 @@ class ModelConfig:
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
     allowed_media_domains: list[str] | None = None
-    """If set, only media URLs that belong to this domain can be used for 
+    """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
@@ -345,6 +345,7 @@ class ModelConfig:
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
         factors.append(self.video_pruning_rate)
+        factors.append(self.enable_prompt_embeds)
 
         # hf_config can control how the model looks!
         try:
