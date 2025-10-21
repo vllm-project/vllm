@@ -153,6 +153,7 @@ class MLPBlock(torch.nn.Module):
 
         self.layer_idx = layer_idx
         self.num_experts = config.num_local_experts
+        self.hidden_size = config.hidden_size
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.router = torch.nn.Linear(config.hidden_size, config.num_local_experts)
@@ -179,7 +180,7 @@ class MLPBlock(torch.nn.Module):
 
         if current_platform.is_rocm():
             g = rocm_unquantized_gemm(
-                x[:, : self.hidden_size], self.router.weight, self.router.bias
+                self, x[:, : self.hidden_size], self.router.weight, self.router.bias
             )
         else:
             g = self.router(x)

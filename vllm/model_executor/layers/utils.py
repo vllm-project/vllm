@@ -162,6 +162,7 @@ def rocm_unquantized_gemm_fake(
 
 
 def rocm_unquantized_gemm(
+    layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
