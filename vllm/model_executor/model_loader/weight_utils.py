@@ -671,7 +671,7 @@ def runai_safetensors_weights_iterator(
                 hf_weights_files,
                 s3_credentials=None,
                 device=device,
-                is_distributed=True
+                is_distributed=True,
             )
         else:
             streamer.stream_files(hf_weights_files)
