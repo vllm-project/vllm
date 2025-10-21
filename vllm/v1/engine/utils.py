@@ -1214,16 +1214,18 @@ class FaultHandler:
         self.engine_exception_q_lock = engine_exception_q_lock
 
     async def handle_fault(self, instruction: str, timeout) -> bool:
-        # TODO engine没有的情况 循环会超时报错
-        # 短期解决方案： 遍历exception_q 获取异常index并移除 再下发指令
-        # 最终方案： 实现线程安全字典 标记状态
+        # TODO: If the engine does not exist, the loop will time out and throw an error
+        #  Short-term solution: Iterate through exception_q to get the exception index,
+        #  remove it, and then issue the command
+        #  Final solution: Implement a thread-safe dictionary to mark statuses
         unhealthy_engine_list = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
         )
         engine_indexes = [engine_index for engine_index in self.client_cmd_registry]
 
-        for unhealthy_engine in unhealthy_engine_list:
-            engine_indexes.remove(unhealthy_engine.engine_id)
+        if instruction == "pause":
+            for unhealthy_engine in unhealthy_engine_list:
+                engine_indexes.remove(unhealthy_engine.engine_id)
 
         kwargs = {"timeout": timeout}
         for engine_index in engine_indexes:

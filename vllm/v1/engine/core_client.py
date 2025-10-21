@@ -530,7 +530,8 @@ class ClientGuard:
             assert message is not None, (
                 "message should not be None at fault tolerance scenario"
             )
-            # TODO 异步下发暂停指令 enginecore状态设计
+            # TODO Asynchronous issuance of pause commands and design of engine
+            #  core status
             self.engine_exception_q.put_nowait(FaultInfo.from_json(message))
 
     def shutdown_guard(self):
