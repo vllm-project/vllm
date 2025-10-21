@@ -630,8 +630,9 @@ class Qwen3OmniMoeMultiModalConfig(VerifyAndUpdateConfig):
             mm_config.mm_processor_dynamic_kwargs = dynamic_kwargs
         else:
             logger.warning(
-                "The video_kwargs of Qwen3OmniMoeProcessor does not contain all dynamic "
-                "kwargs. Please check if the dynamic kwargs are set correctly."
+                "The video_kwargs of Qwen3OmniMoeProcessor does not contain "
+                "all dynamic kwargs. Please check if the dynamic kwargs are "
+                "set correctly."
             )
 
 
