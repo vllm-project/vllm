@@ -3,15 +3,14 @@
 import json
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from typing_extensions import override
 
 
+@dataclass
 class SLACriterionBase(ABC):
-    def __init__(self, target: float) -> None:
-        super().__init__()
-
-        self.target = target
+    target: float
 
     @abstractmethod
     def validate(self, actual: float) -> bool:
@@ -36,6 +35,7 @@ class SLACriterionBase(ABC):
         return result
 
 
+@dataclass
 class SLALessThan(SLACriterionBase):
     @override
     def validate(self, actual: float) -> bool:
@@ -46,6 +46,7 @@ class SLALessThan(SLACriterionBase):
         return f"{lhs}<{self.target:.2f}"
 
 
+@dataclass
 class SLALessThanOrEqualTo(SLACriterionBase):
     @override
     def validate(self, actual: float) -> bool:
@@ -56,6 +57,7 @@ class SLALessThanOrEqualTo(SLACriterionBase):
         return f"{lhs}<={self.target:.2f}"
 
 
+@dataclass
 class SLAGreaterThan(SLACriterionBase):
     @override
     def validate(self, actual: float) -> bool:
@@ -66,6 +68,7 @@ class SLAGreaterThan(SLACriterionBase):
         return f"{lhs}>{self.target:.2f}"
 
 
+@dataclass
 class SLAGreaterThanOrEqualTo(SLACriterionBase):
     @override
     def validate(self, actual: float) -> bool:

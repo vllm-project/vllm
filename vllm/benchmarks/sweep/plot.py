@@ -4,6 +4,7 @@ import argparse
 import json
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import TracebackType
@@ -18,24 +19,25 @@ from vllm.utils.collection_utils import full_groupby
 from .utils import sanitize_filename
 
 
+@dataclass
 class PlotFilterBase(ABC):
+    var: str
+    target: str
+
     @classmethod
     def parse_str(cls, s: str):
         for op_key in PLOT_FILTERS:
             if op_key in s:
                 key, value = s.split(op_key)
-                return PLOT_FILTERS[op_key](key, value.removeprefix(op_key))
+                return PLOT_FILTERS[op_key](
+                    key,
+                    value.removeprefix(op_key).strip("'").strip('"'),
+                )
         else:
             raise ValueError(
                 f"Invalid operator for plot filter '{s}'. "
                 f"Valid operators are: {set(PLOT_FILTERS)}",
             )
-
-    def __init__(self, var: str, target: str) -> None:
-        super().__init__()
-
-        self.var = var
-        self.target = target
 
     @abstractmethod
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -43,6 +45,7 @@ class PlotFilterBase(ABC):
         raise NotImplementedError
 
 
+@dataclass
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -54,24 +57,28 @@ class PlotEqualTo(PlotFilterBase):
         return df[df[self.var] == target]
 
 
+@dataclass
 class PlotLessThan(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         return df[df[self.var] < float(self.target)]
 
 
+@dataclass
 class PlotLessThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         return df[df[self.var] <= float(self.target)]
 
 
+@dataclass
 class PlotGreaterThan(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         return df[df[self.var] > float(self.target)]
 
 
+@dataclass
 class PlotGreaterThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -103,7 +110,11 @@ class PlotFilters(list[PlotFilterBase]):
         return df
 
 
+@dataclass
 class PlotBinner:
+    var: str
+    bin_size: float
+
     @classmethod
     def parse_str(cls, s: str):
         for op_key in PLOT_BINNERS:
@@ -115,12 +126,6 @@ class PlotBinner:
                 f"Invalid operator for plot binner '{s}'. "
                 f"Valid operators are: {set(PLOT_BINNERS)}",
             )
-
-    def __init__(self, var: str, bin_size: float) -> None:
-        super().__init__()
-
-        self.var = var
-        self.bin_size = bin_size
 
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         """Applies this binner to a DataFrame."""
