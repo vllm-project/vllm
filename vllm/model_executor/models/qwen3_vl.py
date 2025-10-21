@@ -79,7 +79,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -300,6 +300,7 @@ class Qwen3_VisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = vision_config.hidden_size
@@ -359,7 +360,9 @@ class Qwen3_VisionTransformer(nn.Module):
         )
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         use_upstream_fa = False
         if (
@@ -379,7 +382,6 @@ class Qwen3_VisionTransformer(nn.Module):
             raise RuntimeError(
                 f"Qwen3-VL does not support {self.attn_backend} backend now."
             )
-
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
@@ -735,9 +737,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         if do_sample_frames:
             # here video_fps is the fps of the sampled video, and
             # metadata["fps"] refers to the fps of the original video.
-            video_fps = sampled_fps if sampled_fps else video_processor.fps
+            sampled_fps = sampled_fps if sampled_fps else video_processor.fps
             total_num_frames = metadata["total_num_frames"]
-            num_frames = int(total_num_frames / metadata["fps"] * video_fps)
+            num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
             num_frames = min(
                 min(
                     max(num_frames, video_processor.min_frames),
@@ -1214,12 +1216,18 @@ class Qwen3VLForConditionalGeneration(
         ) and not multimodal_config.get_limit_per_prompt("video"):
             self.visual = None
         else:
+            attn_backend_override = (
+                multimodal_config.mm_encoder_attn_backend
+                if multimodal_config is not None
+                else None
+            )
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
+                attn_backend_override=attn_backend_override,
             )
 
         self.language_model = Qwen3LLMForCausalLM(
