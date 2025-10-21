@@ -798,9 +798,10 @@ class NixlConnectorWorker:
             else:
                 # P TP > D TP case, D reads from |tp_ratio| remote workers.
                 tp_ratio = -tp_ratio
-                if self.replicates_kv_cache(remote_tp_size):
+                if self.is_mla:
                     # When cache is replicated on remote, we only need to read
-                    # from one remote (they all have the same cache).
+                    # from one remote (they all have the same cache). Fan out
+                    # transfers to avoid bottlenecks on single remote.
                     return [self.tp_rank * tp_ratio]
                 return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
 
@@ -810,7 +811,6 @@ class NixlConnectorWorker:
         ) -> list[int]:
             remote_tp_size = self.remote_tp_size[remote_engine_id]
             return self.get_target_remote_ranks(remote_tp_size)
-
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         if NixlWrapper is None:
@@ -920,6 +920,7 @@ class NixlConnectorWorker:
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
         # Populated dynamically during handshake based on remote configuration.
         # Keep track of regions at different tp_ratio values. tp_ratio->handles
+        # FIXME change to remote tp_size
         self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
         self.dst_xfer_side_handles: defaultdict[EngineId, dict[int, int]] = defaultdict(
@@ -1466,7 +1467,7 @@ class NixlConnectorWorker:
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
-        tp_ratio = self.kv_topo.tp_ratio(engine_id)
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(engine_id)
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
         indexes_into_remote = (
@@ -2008,8 +2009,9 @@ class NixlConnectorWorker:
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
-            meta.remote_engine_id)
-        tp_ratio = self.kv_topo.tp_ratio(meta.remote_engine_id)
+            meta.remote_engine_id
+        )
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote_engine_id)
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             remote_block_size = self.kv_topo.remote_block_size[meta.remote_engine_id]
