@@ -1411,9 +1411,8 @@ class NixlConnectorWorker:
                 len(done_recving),
             )
 
-        # clean up metadata for completed requests
         for req_id in done_recving:
-            meta = self._recving_metadata.pop(req_id, None)
+            meta = self._recving_metadata.get(req_id, None)
             if self.use_host_buffer and meta:
                 self.sync_recved_kv_to_device(req_id, meta)
 
@@ -1444,6 +1443,10 @@ class NixlConnectorWorker:
                 block_ids += meta.local_block_ids
 
             self.permute_device_kv(block_ids)
+
+        # clean up metadata for completed requests
+        for req_id in done_recving:
+            self._recving_metadata.pop(req_id, None)
 
         return done_sending, done_recving
 
