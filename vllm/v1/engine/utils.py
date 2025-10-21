@@ -1227,7 +1227,7 @@ class FaultHandler:
 
         if instruction == "pause":
             for unhealthy_engine in unhealthy_engine_list:
-                engine_indexes.remove(unhealthy_engine.engine_id)
+                engine_indexes.remove(int(unhealthy_engine.engine_id))
 
         kwargs = {"timeout": timeout}
         for engine_index in engine_indexes:
