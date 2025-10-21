@@ -122,7 +122,8 @@ class Worker(WorkerBase):
             }
 
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        tags = ("weights", "graphs") if level == 1 else tuple()
+        allocator.sleep(offload_tags=tags)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -146,6 +147,14 @@ class Worker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+    def _setup_sleep_mode_graph_pool(self) -> None:
+        """Set up custom graph pool for sleep mode after graph capture is complete."""
+        if self.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            allocator.setup_graph_pool_for_sleep_mode()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -361,6 +370,9 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        # Set up custom graph pool for sleep mode after graph capture is complete
+        self._setup_sleep_mode_graph_pool()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
