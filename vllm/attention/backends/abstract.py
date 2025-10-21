@@ -117,9 +117,11 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
+        if kv_cache_dtype is None:
+            return True
         supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
         return (not supported_kv_cache_dtypes) or (
-            kv_cache_dtype is not None and kv_cache_dtype in supported_kv_cache_dtypes
+            kv_cache_dtype in supported_kv_cache_dtypes
         )
 
     @classmethod
