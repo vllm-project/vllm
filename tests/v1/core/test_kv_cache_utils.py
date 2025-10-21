@@ -33,6 +33,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.kv_cache_interface import (
+    CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -117,6 +118,17 @@ def new_sliding_window_spec(
         head_size=head_size,
         dtype=dtype,
         sliding_window=sliding_window,
+    )
+
+
+def new_cross_attention_spec(
+    block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float32
+):
+    return CrossAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
     )
 
 
@@ -1404,6 +1416,64 @@ def test_get_kv_cache_config_one_worker():
         ],
         kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())],
     )
+
+
+def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
+    """If num_gpu_blocks_override is set too small, engine init should fail.
+
+    This guards against allowing configurations where the effective number of
+    KV blocks is not enough to hold a single request with
+    `model_config.max_model_len` tokens.
+    """
+    # max_model_len requires more than one block (block_size defaults to 16)
+    model_config = ModelConfig(max_model_len=32)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    # Single worker with two identical full-attention layers
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    # Force only one KV block available via override
+    vllm_config.cache_config.num_gpu_blocks_override = 1
+
+    # Set available memory very large so memory-based checks would pass
+    # without the override. Use per-block total to scale.
+    per_block_total = sum(spec.page_size_bytes for spec in kv_cache_specs.values())
+    available_memory = per_block_total * 100
+
+    # With only one block, a 32-token request (2 blocks) cannot fit; expect error
+    with pytest.raises(ValueError):
+        get_kv_cache_configs(vllm_config, [kv_cache_specs], [available_memory])
+
+
+def test_override_must_cover_worst_layer_blocks_in_heterogeneous_model():
+    """Override must be >= the maximum per-layer required blocks.
+
+    Create a heterogeneous spec where cross-attention needs more blocks than
+    decoder self-attention (due to default max_num_encoder_input_tokens=2048),
+    and verify that an override between the two is rejected.
+    """
+    # Full-attn needs ceil(1024/16)=64 blocks; cross-attn needs ceil(2048/16)=128.
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs = {
+        "decoder_self": new_kv_cache_spec(block_size=16),
+        "cross": new_cross_attention_spec(block_size=16),
+    }
+
+    # Set override below the worst-layer requirement (96 < 128)
+    vllm_config.cache_config.num_gpu_blocks_override = 96
+
+    # Use large available memory so raw memory checks would pass
+    # without the override capping taking effect.
+    per_block_total = sum(spec.page_size_bytes for spec in kv_cache_specs.values())
+    available_memory = per_block_total * 100
+
+    with pytest.raises(ValueError):
+        get_kv_cache_configs(vllm_config, [kv_cache_specs], [available_memory])
 
 
 def test_get_kv_cache_configs_attention_free():

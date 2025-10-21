@@ -664,10 +664,44 @@ def check_enough_kv_cache_memory(
     max_model_len = vllm_config.model_config.max_model_len
     needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
 
-    if needed_memory > available_memory:
+    # Respect explicit override of number of KV blocks by:
+    # 1) Validating that the override covers the per-layer required blocks.
+    # 2) Capping the effective available memory based on the override.
+    effective_available_memory = available_memory
+    override_blocks = vllm_config.cache_config.num_gpu_blocks_override
+    if override_blocks is not None:
+        # Compute the minimum blocks required among layers for a single request.
+        # This is ceil(layer_needed_bytes / layer_page_size_bytes).
+        from vllm.utils import cdiv
+
+        per_layer_required_blocks = [
+            cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+            for spec in kv_cache_spec.values()
+        ]
+        max_required_blocks = (
+            max(per_layer_required_blocks) if per_layer_required_blocks else 0
+        )
+
+        if override_blocks < max_required_blocks:
+            raise ValueError(
+                "num_gpu_blocks_override is too small to serve at least one "
+                "request with the model's max seq len. "
+                f"Required blocks: {max_required_blocks}, "
+                f"but got num_gpu_blocks_override={override_blocks}. "
+                "Increase num_gpu_blocks_override, decrease max_model_len, or "
+                "increase gpu_memory_utilization."
+            )
+
+        # Cap available memory by the number of blocks allowed via override.
+        per_block_total = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
+        effective_available_memory = min(
+            available_memory, per_block_total * override_blocks
+        )
+
+    if needed_memory > effective_available_memory:
         # Estimate the maximum model length that can fit in the available memory
         estimated_max_len = estimate_max_model_len(
-            vllm_config, kv_cache_spec, available_memory
+            vllm_config, kv_cache_spec, effective_available_memory
         )
         estimated_msg = ""
         if estimated_max_len > 0:
@@ -676,11 +710,26 @@ def check_enough_kv_cache_memory(
                 f"the estimated maximum model length is {estimated_max_len}."
             )
 
+        # Tailor error message if override is limiting effective capacity.
+        if (
+            override_blocks is not None
+            and effective_available_memory < available_memory
+        ):
+            extra = (
+                f"effective available KV cache memory "
+                f"({effective_available_memory / GiB_bytes:.2f} GiB) "
+                f"with num_gpu_blocks_override={override_blocks}"
+            )
+        else:
+            extra = (
+                f"available KV cache memory "
+                f"({effective_available_memory / GiB_bytes:.2f} GiB)"
+            )
+
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
             f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
-            f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory / GiB_bytes:.2f} GiB). "
+            f"cache is needed, which is larger than the {extra}. "
             f"{estimated_msg} "
             f"Try increasing `gpu_memory_utilization` or decreasing "
             f"`max_model_len` when initializing the engine."
