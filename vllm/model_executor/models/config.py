@@ -317,8 +317,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "Hybrid or mamba-based model detected without "
                     "support for prefix caching: disabling."
                 )
-        else:
-            cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(tdoublep): remove once cascade attention is supported
         logger.info(
