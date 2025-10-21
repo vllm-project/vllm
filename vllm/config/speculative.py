@@ -328,11 +328,10 @@ class SpeculativeConfig:
             if self.num_speculative_tokens is None:
                 # Suffix decoding decides the actual number of speculative tokens
                 # dynamically and treats num_speculative_tokens as a maximum limit.
-                max_spec_tokens = self.suffix_decoding_max_tree_depth
-                self.num_speculative_tokens = max_spec_tokens
+                self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
                 logger.warning(
-                    f"Defaulted num_speculative_tokens to "
-                    f"{max_spec_tokens} for suffix decoding."
+                    "Defaulted num_speculative_tokens to %s for suffix decoding.",
+                    self.num_speculative_tokens,
                 )
             # Validate values
             if self.suffix_decoding_max_tree_depth < 1:
