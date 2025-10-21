@@ -116,11 +116,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 else:  # fall back to the default config
                     get_config_func = functools.partial(
                         try_get_optimal_moe_config,
-                        self.w13_weight.size(),
-                        self.w2_weight.size(),
+                        layer.w13_weight.size(),
+                        layer.w2_weight.size(),
                         top_k,
                         config_dtype,
-                        block_shape=self.quant_method.moe_quant_config.block_shape,
+                        block_shape=layer.quant_method.moe_quant_config.block_shape,
                     )
 
                     shrink_config = get_config_func(M)
@@ -219,11 +219,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 else:
                     get_config_func = functools.partial(
                         try_get_optimal_moe_config,
-                        self.w13_weight.size(),
-                        self.w2_weight.size(),
+                        layer.w13_weight.size(),
+                        layer.w2_weight.size(),
                         top_k,
                         config_dtype,
-                        block_shape=self.quant_method.moe_quant_config.block_shape,
+                        block_shape=layer.quant_method.moe_quant_config.block_shape,
                     )
                     shrink_config = get_config_func(M)
                     expand_config = get_config_func(M)
