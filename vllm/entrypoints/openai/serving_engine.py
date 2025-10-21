@@ -448,9 +448,26 @@ class OpenAIServing:
 
                 # check for error finish reason and abort beam search
                 if result.outputs[0].finish_reason == "error":
-                    raise RuntimeError(
-                        "Beam search encountered an internal error during generation"
+                    # yield error output and terminate beam search
+                    yield RequestOutput(
+                        request_id=request_id,
+                        prompt=prompt_text,
+                        outputs=[
+                            CompletionOutput(
+                                index=0,
+                                text="",
+                                token_ids=[],
+                                cumulative_logprob=None,
+                                logprobs=None,
+                                finish_reason="error",
+                            )
+                        ],
+                        finished=True,
+                        prompt_token_ids=prompt_token_ids,
+                        prompt_logprobs=None,
                     )
+                    return
+
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     all_beams_token_id.extend(list(logprobs.keys()))
