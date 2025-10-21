@@ -7,7 +7,6 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
-from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
 from typing import Final
@@ -360,9 +359,21 @@ class OpenAIServingResponses(OpenAIServing):
                 context: ConversationContext
                 if self.use_harmony:
                     if request.stream:
-                        context = StreamingHarmonyContext(messages, available_tools)
+                        context = StreamingHarmonyContext(
+                            messages,
+                            available_tools,
+                            self.tool_server,
+                            request.request_id,
+                            request.tools,
+                        )
                     else:
-                        context = HarmonyContext(messages, available_tools)
+                        context = HarmonyContext(
+                            messages,
+                            available_tools,
+                            self.tool_server,
+                            request.request_id,
+                            request.tools,
+                        )
                 else:
                     context = SimpleContext()
 
@@ -519,22 +530,6 @@ class OpenAIServingResponses(OpenAIServing):
 
         return messages, [prompt_token_ids], [engine_prompt]
 
-    async def _initialize_tool_sessions(
-        self,
-        request: ResponsesRequest,
-        context: ConversationContext,
-        exit_stack: AsyncExitStack,
-    ):
-        # we should only initialize the tool session if the request needs tools
-        if len(request.tools) == 0:
-            return
-        mcp_tools = {
-            tool.server_label: tool for tool in request.tools if tool.type == "mcp"
-        }
-        await context.init_tool_sessions(
-            self.tool_server, exit_stack, request.request_id, mcp_tools
-        )
-
     async def responses_full_generator(
         self,
         request: ResponsesRequest,
@@ -549,9 +544,8 @@ class OpenAIServingResponses(OpenAIServing):
         if created_time is None:
             created_time = int(time.time())
 
-        async with AsyncExitStack() as exit_stack:
+        async with context:
             try:
-                await self._initialize_tool_sessions(request, context, exit_stack)
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
@@ -1923,12 +1917,9 @@ class OpenAIServingResponses(OpenAIServing):
             sequence_number += 1
             return event
 
-        async with AsyncExitStack() as exit_stack:
+        async with context:
             processer = None
             if self.use_harmony:
-                # TODO: in streaming, we noticed this bug:
-                # https://github.com/vllm-project/vllm/issues/25697
-                await self._initialize_tool_sessions(request, context, exit_stack)
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
