@@ -46,7 +46,7 @@ class SLALessThan(SLACriterionBase):
         return f"{lhs}<{self.target:.2f}"
 
 
-class SLALessThanOrEqual(SLACriterionBase):
+class SLALessThanOrEqualTo(SLACriterionBase):
     @override
     def validate(self, actual: float) -> bool:
         return actual <= self.target
@@ -66,7 +66,7 @@ class SLAGreaterThan(SLACriterionBase):
         return f"{lhs}>{self.target:.2f}"
 
 
-class SLAGreaterThanOrEqual(SLACriterionBase):
+class SLAGreaterThanOrEqualTo(SLACriterionBase):
     @override
     def validate(self, actual: float) -> bool:
         return actual >= self.target
@@ -78,8 +78,8 @@ class SLAGreaterThanOrEqual(SLACriterionBase):
 
 # NOTE: The ordering is important! Match longer op_keys first
 SLA_CRITERIA: dict[str, type[SLACriterionBase]] = {
-    "<=": SLALessThanOrEqual,
-    ">=": SLAGreaterThanOrEqual,
+    "<=": SLALessThanOrEqualTo,
+    ">=": SLAGreaterThanOrEqualTo,
     "<": SLALessThan,
     ">": SLAGreaterThan,
 }

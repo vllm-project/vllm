@@ -43,13 +43,19 @@ class PlotFilterBase(ABC):
         raise NotImplementedError
 
 
+class PlotEqualTo(PlotFilterBase):
+    @override
+    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df[df[self.var] == self.target]
+
+
 class PlotLessThan(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         return df[df[self.var] < self.target]
 
 
-class PlotLessThanOrEqual(PlotFilterBase):
+class PlotLessThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         return df[df[self.var] <= self.target]
@@ -61,7 +67,7 @@ class PlotGreaterThan(PlotFilterBase):
         return df[df[self.var] > self.target]
 
 
-class PlotGreaterThanOrEqual(PlotFilterBase):
+class PlotGreaterThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         return df[df[self.var] >= self.target]
@@ -69,8 +75,9 @@ class PlotGreaterThanOrEqual(PlotFilterBase):
 
 # NOTE: The ordering is important! Match longer op_keys first
 PLOT_FILTERS: dict[str, type[PlotFilterBase]] = {
-    "<=": PlotLessThanOrEqual,
-    ">=": PlotGreaterThanOrEqual,
+    "==": PlotEqualTo,
+    "<=": PlotLessThanOrEqualTo,
+    ">=": PlotGreaterThanOrEqualTo,
     "<": PlotLessThan,
     ">": PlotGreaterThan,
 }
