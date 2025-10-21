@@ -185,7 +185,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Optimized top-k per row operation
   ops.def(
       "top_k_per_row(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, Tensor! values, int numRows, int stride0, "
+      "Tensor! indices, int numRows, int stride0, "
       "int stride1) -> ()");
   ops.impl("top_k_per_row", torch::kCUDA, &top_k_per_row);
 

@@ -33,6 +33,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.impl("batched_moe_align_block_size", torch::kCUDA,
          &batched_moe_align_block_size);
 
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size.
+  m.def(
+      "moe_lora_align_block_size(Tensor topk_ids,"
+      "                     Tensor token_lora_mapping,"
+      "                     int num_experts,"
+      "                     int block_size, int max_loras, "
+      "                     Tensor !sorted_token_ids,"
+      "                     Tensor !experts_ids,"
+      "                     Tensor !num_tokens_post_pad) -> () ");
+  m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
+
 #ifndef USE_ROCM
   m.def(
       "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "

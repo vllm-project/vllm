@@ -756,10 +756,10 @@ def override_envs_for_invariance():
         "FLEX_ATTENTION",
         "FLASHINFER",
         "FLASH_ATTN_MLA",
+        "FLASHINFER_MLA",
         "TRITON_MLA",
         # Not yet supported MLA backends
         # "FLASHMLA",
-        # "FLASHINFER_MLA",
     ]
     if curr_attn_backend not in supported_backends:
         warning = (
