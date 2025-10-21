@@ -28,6 +28,11 @@ class MockHfConfig:
         self.hidden_size = mla_dims["head_dim"] * mla_dims["num_q_heads"]
         self.model_type = "deepseek_v2"
         self.is_encoder_decoder = False
+        self.kv_lora_rank = mla_dims["kv_lora_rank"]
+        self.qk_nope_head_dim = mla_dims["qk_nope_head_dim"]
+        self.qk_rope_head_dim = mla_dims["qk_rope_head_dim"]
+        self.v_head_dim = mla_dims["v_head_dim"]
+        self.qk_head_dim = mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]
 
     def get_text_config(self):
         return self
