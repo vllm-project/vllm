@@ -360,8 +360,8 @@ class TestEnvSetWithChoices:
             with pytest.raises(ValueError, match="Invalid value 'invalid' in TEST_ENV"):
                 env_func()
 
-    def test_duplicate_values_preserved(self):
-        """Test that duplicate values in the list are preserved."""
+    def test_duplicate_values_deduped(self):
+        """Test that duplicate values in the list are deduped."""
         with patch.dict(os.environ, {"TEST_ENV": "option1,option1,option2"}):
             env_func = env_set_with_choices("TEST_ENV", [], ["option1", "option2"])
             assert env_func() == {"option1", "option2"}
