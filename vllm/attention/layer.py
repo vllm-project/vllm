@@ -16,6 +16,7 @@ from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config.vllm import VllmConfig
 from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
@@ -34,7 +35,16 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
-from vllm.utils import GiB_bytes, direct_register_custom_op
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    kv_cache_dtype_str_to_dtype,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
@@ -152,6 +162,7 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             sliding_window = None
 
+        vllm_config = get_current_vllm_config()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
@@ -160,6 +171,9 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
+        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
+            kv_cache_dtype, vllm_config.model_config
+        )
         if num_kv_heads is None:
             num_kv_heads = num_heads
         assert num_heads % num_kv_heads == 0, (
@@ -256,7 +270,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         self.use_output = self.attn_backend.accept_output_buffer
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -276,30 +290,13 @@ class Attention(nn.Module, AttentionLayerBase):
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = [
             torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
+            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
         ]
 
-        try:
-            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-        except torch.cuda.OutOfMemoryError as e:
-            logger.error("Failed to initialize attention q/k/v range constants: %s", e)
-            if torch.cuda.is_available():
-                logger.debug("CUDA device: %s", torch.cuda.current_device())
-                logger.debug(
-                    "Allocated: %.2f GiB", torch.cuda.memory_allocated() / GiB_bytes
-                )
-                logger.debug(
-                    "Reserved: %.2f GiB", torch.cuda.memory_reserved() / GiB_bytes
-                )
-            raise RuntimeError(
-                "Failed to initialize q/k/v range constants. "
-                "This may be caused by insufficient memory to allocate "
-                "kv cache."
-            ) from e
+        # Initialize q/k/v range constants.
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
         # for attn backends supporting query quantization
         self.query_quant = None
@@ -404,19 +401,34 @@ class Attention(nn.Module, AttentionLayerBase):
         return s
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading(act_dtype)
-
-        # FlashInfer requires attention sinks to be float32
-        if self.backend == _Backend.FLASHINFER and hasattr(self.impl, "sinks"):
-            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
-
-            assert isinstance(self.impl, FlashInferImpl)
-            if self.impl.sinks is not None and self.impl.sinks.dtype != torch.float32:
-                self.impl.sinks = self.impl.sinks.to(torch.float32)
+        self.impl.process_weights_after_loading(act_dtype)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # Block size may get updated after model loading, refresh it
+        block_size = vllm_config.cache_config.block_size
+        # Should not be called for enc-dec or encoder-only attention.
+        assert self.attn_type == AttentionType.DECODER
+        if self.sliding_window is not None:
+            assert not vllm_config.model_config.use_mla, (
+                "MLA is not supported for slidingwindow"
+            )
+            return SlidingWindowSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.kv_cache_torch_dtype,
+                sliding_window=self.sliding_window,
+            )
+        else:
+            return FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.kv_cache_torch_dtype,
+            )
 
 
 class MultiHeadAttention(nn.Module):
@@ -677,13 +689,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         # Initialize q/k/v range constants.
-        try:
-            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-        except torch.cuda.OutOfMemoryError:
-            # Keep defaults if allocation fails; not critical for init.
-            pass
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
     def forward(
         self,
@@ -776,6 +784,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+        return MLAAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_size,
+            dtype=kv_cache_dtype,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+        )
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
