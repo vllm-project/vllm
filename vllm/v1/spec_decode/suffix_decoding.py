@@ -72,6 +72,8 @@ class SuffixDecodingProposer:
             # Append the newly sampled ids to the suffix cache for this request.
             self.suffix_cache.add_active_response(req_id, sampled_ids)
 
+            # Suffix decoding only uses the most recent tokens up to max_tree_depth, so
+            # we extract the pattern from the end of the input.
             start = max(0, num_tokens - self.max_tree_depth)
             pattern = input_batch.token_ids_cpu[i, start:num_tokens]
             draft = self.suffix_cache.speculate(
@@ -87,8 +89,9 @@ class SuffixDecodingProposer:
             draft_token_ids.append(draft.token_ids)
 
         # Stop requests that were not seen in the input batch.
-        for req_id in (self.suffix_cache.active_requests -
-                       input_batch.req_id_to_index.keys()):
+        for req_id in (
+            self.suffix_cache.active_requests - input_batch.req_id_to_index.keys()
+        ):
             self.suffix_cache.stop_request(req_id)
 
         return draft_token_ids

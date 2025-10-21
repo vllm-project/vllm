@@ -143,7 +143,7 @@ class SpeculativeConfig:
     """The parallel configuration for the draft model initialized internal."""
 
     # Suffix decoding configuration
-    suffix_decoding_max_tree_depth: int = 64
+    suffix_decoding_max_tree_depth: int = 24
     """The maximum depth of the suffix decoding global and prompt trees. The
     tree depth limits the sum of the prefix match and speculation lengths."""
 
@@ -326,7 +326,12 @@ class SpeculativeConfig:
                     "Install via `pip install arctic-inference==0.0.9`."
                 )
             if self.num_speculative_tokens is None:
-                self.num_speculative_tokens = 32
+                # Suffix decoding decides the actual number of speculative tokens
+                # dynamically and treats num_speculative_tokens as a maximum limit.
+                max_spec_tokens = self.suffix_decoding_max_tree_depth
+                self.num_speculative_tokens = max_spec_tokens
+                logger.warning(f"Defaulted num_speculative_tokens to "
+                               f"{max_spec_tokens} for suffix decoding.")
             # Validate values
             if self.suffix_decoding_max_tree_depth < 1:
                 raise ValueError(
@@ -343,10 +348,7 @@ class SpeculativeConfig:
                     f"suffix_decoding_max_spec_factor="
                     f"{self.suffix_decoding_max_spec_factor} must be >= 0"
                 )
-            if (
-                self.suffix_decoding_min_token_prob < 0
-                or self.suffix_decoding_min_token_prob > 1
-            ):
+            if not 0 <= self.suffix_decoding_min_token_prob <= 1:
                 raise ValueError(
                     f"suffix_decoding_min_token_prob="
                     f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
