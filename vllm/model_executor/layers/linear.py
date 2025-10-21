@@ -3,6 +3,7 @@
 
 import itertools
 from abc import abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -285,6 +286,45 @@ class LinearBase(CustomOp):
         self.disable_tp = disable_tp
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+
+        if (
+            self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+            and callable(getattr(self, "weight_loader_v2", None))
+        ):
+            self.weight_loader_v2 = self.add_preprocessor_to_weight_loader(
+                self.weight_loader_v2  # type: ignore
+            )
+        if callable(getattr(self, "weight_loader", None)):
+            self.weight_loader = self.add_preprocessor_to_weight_loader(
+                self.weight_loader  # type: ignore
+            )
+
+    def add_preprocessor_to_weight_loader(self, weight_loader: Callable) -> Callable:
+        def weigth_loader_with_preprocessor(
+            param: Parameter | BasevLLMParameter,
+            loaded_weight: torch.Tensor,
+            *args,
+            **kwargs,
+        ):
+            if self.quant_method is None:
+                return weight_loader(param, loaded_weight, *args, **kwargs)
+            results = self.quant_method.process_weights_before_loading(
+                self, param, loaded_weight
+            )
+            scale = results.get("scale", None)
+            loaded_weight = results.get("quantized", loaded_weight)
+            if scale is not None and hasattr(param, "scale"):
+                # load scale
+                scale_param = self.get_parameter(param.scale)
+                scale_param.weight_loader(
+                    scale_param,
+                    scale,
+                    *args,
+                    **kwargs,
+                )
+            return weight_loader(param, loaded_weight, *args, **kwargs)
+
+        return weigth_loader_with_preprocessor
 
     def update_param_tp_status(self):
         for param in self.parameters():

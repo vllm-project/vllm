@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
@@ -156,6 +156,42 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
 
     return method_to_config[quantization]
+
+
+def get_default_quantization_hf_config(
+    quantization: str, quantization_schema: str | None
+) -> dict[str, Any]:
+    if (
+        quantization == "compressed-tensors"
+        and quantization_schema == "fp8_channelwise"
+    ):
+        return {
+            "config_groups": {
+                "group_0": {
+                    "input_activations": {
+                        "dynamic": True,
+                        "num_bits": 8,
+                        "observer_kwargs": {},
+                        "strategy": "token",
+                        "type": "float",
+                    },
+                    "targets": ["Linear"],
+                    "weights": {
+                        "dynamic": False,
+                        "num_bits": 8,
+                        "observer": "minmax",
+                        "observer_kwargs": {},
+                        "strategy": "channel",
+                        "symmetric": True,
+                        "type": "float",
+                    },
+                }
+            },
+            "format": "float-quantized",
+            "quant_method": "compressed-tensors",
+            "quantization_status": "compressed",
+        }
+    return {}
 
 
 __all__ = [
