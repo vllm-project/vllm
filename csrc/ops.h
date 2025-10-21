@@ -153,6 +153,11 @@ void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
 void swigluoai_and_mul(torch::Tensor& out, torch::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
 
+void swigluoai_and_mul_masked(torch::Tensor& out, torch::Tensor& input,
+                              int64_t num_experts,
+                              torch::Tensor& tokens_per_expert,
+                              double alpha = 1.702, double limit = 7.0);
+
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_fast(torch::Tensor& out, torch::Tensor& input);

@@ -42,6 +42,7 @@ def _fused_marlin_moe(
     sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
+    expert_num_tokens: torch.Tensor = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
     g_idx1: torch.Tensor | None = None,
@@ -55,6 +56,7 @@ def _fused_marlin_moe(
     intermediate_cache2: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
     is_k_full: bool = True,
+    expert_tokens_meta=None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
@@ -124,9 +126,17 @@ def _fused_marlin_moe(
         )
     elif activation == "swigluoai":
         # alpha = 1.702, limit = 7.0
-        torch.ops._C.swigluoai_and_mul(
-            intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-        )
+        if expert_num_tokens is not None:
+            torch.ops._C.swigluoai_and_mul_masked(
+                intermediate_cache2,
+                intermediate_cache1.view(-1, 2 * N),
+                expert_num_tokens.size(0),
+                expert_num_tokens,
+            )
+        else:
+            torch.ops._C.swigluoai_and_mul(
+                intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
+            )
     else:
         raise ValueError(
             f"Unsupported activation: {activation}. "
@@ -296,6 +306,7 @@ def fused_marlin_moe(
         sorted_token_ids=sorted_token_ids,
         expert_ids=expert_ids,
         num_tokens_post_padded=num_tokens_post_padded,
+        expert_num_tokens=None,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
         g_idx1=g_idx1,
@@ -349,6 +360,7 @@ def batched_fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     inplace: bool = False,
+    expert_tokens_meta=None,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -458,6 +470,7 @@ def batched_fused_marlin_moe(
         sorted_token_ids=sorted_token_ids,
         expert_ids=expert_ids,
         num_tokens_post_padded=num_tokens_post_padded,
+        expert_num_tokens=expert_num_tokens,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
         g_idx1=g_idx1,
@@ -471,6 +484,7 @@ def batched_fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=output.view(-1, K) if output is not None else output,
         is_k_full=is_k_full,
+        expert_tokens_meta=expert_tokens_meta,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -693,4 +707,5 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             output=output,
             intermediate_cache13=workspace13,
             intermediate_cache2=workspace2,
+            expert_tokens_meta=expert_tokens_meta,
         )

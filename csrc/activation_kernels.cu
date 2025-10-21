@@ -128,6 +128,26 @@ __global__ void act_and_mul_kernel_with_param(
   }
 }
 
+__device__ __forceinline__ float _swigluoai_and_mul(const float& gate,
+                                                    const float& up,
+                                                    float alpha, float limit) {
+  // clamp gate: min=None, max=limit
+  const float gate_f = (float)gate;
+  const float clamped_gate = gate_f > limit ? limit : gate_f;
+
+  // clamp up: min=-limit, max=limit
+  const float up_f = (float)up;
+  const float clamped_up =
+      up_f > limit ? limit : (up_f < -limit ? -limit : up_f);
+
+  // glu = gate * sigmoid(gate * alpha)
+  const float sigmoid_val = 1.0f / (1.0f + expf(-clamped_gate * alpha));
+  const float glu = clamped_gate * sigmoid_val;
+
+  // (up + 1) * glu
+  return (float)((clamped_up + 1.0f) * glu);
+}
+
 template <typename T>
 __device__ __forceinline__ T swigluoai_and_mul(const T& gate, const T& up,
                                                float alpha, float limit) {
@@ -226,13 +246,6 @@ __device__ __forceinline__ void cp_async_wait<0>() {
 #endif
 }
 
-__device__ __forceinline__ float clip(float v, float mmin, float mmax) {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
-  return fminf(mmax, fmaxf(v, mmin));
-#else
-#endif
-}
-
 template <int num_parallel_tokens>
 __device__ __forceinline__ void token_bounds(int32_t n_tokens,
                                              int32_t worker_id,
@@ -256,14 +269,37 @@ __device__ __forceinline__ void token_bounds(int32_t n_tokens,
   }
 }
 
-template <class ACT_FN2, int BLOCK_COUNT, int SMEM_SIZE_BYTES_Y, int THREADS,
-          typename Idx_t, int NUM_STAGES = 3>
-__global__ void act_mul_masked_kernel(
+template <typename Idx_t>
+__device__ __forceinline__ int warp_expert_search(
+    int idx, int n, const Idx_t* __restrict__ input, Idx_t val) {
+  const Idx_t* input_ptr = input + idx;
+  int base_offset = 0;
+
+  for (;;) {
+    bool move_on = (idx < n && *input_ptr <= val);
+
+    unsigned mask = __ballot_sync(0xffffffff, move_on);
+
+    if (mask != 0xffffffffu) {
+      int last_lane = 31 - __clz(mask);
+      return base_offset + last_lane;
+    }
+
+    input_ptr += 32;
+    base_offset += 32;
+    idx += 32;
+  }
+}
+
+template <float (*ACT_FN)(const float&, const float&, const float, const float),
+          int BLOCK_COUNT, int SMEM_SIZE_BYTES_Y, int THREADS, typename Idx_t,
+          int NUM_STAGES = 3>
+__global__ void act_and_mul_masked_kernel(
     const __nv_bfloat16* __restrict__ _input,
-    const __nv_bfloat16* __restrict__ _output,
+    __nv_bfloat16* __restrict__ _output,
     const int32_t* __restrict__ tokens_per_expert,
     // sizes
-    Idx_t E, Idx_t T, Idx_t H) {
+    Idx_t E, Idx_t T, Idx_t H, float ALPHA, float LIMIT) {
 #ifndef USE_ROCM
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
 
@@ -324,7 +360,6 @@ __global__ void act_mul_masked_kernel(
 
   int32_t compute_pipeline_offset_64 = 0;
   int32_t load_stage_offset{};
-  const __nv_bfloat16 one_bf16 = __float2bfloat16_rn(1.f);
 
   __int64_t* smem_compute_ptr = reinterpret_cast<__int64_t*>(smem_128) +
                                 warp_id * (2 * (GROUP_SIZE / 4) * NUM_STAGES) +
@@ -352,16 +387,16 @@ __global__ void act_mul_masked_kernel(
 
   int t_load_bound = H / (GROUP_SIZE * NUM_WARPS);
 
-  Idx_t base_i = ((expert_id) / 8) + (token_id - expert_offset) * H / 8;
+  Idx_t base_i = ((expert_id * T * H) / 8) + (token_id - expert_offset) * H / 8;
   const Idx_t gate_warp_offset =
       // TODO(elvircrn):
       //              v check this
-      warp_id * ((T * H) / (8 * NUM_WARPS)) + (lane_id & 0b1111);
+      warp_id * (H / (8 * NUM_WARPS)) + (lane_id & 0b1111);
 
   const __int128_t* input_128_ptr =
       reinterpret_cast<const __int128_t*>(_input) + gate_warp_offset +
       ((lane_id < 16) ? 0 : (H / 8));
-  __int64_t* out_64_ptr = reinterpret_cast<const __int64_t*>(_output) +
+  __int64_t* out_64_ptr = reinterpret_cast<__int64_t*>(_output) +
                           2 * gate_warp_offset + ((lane_id < 16) ? 0 : (H / 4));
   __int128_t* load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
 
@@ -458,8 +493,12 @@ __global__ void act_mul_masked_kernel(
 
   #pragma unroll
       for (int32_t k = 0; k < 2; ++k) {
-        __nv_bfloat162 gate = ACT_FN2(__bfloat1622float2(s_gate_comp[k]));
-        res[k] = __hmul2(gate, s_up_comp[k]);
+        auto in2 = __bfloat1622float2(s_gate_comp[k]);
+        auto _in2 = __bfloat1622float2(s_up_comp[k]);
+        __nv_bfloat162 gate = make_bfloat162(
+            __float2bfloat16_rd(ACT_FN(in2.x, _in2.x, ALPHA, LIMIT)),
+            __float2bfloat16_rd(ACT_FN(in2.y, _in2.y, ALPHA, LIMIT)));
+        res[k] = gate;
       }
 
       *out_64_ptr = *reinterpret_cast<__int64_t*>(res);
@@ -501,6 +540,26 @@ __global__ void act_mul_masked_kernel(
                                          LIMIT);                               \
       });
 
+#define LAUNCH_SIGLUOAI_AND_MUL_MASKED(KERNEL, ALPHA, LIMIT, BLOCK_COUNT,    \
+                                       THREAD_COUNT, NUM_STAGES)             \
+  int64_t num_tokens = (input.numel() / input.size(-1)) / E;                 \
+  dim3 grid(BLOCK_COUNT);                                                    \
+  dim3 block(THREAD_COUNT);                                                  \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));          \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();              \
+  using cuda_type = __nv_bfloat16;                                           \
+  using cuda_type2 = __nv_bfloat16;                                          \
+  static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
+  static constexpr int max_shared_mem_bytes =                                \
+      128 * 2 * NUM_STAGES * NUM_WARPS * 2;                                  \
+  vllm::act_and_mul_masked_kernel<KERNEL, BLOCK_COUNT, max_shared_mem_bytes, \
+                                  THREAD_COUNT, __int64_t, NUM_STAGES>       \
+      <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(        \
+          (const __nv_bfloat16*)input.data_ptr<at::BFloat16>(),              \
+          (__nv_bfloat16*)out.data_ptr<at::BFloat16>(),                      \
+          tokens_per_expert.data_ptr<int32_t>(), E, num_tokens, d, ALPHA,    \
+          LIMIT);
+
 void fatrelu_and_mul(torch::Tensor& out,    // [..., d],
                      torch::Tensor& input,  // [..., 2 * d]
                      double threshold) {
@@ -511,6 +570,26 @@ void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
                        double alpha, double limit) {
   LAUNCH_SIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }
+
+void swigluoai_and_mul_masked(torch::Tensor& out,    // [..., d]
+                              torch::Tensor& input,  // [..., 2 * d]
+                              int64_t E, torch::Tensor& tokens_per_expert,
+                              double alpha = 1.702, double limit = 7.0) {
+  int d = input.size(-1) / 2;
+  static constexpr int BLOCK_COUNT = 132 * 8;
+  if (d >= 4096) {
+    static constexpr int NUM_STAGES = 4;
+    static constexpr int THREAD_COUNT = 256;
+    LAUNCH_SIGLUOAI_AND_MUL_MASKED(vllm::_swigluoai_and_mul, alpha, limit,
+                                   BLOCK_COUNT, THREAD_COUNT, NUM_STAGES)
+  } else {
+    static constexpr int NUM_STAGES = 1;
+    static constexpr int THREAD_COUNT = 32;
+    LAUNCH_SIGLUOAI_AND_MUL_MASKED(vllm::_swigluoai_and_mul, alpha, limit,
+                                   BLOCK_COUNT, THREAD_COUNT, NUM_STAGES)
+  }
+}
+
 namespace vllm {
 
 // Element-wise activation kernel template.

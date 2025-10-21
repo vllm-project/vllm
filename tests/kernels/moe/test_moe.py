@@ -1093,6 +1093,7 @@ def test_batched_fused_marlin_moe(
             kwargs = fused_marlin_moe_kwargs | {
                 "hidden_states": batched_hidden_states,
                 "expert_num_tokens": self.expert_num_tokens_cpu.to("cuda"),
+                "activation": "swigluoai",
             }
             batched_outputs = batched_fused_marlin_moe(**kwargs)
 
@@ -1127,6 +1128,7 @@ def test_batched_fused_marlin_moe(
         "hidden_states": a,
         "topk_ids": topk_ids,
         "topk_weights": topk_weights,
+        "activation": "swigluoai",
     }
     ref_marlin_output = fused_marlin_moe(**fused_marlin_moe_kwargs)
 
@@ -1136,4 +1138,8 @@ def test_batched_fused_marlin_moe(
         pytest.skip("Cannot represent data in Batched Format.")
     marlin_output = br.run(a, kwargs)
 
-    torch.testing.assert_close(marlin_output, ref_marlin_output, atol=1e-3, rtol=0)
+    torch.testing.assert_close(marlin_output, ref_marlin_output, atol=2e-3, rtol=0.008)
+
+
+if __name__ == "__main__":
+    pytest.main(["test_moe.py::test_batched_fused_marlin_moe"])

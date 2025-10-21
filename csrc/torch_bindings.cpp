@@ -150,6 +150,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> ()");
   ops.impl("swigluoai_and_mul", torch::kCUDA, &swigluoai_and_mul);
 
+  ops.def(
+      "swigluoai_and_mul_masked(Tensor! out, Tensor input,"
+      "int num_experts, Tensor tokens_per_expert, float alpha=1.702, float "
+      "limit=7.0) "
+      "-> ()");
+  ops.impl("swigluoai_and_mul_masked", torch::kCUDA, &swigluoai_and_mul_masked);
+
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_new", torch::kCUDA, &gelu_new);
