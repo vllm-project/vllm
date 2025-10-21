@@ -532,6 +532,7 @@ class CudaPlatformBase(Platform):
         """Copy blocks from src_cache to dst_cache on GPU."""
         _src_cache = src_cache[:, src_block_indices]
         dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+        torch.cuda.synchronize()
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -544,6 +545,7 @@ class CudaPlatformBase(Platform):
         """Copy blocks from GPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        torch.cuda.synchronize()
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

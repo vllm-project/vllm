@@ -1111,6 +1111,7 @@ class NixlConnectorWorker:
         # remote_block_lens * remote_block_size = local_block_lens * local_block_size
         remote_block_size = nixl_agent_meta.block_size
         block_size_ratio = remote_block_size / self.block_size
+        block_size_ratio_inv = self.block_size / remote_block_size
         self.block_size_ratio = block_size_ratio
         if nixl_agent_meta.kv_cache_layout != self.kv_cache_layout:
             if (
@@ -1171,6 +1172,9 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[engine_id] = nixl_agent_meta.kv_caches_base_addr
 
         assert len(nixl_agent_meta.kv_caches_base_addr) == len(self.block_len_per_layer)
+        # NOTE(Chendi): In case remote and local use different block_size.
+        local_num_blocks = int(nixl_agent_meta.num_blocks * block_size_ratio)
+        self.remote_remain_blocks = []
         # Register all remote blocks, but only the corresponding kv heads.
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
@@ -1179,27 +1183,43 @@ class NixlConnectorWorker:
                 if not (self.use_mla or is_kv_replicated)
                 else 0
             )
-            # NOTE(Chendi): In case remote and local use different block_size.
-            local_num_blocks = int(nixl_agent_meta.num_blocks * block_size_ratio)
-            # print(f"{local_num_blocks*i=} {local_num_blocks=} "
-            # f "{nixl_agent_meta.num_blocks=} {nixl_agent_meta.block_lens[0]=}")
+
+            if block_size_ratio < 1:
+                # we skip block 0 in each layer, block 0 at remote is using smaller size
+                # in order to correct mapping, we can skip block0 from remote
+                # example for block_size_ratio = 0.25
+                # remote block 0 -> skip
+                # remote block 1, 2, 3, 4 => local blocl 0
+                # remote block 5, 6, 7, 8 => local blocl 1
+                # Also, we keep track of last few remote blocks which can't match to
+                # last local block size and use them in read_block for mapping
+                # remote/local block_id.
+                shift_for_remote_block_0 = remote_block_len
+                remain_nblocks_remote = nixl_agent_meta.num_blocks - int(
+                    local_num_blocks * block_size_ratio_inv
+                )
+            self.remote_remain_blocks.append(remain_nblocks_remote)
+            local_block_len = int(self.block_len_per_layer[i] * tp_ratio)
             for block_id in range(local_num_blocks):
-                block_offset = block_id * nixl_agent_meta.block_lens[i]
+                block_offset = block_id * local_block_len
                 # For each block, grab the heads chunk belonging to rank_i
                 # of size remote_nheads // tp_ratio, which correspond to
                 # self.block_len == remote_block_len//tp_ratio bytes.
-                addr = base_addr + block_offset + rank_offset
+                addr = base_addr + block_offset + rank_offset + shift_for_remote_block_0
                 # (addr, len, device id)
                 blocks_data.append((addr, kv_block_len, remote_tp_rank))
 
             if self._use_flashinfer:
                 # With FlashInfer index V separately to allow head splitting.
                 for block_id in range(local_num_blocks):
-                    block_offset = block_id * math.ceil(
-                        nixl_agent_meta.block_lens[i] * block_size_ratio
+                    block_offset = block_id * local_block_len
+                    addr = (
+                        base_addr
+                        + block_offset
+                        + rank_offset
+                        + shift_for_remote_block_0
                     )
-                    addr = base_addr + block_offset + rank_offset
-                    v_addr = addr + nixl_agent_meta.block_lens[i] // 2
+                    v_addr = addr + local_block_len // 2
                     blocks_data.append((v_addr, kv_block_len, remote_tp_rank))
 
         logger.debug(
@@ -1320,8 +1340,8 @@ class NixlConnectorWorker:
 
         # clean up metadata for completed requests
         for req_id in done_recving:
-            meta = self._recving_metadata.pop(req_id, None)
-            if self.use_host_buffer and meta:
+            if self.use_host_buffer:
+                meta = self._recving_metadata.pop(req_id)
                 self.sync_recved_kv_to_device(req_id, meta)
 
         # Handle timeout to avoid stranding blocks on remote.
@@ -1504,19 +1524,7 @@ class NixlConnectorWorker:
         request_id: str,
         block_size_ratio: float,
     ):
-        # FIXME(Chendi): Very naive codes to re-calculate remote block
-        # Only works for remote block_size < local block_size now,
-        # remote block_size > local block_size needs extra map
-        # print(f"before {local_block_ids=} {remote_block_ids=}")
-        block_size_ratio_inv = int(1 / block_size_ratio)
-        remote_block_ids = [
-            i // block_size_ratio_inv
-            for i in remote_block_ids
-            if i % block_size_ratio_inv == 0
-        ]
-        if len(remote_block_ids) < len(local_block_ids):
-            remote_block_ids.append(remote_block_ids[-1] + 1)
-        # print(f"after {local_block_ids=} {remote_block_ids=}")
+        print(f"before {local_block_ids=} {remote_block_ids=}")
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
@@ -1551,12 +1559,6 @@ class NixlConnectorWorker:
                 self.xfer_stats.record_failed_notification()
             return
 
-        # Partial prefix cache hit: just read uncomputed blocks.
-        num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks
-        if num_local_blocks < num_remote_blocks:
-            remote_block_ids = remote_block_ids[-num_local_blocks:]
-
         # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
@@ -1571,7 +1573,9 @@ class NixlConnectorWorker:
         if not self.block_window_per_layer:
             # Default case: assume global attention
             remote_block_descs_ids = self._get_block_descs_ids(
-                dst_engine_id, remote_block_ids, block_size_ratio=block_size_ratio
+                dst_engine_id,
+                remote_block_ids,
+                remain_nblocks=self.remote_remain_blocks,
             )
             local_block_descs_ids = self._get_block_descs_ids(
                 self.engine_id, local_block_ids
@@ -1595,13 +1599,10 @@ class NixlConnectorWorker:
 
                 # Get descs ids for the layer.
                 layer_local_desc_ids = self._get_block_descs_ids(
-                    self.engine_id, layer_local_block_ids, layer_idx
+                    dst_engine_id, layer_local_block_ids, layer_idx
                 )
                 layer_remote_desc_ids = self._get_block_descs_ids(
-                    dst_engine_id,
-                    layer_remote_block_ids,
-                    layer_idx,
-                    block_size_ratio=block_size_ratio,
+                    self.engine_id, layer_remote_block_ids, layer_idx
                 )
 
                 local_descs_list.append(layer_local_desc_ids)
@@ -1610,6 +1611,12 @@ class NixlConnectorWorker:
             local_block_descs_ids = np.concatenate(local_descs_list)
             remote_block_descs_ids = np.concatenate(remote_descs_list)
 
+        # NOTE(Chendi): Update remote remote_block_descs_ids using local block_size
+        # print(f"{remote_block_descs_ids=}{local_block_descs_ids=}")
+        remote_block_descs_ids = self.get_mapped_blocks(
+            remote_block_descs_ids, block_size_ratio
+        )
+        # print(f"after {remote_block_descs_ids=}")
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
@@ -1643,12 +1650,34 @@ class NixlConnectorWorker:
                 self.nixl_wrapper.release_xfer_handle(handle)
             self._failed_recv_reqs.add(request_id)
 
+    def get_mapped_blocks(self, block_ids, block_size_ratio):
+        """
+        Calculates the new set of block IDs by mapping every element
+        in the (potentially sparse) input array.
+        """
+        if block_ids.size == 0:
+            return np.array([], dtype=np.int64)
+
+        # 1. Scale all block IDs and truncate (floor)
+        #    (This is the logic from your original code block)
+        mapped_ids = (block_ids * block_size_ratio).astype(np.int64)
+
+        # 2. Get the unique resulting IDs
+        unique_blocks = np.unique(mapped_ids)
+
+        # # 3. Filter out 0, as block IDs are 1-based.
+        # #    (This logic matches your Example 1)
+        # if unique_blocks.size > 0 and unique_blocks[0] == 0:
+        #     unique_blocks = unique_blocks[unique_blocks > 0]
+
+        return unique_blocks
+
     def _get_block_descs_ids(
         self,
         engine_id: str,
         block_ids: list[int],
         layer_idx: int | None = None,
-        block_size_ratio: float = 1,
+        remain_nblocks: list[int] | None = None,
     ) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
@@ -1671,11 +1700,15 @@ class NixlConnectorWorker:
                 region_ids = np.arange(layer_idx, layer_idx + 1)
 
         num_blocks = self.dst_num_blocks[engine_id]
+        num_blocks = np.full((self.num_regions), num_blocks)
+        if remain_nblocks is not None:
+            num_blocks = num_blocks - np.array(remain_nblocks)
 
         # Compute the desc ids for each block.
-        region_ids = region_ids[:, None]
         block_ids = np.array(block_ids)[None, :]
-        descs_ids = region_ids * int(num_blocks * block_size_ratio) + block_ids
+        region_nblocks = region_ids * num_blocks
+        region_nblocks = region_nblocks[:, None]
+        descs_ids = region_nblocks + block_ids
         return descs_ids.flatten()
 
     def get_backend_aware_kv_block_len(self, layer_idx: int):
