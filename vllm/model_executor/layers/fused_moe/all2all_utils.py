@@ -121,10 +121,10 @@ def maybe_make_prepare_finalize(
             num_local_experts=moe.num_local_experts,
             num_dispatchers=num_dispatchers,
         )
-    elif moe.use_pplx_efa_kernels:
+    elif moe.use_rose_kernels:
         assert quant_config is not None
 
-        hidden_dim_scale = pplx_hidden_dim_scale(
+        hidden_dim_scale = rose_hidden_dim_scale(
             moe.hidden_dim,
             quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
@@ -150,9 +150,7 @@ def maybe_make_prepare_finalize(
 
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        # Note: the API for EFA appears identical to the regular pplx kernels,
-        # so we can reuse the PplxPrepareAndFinalize class for both.
-        prepare_finalize = PplxPrepareAndFinalize(
+        prepare_finalize = RosePrepareAndFinalize(
             handle,
             max_num_tokens=moe.max_num_tokens,
             num_local_experts=moe.num_local_experts,

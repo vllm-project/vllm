@@ -718,8 +718,8 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_pplx_kernels
 
     @property
-    def use_pplx_efa_kernels(self):
-        return self.moe_parallel_config.use_pplx_efa_kernels
+    def use_rose_kernels(self):
+        return self.moe_parallel_config.use_rose_kernels
 
     @property
     def use_deepep_ht_kernels(self):
@@ -745,7 +745,7 @@ class FusedMoE(CustomOp):
     def use_dp_chunking(self) -> bool:
         return (
             self.moe_parallel_config.use_pplx_kernels
-            or self.moe_parallel_config.use_pplx_efa_kernels
+            or self.moe_parallel_config.use_rose_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         )

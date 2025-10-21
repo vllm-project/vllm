@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -12,7 +12,7 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import has_flashinfer_all2all
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_pplx, has_rose
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -247,14 +247,14 @@ def _nets_per_gpu() -> int:
     return num_efa // num_cuda
 
 
-class PPLXEfaAll2AllManager(All2AllManagerBase):
+class RoseAll2AllManager(All2AllManagerBase):
     """
-    All2All communication based on PPLX EFA kernels.
+    All2All communication based on PPLX EFA Rose kernels.
     """
 
     def __init__(self, cpu_group, device):
         # TODO: update README.md
-        assert has_pplx(), (
+        assert has_rose(), (
             "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
             " to install pplx_kernels."
         )
@@ -263,12 +263,13 @@ class PPLXEfaAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
     def get_handle(self, kwargs):
-        import pplx_kernels as pplx
+        from rose.distributed import TorchParallelGroup
+        from rose.kernels.efa_all_to_all import EfaAllToAll
 
         ep_group = get_ep_group()
         dp_group = get_dp_group()
 
-        global_group = pplx.rose.distributed.torch_group.TorchParallelGroup(
+        global_group = TorchParallelGroup(
             device=self.device,
             node_rank=ep_group.rank_in_group,
             local_rank=ep_group.local_rank,
@@ -276,7 +277,7 @@ class PPLXEfaAll2AllManager(All2AllManagerBase):
             ranks=ep_group.ranks,
         )
 
-        tp_group = pplx.rose.distributed.torch_group.TorchParallelGroup(
+        tp_group = TorchParallelGroup(
             device=self.device,
             node_rank=dp_group.rank_in_group,
             local_rank=dp_group.local_rank,
@@ -294,7 +295,7 @@ class PPLXEfaAll2AllManager(All2AllManagerBase):
 
         return self.handle_cache.get_or_create(
             kwargs,
-            pplx.rose.kernels.EfaAllToAll,
+            EfaAllToAll,
         )
 
     def dispatch(
