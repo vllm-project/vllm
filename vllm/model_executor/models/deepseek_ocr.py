@@ -1,39 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# Adapted from
-# https://github.com/deepseek-ai/DeepSeek-OCR/blob/main/DeepSeek-OCR-master/DeepSeek-OCR-vllm/deepseek_ocr.py
-# Copyright 2025 The vLLM team.
-# Copyright 2025 DeepSeek-AI Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Adapted from https://github.com/deepseek-ai/DeepSeek-OCR/blob/main/DeepSeek-OCR-master/DeepSeek-OCR-vllm/deepseek_ocr.py
 """Inference-only Deepseek-OCR model compatible with HuggingFace weights."""
-
+import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, Set, Tuple, Union
+from typing import Dict, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from process.image_process import DeepseekOCRProcessor, count_tiles
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    flatten_bn,
+    init_vllm_registered_model,
+    maybe_prefix,
+    merge_multimodal_embeddings,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -58,37 +53,185 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (
     DeepseekVLV2Config,
 )
-from process.image_process import DeepseekOCRProcessor, count_tiles
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-
-from vllm.model_executor.models.interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    SupportsPP,
-)
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    flatten_bn,
-    init_vllm_registered_model,
-    maybe_prefix,
-    merge_multimodal_embeddings,
-)
-
-from deepencoder.sam_vary_sdpa import build_sam_vit_b
-from deepencoder.clip_sdpa import build_clip_l
-from deepencoder.build_linear import MlpProjector
-from addict import Dict
-
-# import time
-from config import IMAGE_SIZE, BASE_SIZE, CROP_MODE, PRINT_NUM_VIS_TOKENS, PROMPT
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
+BASE_SIZE = 1024
+IMAGE_SIZE = 640
+CROP_MODE = True
+PRINT_NUM_VIS_TOKENS = False
+PROMPT = '<image>\n<|grounding|>Convert the document to markdown.'
+
+class MlpProjector(nn.Module):
+
+    def __init__(self, cfg):
+
+        super().__init__()
+
+        self.cfg = cfg
+
+        if cfg.projector_type == "identity":
+            modules = nn.Identity()
+
+        elif cfg.projector_type == "linear":
+            modules = nn.Linear(cfg.input_dim, cfg.n_embed)
+
+        elif cfg.projector_type == "mlp_gelu":
+            mlp_depth = cfg.get("depth", 1)
+            modules = [nn.Linear(cfg.input_dim, cfg.n_embed)]
+            for _ in range(1, mlp_depth):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(cfg.n_embed, cfg.n_embed))
+            modules = nn.Sequential(*modules)
+        
+        elif cfg.projector_type == "normlayer_downsample_mlp_gelu":
+            mlp_depth = cfg.get("depth", 1)
+            mlp_ratio = cfg.get("mlp_ratio", 1)
+            modules = [
+                nn.LayerNorm(cfg.input_dim * cfg.downsample_ratio * cfg.downsample_ratio),
+                nn.Linear(cfg.input_dim * cfg.downsample_ratio * cfg.downsample_ratio, cfg.n_embed * mlp_ratio)
+            ]
+            for _ in range(1, mlp_depth - 1):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(cfg.n_embed * mlp_ratio, cfg.n_embed * mlp_ratio))
+            modules.append(nn.GELU())
+            modules.append(nn.Linear(cfg.n_embed * mlp_ratio, cfg.n_embed))
+            modules = nn.Sequential(*modules)
+        
+        elif cfg.projector_type == "downsample_mlp_gelu":
+            mlp_depth = cfg.get("depth", 1)
+            mlp_ratio = cfg.get("mlp_ratio", 1)
+            modules = [nn.Linear(cfg.input_dim * cfg.downsample_ratio * cfg.downsample_ratio, cfg.n_embed * mlp_ratio)]
+            for _ in range(1, mlp_depth - 1):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(cfg.n_embed * mlp_ratio, cfg.n_embed * mlp_ratio))
+            modules.append(nn.GELU())
+            modules.append(nn.Linear(cfg.n_embed * mlp_ratio, cfg.n_embed))
+            modules = nn.Sequential(*modules)
+
+        elif cfg.projector_type == "low_high_hybrid_split_mlp_gelu":
+            mlp_depth = cfg.get("depth", 1)
+            self.high_up_proj = nn.Linear(cfg.input_dim, cfg.n_embed // 2)
+            self.low_up_proj = nn.Linear(cfg.input_dim, cfg.n_embed // 2)
+
+            modules = []
+            for _ in range(1, mlp_depth):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(cfg.n_embed, cfg.n_embed))
+            modules = nn.Sequential(*modules)
+
+        elif cfg.projector_type == "hybrid_split_feature_mlp_gelu":
+            mlp_depth = cfg.get("depth", 1)
+            channel_div = cfg.get("channel_div", 0.5)
+            self.high_up_proj = nn.Linear(cfg.input_dim[0], int(cfg.n_embed * channel_div))
+            self.low_up_proj = nn.Linear(cfg.input_dim[1], cfg.n_embed - int(cfg.n_embed * channel_div))
+
+            modules = []
+            for _ in range(1, mlp_depth):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(cfg.n_embed, cfg.n_embed))
+            modules = nn.Sequential(*modules)
+
+        elif cfg.projector_type == "low_high_split_mlp_gelu":
+            mlp_depth = cfg.get("depth", 1)
+            modules = []
+            for _ in range(1, mlp_depth):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(cfg.n_embed // 2, cfg.n_embed // 2))
+            modules = nn.Sequential(*modules)
+            self.high_layers = nn.Sequential(*modules)
+            self.low_layers = copy.deepcopy(modules)
+
+        else:
+            raise ValueError(f"Unknown projector type: {cfg.projector_type}")
+
+        if cfg.get("token_pooling", False):
+            self.token_pooling_layer = nn.Linear(cfg.input_dim * 4, cfg.input_dim)
+
+        if cfg.get("conv_fusion_high_low_features", False):
+            self.fusion_layer = nn.Linear(cfg.input_dim, cfg.input_dim)
+        self.layers = modules
+
+    def forward(self, x):
+        if self.cfg.get("token_pooling", False):
+            batch_size, wxh, channels = x.shape
+            w = h = int(wxh**0.5)
+            x = x.view(batch_size, w, h, channels)
+            x = x.permute(0, 3, 1, 2)
+            # import ipdb; ipdb.set_trace()
+            patches = x.unfold(2, 2, 2).unfold(3, 2, 2)
+            batch_size, channels, h_patches, w_patches, _, _ = patches.size()
+            # 在通道维度上拼接
+            patches = patches.contiguous().view(batch_size, channels, h_patches * w_patches, -1)
+
+            # 通过线性层
+            patches = patches.permute(0, 2, 1, 3).contiguous()
+            patches = patches.view(batch_size, h_patches * w_patches, channels * 4)
+
+            x = self.token_pooling_layer(patches)
+        
+        if self.cfg.get("conv_fusion_high_low_features", False):
+            x = self.fusion_layer(x[:, 0]) + x[:, 1]
+
+        if self.cfg.projector_type == 'low_high_hybrid_split_mlp_gelu':
+            high_x, low_x = x[0], x[1]
+            high_x = self.high_up_proj(high_x)
+            low_x = self.low_up_proj(low_x)
+            x = torch.concat([high_x, low_x], dim=-1)
+        
+        if self.cfg.projector_type == 'hybrid_split_feature_mlp_gelu':
+            high_x = x[...,:self.cfg.input_dim[0]]
+            low_x = x[...,self.cfg.input_dim[0]:]
+            high_x = self.high_up_proj(high_x)
+            low_x = self.low_up_proj(low_x)
+            x = torch.concat([high_x, low_x], dim=-1)
+        
+        if self.cfg.projector_type == 'low_high_split_mlp_gelu':
+            high_x, low_x = x[0], x[1]
+            high_x = self.high_layers(high_x)
+            low_x = self.low_layers(low_x)
+            x = torch.concat([high_x, low_x], dim=-1)
+            return x
+        
+        if self.cfg.projector_type == 'downsample_mlp_gelu' or self.cfg.projector_type == 'normlayer_downsample_mlp_gelu':
+            bs, hw, input_dim = x.shape
+            h = w = int((hw) ** 0.5)
+
+            """compute padding"""
+            if h % self.cfg.downsample_ratio:
+                pad = self.cfg.downsample_ratio - h % self.cfg.downsample_ratio
+            else:
+                pad = 0
+            x = x.reshape(bs, h, w, input_dim)
+            if pad > 0:
+                x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
+
+            """4 to 1 concat"""
+            x = x.permute(0, 3, 1, 2)  # B, C, H, W
+            x = F.unfold(x, kernel_size=self.cfg.downsample_ratio, stride=self.cfg.downsample_ratio, padding=0) # B, C*4, HW // 4
+            x = x.permute(0, 2, 1)
+            
+        return self.layers(x)
+
+    @staticmethod
+    def get_flops_per_sample(cfg):
+        if cfg.projector_type == "linear":
+            fwd = 2 * cfg.input_dim * cfg.n_embed
+
+        elif "mlp_gelu" in cfg.projector_type :
+            mlp_depth = cfg.get("depth", 1)
+            downsample_ratio = cfg.get("downsample_ratio", 1)
+            input_dim = sum(cfg.input_dim) if isinstance(cfg.input_dim, list) else cfg.input_dim
+            input_dim = input_dim * downsample_ratio * downsample_ratio
+            fwd = 2 * input_dim * cfg.n_embed + (mlp_depth - 1) * 2 * cfg.n_embed * cfg.n_embed
+        else:
+            fwd = 0
+
+        return fwd * 3
 
 
 class DeepseekOCRProcessingInfo(BaseProcessingInfo):
-
     def get_hf_config(self):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
@@ -144,14 +287,12 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
         return global_views_tokens + local_views_tokens + 1
 
     def get_image_size_with_most_features(self) -> ImageSize:
-
         if IMAGE_SIZE == 1024 and BASE_SIZE == 1280:
             return ImageSize(width=1024 * 2, height=1024 * 2)
         return ImageSize(width=640 * 2, height=640 * 2)
 
 
 class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessingInfo]):
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -189,14 +330,12 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
 class DeepseekOCRMultiModalProcessor(
     BaseMultiModalProcessor[DeepseekOCRProcessingInfo]
 ):
-
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-
         # print(mm_data)
         if mm_data:
             processed_outputs = self.info.ctx.call_hf_processor(
@@ -244,7 +383,6 @@ class DeepseekOCRMultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-
                 width = images[0][-1][0][0]
                 height = images[0][-1][0][1]
 
@@ -296,7 +434,6 @@ class DeepseekOCRMultiModalProcessor(
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
 class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language.": "language_model.",
@@ -367,7 +504,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def _parse_and_validate_image_input(self, **kwargs: object):
-
         pixel_values = kwargs.pop("pixel_values", None)
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
@@ -378,7 +514,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if pixel_values is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError(
-                    "Incorrect type of pixel values. " f"Got type: {type(pixel_values)}"
+                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
                 )
 
             if not isinstance(images_spatial_crop, (torch.Tensor, list)):
@@ -389,7 +525,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             if not isinstance(images_crop, (torch.Tensor, list)):
                 raise ValueError(
-                    "Incorrect type of image crop. " f"Got type: {type(images_crop)}"
+                    f"Incorrect type of image crop. Got type: {type(images_crop)}"
                 )
 
             return [pixel_values, images_crop, images_spatial_crop]
@@ -402,7 +538,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         images_crop: torch.Tensor,
         images_spatial_crop: torch.Tensor,
     ) -> NestedTensors:
-
         # Pixel_values (global view): [n_image, batch_size, 3, height, width]
         # images_spatial_crop: [n_image, batch_size, [num_tiles_w, num_tiles_h]]
         # images_crop (local view): [n_image, batch_size, num_pathes, 3, h, w]
@@ -540,7 +675,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return images_in_this_batch
 
     def _process_image_input(self, image_input) -> torch.Tensor:
-
         # image_input: [pixel_values, images_crop, images_spatial_crop]
 
         pixel_values = image_input[0].to(torch.bfloat16)
@@ -583,7 +717,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
         if multimodal_embeddings is not None:
@@ -605,7 +738,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ):
-
         if intermediate_tensors is not None:
             inputs_embeds = None
 
