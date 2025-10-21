@@ -75,31 +75,64 @@ def create_minimal_vllm_config(
     if mla_dims is None:
         mla_dims = setup_mla_dims(model_name)
 
-    # Create model config
-    model_config = ModelConfig(
-        model=f"deepseek-ai/{model_name}",
-        tokenizer=None,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=0,
-        max_model_len=32768,
-        quantization=None,
-        quantization_param_path=None,
-        enforce_eager=False,
-        max_context_len_to_capture=None,
-        max_seq_len_to_capture=8192,
-        max_logprobs=20,
-        disable_sliding_window=False,
-        skip_tokenizer_init=True,
-        served_model_name=None,
-        limit_mm_per_prompt=None,
-        use_async_output_proc=True,
-        config_format="auto",
-    )
+    # Create mock HF config first (avoids downloading from HuggingFace)
+    mock_hf_config = MockHfConfig(mla_dims)
 
-    # Override head counts and dims for MLA
-    model_config.hf_config = MockHfConfig(mla_dims)
+    # Create a temporary minimal config.json to avoid HF downloads
+    # This ensures consistent ModelConfig construction without network access
+    import json
+    import os
+    import shutil
+    import tempfile
+
+    minimal_config = {
+        "architectures": ["DeepseekV2ForCausalLM"],
+        "model_type": "deepseek_v2",
+        "num_attention_heads": mla_dims["num_q_heads"],
+        "num_key_value_heads": mla_dims["num_kv_heads"],
+        "hidden_size": mla_dims["head_dim"] * mla_dims["num_q_heads"],
+        "torch_dtype": "float16",
+        "max_position_embeddings": 163840,  # DeepSeek V3 default
+        "rope_theta": 10000.0,
+        "vocab_size": 128256,
+    }
+
+    # Create temporary directory with config.json
+    temp_dir = tempfile.mkdtemp(prefix="vllm_bench_")
+    config_path = os.path.join(temp_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(minimal_config, f)
+
+    try:
+        # Create model config using local path - no HF downloads
+        model_config = ModelConfig(
+            model=temp_dir,  # Use local temp directory
+            tokenizer=None,
+            tokenizer_mode="auto",
+            trust_remote_code=True,
+            dtype="float16",
+            seed=0,
+            max_model_len=32768,
+            quantization=None,
+            quantization_param_path=None,
+            enforce_eager=False,
+            max_context_len_to_capture=None,
+            max_seq_len_to_capture=8192,
+            max_logprobs=20,
+            disable_sliding_window=False,
+            skip_tokenizer_init=True,
+            served_model_name=None,
+            limit_mm_per_prompt=None,
+            use_async_output_proc=True,
+            config_format="auto",
+        )
+    finally:
+        # Clean up temporary directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Override with our mock config
+    model_config.hf_config = mock_hf_config
+    model_config.hf_text_config = mock_hf_config
 
     # Add mock methods for layer-specific queries
     _add_mock_methods_to_model_config(model_config)
