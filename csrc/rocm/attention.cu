@@ -45,9 +45,7 @@ using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
   #define __HIP__GFX11__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
-  #define __HIP__GFX12__
-#endif
+#include "rocm_arch.h"
 
 #if defined(NDEBUG)
   #undef NDEBUG
@@ -85,6 +83,7 @@ typedef struct _Half8 {
 } _Half8;
 
 using bit16_t = uint16_t;
+using bit16x2 = __attribute__((__vector_size__(2 * sizeof(uint16_t)))) uint16_t;
 using bit16x4 = __attribute__((__vector_size__(4 * sizeof(uint16_t)))) uint16_t;
 typedef bit16x4 _B16x4;
 typedef struct _B16x8 {
@@ -107,8 +106,17 @@ __device__ __forceinline__ floatx4 gcn_mfma4x4x4_instr(const _B16x4& inpA,
     return __builtin_amdgcn_mfma_f32_4x4x4f16(inpA, inpB, inpC, absz, cbid,
                                               blgp);
   } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
+  #if __HIP__GFX9__CNDA__ < 2
+    return __builtin_amdgcn_mfma_f32_4x4x2bf16(
+        (bit16x2){inpA[0], inpA[1]}, (bit16x2){inpB[0], inpB[1]},
+        __builtin_amdgcn_mfma_f32_4x4x2bf16((bit16x2){inpA[2], inpA[3]},
+                                            (bit16x2){inpB[2], inpB[3]}, inpC,
+                                            absz, cbid, blgp),
+        absz, cbid, blgp);
+  #else
     return __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(inpA, inpB, inpC, absz, cbid,
                                                   blgp);
+  #endif
   } else {
     static_assert(false, "unsupported 16b dtype");
   }
@@ -122,8 +130,17 @@ __device__ __forceinline__ floatx4 gcn_mfma16x16x16_instr(const _B16x4& inpA,
     return __builtin_amdgcn_mfma_f32_16x16x16f16(inpA, inpB, inpC, absz, cbid,
                                                  blgp);
   } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
+  #if __HIP__GFX9__CNDA__ < 2
+    return __builtin_amdgcn_mfma_f32_16x16x8bf16(
+        (bit16x2){inpA[0], inpA[1]}, (bit16x2){inpB[0], inpB[1]},
+        __builtin_amdgcn_mfma_f32_16x16x8bf16((bit16x2){inpA[2], inpA[3]},
+                                              (bit16x2){inpB[2], inpB[3]}, inpC,
+                                              absz, cbid, blgp),
+        absz, cbid, blgp);
+  #else
     return __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(inpA, inpB, inpC, absz,
                                                      cbid, blgp);
+  #endif
   } else {
     static_assert(false, "unsupported 16b dtype");
   }
@@ -232,7 +249,7 @@ __device__ __forceinline__ floatx4 to_float_fp8x4(const _B8x4& inp) {
   // #else case for fewer instructions (# inst=2) in MI300+,
   // and fallback to
   // #if case for other platforms (# inst=4).
-  #if defined(__gfx90a__)
+  #ifndef __HIP__GFX9__CDNA_FP8_EN__
   float4 f32x4 = vllm::fp8::vec_conversion<float4, uint32_t>(
       *reinterpret_cast<const uint32_t*>(&inp));
   return *reinterpret_cast<floatx4*>(&f32x4);
@@ -3581,11 +3598,10 @@ void paged_attention_custom_launcher_navi(
                          false, MFMA_TYPE);                                  \
   }
 
-#if defined(__HIPCC__) && defined(__gfx90a__)
-  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                   MFMA_TYPE)                              \
+#if defined(__HIPCC__) && !defined(__HIP__GFX9__CDNA_FP8_EN__)
+  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE)  \
     if (fp8_out_scale) {                                                   \
-      TORCH_CHECK(false, "fp8 out scale unsupported for gfx90a");          \
+      TORCH_CHECK(false, "fp8 out scale unsupported for GPU");             \
     } else {                                                               \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
                                  256, MFMA_TYPE);                          \
