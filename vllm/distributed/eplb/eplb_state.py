@@ -275,7 +275,7 @@ class EplbState:
 
         # Construct the algorithm instance based
         # on the selected eplb algorithm type.
-        policy_type = parallel_config.eplb_config.eplb_policy_type
+        policy_type = parallel_config.eplb_config.policy
         policy = PolicyFactory.generate_policy(policy_type)
         assert policy is not None, "EplbPolicy must be initialized"
         if global_expert_load is not None:
