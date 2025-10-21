@@ -81,7 +81,10 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        apply_router_weight_on_input: None,
+        weight_and_reduce_impl: None,
     ) -> None:
         num_token = output.shape[0]
         result = self.mori_op.combine(
