@@ -3,7 +3,7 @@
 
 import ast
 import hashlib
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -59,16 +59,16 @@ MTP_MODEL_TYPES = (
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
-    enforce_eager: Optional[bool] = None
+    enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
     num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
-    model: Optional[str] = None
+    model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
-    method: Optional[SpeculativeMethod] = None
+    method: SpeculativeMethod | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
     if possible, if `model` param is not provided, the method name must be
@@ -76,7 +76,7 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
-    draft_tensor_parallel_size: Optional[int] = None
+    draft_tensor_parallel_size: int | None = None
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
     disable_logprobs: bool = True
@@ -85,24 +85,24 @@ class SpeculativeConfig:
     according to the log probability settings in SamplingParams."""
 
     # Draft model configuration
-    quantization: Optional[me_quant.QuantizationMethods] = None
+    quantization: me_quant.QuantizationMethods | None = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
-    max_model_len: Optional[int] = None
+    max_model_len: int | None = None
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
-    revision: Optional[str] = None
+    revision: str | None = None
     """The specific model version to use for the draft model. It can be a
     branch name, a tag name, or a commit id. If unspecified, will use the
     default version."""
-    code_revision: Optional[str] = None
+    code_revision: str | None = None
     """The specific revision to use for the draft model code on Hugging Face
     Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
     will use the default version."""
 
     # Advanced control
-    disable_by_batch_size: Optional[int] = None
+    disable_by_batch_size: int | None = None
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
     disable_padded_drafter_batch: bool = False
@@ -112,14 +112,14 @@ class SpeculativeConfig:
     only affects the EAGLE method of speculation."""
 
     # Ngram proposer configuration
-    prompt_lookup_max: Optional[int] = None
+    prompt_lookup_max: int | None = None
     """Maximum size of ngram token window when using Ngram proposer, required
     when method is set to ngram."""
-    prompt_lookup_min: Optional[int] = None
+    prompt_lookup_min: int | None = None
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
 
-    speculative_token_tree: Optional[str] = None
+    speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
     """
     # required configuration params passed from engine
@@ -449,7 +449,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
-        speculative_max_model_len: Optional[int],
+        speculative_max_model_len: int | None,
         draft_max_model_len: int,
         target_max_model_len: int,
     ) -> int:
@@ -488,7 +488,7 @@ class SpeculativeConfig:
     @staticmethod
     def _verify_and_get_draft_tp(
         target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int],
+        speculative_draft_tensor_parallel_size: int | None,
         draft_hf_config: PretrainedConfig,
     ) -> int:
         """

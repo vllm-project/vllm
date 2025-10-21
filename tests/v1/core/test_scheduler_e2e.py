@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 
 import pytest
 
 from vllm import LLM
 
-if os.getenv("VLLM_USE_V1", "0") != "1":
-    pytest.skip("Test package requires V1", allow_module_level=True)
-
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 

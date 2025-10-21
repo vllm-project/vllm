@@ -18,6 +18,7 @@ On the client side, run:
 
 import argparse
 import asyncio
+import contextlib
 import gc
 import importlib.util
 import json
@@ -30,7 +31,7 @@ from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import aiohttp
 import numpy as np
@@ -57,12 +58,13 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 
 class TaskType(Enum):
     GENERATION = "generation"
-    EMBEDDING = "embedding"
+    POOLING = "pooling"
 
 
 @dataclass
 class BenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     total_output: int
     request_throughput: float
@@ -96,6 +98,7 @@ class BenchmarkMetrics:
 @dataclass
 class EmbedBenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     request_throughput: float
     total_token_throughput: float
@@ -106,9 +109,9 @@ class EmbedBenchmarkMetrics:
 
 
 def _get_current_request_rate(
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
-    ramp_up_start_rps: Optional[int],
-    ramp_up_end_rps: Optional[int],
+    ramp_up_strategy: Literal["linear", "exponential"] | None,
+    ramp_up_start_rps: int | None,
+    ramp_up_end_rps: int | None,
     request_index: int,
     total_requests: int,
     request_rate: float,
@@ -134,9 +137,9 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -238,12 +241,15 @@ def calculate_metrics_for_embeddings(
     """
     total_input = 0
     completed = 0
+    failed = 0
     e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             e2els.append(outputs[i].latency)
             completed += 1
             total_input += outputs[i].prompt_len
+        else:
+            failed += 1
 
     if completed == 0:
         warnings.warn(
@@ -253,6 +259,7 @@ def calculate_metrics_for_embeddings(
         )
     metrics = EmbedBenchmarkMetrics(
         completed=completed,
+        failed=failed,
         total_input=total_input,
         request_throughput=completed / dur_s,
         total_token_throughput=total_input / dur_s,
@@ -365,6 +372,7 @@ def calculate_metrics(
 
     # Find the time range across all successful requests
     successful_outputs = [output for output in outputs if output.success]
+    failed_outputs = [output for output in outputs if not output.success]
     if successful_outputs:
         min_start_time = min(output.start_time for output in successful_outputs)
         max_end_time = max(
@@ -426,6 +434,7 @@ def calculate_metrics(
 
     metrics = BenchmarkMetrics(
         completed=completed,
+        failed=len(failed_outputs),
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
@@ -465,6 +474,7 @@ def calculate_metrics(
 
 
 async def benchmark(
+    task_type: TaskType,
     endpoint_type: str,
     api_url: str,
     base_url: str,
@@ -472,36 +482,29 @@ async def benchmark(
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: list[SampleRequest],
-    logprobs: Optional[int],
+    logprobs: int | None,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
+    num_warmups: int,
     profile: bool,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
-    max_concurrency: Optional[int],
-    lora_modules: Optional[Iterable[str]],
-    extra_headers: Optional[dict],
-    extra_body: Optional[dict],
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
+    max_concurrency: int | None,
+    lora_modules: Iterable[str] | None,
+    extra_headers: dict | None,
+    extra_body: dict | None,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
 ):
-    task_type = (
-        TaskType.EMBEDDING
-        if api_url.endswith("/v1/embeddings")
-        else TaskType.GENERATION
-    )
-    if endpoint_type in ASYNC_REQUEST_FUNCS:
-        if task_type == TaskType.EMBEDDING:
-            request_func = ASYNC_REQUEST_FUNCS["openai-embeddings"]
-        else:
-            request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
-    else:
-        raise ValueError(f"Unknown backend: {endpoint_type}")
+    try:
+        request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
+    except KeyError:
+        raise ValueError(f"Unknown backend: {endpoint_type}") from None
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     connector = aiohttp.TCPConnector(
@@ -565,9 +568,36 @@ async def benchmark(
                 f"Error: {test_output.error}"
             )
         else:
-            print("Initial test run completed. Starting main benchmark run...")
+            print("Initial test run completed.")
     else:
         print("Skipping endpoint ready check.")
+
+    if num_warmups > 0:
+        print(f"Warming up with {num_warmups} requests...")
+        warmup_pbar = None if disable_tqdm else tqdm(total=num_warmups)
+        warmup_semaphore = (
+            asyncio.Semaphore(max_concurrency)
+            if max_concurrency
+            else contextlib.nullcontext()
+        )
+        warmup_tasks = []
+
+        async def warmup_limited_request_func():
+            async with warmup_semaphore:
+                return await request_func(
+                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                )
+
+        for _ in range(num_warmups):
+            request_task = asyncio.create_task(warmup_limited_request_func())
+            warmup_tasks.append(request_task)
+        _ = await asyncio.gather(*warmup_tasks)
+
+        if warmup_pbar is not None:
+            warmup_pbar.close()
+        print("Warmup run completed.")
+
+    print("Starting main benchmark run...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -612,17 +642,13 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (
+        asyncio.Semaphore(max_concurrency)
+        if max_concurrency
+        else contextlib.nullcontext()
+    )
 
     async def limited_request_func(request_func_input, session, pbar):
-        if semaphore is None:
-            return await request_func(
-                request_func_input=request_func_input, session=session, pbar=pbar
-            )
         async with semaphore:
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
@@ -716,6 +742,7 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    print("{:<40} {:<10}".format("Failed requests:", metrics.failed))
     if max_concurrency is not None:
         print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
     if request_rate != float("inf"):
@@ -761,6 +788,7 @@ async def benchmark(
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
+            "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
             "total_output_tokens": metrics.total_output,
             "request_throughput": metrics.request_throughput,
@@ -1040,6 +1068,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Specify to disable tqdm progress bar.",
     )
     parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=0,
+        help="Number of warmup requests.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Use Torch Profiler. The endpoint must be launched with "
@@ -1094,10 +1128,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--percentile-metrics",
         type=str,
-        default="ttft,tpot,itl",
+        default=None,
         help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". ',
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
+        'If not specified, defaults to "ttft,tpot,itl" for generative models '
+        'and "e2el" for pooling models.',
     )
     parser.add_argument(
         "--metric-percentiles",
@@ -1195,7 +1231,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="The model name used in the API. "
         "If not specified, the model name will be the "
-        "same as the ``--model`` argument. ",
+        "same as the `--model` argument. ",
     )
 
     parser.add_argument(
@@ -1238,6 +1274,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Maximum time to wait for the endpoint to become ready "
         "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
         "the ready check will be skipped.",
+    )
+
+    parser.add_argument(
+        "--extra-body",
+        help="A JSON string representing extra body parameters to include "
+        "in each request."
+        'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
+        type=json.loads,
+        default=None,
     )
 
 
@@ -1310,36 +1355,55 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
+    backend = args.backend
+    task_type = (
+        TaskType.POOLING
+        if "embeddings" in backend or "rerank" in backend
+        else TaskType.GENERATION
+    )
+
     # Collect the sampling parameters.
-    sampling_params = {
-        k: v
-        for k, v in {
-            "top_p": args.top_p,
-            "top_k": args.top_k,
-            "min_p": args.min_p,
-            "temperature": args.temperature,
-            "frequency_penalty": args.frequency_penalty,
-            "presence_penalty": args.presence_penalty,
-            "repetition_penalty": args.repetition_penalty,
-        }.items()
-        if v is not None
-    }
+    if task_type == TaskType.GENERATION:
+        sampling_params = {
+            k: v
+            for k, v in {
+                "top_p": args.top_p,
+                "top_k": args.top_k,
+                "min_p": args.min_p,
+                "temperature": args.temperature,
+                "frequency_penalty": args.frequency_penalty,
+                "presence_penalty": args.presence_penalty,
+                "repetition_penalty": args.repetition_penalty,
+            }.items()
+            if v is not None
+        }
 
-    # Sampling parameters are only supported by openai-compatible backend.
-    if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
-        raise ValueError(
-            "Sampling parameters are only supported by openai-compatible backends."
-        )
+        # Sampling parameters are only supported by openai-compatible backend.
+        if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+            raise ValueError(
+                "Sampling parameters are only supported by openai-compatible backends."
+            )
 
-    if "temperature" not in sampling_params:
-        sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+        if "temperature" not in sampling_params:
+            sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+
+        default_percentile_metrics = "ttft,tpot,itl"
+    else:
+        sampling_params = {}
+        default_percentile_metrics = "e2el"
+
+    extra_body = args.extra_body or {}
+    extra_body = {**sampling_params, **extra_body}
+
+    percentile_metrics: str = args.percentile_metrics or default_percentile_metrics
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
 
     benchmark_result = await benchmark(
-        endpoint_type=args.backend,
+        task_type=task_type,
+        endpoint_type=backend,
         api_url=api_url,
         base_url=base_url,
         model_id=model_id,
@@ -1350,15 +1414,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         request_rate=args.request_rate,
         burstiness=args.burstiness,
         disable_tqdm=args.disable_tqdm,
+        num_warmups=args.num_warmups,
         profile=args.profile,
-        selected_percentile_metrics=args.percentile_metrics.split(","),
+        selected_percentile_metrics=percentile_metrics.split(","),
         selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
         ignore_eos=args.ignore_eos,
         goodput_config_dict=goodput_config_dict,
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
         extra_headers=headers,
-        extra_body=sampling_params,
+        extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,

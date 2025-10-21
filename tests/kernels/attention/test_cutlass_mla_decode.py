@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 import random
-from typing import Optional
 
 import pytest
 import torch
@@ -17,7 +16,7 @@ def cal_diff(
     y: torch.Tensor,
     name: str,
     use_fp8: bool = False,
-    diff_threshold: Optional[float] = None,
+    diff_threshold: float | None = None,
 ) -> None:
     x, y = x.double(), y.double()
     cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)

@@ -14,7 +14,7 @@ import torch
 
 
 def compute_retained_tokens_count(
-    video_size_thw: torch.LongTensor, spatial_merge_size: int, q: float
+    tokens_per_frame: int, num_frames: int, q: float
 ) -> int:
     """
     Compute the number of retained tokens for a given video.
@@ -22,22 +22,22 @@ def compute_retained_tokens_count(
     regardless of the pruning rate.
 
     Args:
-        video_size_thw: The size of the video in the format of (T, H, W).
-        spatial_merge_size: The size of the spatial merge.
+        tokens_per_frame: The number of tokens per frame.
+        num_frames: The total number of frames.
         q: The pruning rate.
 
     Returns:
         The number of retained tokens.
     """
-    T, H, W = map(int, video_size_thw)
-    min_num_tokens = (H // spatial_merge_size) * (W // spatial_merge_size)
-    evs_num_tokens = int(T * min_num_tokens * (1 - q))
+    total_tokens = tokens_per_frame * num_frames
+    evs_num_tokens = int(total_tokens * (1 - q))
+    min_num_tokens = tokens_per_frame
     return max(min_num_tokens, evs_num_tokens)
 
 
 def compute_retention_mask(
     video_embeds: torch.Tensor,
-    video_size_thw: torch.LongTensor,
+    video_size_thw: torch.LongTensor | tuple[int, int, int],
     spatial_merge_size: int,
     q: float,
 ) -> torch.Tensor:
@@ -56,7 +56,7 @@ def compute_retention_mask(
         `torch.Tensor`: The retention mask for the video embeddings of
             `(T * H * W // spatial_merge_size ^ 2)` shape.
     """
-    T, H, W = video_size_thw
+    T, H, W = map(int, video_size_thw)
 
     # Use reshape instead of einops to avoid graph breaks
     video_embeds = video_embeds.reshape(
@@ -65,7 +65,7 @@ def compute_retention_mask(
         W // spatial_merge_size,
         video_embeds.size(-1),
     )
-
+    tokens_per_frame = (H // spatial_merge_size) * (W // spatial_merge_size)
     # Core EVS
     similarity = torch.nn.functional.cosine_similarity(
         video_embeds[1:, ...], video_embeds[:-1, ...], dim=-1
@@ -80,7 +80,7 @@ def compute_retention_mask(
     dissimilarity_flat = dissimilarity.view(-1)
     order = torch.argsort(dissimilarity_flat, dim=-1, descending=True, stable=True)
     retain_num_tokens = compute_retained_tokens_count(
-        video_size_thw, spatial_merge_size, q
+        tokens_per_frame=tokens_per_frame, num_frames=T, q=q
     )
     topk_indices = order[:retain_num_tokens]
 
