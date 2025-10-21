@@ -16,7 +16,7 @@ from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
-    decoding_pooling_output,
+    decode_pooling_output,
 )
 
 
@@ -55,7 +55,7 @@ def main(args):
             body = response.content
             items = [MetadataItem(**x) for x in metadata["data"]]
 
-            embedding = decoding_pooling_output(items=items, body=body)
+            embedding = decode_pooling_output(items=items, body=body)
             embedding = [x.to(torch.float32) for x in embedding]
             embedding = torch.cat(embedding)
             print(embed_dtype, endianness, embedding.shape)

@@ -93,7 +93,7 @@ def binary2tensor(
     return torch.from_numpy(np_array).view(torch_dtype)
 
 
-def encoding_pooling_output(
+def encode_pooling_output(
     output: PoolingRequestOutput,
     encoding_format: EncodingFormat,
     embed_dtype: EmbedDType,
@@ -119,7 +119,7 @@ class MetadataItem:
     shape: tuple[int, ...]
 
 
-def encoding_pooling_bytes(
+def encode_pooling_bytes(
     pooling_outputs: list[PoolingRequestOutput],
     embed_dtype: EmbedDType,
     endianness: Endianness,
@@ -158,9 +158,7 @@ def encoding_pooling_bytes(
     return body, items, usage
 
 
-def decoding_pooling_output(
-    items: list[MetadataItem], body: bytes
-) -> list[torch.Tensor]:
+def decode_pooling_output(items: list[MetadataItem], body: bytes) -> list[torch.Tensor]:
     items.sort(key=lambda x: x.index)
 
     tensor_list: list[torch.Tensor] = []

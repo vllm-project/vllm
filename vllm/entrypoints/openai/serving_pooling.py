@@ -38,8 +38,8 @@ from vllm.utils.serial_utils import (
     EmbedDType,
     EncodingFormat,
     Endianness,
-    encoding_pooling_bytes,
-    encoding_pooling_output,
+    encode_pooling_bytes,
+    encode_pooling_output,
 )
 
 logger = init_logger(__name__)
@@ -265,7 +265,7 @@ class OpenAIServingPooling(OpenAIServing):
             for idx, final_res in enumerate(final_res_batch):
                 item = PoolingResponseData(
                     index=idx,
-                    data=encoding_pooling_output(
+                    data=encode_pooling_output(
                         final_res,
                         encoding_format=encoding_format,
                         embed_dtype=embed_dtype,
@@ -291,7 +291,7 @@ class OpenAIServingPooling(OpenAIServing):
             )
 
         def encoding_bytes():
-            body, items, usage = encoding_pooling_bytes(
+            body, items, usage = encode_pooling_bytes(
                 pooling_outputs=final_res_batch,
                 embed_dtype=embed_dtype,
                 endianness=endianness,
