@@ -157,7 +157,7 @@ class ShardedStateLoader(BaseModelLoader):
         self, paths
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         if self.load_config.load_format == "runai_streamer_sharded":
-            yield from runai_safetensors_weights_iterator(paths, True)
+            yield from runai_safetensors_weights_iterator(paths, True, is_distributed: False)
         else:
             from safetensors.torch import safe_open
 

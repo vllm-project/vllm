@@ -33,9 +33,8 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             if "distributed" in extra_config and isinstance(
                 extra_config.get("distributed"), bool
             ):
-                os.environ["RUNAI_STREAMER_DIST"] = str(
-                    1 if extra_config.get("distributed") else 0
-                )
+                self._is_distributed = extra_config.get("distributed")
+
 
             if "concurrency" in extra_config and isinstance(
                 extra_config.get("concurrency"), int
@@ -101,6 +100,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return runai_safetensors_weights_iterator(
             hf_weights_files,
             self.load_config.use_tqdm_on_load,
+            self._is_distributed
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
