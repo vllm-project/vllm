@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
-from threading import Lock, Thread
+from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
@@ -435,7 +435,7 @@ class ClientGuard:
         cmd_addr: str,
         engine_registry: dict[int, bytes],
         engine_exception_q: asyncio.Queue[FaultInfo],
-        engine_exception_q_lock: Lock,
+        engine_exception_q_lock: asyncio.Lock,
     ):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
@@ -673,7 +673,7 @@ class MPClient(EngineCoreClient):
                     " scenario"
                 )
                 self.engine_registry = addresses.engine_core_guard_identities
-                self.engine_exception_q_lock = Lock()
+                self.engine_exception_q_lock = asyncio.Lock()
                 assert self.engine_registry is not None
                 self.client_guard = ClientGuard(
                     addresses.fault_report_addr,

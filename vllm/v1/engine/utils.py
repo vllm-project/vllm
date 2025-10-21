@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from threading import Lock
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -1182,10 +1181,19 @@ def generate_identity_group(peer1, peer2, use, n):
     return identitys
 
 
-def get_queue_snapshot(queue: asyncio.Queue, queue_lock: Lock) -> list[FaultInfo]:
+def get_queue_snapshot(queue: asyncio.Queue, queue_lock: asyncio.Lock) -> list:
     """Thread-safe snapshot of the exception queue."""
-    with queue_lock:
-        return list(queue.queue)
+    """复制队列元素到列表（保留队列内容）"""
+    with queue_lock:  # 加锁确保复制期间无其他协程修改队列
+        items = []
+        # 先取出所有元素
+        while not queue.empty():
+            item = queue.get_nowait()
+            items.append(item)
+        # 再放回队列
+        for item in items:
+            queue.put(item)
+    return items
 
 
 class FaultHandler:
@@ -1194,7 +1202,7 @@ class FaultHandler:
         cmd_socket: zmq.Socket,
         client_cmd_registry: dict,
         engine_exception_q: asyncio.Queue[FaultInfo],
-        engine_exception_q_lock: Lock,
+        engine_exception_q_lock: asyncio.Lock,
     ) -> None:
         self.cmd_socket = cmd_socket
         self.client_cmd_registry = client_cmd_registry
