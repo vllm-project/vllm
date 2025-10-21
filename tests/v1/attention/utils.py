@@ -20,7 +20,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
