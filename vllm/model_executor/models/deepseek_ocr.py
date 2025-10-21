@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Deepseek-OCR model compatible with HuggingFace weights."""
 
 import math
@@ -56,11 +58,11 @@ from vllm.v1.sample.logits_processor import (
 from .deepencoder import DeepCLIPVisionTransformer, build_sam_vit_b
 from .deepseek_vl2 import MlpProjector
 
+# TODO(ywang96): Make these configurable
 BASE_SIZE = 1024
 IMAGE_SIZE = 640
 CROP_MODE = True
-MIN_CROPS = 2
-MAX_CROPS = 6  # max:9; If your GPU memory is small, it is recommended to set it to 6.
+
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
 
@@ -128,18 +130,24 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
             return None
         if not isinstance(ngram_size, int) or ngram_size <= 0:
             raise ValueError(
-                f"`ngram_size` has to be a strictly positive integer, but get {ngram_size}"
+                f"`ngram_size` has to be a strictly positive integer, got {ngram_size}."
             )
         if not isinstance(window_size, int) or window_size <= 0:
             raise ValueError(
-                f"`window_size` has to be a strictly positive integer, but get {window_size}"
+                "`window_size` has to be a strictly positive integer, "
+                f"got {window_size}."
             )
-        if whitelist_token_ids is not None and not isinstance(whitelist_token_ids, Iterable):
+        if whitelist_token_ids is not None and not isinstance(
+            whitelist_token_ids, Iterable
+        ):
             raise ValueError(
-                f"`whitelist_token_ids` has to be a set of integers, but get {whitelist_token_ids}"
+                "`whitelist_token_ids` has to be a set of integers, "
+                f"got {whitelist_token_ids}."
             )
         else:
-            whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
+            whitelist_token_ids = (
+                set(whitelist_token_ids) if whitelist_token_ids else None
+            )
         return NoRepeatNGramLogitsProcessor(
             ngram_size=ngram_size,
             window_size=window_size,
@@ -160,12 +168,6 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
     def get_num_image_tokens(
         self, *, image_width: int, image_height: int, cropping: bool = True
     ) -> int:
-        hf_processor = self.get_hf_processor()
-
-        # image_size = hf_processor.image_size
-        # patch_size = hf_processor.patch_size
-        # downsample_ratio = hf_processor.downsample_ratio
-
         image_size = IMAGE_SIZE
         base_size = BASE_SIZE
         patch_size = 16
@@ -376,27 +378,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
 
         self.sam_model = build_sam_vit_b()
-        # vit_model_cfg = dict(
-        #     num_layers=24,
-        #     hidden_size=1024,
-        #     num_heads = 16,
-        #     num_attention_heads=16,
-        #     ffn_hidden_size=4096,
-        #     seq_length=256,
-        #     max_position_embeddings=256,
-        #     use_flash_attn=False,
-        #     understand_projector_stride=2,
-        #     hidden_dropout = 0.0,
-        #     attention_dropout = 0.0,
-        #     no_persist_layer_norm = False,
-        #     layernorm_epsilon = 1e-5,
-        #     pre_layernorm_epsilon = 1e-5,
-        #     image_size = 224,
-        #     patch_size = 14,
-        #     recompute_list = []
-        # )
-        # self.vision_model = build_clip_l()
-        # TODO(Isotr0py): convert from vision_config
         clip_vision_config = CLIPVisionConfig(
             hidden_size=1024,
             intermediate_size=4096,
@@ -415,10 +396,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.projector = MlpProjector(self.projector_config)
         self.tile_tag = config.tile_tag
         self.global_view_pos = config.global_view_pos
-
-        # self.sam_model = torch.compile(self.sam_model, mode="reduce-overhead")
-        # self.vision_model = torch.compile(self.vision_model, mode="reduce-overhead")
-        # self.projector = torch.compile(self.projector, mode="max-autotune")
 
         # special token for image token sequence format
         n_embed = self.projector_config.n_embed
@@ -480,160 +457,102 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         raise AssertionError("This line should be unreachable.")
 
+    def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        global_features_1 = self.sam_model(image_tensor)
+        global_features_2 = self.vision_model(image_tensor, global_features_1)
+        features = torch.cat(
+            (
+                global_features_2[:, 1:],
+                global_features_1.flatten(2).permute(0, 2, 1),
+            ),
+            dim=-1,
+        )
+        features = self.projector(features)
+
+        _, hw, dim = features.shape
+        side = int(hw**0.5)
+
+        features = features.view(side, side, dim)
+        newline = self.image_newline[None, None, :].expand(side, 1, dim)
+        features = torch.cat([features, newline], dim=1)
+        return features.view(-1, dim)
+
+    def _encode_local_features(
+        self, patches: torch.Tensor, crop_shape: torch.Tensor
+    ) -> torch.Tensor | None:
+        if torch.sum(patches).item() == 0:
+            return None
+
+        local_features_1 = self.sam_model(patches)
+        local_features_2 = self.vision_model(patches, local_features_1)
+        features = torch.cat(
+            (
+                local_features_2[:, 1:],
+                local_features_1.flatten(2).permute(0, 2, 1),
+            ),
+            dim=-1,
+        )
+        features = self.projector(features)
+
+        _, hw, dim = features.shape
+        patch_side = int(hw**0.5)
+
+        width_tiles = int(crop_shape[0].item())
+        height_tiles = int(crop_shape[1].item())
+
+        features = (
+            features.view(height_tiles, width_tiles, patch_side, patch_side, dim)
+            .permute(0, 2, 1, 3, 4)
+            .reshape(height_tiles * patch_side, width_tiles * patch_side, dim)
+        )
+        newline = self.image_newline[None, None, :].expand(
+            height_tiles * patch_side, 1, dim
+        )
+        features = torch.cat([features, newline], dim=1)
+
+        return features.view(-1, dim)
+
     def _pixel_values_to_embedding(
         self,
         pixel_values: torch.Tensor,
         images_crop: torch.Tensor,
         images_spatial_crop: torch.Tensor,
     ) -> NestedTensors:
-        # Pixel_values (global view): [n_image, batch_size, 3, height, width]
-        # images_spatial_crop: [n_image, batch_size, [num_tiles_w, num_tiles_h]]
-        # images_crop (local view): [n_image, batch_size, num_pathes, 3, h, w]
-        # split the pixel and image_crop, all batch_size = 1
-
         images_in_this_batch = []
 
-        # print(type(images_crop))
+        for jdx in range(images_spatial_crop.size(0)):
+            patches = images_crop[jdx][0].to(torch.bfloat16)
+            image_ori = pixel_values[jdx]
+            crop_shape = images_spatial_crop[jdx][0]
 
-        # print(pixel_values.shape)
+            global_features = self._encode_global_features(image_ori)
+            local_features = self._encode_local_features(patches, crop_shape)
 
-        with torch.no_grad():
-            for jdx in range(images_spatial_crop.size(0)):
-                # with torch.set_grad_enabled(False):
-                patches = images_crop[jdx][0].to(torch.bfloat16)  # batch_size = 1
-                image_ori = pixel_values[jdx]
-                crop_shape = images_spatial_crop[jdx][0]
+            if local_features is not None:
+                combined = torch.cat(
+                    [local_features, global_features, self.view_seperator[None, :]],
+                    dim=0,
+                )
+            else:
+                combined = torch.cat(
+                    [global_features, self.view_seperator[None, :]], dim=0
+                )
 
-                if torch.sum(patches).item() != 0:  # if all values = 0, no crop
-                    # P, C, H, W = patches.shape
-                    # crop_flag = 1
-                    local_features_1 = self.sam_model(patches)
-                    # TODO del patches
-                    # torch.compiler.cudagraph_mark_step_begin()
-                    local_features_2 = self.vision_model(patches, local_features_1)
-
-                    local_features = torch.cat(
-                        (
-                            local_features_2[:, 1:],
-                            local_features_1.flatten(2).permute(0, 2, 1),
-                        ),
-                        dim=-1,
-                    )
-                    local_features = self.projector(local_features)
-
-                    global_features_1 = self.sam_model(image_ori)
-                    global_features_2 = self.vision_model(image_ori, global_features_1)
-                    global_features = torch.cat(
-                        (
-                            global_features_2[:, 1:],
-                            global_features_1.flatten(2).permute(0, 2, 1),
-                        ),
-                        dim=-1,
-                    )
-                    global_features = self.projector(global_features)
-
-                    _, hw, n_dim = global_features.shape
-                    h = w = int(hw**0.5)
-
-                    _2, hw2, n_dim2 = local_features.shape
-                    h2 = w2 = int(hw2**0.5)
-
-                    width_crop_num, height_crop_num = crop_shape[0], crop_shape[1]
-
-                    global_features = global_features.view(h, w, n_dim)
-
-                    global_features = torch.cat(
-                        [
-                            global_features,
-                            self.image_newline[None, None, :].expand(h, 1, n_dim),
-                        ],
-                        dim=1,
-                    )
-
-                    global_features = global_features.view(-1, n_dim)
-
-                    local_features = (
-                        local_features.view(
-                            height_crop_num, width_crop_num, h2, w2, n_dim2
-                        )
-                        .permute(0, 2, 1, 3, 4)
-                        .reshape(height_crop_num * h2, width_crop_num * w2, n_dim2)
-                    )
-                    local_features = torch.cat(
-                        [
-                            local_features,
-                            self.image_newline[None, None, :].expand(
-                                height_crop_num * h2, 1, n_dim2
-                            ),
-                        ],
-                        dim=1,
-                    )
-                    local_features = local_features.view(-1, n_dim2)
-
-                    global_local_features = torch.cat(
-                        [local_features, global_features, self.view_seperator[None, :]],
-                        dim=0,
-                    )
-
-                else:
-                    global_features_1 = self.sam_model(image_ori)
-                    global_features_2 = self.vision_model(image_ori, global_features_1)
-                    global_features = torch.cat(
-                        (
-                            global_features_2[:, 1:],
-                            global_features_1.flatten(2).permute(0, 2, 1),
-                        ),
-                        dim=-1,
-                    )
-                    global_features = self.projector(global_features)
-
-                    _, hw, n_dim = global_features.shape
-                    h = w = int(hw**0.5)
-
-                    global_features = global_features.view(h, w, n_dim)
-
-                    global_features = torch.cat(
-                        [
-                            global_features,
-                            self.image_newline[None, None, :].expand(h, 1, n_dim),
-                        ],
-                        dim=1,
-                    )
-
-                    global_features = global_features.view(-1, n_dim)
-
-                    global_local_features = torch.cat(
-                        [global_features, self.view_seperator[None, :]], dim=0
-                    )
-
-                images_in_this_batch.append(global_local_features)
+            images_in_this_batch.append(combined)
 
         return images_in_this_batch
 
     def _process_image_input(self, image_input) -> torch.Tensor:
-        # image_input: [pixel_values, images_crop, images_spatial_crop]
-
         pixel_values = image_input[0].to(torch.bfloat16)
-        # print(image_input[1][0].shape)
-        # print(type(image_input[1]))
-        # exit()
-
-        # images_crop = image_input[1].to(torch.bfloat16)
         images_crop = image_input[1]
-        # images_crop = image_input[1]
         images_spatial_crop = image_input[2].to(dtype=torch.long)
 
-        # local_start = time.time()
         vision_features = self._pixel_values_to_embedding(
             pixel_values=pixel_values,
             images_crop=images_crop,
             images_spatial_crop=images_spatial_crop,
         )
 
-        # local_total_time = time.time() - local_start
-
-        # print('encoder_time: ', local_total_time)
-        # exit()
         return vision_features
 
     def get_language_model(self) -> torch.nn.Module:
