@@ -1112,13 +1112,10 @@ class OpenAIServingChat(OpenAIServing):
                         # check for error finish reason and abort streaming
                         # finish_reason='error' indicates a retryable error
                         if output.finish_reason == "error":
-                            logger.error(
-                                "Request-level error for request %s: %s",
-                                request_id,
-                                output.stop_reason or "unknown",
-                            )
                             error_data = self.create_streaming_error_response(
-                                "Service temporarily unavailable"
+                                "Completion request failed",
+                                err_type="ServiceUnavailable",
+                                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
                             )
                             yield f"data: {error_data}\n\n"
                             yield "data: [DONE]\n\n"
@@ -1326,13 +1323,8 @@ class OpenAIServingChat(OpenAIServing):
         # finish_reason='error' indicates a retryable request-level internal error
         for output in final_res.outputs:
             if output.finish_reason == "error":
-                logger.error(
-                    "Request-level error for request %s: %s",
-                    request_id,
-                    output.stop_reason or "unknown",
-                )
                 return self.create_error_response(
-                    "Service temporarily unavailable",
+                    "Completion request failed",
                     err_type="ServiceUnavailable",
                     status_code=HTTPStatus.SERVICE_UNAVAILABLE,
                 )
