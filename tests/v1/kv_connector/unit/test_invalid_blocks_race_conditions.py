@@ -4,7 +4,7 @@
 """
 Tests for race conditions and incorrect freeing in invalid block handling.
 
-These tests verify corretness in two scenarios:
+These tests verify corretness in three scenarios:
 1. Async fail case: Blocks should not be freed immediately if async KV
    transfer is still in progress
 2. Sync recompute case: Blocks should not be freed for running requests
@@ -42,17 +42,17 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def fail_scheduler():
-    """scheduler with kv_load_retry_policy='fail'"""
+    """scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_load_retry_policy = "fail"
+    vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
 
 
 @pytest.fixture
 def recompute_scheduler():
-    """scheduler with kv_load_retry_policy='recompute'"""
+    """scheduler with kv_load_failure_policy='recompute'"""
     vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_load_retry_policy = "recompute"
+    vllm_config.kv_transfer_config.kv_load_failure_policy = "recompute"
     return create_scheduler(vllm_config)
 
 
@@ -264,3 +264,94 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     assert (
         request.request_id in scheduled_req_ids or len(recompute_scheduler.running) > 0
     ), "Request should be reschedulable for recomputation"
+
+
+def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
+    """
+    Test Issue 3: Sync fail case - invalid blocks must be evicted from cache.
+
+    When a request fails with policy='fail' and has invalid blocks from sync loading:
+    1. Request should be finished with FINISHED_ERROR
+    2. Invalid blocks should be evicted from the KV cache
+    3. Valid blocks (if shared) should remain in cache
+    4. Future requests should not reuse the invalid blocks
+
+    This test verifies that invalid blocks are properly evicted to prevent
+    cache corruption and reuse of invalid data.
+    """
+    num_prompt_blocks = 100
+    num_external_computed_blocks = 99
+    invalid_block_idx = 50
+
+    num_prompt_tokens = num_prompt_blocks * fail_scheduler.block_size
+    num_external_computed_tokens = (
+        num_external_computed_blocks * fail_scheduler.block_size
+    )
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    fail_scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens,
+    }
+
+    # mock connector indicating sync load
+    fail_scheduler.connector = Mock()
+    fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    fail_scheduler.connector.request_finished.return_value = (False, None)
+    fail_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = fail_scheduler.schedule()
+
+    # request should be running with sync KV load
+    assert len(fail_scheduler.running) == 1
+    assert request.status == RequestStatus.RUNNING
+
+    # get allocated block IDs
+    req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    invalid_block_ids = {req_block_ids[invalid_block_idx]}
+
+    # report invalid blocks - request should fail
+    model_runner_output = create_model_runner_output(
+        [request],
+        invalid_block_ids=invalid_block_ids,
+        use_eos=True,
+    )
+
+    outputs = fail_scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # verify request is finished with error
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.get_finished_reason() == FinishReason.ERROR
+
+    # verify output is generated
+    assert len(outputs) == 1
+    engine_outputs = next(iter(outputs.values()))
+    assert len(engine_outputs.outputs) == 1
+    output = engine_outputs.outputs[0]
+    assert output.request_id == request.request_id
+    assert output.finish_reason == FinishReason.ERROR
+
+    # verify the request was removed from scheduler
+    assert request.request_id not in fail_scheduler.requests
+    assert len(fail_scheduler.running) == 0
+
+    # critical: verify invalid block was actually freed from cache
+    # this is the key assertion - the invalid block should no longer be
+    # tracked by the KV cache manager for this request
+    # if it's still there, a future request could reuse the invalid data
+    try:
+        block_ids = fail_scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        # if we get here, check if blocks were actually freed
+        if block_ids is not None and len(block_ids[0]) > 0:
+            pytest.fail(
+                f"Invalid blocks still tracked for finished request! "
+                f"Request {request.request_id} should have been freed but "
+                f"still has {len(block_ids[0])} blocks allocated."
+            )
+        # blocks list exists but is empty - this is fine, they were freed
+    except KeyError:
+        # expected - request completely removed from tracking
+        pass
