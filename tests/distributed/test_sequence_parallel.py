@@ -244,7 +244,6 @@ def _compare_sp(
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,
-        "custom_ops": ["+rms_norm"],
         "compile_sizes": [4, 8],
         "pass_config": {
             "enable_sequence_parallelism": True,
