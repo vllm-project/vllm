@@ -30,6 +30,7 @@ class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
     dcp_size: int
+    pcp_size: int
     eager_mode: bool
     chunked_prefill: bool
 
@@ -37,6 +38,7 @@ class ParallelSetup(NamedTuple):
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: str | None = None
+    attn_backend: str = "FLASH_ATTN"
 
 
 @dataclass
@@ -52,20 +54,25 @@ class CPTestSettings:
         tp_base: int = 4,
         pp_base: int = 1,
         dcp_base: int = 1,
+        pcp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: str | None = None,
+        attn_backend: str = "FLASH_ATTN",
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
             for pp_multiplier in [1]:
-                for dcp_multiplier in [0.5, 1]:
+                # TODO(qcs): Test the effect of mixed activation
+                # when CP and DCP are compatible.
+                for pcp_multiplier, dcp_multiplier in zip([1, 2, 1], [0.5, 1, 1]):
                     for chunked_prefill_val in [True]:
                         parallel_setups.append(
                             ParallelSetup(
                                 tp_size=tp_base,
                                 pp_size=pp_multiplier * pp_base,
                                 dcp_size=int(dcp_multiplier * tp_base),
+                                pcp_size=int(pcp_multiplier * pcp_base),
                                 eager_mode=eager_mode_val,
                                 chunked_prefill=chunked_prefill_val,
                             )
@@ -75,7 +82,9 @@ class CPTestSettings:
             distributed_backends=["mp"],
             runner=runner,
             test_options=CPTestOptions(
-                multi_node_only=multi_node_only, load_format=load_format
+                multi_node_only=multi_node_only,
+                load_format=load_format,
+                attn_backend=attn_backend,
             ),
         )
 
@@ -108,11 +117,12 @@ def _compare_cp_with_tp(
         tp_size,
         pp_size,
         dcp_size,
+        pcp_size,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, load_format = test_options
+    multi_node_only, load_format, attn_backend = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -155,7 +165,7 @@ def _compare_cp_with_tp(
         "--max-model-len",
         "2048",
         "--max-num-seqs",
-        "8",
+        "16",
     ]
     if chunked_prefill:
         common_args.append("--enable-chunked-prefill")
@@ -172,6 +182,10 @@ def _compare_cp_with_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
+    cp_env = tp_env = {
+        "VLLM_ATTENTION_BACKEND": attn_backend,
+    }
+
     cp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -180,6 +194,8 @@ def _compare_cp_with_tp(
         str(pp_size),
         "--decode-context-parallel-size",
         str(dcp_size),
+        "--prefill-context-parallel-size",
+        str(pcp_size),
         "--distributed-executor-backend",
         distributed_backend,
     ]
@@ -198,12 +214,15 @@ def _compare_cp_with_tp(
         model_id,
         cp_args,
         tp_args,
+        cp_env,
+        tp_env,
         method=method,
         max_wait_seconds=720,
     )
 
 
 CP_TEXT_GENERATION_MODELS = {
+    # [MLA attention only]
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
@@ -211,6 +230,8 @@ CP_TEXT_GENERATION_MODELS = {
     "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
+        CPTestSettings.detailed(attn_backend="FLASHINFER"),
+        CPTestSettings.detailed(tp_base=2, attn_backend="FLASHINFER"),
     ],
 }
 

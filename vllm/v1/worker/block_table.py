@@ -4,7 +4,7 @@
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
@@ -80,12 +80,16 @@ class BlockTable:
             self._kernel_block_arange = None
 
         try:
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
 
     def append_row(
         self,
@@ -127,14 +131,16 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        if self.dcp_world_size > 1:
+        if self.dcp_world_size * self.pcp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
-            # always stored on the GPU whose dcp_rank equals i % cp_world_size:
+            # always stored on the GPU whose dcp_rank equals i % pcp_world_size:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * self.dcp_world_size
+            virtual_block_size = (
+                self.block_size * self.dcp_world_size * self.pcp_world_size
+            )
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req
                 + positions // virtual_block_size
@@ -144,9 +150,15 @@ class BlockTable:
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
-            mask = virtual_block_offsets % self.dcp_world_size == self.dcp_rank
+            self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+            mask = (
+                virtual_block_offsets % (self.dcp_world_size * self.pcp_world_size)
+                == self.current_rank
+            )
             # Calculate local block_offsets
-            block_offsets = virtual_block_offsets // self.dcp_world_size
+            block_offsets = virtual_block_offsets // (
+                self.dcp_world_size * self.pcp_world_size
+            )
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local

@@ -94,6 +94,10 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    # Needed by custom mask calc for context parallelism
+    query_positions: np.ndarray | None = None
+    pcp_allgather_restore_idx: torch.Tensor | None = None
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
@@ -190,6 +194,19 @@ def _make_metadata_with_slice(
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
+    # TODO(qcs): check if we can split query_positions and
+    # cp_kv_recover_idx as following approach
+    query_positions = (
+        attn_metadata.query_positions[token_slice]
+        if attn_metadata.query_positions is not None
+        else None
+    )
+    cp_allgather_restore_idx = (
+        attn_metadata.pcp_allgather_restore_idx[token_slice]
+        if attn_metadata.pcp_allgather_restore_idx is not None
+        else None
+    )
+
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
@@ -202,6 +219,8 @@ def _make_metadata_with_slice(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        query_positions=query_positions,
+        pcp_allgather_restore_idx=cp_allgather_restore_idx,
     )
 
 

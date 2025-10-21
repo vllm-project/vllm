@@ -976,9 +976,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 def reorg_kvcache(
     allgatered_kv_c_normed: torch.Tensor,
     allgatered_k_pe: torch.Tensor,
-    cp_chunk_seq_lens_lst: list[int],
+    dcp_chunk_seq_lens_lst: list[int],
     origin_context_lens: list[int],
-    cp_world_size: int,
+    dcp_world_size: int,
     sum_seq_len: int,
     max_seq_len: int,
     chunk_size: int,
@@ -986,14 +986,14 @@ def reorg_kvcache(
     toks: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    reorg kvcache after cp local gather to tp layout for attn kernel.
+    reorg kvcache after dcp local gather to tp layout for attn kernel.
 
     Args:
-        cp_chunk_seq_lens_lst: chunk context lengths under CP.
-        origin_context_lens: origin full context lengths under CP.
-        cp_world_size: CP size.
-        sum_seq_len: the sum of cp_chunk_seq_lens_lst.
-        max_seq_len: the max value of cp_chunk_seq_lens_lst.
+        dcp_chunk_seq_lens_lst: chunk context lengths under DCP.
+        origin_context_lens: origin full context lengths under DCP.
+        dcp_world_size: DCP size.
+        sum_seq_len: the sum of dcp_chunk_seq_lens_lst.
+        max_seq_len: the max value of dcp_chunk_seq_lens_lst.
         chunk_size: equals to max_context_chunk from
             chunked_context_metadata building.
         chunk_idx: chunk idx of chunked_prefill.
@@ -1003,37 +1003,37 @@ def reorg_kvcache(
     k_pe_segments = []
     src_token_idx = 0
     max_seq_len_check = 0
-    for cp_chunk_seq_len, origin_context_len in zip(
-        cp_chunk_seq_lens_lst, origin_context_lens
+    for dcp_chunk_seq_len, origin_context_len in zip(
+        dcp_chunk_seq_lens_lst, origin_context_lens
     ):
         chunk_context_len = chunk_size
-        if cp_chunk_seq_len != 0:
+        if dcp_chunk_seq_len != 0:
             chunk_context_len = min(
                 chunk_context_len, origin_context_len - chunk_size * chunk_idx
             )
-        cp_target_rank = (chunk_context_len - 1) % cp_world_size
+        dcp_target_rank = (chunk_context_len - 1) % dcp_world_size
         cur_seq_len = 0
-        for rank in range(cp_world_size):
-            if rank > cp_target_rank and cp_chunk_seq_len:
-                real_cp_chunk_seq_len = cp_chunk_seq_len - 1
+        for rank in range(dcp_world_size):
+            if rank > dcp_target_rank and dcp_chunk_seq_len:
+                real_dcp_chunk_seq_len = dcp_chunk_seq_len - 1
             else:
-                real_cp_chunk_seq_len = cp_chunk_seq_len
-            if real_cp_chunk_seq_len:
+                real_dcp_chunk_seq_len = dcp_chunk_seq_len
+            if real_dcp_chunk_seq_len:
                 kv_c_segment = allgatered_kv_c_normed[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + real_cp_chunk_seq_len
+                    + real_dcp_chunk_seq_len
                 ]
                 k_pe_segment = allgatered_k_pe[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + real_cp_chunk_seq_len
+                    + real_dcp_chunk_seq_len
                 ]
                 kv_c_segments.append(kv_c_segment)
                 k_pe_segments.append(k_pe_segment)
-                cur_seq_len += real_cp_chunk_seq_len
+                cur_seq_len += real_dcp_chunk_seq_len
         max_seq_len_check = max(max_seq_len_check, cur_seq_len)
-        src_token_idx += cp_chunk_seq_len
+        src_token_idx += dcp_chunk_seq_len
     reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
     reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
     assert reorganized_kv_c_normed.shape[0] == sum_seq_len
@@ -1637,11 +1637,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_c_normed, k_pe = reorg_kvcache(
                 allgatered_kv_c_normed,
                 allgatered_k_pe,
-                cp_chunk_seq_lens_lst=prefill_metadata.chunked_context.cp_chunk_seq_lens[
+                dcp_chunk_seq_lens_lst=prefill_metadata.chunked_context.cp_chunk_seq_lens[
                     i
                 ],
                 origin_context_lens=prefill_metadata.chunked_context.origin_context_lens,
-                cp_world_size=dcp_world_size,
+                dcp_world_size=dcp_world_size,
                 sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1],
                 max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
                 chunk_size=prefill_metadata.chunked_context.chunk_size,
