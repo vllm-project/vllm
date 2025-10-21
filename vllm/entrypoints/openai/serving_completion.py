@@ -294,9 +294,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 for output in final_res.outputs:
                     if output.finish_reason == "error":
                         return self.create_error_response(
-                            "Completion request failed",
-                            err_type="ServiceUnavailable",
-                            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                            "Internal server error",
+                            err_type="InternalServerError",
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
 
             response = self.request_output_to_completion_response(
@@ -449,9 +449,9 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     if finish_reason == "error":
                         error_data = self.create_streaming_error_response(
-                            "Completion request failed",
-                            err_type="ServiceUnavailable",
-                            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                            "Internal server error",
+                            err_type="InternalServerError",
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
                         yield f"data: {error_data}\n\n"
                         yield "data: [DONE]\n\n"
