@@ -120,7 +120,8 @@ class MlpProjector(nn.Module):
             modules.append(nn.GELU())
             modules.append(nn.Linear(cfg.n_embed * mlp_ratio, cfg.n_embed))
             modules = nn.Sequential(*modules)
-
+        elif cfg.projector_type == "linear":
+            modules = nn.Linear(cfg.input_dim, cfg.n_embed)
         else:
             raise NotImplementedError(
                 f"Unsupported projector type: {cfg.projector_type}"
