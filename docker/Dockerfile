@@ -1,4 +1,4 @@
-# The vLLM Dockerfile is used to construct vLLM image that can be directly used
+Vim # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
 # Please update any changes made here to
@@ -132,7 +132,9 @@ WORKDIR /workspace
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 --prerelease=allow -r requirements/cuda.txt \
+    # TODO: remove apache-tvm-ffi once FlashInfer is fixed https://github.com/flashinfer-ai/flashinfer/issues/1962
+    uv pip install --python /opt/venv/bin/python3 --pre apache-tvm-ffi==0.1.0b15 \
+    && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # cuda arch list used by torch
@@ -354,7 +356,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --prerelease=allow --system dist/*.whl --verbose \
+    # TODO: remove apache-tvm-ffi once FlashInfer is fixed https://github.com/flashinfer-ai/flashinfer/issues/1962
+    uv pip install --system --pre apache-tvm-ffi==0.1.0b15 \
+    && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # TODO (huydhn): Remove this once xformers is released for 2.9.0
