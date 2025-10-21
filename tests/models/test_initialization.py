@@ -106,7 +106,7 @@ def can_initialize(
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         extra_args = {}
-        if model_arch == "PrithviGeoSpatialMAE":
+        if model_arch in ("PrithviGeoSpatialMAE", "TerraTorch"):
             extra_args["enable_mm_embeds"] = True
 
         LLM(
