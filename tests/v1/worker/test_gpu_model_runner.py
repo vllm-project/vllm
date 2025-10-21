@@ -21,7 +21,8 @@ from vllm.distributed.parallel_state import (
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes, update_environment_variables
+from vllm.utils import update_environment_variables
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -146,10 +147,10 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         total_num_scheduled_tokens=total_num_scheduled_tokens,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -212,10 +213,10 @@ def test_update_states_request_finished(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids={req_id},
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -244,10 +245,10 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -273,10 +274,10 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -366,10 +367,10 @@ def test_update_states_no_changes(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -403,10 +404,10 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
