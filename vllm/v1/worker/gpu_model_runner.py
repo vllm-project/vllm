@@ -1493,6 +1493,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                    common_prefix_lens is 2D: ``[kv_cache_group_id][attn_group_idx]``,
                    None if we should not use cascade attention
         """
+
         use_cascade_attn = False
         num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
         common_prefix_lens: list[list[int]] = [[] for _ in range(num_kv_cache_groups)]
@@ -2537,13 +2538,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
-                common_prefix_lens = None
-                if self.cascade_attn_enabled:
-                    common_prefix_lens = self._compute_cascade_attn_prefix_lens(
-                        num_scheduled_tokens_np,
-                        scheduler_output.num_common_prefix_blocks,
-                    )
-
                 (
                     logits_indices,
                     spec_decode_metadata,
@@ -2553,9 +2547,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     scheduler_output, num_scheduled_tokens_np, max_num_scheduled_tokens
                 )
 
+                common_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
-                if ubatch_slices is not None:
-                    common_prefix_lens = None
+                if self.cascade_attn_enabled and ubatch_slices is None:
+                    # Pre-compute cascade attention prefix lengths
+                    # NOTE: Must be AFTER _prepare_inputs uses self.input_batch state
+                    common_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        scheduler_output.num_common_prefix_blocks,
+                    )
+
+                # TODO(lucas): move cudagraph dispatching here:
+                #   https://github.com/vllm-project/vllm/issues/23789
 
                 total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
