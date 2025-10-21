@@ -30,7 +30,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utis import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
