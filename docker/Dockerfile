@@ -456,7 +456,8 @@ ENV HF_HUB_ENABLE_HF_TRANSFER 1
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
 # Install vllm wheel
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
