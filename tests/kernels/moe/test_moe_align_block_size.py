@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    batched_moe_align_block_size,
     moe_align_block_size,
 )
 from vllm.platforms import current_platform
@@ -300,3 +301,96 @@ def test_moe_align_block_size_deterministic():
         assert torch.equal(results[0][2], results[i][2]), (
             "num_tokens should be deterministic"
         )
+
+
+@pytest.mark.parametrize("max_tokens_per_batch", [13, 16, 512])
+@pytest.mark.parametrize("num_experts", [8, 16, 32, 64])
+@pytest.mark.parametrize("block_size", [8, 16, 32, 64])
+@pytest.mark.parametrize("simulate_empty_batches", [False, True])
+def test_batched_moe_align_block_size(
+    max_tokens_per_batch: int,
+    num_experts: int,
+    block_size: int,
+    simulate_empty_batches: bool,
+):
+    def ref_outputs(
+        expert_num_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        E = expert_num_tokens.size(0)
+
+        # Round up so each batch can be split to blocks evenly.
+        Msum = round_up(max_tokens_per_batch, block_size) * E
+        ref_sorted_ids = torch.empty((Msum,), dtype=torch.int32)
+        ref_expert_ids = torch.empty((Msum // block_size,), dtype=torch.int32)
+        ref_num_tokens_post_pad = torch.empty((1,), dtype=torch.int32)
+
+        # Intialize
+        sentinel = E * max_tokens_per_batch
+        ref_sorted_ids.fill_(sentinel)
+        ref_expert_ids.fill_(-1)
+
+        # Fill ref_sorted_ids
+        i = 0
+        for expert_id, expert_nt in enumerate(expert_num_tokens):
+            token_offset = expert_id * max_tokens_per_batch
+            for j in range(expert_nt):
+                ref_sorted_ids[i] = token_offset + j
+                i += 1
+            # round up i to the next block_size
+            i = round_up(i, block_size)
+
+        ref_num_tokens_post_pad[0] = i
+
+        # Fill expert_ids
+        nt_ceil_sum = 0
+        for expert_id, expert_nt in enumerate(expert_num_tokens):
+            expert_ids_offset = nt_ceil_sum // block_size
+            ceil_expert_nt = round_up(int(expert_nt.item()), block_size)
+            num_blocks = ceil_expert_nt // block_size
+            for x in range(num_blocks):
+                ref_expert_ids[expert_ids_offset + x] = expert_id
+            nt_ceil_sum += ceil_expert_nt
+
+        return (
+            ref_sorted_ids.to("cuda"),
+            ref_expert_ids.to("cuda"),
+            ref_num_tokens_post_pad.to("cuda"),
+        )
+
+    # Compute expert_num_tokens
+    expert_num_tokens = torch.randint(
+        low=0,
+        high=max_tokens_per_batch,
+        size=(num_experts,),
+        device="cpu",
+        dtype=torch.int32,
+    )
+    if simulate_empty_batches:
+        # mark half the batches to have 0 tokens
+        zero_batches = torch.randperm(num_experts)[: num_experts // 2]
+        expert_num_tokens[zero_batches] = 0
+
+    # ref outputs
+    ref_sorted_ids, ref_expert_ids, ref_num_tokens_post_pad = ref_outputs(
+        expert_num_tokens
+    )
+
+    # outputs
+    sorted_ids, expert_ids, num_tokens_post_pad = batched_moe_align_block_size(
+        max_tokens_per_batch, block_size, expert_num_tokens.to("cuda")
+    )
+
+    assert ref_sorted_ids.size() == sorted_ids.size(), (
+        f"{ref_sorted_ids.size()} vs {sorted_ids.size()}"
+    )
+    assert ref_expert_ids.size() == expert_ids.size(), (
+        f"{ref_expert_ids.size()} vs {expert_ids.size()}"
+    )
+    assert ref_num_tokens_post_pad.size() == num_tokens_post_pad.size(), (
+        f"{ref_num_tokens_post_pad.size()} vs {num_tokens_post_pad.size()}"
+    )
+    torch.testing.assert_close(ref_sorted_ids, sorted_ids, atol=0, rtol=0)
+    torch.testing.assert_close(ref_expert_ids, expert_ids, atol=0, rtol=0)
+    torch.testing.assert_close(
+        ref_num_tokens_post_pad, num_tokens_post_pad, atol=0, rtol=0
+    )
