@@ -240,7 +240,8 @@ class DecodeBenchConnectorScheduler:
             group_blocks[:num_blocks_to_fill] for group_blocks in block_groups
         )
 
-        # Store the blocks to fill for all groups
+        # Store the blocks to fill for all group. _pending_fills doesn't need cleanup
+        # as it's cleared after build_connector_meta
         self._pending_fills[req_id] = (
             block_ids_per_group,
             num_external_tokens,
@@ -285,6 +286,7 @@ class DecodeBenchConnectorWorker:
 
         # Get fill parameters from extra config
         kv_transfer_config = vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
         self.fill_mean = kv_transfer_config.get_from_extra_config("fill_mean", 0.015)
         self.fill_std = kv_transfer_config.get_from_extra_config("fill_std", 0.0)
 
