@@ -547,6 +547,7 @@ class EngineArgs:
     enable_fault_tolerance: bool = FaultToleranceConfig.enable_fault_tolerance
     engine_recovery_timeout: int = FaultToleranceConfig.engine_recovery_timeout
     fault_report_addr: str = FaultToleranceConfig.fault_report_addr
+    fault_report_port: int = FaultToleranceConfig.fault_report_port
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1075,8 +1076,8 @@ class EngineArgs:
             **fault_tolerance_kwargs["engine_recovery_timeout"],
         )
         fault_tolerance_group.add_argument(
-            "--fault-report-addr",
-            **fault_tolerance_kwargs["fault_report_addr"],
+            "--fault-report-port",
+            **fault_tolerance_kwargs["fault_report_port"],
         )
         # Other arguments
         parser.add_argument(
@@ -1632,7 +1633,8 @@ class EngineArgs:
         fault_tolerance_config = FaultToleranceConfig(
             enable_fault_tolerance=self.enable_fault_tolerance,
             engine_recovery_timeout=self.engine_recovery_timeout,
-            fault_report_addr=self.fault_report_addr,
+            fault_report_addr=self.data_parallel_address,
+            fault_report_port=self.fault_report_port,
         )
 
         config = VllmConfig(
