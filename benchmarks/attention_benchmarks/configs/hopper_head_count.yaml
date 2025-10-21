@@ -10,7 +10,8 @@ backends:
   - flashmla
 
 # Comprehensive batch spec matrix: batch sizes × query lengths
-# Batch sizes (num requests): 1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128
+# Batch sizes (num requests): 1, 2, 4, 8, 16
+# Note: FlashMLA has IMA issues for batch_size > 16, so limiting to ≤ 16
 # Query lengths: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512
 # KV cache length: 1k (fixed)
 batch_specs:
@@ -73,78 +74,6 @@ batch_specs:
   - "16q128s1k"
   - "16q256s1k"
   - "16q512s1k"
-
-  # Batch size: 24
-  - "24q1s1k"
-  - "24q2s1k"
-  - "24q4s1k"
-  - "24q8s1k"
-  - "24q16s1k"
-  - "24q32s1k"
-  - "24q64s1k"
-  - "24q128s1k"
-  - "24q256s1k"
-  - "24q512s1k"
-
-  # Batch size: 32
-  - "32q1s1k"
-  - "32q2s1k"
-  - "32q4s1k"
-  - "32q8s1k"
-  - "32q16s1k"
-  - "32q32s1k"
-  - "32q64s1k"
-  - "32q128s1k"
-  - "32q256s1k"
-  - "32q512s1k"
-
-  # Batch size: 48
-  - "48q1s1k"
-  - "48q2s1k"
-  - "48q4s1k"
-  - "48q8s1k"
-  - "48q16s1k"
-  - "48q32s1k"
-  - "48q64s1k"
-  - "48q128s1k"
-  - "48q256s1k"
-  - "48q512s1k"
-
-  # Batch size: 64
-  - "64q1s1k"
-  - "64q2s1k"
-  - "64q4s1k"
-  - "64q8s1k"
-  - "64q16s1k"
-  - "64q32s1k"
-  - "64q64s1k"
-  - "64q128s1k"
-  - "64q256s1k"
-  - "64q512s1k"
-
-  # Batch size: 96
-  - "96q1s1k"
-  - "96q2s1k"
-  - "96q4s1k"
-  - "96q8s1k"
-  - "96q16s1k"
-  - "96q32s1k"
-  - "96q64s1k"
-  - "96q128s1k"
-  - "96q256s1k"
-  - "96q512s1k"
-
-  # Batch size: 128
-  - "128q1s1k"
-  - "128q2s1k"
-  - "128q4s1k"
-  - "128q8s1k"
-  - "128q16s1k"
-  - "128q32s1k"
-  - "128q64s1k"
-  - "128q128s1k"
-  - "128q256s1k"
-  - "128q512s1k"
 
 # Model configuration
 model:
