@@ -782,6 +782,7 @@ class MPClient(EngineCoreClient):
         # callback to inform the engine.
         def monitor_engine_cores():
             sentinels = [proc.sentinel for proc in engine_processes]
+
             _self = self_ref()
             if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
                 while engine_processes:
@@ -802,6 +803,9 @@ class MPClient(EngineCoreClient):
                         engine_manager.engine_down_socket.send_multipart(
                             [b"", fault_info.serialize().encode("utf-8")]
                         )
+
+                        sentinels.remove(sentinel)
+
                         logger.error(
                             "Engine core proc %s died unexpectedly",
                             died_proc.name,

@@ -123,7 +123,7 @@ class CoreEngineProcManager:
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
             identity = generate_identity_group(
-                "core_engine_proc_manager", "clinet_guard", "report", 1
+                "core_engine_proc_manager", "client_guard", "report", 1
             )[0]
             zmq_addr = (
                 f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
@@ -133,7 +133,7 @@ class CoreEngineProcManager:
                 ctx=zmq_ctx,
                 path=zmq_addr,
                 socket_type=zmq.DEALER,
-                bind=True,
+                bind=False,
                 identity=identity,
             )
         if client_handshake_address:
@@ -869,8 +869,10 @@ def launch_core_engines(
         addresses.engine_core_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
         )
-        addresses.fault_report_addr = get_engine_client_zmq_addr(
-            local_only=client_local_only, host=host
+
+        addresses.fault_report_addr = (
+            f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
+            f"{vllm_config.fault_tolerance_config.fault_report_port}"
         )
         addresses.client_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
