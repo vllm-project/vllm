@@ -24,12 +24,10 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
-from vllm.model_executor.layers.quantization.awq import (
-    AWQLinearMethod,
-    is_layer_skipped_awq,
-)
+from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -139,7 +137,9 @@ class IPEXConfig(QuantizationConfig):
     ) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
             if self.method == "awq":
-                if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+                if is_layer_skipped(
+                    prefix, self.modules_to_not_convert, self.packed_modules_mapping
+                ):
                     return UnquantizedLinearMethod()
                 return IPEXAWQLinearMethod(self)
             if self.method == "gptq":
