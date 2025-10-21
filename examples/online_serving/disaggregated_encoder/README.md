@@ -2,7 +2,7 @@
 
 This example contains scripts that demonstrate the disaggregated encoder (EPD) features of vLLM.
 
-Please refer to [Disaggregated Encoder Feature](../../features/disagg_encoder.md) for the detailed explanation for the EPD features.
+Please refer to [Disaggregated Encoder Feature](../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
 
 ## Files
 
