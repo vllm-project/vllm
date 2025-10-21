@@ -15,11 +15,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils import (
     enable_trace_function_call_for_thread,
-    resolve_obj_by_qualname,
     run_method,
     update_environment_variables,
     warn_for_unimplemented_methods,
 )
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
@@ -126,28 +126,6 @@ class WorkerBase:
         raise NotImplementedError
 
     def execute_model(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
-        raise NotImplementedError
-
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        raise NotImplementedError("Dead V0 code")
-
-    def determine_num_available_blocks(self) -> tuple[int, int]:
-        """Determine the number of available blocks for the GPU KV cache and
-        swappable CPU KV cache.
-
-        The implementation may run profiling or other heuristics to determine
-        the size of caches.
-
-        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
-        appended to.
-        """
         raise NotImplementedError
 
     def get_cache_block_size_bytes(self) -> int:
