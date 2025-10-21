@@ -1631,6 +1631,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             f"[TRT-LLM Ragged] Pre-allocated output shapes - out: {out.shape}, lse: {lse.shape}"
         )
 
+
         ret = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -1758,6 +1759,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             f"[TRT-LLM Ragged] Chunk {chunk_idx} - Initialized LSE with -inf - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}"
         )
 
+        self._workspace_buffer.fill_(0)
+
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -1799,23 +1802,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
         # Set LSE to -inf for sequences where seq_lens is 0
-        seq_lens = prefill.chunked_context.seq_lens[chunk_idx]
-        zero_mask = seq_lens == 0
-        if zero_mask.any():
-            logger.info(
-                f"[TRT-LLM Ragged] Chunk {chunk_idx} - Found {zero_mask.sum().item()} sequences with seq_lens=0, setting their LSE to -inf"
-            )
-            # Get query lengths for each sequence
-            query_start_loc = prefill.query_start_loc
-            for seq_idx in range(len(seq_lens)):
-                if zero_mask[seq_idx]:
-                    q_start = query_start_loc[seq_idx].item()
-                    q_end = query_start_loc[seq_idx + 1].item()
-                    # Set LSE to -inf for all query tokens in this sequence
-                    lse[q_start:q_end, :] = float("-inf")
-            logger.info(
-                f"[TRT-LLM Ragged] Chunk {chunk_idx} - LSE stats after masking - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}, mean: {lse.mean().item():.6f}"
-            )
+        #seq_lens = prefill.chunked_context.seq_lens[chunk_idx]
+        #zero_mask = seq_lens == 0
+        #if zero_mask.any():
+        #    logger.info(
+        #        f"[TRT-LLM Ragged] Chunk {chunk_idx} - Found {zero_mask.sum().item()} sequences with seq_lens=0, setting their LSE to -inf"
+        #    )
+        #    # Get query lengths for each sequence
+        #    query_start_loc = prefill.query_start_loc
+        #    for seq_idx in range(len(seq_lens)):
+        #        if zero_mask[seq_idx]:
+        #            q_start = query_start_loc[seq_idx].item()
+        #            q_end = query_start_loc[seq_idx + 1].item()
+        #            # Set LSE to -inf for all query tokens in this sequence
+        #            lse[q_start:q_end, :] = float("-inf")
+        #    logger.info(
+        #        f"[TRT-LLM Ragged] Chunk {chunk_idx} - LSE stats after masking - min: {lse.min().item():.6f}, max: {lse.max().item():.6f}, mean: {lse.mean().item():.6f}"
+        #    )
 
         logger.info(
             f"[TRT-LLM Ragged] _run_prefill_context_chunk_trtllm_ragged completed - chunk_idx: {chunk_idx}"
