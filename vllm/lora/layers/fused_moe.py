@@ -216,12 +216,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     # get the down expand config
                     expand_config = get_lora_op_configs(
                         op_type="fused_moe_lora_down_expand",
-                        max_loras=self.w1_lora_a_stacked.shape[0],
+                        max_loras=self.w2_lora_a_stacked.shape[0],
                         batch=M,
-                        hidden_size=self.w1_lora_a_stacked.shape[-1],
-                        rank=self.w1_lora_a_stacked.shape[-2],
+                        hidden_size=self.w2_lora_a_stacked.shape[-1],
+                        rank=self.w2_lora_a_stacked.shape[-2],
                         num_slices=1,
-                        hidden_size_2=self.w1_lora_b_stacked.shape[-2],
+                        hidden_size_2=self.w2_lora_b_stacked.shape[-2]
                     )
                 else:
                     get_config_func = functools.partial(
