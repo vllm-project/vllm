@@ -376,9 +376,12 @@ def test_kv_transfer_metadata(dist_init):
 class FakeNixlConnectorWorker(NixlConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
-    def __init__(self, *args, hand_shake_latency: float = 1.8, **kwargs):
+    def __init__(
+        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self._hand_shake_latency = hand_shake_latency
+        self.kv_cache_layout = kv_cache_layout
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
@@ -654,11 +657,62 @@ class TestNixlHandshake:
                 kv_cache_layout=mismatched_layout,
             )
 
-            # We don't check layout for homogeneous TP and MLA for now, as the
-            # whole block is moved.
-            worker.add_remote_agent(meta, remote_tp_size=2)
+            with pytest.raises(RuntimeError):
+                # mismatched layout is expected to fail
+                worker.add_remote_agent(meta, remote_tp_size=2)
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(meta, remote_tp_size=1)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_succeed_on_kv_cache_layout_mismatch_with_experimental(
+        self, dist_init
+    ):
+        """
+        Verify that adding a remote agent fails if kv_cache_layout differs.
+        This test is only relevant for heterogeneous TP.
+        """
+        vllm_config = create_vllm_config(enable_permute_local_kv=True)
+
+        # Mock TP world size to 2 to force heterogeneous TP when
+        # remote_tp_size=1
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=2,
+        ):
+            # Initialize connector and worker (with fake NIXL wrapper)
+            connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config,
+                connector.engine_id,
+                hand_shake_latency=0,
+                kv_cache_layout="NHD",
+            )
+            worker = connector.connector_worker
+
+            # Minimal local registration params used by add_remote_agent
+            worker.slot_size_per_layer = [2048]
+            worker.block_len_per_layer = [2048 * worker.block_size]
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Metadata with different kv_cache_layout than local worker
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                num_blocks=1,
+                # prefill TP=1, decode TP=2, remote block_lens is double to local
+                block_lens=[i * 2 for i in worker.block_len_per_layer],
+                attn_backend_name=worker.backend_name,
+                kv_cache_layout="HND",
+            )
+
+            # We don't check layout for homogeneous TP and MLA for now, as the
+            # whole block is moved.
+            worker.add_remote_agent(meta, remote_tp_size=1)
 
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
@@ -873,6 +927,75 @@ def test_multi_kv_connector_stats_aggregation():
     assert kv_connector_stats["NixlConnector"].num_successful_transfers == 5
     assert isinstance(kv_connector_stats["FooConnector"], FooKVConnectorStats)
     assert kv_connector_stats["FooConnector"].data["num_foo_transfers"] == 6
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_scheduler_kv_connector_stats_aggregation():
+    """Test scheduler and worker KV connector stats aggregation."""
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    scheduler = create_scheduler(create_vllm_config())
+
+    # Worker stats with transfer metrics
+    worker_stats = NixlKVConnectorStats()
+    worker_stats.record_transfer(get_default_xfer_telemetry())
+    worker_stats.data["remote_tokens"] = []
+
+    # Scheduler stats with custom metric (needs dummy transfer to avoid being skipped)
+    scheduler_stats = NixlKVConnectorStats()
+    scheduler_stats.data.update(
+        {  # dummy transfer just for testing, to bypass is_empty() check
+            "transfer_duration": [0],
+            "post_duration": [0],
+            "bytes_transferred": [0],
+            "num_descriptors": [0],
+            "remote_tokens": [128],
+        }
+    )
+
+    # Mock the scheduler connector's stats method
+    scheduler.connector.get_kv_connector_stats = lambda: MultiKVConnectorStats(
+        data={"NixlConnector": scheduler_stats}
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=["req_0"],
+        req_id_to_index={"req_0": 0},
+        sampled_token_ids=[[123]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[None],
+        kv_connector_output=KVConnectorOutput(
+            kv_connector_stats=MultiKVConnectorStats(
+                data={"NixlConnector": worker_stats}
+            )
+        ),
+    )
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=None,
+        num_scheduled_tokens={"req_0": 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[0],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=set(),
+        structured_output_request_ids={},
+        grammar_bitmask=None,
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    final_stats = next(
+        iter(engine_core_outputs.values())
+    ).scheduler_stats.kv_connector_stats
+    nixl_stats = final_stats["NixlConnector"]
+    assert nixl_stats.num_successful_transfers == 2
+    assert nixl_stats.data["remote_tokens"] == [128]
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])

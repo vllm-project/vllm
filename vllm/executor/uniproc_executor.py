@@ -13,7 +13,8 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port, run_method
+from vllm.utils import run_method
+from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase

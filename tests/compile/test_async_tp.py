@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.compilation.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     DeviceConfig,
     ModelConfig,
     PassConfig,
@@ -332,13 +333,22 @@ def async_tp_pass_on_test_model(
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
-    model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
+    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
     vllm_config.model_config = ModelConfig(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
 
     async_tp_pass = AsyncTPPass(vllm_config)
     backend = TestBackend(async_tp_pass)
+
+    assert (
+        async_tp_pass.compilation_config.splitting_ops
+        == vllm_config.compilation_config.splitting_ops
+    )
+    assert (
+        async_tp_pass.compilation_config.use_inductor_graph_partition
+        == vllm_config.compilation_config.use_inductor_graph_partition
+    )
 
     model = test_model_cls(hidden_size, dtype)  # Pass dtype to model constructor
 
@@ -400,7 +410,7 @@ def test_async_tp_pass_correctness(
         common_args.append("--enforce-eager")
 
     compilation_config = {
-        "level": 3,
+        "mode": CompilationMode.VLLM_COMPILE,
         "compile_sizes": [2, 4, 8],
         "splitting_ops": [],
         "pass_config": {"enable_async_tp": async_tp_enabled},
