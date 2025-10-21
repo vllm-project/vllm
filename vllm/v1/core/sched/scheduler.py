@@ -1019,7 +1019,7 @@ class Scheduler(SchedulerInterface):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
-                # skip aborted or rescheduled requests from KV load failure
+                # skip failed or rescheduled requests from KV load failure
                 continue
             request = self.requests.get(req_id)
             if request is None:
@@ -1133,24 +1133,28 @@ class Scheduler(SchedulerInterface):
             self.waiting.remove_requests(stopped_preempted_reqs)
 
         if failed_kv_load_req_ids:
-            for req_id in failed_kv_load_req_ids:
-                request = self.requests.get(req_id)
-                # only create output and free for finished requests (abort case).
-                # recompute case: requests remain RUNNING and will be rescheduled.
-                if request is None or not request.is_finished():
-                    continue
+            should_fail = (
+                self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.kv_load_retry_policy == "fail"
+            )
 
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=[],
-                        finish_reason=request.get_finished_reason(),
-                        kv_transfer_params=None,
-                        trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
-                    )
+            if should_fail:
+                # finish requests (which frees them) and create outputs
+                finished_reqs = self.finish_requests(
+                    failed_kv_load_req_ids,
+                    RequestStatus.FINISHED_ERROR,
                 )
-                self._free_request(request)
+
+                for request in finished_reqs:
+                    outputs[request.client_index].append(
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=request.get_finished_reason(),
+                            trace_headers=request.trace_headers,
+                            num_cached_tokens=request.num_cached_tokens,
+                        )
+                    )
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1286,8 +1290,7 @@ class Scheduler(SchedulerInterface):
         self,
         request_ids: str | Iterable[str],
         finished_status: RequestStatus,
-        free_immediately: bool = True,
-    ) -> None:
+    ) -> list[Request]:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
@@ -1296,9 +1299,11 @@ class Scheduler(SchedulerInterface):
         Args:
             request_ids: Request IDs to finish.
             finished_status: The finished status to set.
-            free_immediately: If True, frees requests immediately. If False,
-                only marks them as finished and removes from queues without
-                freeing. Useful when outputs need to be created before freeing.
+
+        Returns:
+            List of valid requests that were finished. These
+            are freed from the scheduler PoV, but can be used
+            to create outputs.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -1329,11 +1334,12 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
 
-        # Second pass: set status and optionally free requests
+        # Set status and free all valid requests
         for request in valid_requests:
             request.status = finished_status
-            if free_immediately:
-                self._free_request(request)
+            self._free_request(request)
+
+        return valid_requests
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
@@ -1627,9 +1633,9 @@ class Scheduler(SchedulerInterface):
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
         """
-        abort = (
+        fail = (
             self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.kv_load_retry_policy == "abort"
+            and self.vllm_config.kv_transfer_config.kv_load_retry_policy == "fail"
         )
 
         # Handle async KV loads (WAITING_FOR_REMOTE_KVS)
@@ -1638,51 +1644,42 @@ class Scheduler(SchedulerInterface):
             for req in self.waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
-        async_affected_req_ids, num_affected_tokens = (
+        async_failed_req_ids, num_failed_tokens = (
             self._update_requests_with_invalid_blocks(
                 async_load_reqs, invalid_block_ids
             )
         )
 
-        total_affected_requests = len(async_affected_req_ids)
-        total_affected_tokens = num_affected_tokens
+        total_failed_requests = len(async_failed_req_ids)
+        total_failed_tokens = num_failed_tokens
 
-        sync_affected_req_ids, num_affected_tokens = (
+        sync_failed_req_ids, num_failed_tokens = (
             self._update_requests_with_invalid_blocks(self.running, invalid_block_ids)
         )
 
-        total_affected_requests += len(sync_affected_req_ids)
-        total_affected_tokens += num_affected_tokens
+        total_failed_requests += len(sync_failed_req_ids)
+        total_failed_tokens += num_failed_tokens
 
-        if not total_affected_requests:
+        if not total_failed_requests:
             return set()
 
-        if abort:
+        if fail:
             logger.warning(
-                "Aborting %d request(s) due to KV load failure "
-                "(retry_policy=abort, %d tokens affected).",
-                total_affected_requests,
-                total_affected_tokens,
+                "Failing %d request(s) due to KV load failure "
+                "(retry_policy=fail, %d tokens affected).",
+                total_failed_requests,
+                total_failed_tokens,
             )
-            all_affected_req_ids = async_affected_req_ids | sync_affected_req_ids
+            all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
+            return all_failed_req_ids
 
-            # mark requests as finished and remove from queues without freeing
-            # we don't free yet as outputs will be created in update_from_output
-            self.finish_requests(
-                all_affected_req_ids,
-                RequestStatus.FINISHED_ERROR,
-                free_immediately=False,
-            )
-
-            return all_affected_req_ids
-        else:
-            logger.warning(
-                "Recovered from KV load failure: "
-                "%d request(s) rescheduled (%d tokens affected).",
-                total_affected_requests,
-                total_affected_tokens,
-            )
-            # Mark async requests with KV load failures for retry once loading completes
-            self.failed_recving_kv_req_ids |= async_affected_req_ids
-            # Return sync affected IDs to skip in update_from_output
-            return sync_affected_req_ids
+        logger.warning(
+            "Recovered from KV load failure: "
+            "%d request(s) rescheduled (%d tokens affected).",
+            total_failed_requests,
+            total_failed_tokens,
+        )
+        # Mark async requests with KV load failures for retry once loading completes
+        self.failed_recving_kv_req_ids |= async_failed_req_ids
+        # Return sync affected IDs to skip in update_from_output
+        return sync_failed_req_ids
