@@ -21,13 +21,13 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from .. import silly_attention  # noqa: F401
@@ -337,9 +337,8 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
 def test_toy_llama(
     backend: str, use_inductor_graph_partition: bool, monkeypatch, tmp_path
 ):
-    # We disable the vLLM compile cache into a new tmp dir for 2 reasons:
+    # We disable the vLLM compile cache into a new tmp dir for 1 reason:
     # 1. To make sure we can properly track the number of Inductor compilations.
-    # 2. Inductor partitioning does not play nicely with Autograd cache (below)
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
@@ -356,27 +355,18 @@ def test_toy_llama(
     )
 
     compile_config_no_compile = CompilationConfig(
-        level=CompilationLevel.NO_COMPILATION,
+        level=CompilationMode.NONE,
         cudagraph_mode=CUDAGraphMode.NONE,
         backend="eager",
     )
 
     compile_config_no_split = CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
+        level=CompilationMode.VLLM_COMPILE,
         use_inductor_graph_partition=use_inductor_graph_partition,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         backend=backend,
         cudagraph_capture_sizes=[1, 2],
     )
-
-    # FIXME(luka/boyuan): the graph from the previous test case
-    #  (no inductor partition) gets cached by AotAutograd so then the
-    #  compilation with inductor partitioning incorrectly loads an unpartitioned
-    #  graph and never partitions. I think this is a bug with custom inductor
-    #  partitioning but does not affect vLLM more generally as vLLM uses its own
-    #  cache (which takes inductor partitioning into account).
-    if use_inductor_graph_partition:
-        compile_config_no_split.inductor_compile_config["force_disable_caches"] = True
 
     compile_config_split = deepcopy(compile_config_no_split)
     compile_config_split.splitting_ops = ["silly::attention"]
@@ -458,14 +448,14 @@ def benchmark():
     for piecewise in [False, True]:
         if piecewise:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 use_cudagraph=True,
                 splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
 
