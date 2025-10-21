@@ -49,10 +49,8 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils import (
-    get_distributed_init_method,
-)
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
     supports_custom_op,
@@ -1528,7 +1526,9 @@ def in_the_same_node_as(
         ranks = list(range(world_size))
 
     # local tensor in each process to store the result
-    is_in_the_same_node = torch.tensor([0] * world_size, dtype=torch.int32)
+    is_in_the_same_node = torch.tensor(
+        [0] * world_size, dtype=torch.int32, device="cpu"
+    )
 
     magic_message = b"magic_message"
     shm = None
