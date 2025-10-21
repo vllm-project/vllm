@@ -151,6 +151,12 @@ ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 
+# Ensure build caching is enabled
+ENV CMAKE_C_COMPILER_LAUNCHER=sccache
+ENV CMAKE_CXX_COMPILER_LAUNCHER=sccache
+ENV CMAKE_CUDA_COMPILER_LAUNCHER=sccache
+
+
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
 
@@ -206,9 +212,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
-        && export CC="sccache gcc" \
-        && export CXX="sccache g++" \
-        && export NVCC="sccache nvcc" \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
