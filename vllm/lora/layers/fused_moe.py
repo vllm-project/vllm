@@ -226,7 +226,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 else:
                     get_config_func = functools.partial(
                         try_get_optimal_moe_config,
-                        layer.w13_weight.size(),
+                        layer.w13_weight.size(), 
                         layer.w2_weight.size(),
                         top_k,
                         config_dtype,
