@@ -36,7 +36,7 @@ class PlotFilterBase(ABC):
         else:
             raise ValueError(
                 f"Invalid operator for plot filter '{s}'. "
-                f"Valid operators are: {set(PLOT_FILTERS)}",
+                f"Valid operators are: {sorted(PLOT_FILTERS)}",
             )
 
     @abstractmethod
@@ -124,7 +124,7 @@ class PlotBinner:
         else:
             raise ValueError(
                 f"Invalid operator for plot binner '{s}'. "
-                f"Valid operators are: {set(PLOT_BINNERS)}",
+                f"Valid operators are: {sorted(PLOT_BINNERS)}",
             )
 
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:

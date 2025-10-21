@@ -123,7 +123,7 @@ class SLASweepItem(dict[str, SLACriterionBase]):
                 raise ValueError(
                     f"Invalid operator for "
                     f"SLA constraint '{metric_key}={metric_value}'. "
-                    f"Valid operators are: {set(SLA_CRITERIA)}",
+                    f"Valid operators are: {sorted(SLA_CRITERIA)}",
                 )
 
         return cls(sla_criteria)
