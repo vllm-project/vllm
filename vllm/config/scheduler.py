@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import InitVar, field
 from typing import Any, Literal
 
-from pydantic import Field, SkipValidation, model_validator
+from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -31,19 +32,19 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: int = Field(default=None)
+    max_num_batched_tokens: int = None
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: int = Field(default=None)
+    max_num_seqs: int = None
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: int = Field(default=None)
+    max_model_len: int = None
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
@@ -79,7 +80,7 @@ class SchedulerConfig:
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
+    enable_chunked_prefill: bool = None
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
@@ -168,6 +169,19 @@ class SchedulerConfig:
         factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    @field_validator(
+        "max_num_batched_tokens",
+        "max_num_seqs",
+        "max_model_len",
+        "enable_chunked_prefill",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
 
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         if self.max_model_len is None:
