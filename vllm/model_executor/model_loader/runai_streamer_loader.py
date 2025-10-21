@@ -30,11 +30,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
 
+            self._is_distributed = False
             if "distributed" in extra_config and isinstance(
                 extra_config.get("distributed"), bool
             ):
                 self._is_distributed = extra_config.get("distributed")
-
 
             if "concurrency" in extra_config and isinstance(
                 extra_config.get("concurrency"), int
