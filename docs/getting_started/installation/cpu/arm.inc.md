@@ -23,7 +23,46 @@ ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
---8<-- "docs/getting_started/installation/cpu/build.inc.md"
+First, install the recommended compiler. We recommend using `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
+
+```bash
+sudo apt-get update  -y
+sudo apt-get install -y --no-install-recommends ccache git curl wget ca-certificates gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+```
+
+Second, clone the vLLM project:
+
+```bash
+git clone https://github.com/vllm-project/vllm.git vllm_source
+cd vllm_source
+```
+
+Third, install required dependencies:
+
+```bash
+uv pip install -r requirements/cpu-build.txt --torch-backend cpu
+uv pip install -r requirements/cpu.txt --torch-backend cpu
+```
+
+??? console "pip"
+    ```bash
+    pip install --upgrade pip
+    pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    ```
+
+Finally, build and install vLLM:
+
+```bash
+VLLM_TARGET_DEVICE=cpu uv pip install . --no-build-isolation
+```
+
+If you want to develop vLLM, install it in editable mode instead.
+
+```bash
+VLLM_TARGET_DEVICE=cpu uv pip install -e . --no-build-isolation
+```
 
 Testing has been conducted on AWS Graviton3 instances for compatibility.
 
@@ -48,6 +87,10 @@ docker run --rm \
             --dtype=bfloat16 \
             other vLLM OpenAI server arguments
 ```
+
+!!! tip
+    An alternative of `--privileged=true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
+
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]
 # --8<-- [end:extra-information]

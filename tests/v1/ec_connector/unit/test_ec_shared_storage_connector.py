@@ -14,8 +14,33 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.distributed.ec_transfer.ec_connector.shared_storage_connector import (
-    ECSharedStorageConnector, ECSharedStorageConnectorMetadata, MMMeta)
+    ECSharedStorageConnector,
+    ECSharedStorageConnectorMetadata,
+    MMMeta,
+)
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.sched.output import SchedulerOutput
+
+
+# ------------------ Mock Classes ------------------ #
+class MockRequest:
+    def __init__(self, request_id, mm_hashes: list[str], token_counts: list[int]):
+        assert len(mm_hashes) == len(token_counts)
+        self.request_id = request_id
+        self._token_counts = token_counts
+        self.mm_features = []
+        for i, mm_hash in enumerate(mm_hashes):
+            feature = MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier=mm_hash,
+                mm_position=PlaceholderRange(offset=0, length=self._token_counts[i]),
+            )
+            self.mm_features.append(feature)
+
+    def get_num_encoder_tokens(self, input_id: int) -> int:
+        assert input_id < len(self._token_counts)
+        return self._token_counts[input_id]
 
 
 @pytest.fixture
@@ -29,8 +54,7 @@ def mock_vllm_config_producer(temp_storage):
     """Fixture providing mock VllmConfig for producer role."""
     config = Mock(spec=VllmConfig)
     config.ec_transfer_config = Mock()
-    config.ec_transfer_config.get_from_extra_config = Mock(
-        return_value=temp_storage)
+    config.ec_transfer_config.get_from_extra_config = Mock(return_value=temp_storage)
     config.ec_transfer_config.is_ec_producer = True
     return config
 
@@ -40,8 +64,7 @@ def mock_vllm_config_consumer(temp_storage):
     """Fixture providing mock VllmConfig for consumer role."""
     config = Mock(spec=VllmConfig)
     config.ec_transfer_config = Mock()
-    config.ec_transfer_config.get_from_extra_config = Mock(
-        return_value=temp_storage)
+    config.ec_transfer_config.get_from_extra_config = Mock(return_value=temp_storage)
     config.ec_transfer_config.is_ec_producer = False
     return config
 
@@ -49,19 +72,19 @@ def mock_vllm_config_consumer(temp_storage):
 @pytest.fixture
 def mock_request_with_3_mm():
     """Fixture providing mock Request with 3 multimodal items."""
-    request = Mock()
-    request.request_id = "test_req_123"
-    request.mm_hashes = ["img_hash_1", "img_hash_2", "audio_hash_1"]
-    request.get_num_encoder_tokens = Mock(
-        side_effect=lambda idx: [100, 150, 200][idx])
+    request_id = "test_req_123"
+    mm_hashes = ["img_hash_1", "img_hash_2", "img_hash_3"]
+    token_counts = [100, 150, 200]
+
+    request = MockRequest(request_id, mm_hashes, token_counts)
     return request
 
 
+# ------------------ Unit Tests ------------------ #
 class TestECSharedStorageConnectorBasics:
     """Test basic EC connector functionality."""
 
-    def test_initialization_producer(self, mock_vllm_config_producer,
-                                     temp_storage):
+    def test_initialization_producer(self, mock_vllm_config_producer, temp_storage):
         """Test connector initializes correctly as producer."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -73,8 +96,7 @@ class TestECSharedStorageConnectorBasics:
         assert connector._storage_path == temp_storage
         assert connector._mm_datas_need_loads == {}
 
-    def test_initialization_consumer(self, mock_vllm_config_consumer,
-                                     temp_storage):
+    def test_initialization_consumer(self, mock_vllm_config_consumer, temp_storage):
         """Test connector initializes correctly as consumer."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_consumer,
@@ -103,9 +125,12 @@ class TestECSharedStorageConnectorBasics:
 class TestCacheExistence:
     """Test cache existence checking using has_caches() API."""
 
-    def test_has_caches_all_exist_3_items(self, mock_vllm_config_producer,
-                                          mock_vllm_config_consumer,
-                                          mock_request_with_3_mm):
+    def test_has_caches_all_exist_3_items(
+        self,
+        mock_vllm_config_producer,
+        mock_vllm_config_consumer,
+        mock_request_with_3_mm,
+    ):
         """Test has_caches returns True when all 3 caches exist."""
         # Test for producer first
         producer = ECSharedStorageConnector(
@@ -115,7 +140,9 @@ class TestCacheExistence:
 
         # Create cache files using save_caches (proper way)
         encoder_cache: dict[str, torch.Tensor] = {}
-        for mm_hash in mock_request_with_3_mm.mm_hashes:
+
+        for mm_feature in mock_request_with_3_mm.mm_features:
+            mm_hash = mm_feature.identifier
             encoder_cache[mm_hash] = torch.randn(10, 768)
             producer.save_caches(encoder_cache, mm_hash)
 
@@ -124,8 +151,7 @@ class TestCacheExistence:
 
         # Assert
         assert len(producer_result) == 3
-        assert all(
-            producer_result), f"Expected all True, got {producer_result}"
+        assert all(producer_result), f"Expected all True, got {producer_result}"
 
         # Also test consumer can check if cache exists
         consumer = ECSharedStorageConnector(
@@ -138,11 +164,11 @@ class TestCacheExistence:
 
         # Assert
         assert len(consumer_result) == 3
-        assert all(
-            consumer_result), f"Expected all True, got {consumer_result}"
+        assert all(consumer_result), f"Expected all True, got {consumer_result}"
 
-    def test_has_caches_none_exist(self, mock_vllm_config_producer,
-                                   mock_request_with_3_mm):
+    def test_has_caches_none_exist(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
         """Test has_caches returns False when no caches exist."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -156,8 +182,9 @@ class TestCacheExistence:
         assert len(result) == 3
         assert not any(result), f"Expected all False, got {result}"
 
-    def test_has_caches_partial_exist(self, mock_vllm_config_producer,
-                                      mock_request_with_3_mm):
+    def test_has_caches_partial_exist(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
         """Test has_caches with some caches existing (1 of 3)."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -165,11 +192,9 @@ class TestCacheExistence:
         )
 
         # Create only the second cache file
-        encoder_cache = {
-            mock_request_with_3_mm.mm_hashes[1]: torch.randn(10, 768)
-        }
-        connector.save_caches(encoder_cache,
-                              mock_request_with_3_mm.mm_hashes[1])
+        mm_hash_second = mock_request_with_3_mm.mm_features[1].identifier
+        encoder_cache = {mm_hash_second: torch.randn(10, 768)}
+        connector.save_caches(encoder_cache, mm_hash_second)
 
         # Test
         result = connector.has_caches(mock_request_with_3_mm)
@@ -184,8 +209,9 @@ class TestCacheExistence:
 class TestStateManagement:
     """Test connector state management."""
 
-    def test_update_state_after_alloc_3_items(self, mock_vllm_config_producer,
-                                              mock_request_with_3_mm):
+    def test_update_state_after_alloc_3_items(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
         """Test state update after allocation for 3 MM items."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -203,13 +229,14 @@ class TestStateManagement:
         assert len(connector._mm_datas_need_loads) == 3
         assert "img_hash_1" in connector._mm_datas_need_loads
         assert "img_hash_2" in connector._mm_datas_need_loads
-        assert "audio_hash_1" in connector._mm_datas_need_loads
+        assert "img_hash_3" in connector._mm_datas_need_loads
         assert connector._mm_datas_need_loads["img_hash_1"] == 100
         assert connector._mm_datas_need_loads["img_hash_2"] == 150
-        assert connector._mm_datas_need_loads["audio_hash_1"] == 200
+        assert connector._mm_datas_need_loads["img_hash_3"] == 200
 
-    def test_build_connector_meta_3_items(self, mock_vllm_config_producer,
-                                          mock_request_with_3_mm):
+    def test_build_connector_meta_3_items(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
         """Test metadata building for 3 MM items."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -231,7 +258,7 @@ class TestStateManagement:
         assert metadata.mm_datas[0].num_token == 100
         assert metadata.mm_datas[1].mm_hash == "img_hash_2"
         assert metadata.mm_datas[1].num_token == 150
-        assert metadata.mm_datas[2].mm_hash == "audio_hash_1"
+        assert metadata.mm_datas[2].mm_hash == "img_hash_3"
         assert metadata.mm_datas[2].num_token == 200
 
         # State should be cleared after building
@@ -250,9 +277,9 @@ class TestStateManagement:
         assert isinstance(metadata, ECSharedStorageConnectorMetadata)
         assert len(metadata.mm_datas) == 0
 
-    def test_state_cleared_after_metadata_build(self,
-                                                mock_vllm_config_producer,
-                                                mock_request_with_3_mm):
+    def test_state_cleared_after_metadata_build(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
         """Test that state is properly cleared after building metadata."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -279,9 +306,9 @@ class TestStateManagement:
 class TestCacheSaving:
     """Test encoder cache saving (producer only)."""
 
-    def test_save_caches_producer_3_items(self, mock_vllm_config_producer,
-                                          mock_request_with_3_mm,
-                                          temp_storage):
+    def test_save_caches_producer_3_items(
+        self, mock_vllm_config_producer, mock_request_with_3_mm, temp_storage
+    ):
         """Test cache saving as producer for 3 different MM items."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -289,7 +316,7 @@ class TestCacheSaving:
         )
 
         # Create and save 3 different caches
-        mm_hashes = mock_request_with_3_mm.mm_hashes
+        mm_hashes = [f.identifier for f in mock_request_with_3_mm.mm_features]
         encoder_cache: dict[str, torch.Tensor] = {}
 
         for mm_hash in mm_hashes:
@@ -305,8 +332,7 @@ class TestCacheSaving:
             filename = connector._generate_filename_debug(mm_hash)
             loaded = safetensors.torch.load_file(filename)
             assert "ec_cache" in loaded
-            assert torch.allclose(loaded["ec_cache"],
-                                  encoder_cache[mm_hash].cpu())
+            assert torch.allclose(loaded["ec_cache"], encoder_cache[mm_hash].cpu())
 
     def test_save_caches_consumer_skips(self, mock_vllm_config_consumer):
         """Test cache saving is skipped for consumer."""
@@ -322,8 +348,7 @@ class TestCacheSaving:
         connector.save_caches(encoder_cache, mm_hash)
 
         # Verify file doesn't exist using has_caches
-        mock_request = Mock()
-        mock_request.mm_hashes = [mm_hash]
+        mock_request = MockRequest("req_consumer", [mm_hash], [10])
         result = connector.has_caches(mock_request)
         assert not result[0], "Consumer should not save caches"
 
@@ -331,13 +356,14 @@ class TestCacheSaving:
 class TestCacheLoading:
     """Test encoder cache loading (consumer)."""
 
-    @pytest.mark.skipif(not torch.cuda.is_available(),
-                        reason="CUDA not available")
-    def test_start_load_caches_consumer_3_items(self,
-                                                mock_vllm_config_producer,
-                                                mock_vllm_config_consumer,
-                                                mock_request_with_3_mm,
-                                                temp_storage):
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_start_load_caches_consumer_3_items(
+        self,
+        mock_vllm_config_producer,
+        mock_vllm_config_consumer,
+        mock_request_with_3_mm,
+        temp_storage,
+    ):
         """Test consumer loads 3 caches from storage."""
         # First, create producer to save caches
         producer = ECSharedStorageConnector(
@@ -346,7 +372,7 @@ class TestCacheLoading:
         )
 
         # Producer saves 3 caches
-        mm_hashes = mock_request_with_3_mm.mm_hashes
+        mm_hashes = [f.identifier for f in mock_request_with_3_mm.mm_features]
         saved_caches = {}
         for mm_hash in mm_hashes:
             saved_caches[mm_hash] = torch.randn(10, 768)
@@ -371,17 +397,17 @@ class TestCacheLoading:
         # Verify all 3 loaded
         assert len(encoder_cache) == 3
         for mm_hash in mm_hashes:
-            assert mm_hash in encoder_cache,\
-                f"{mm_hash} missing in encoder_cache"
-            assert encoder_cache[mm_hash].is_cuda,\
+            assert mm_hash in encoder_cache, f"{mm_hash} missing in encoder_cache"
+            assert encoder_cache[mm_hash].is_cuda, (
                 f"{mm_hash} cache is in {encoder_cache[mm_hash].device}"
+            )
             assert torch.allclose(
                 encoder_cache[mm_hash].cpu(), saved_caches[mm_hash]
             ), f"{mm_hash} cache saved and loaded tesnor are not the same"
 
-    def test_start_load_caches_skip_existing(self, mock_vllm_config_producer,
-                                             mock_vllm_config_consumer,
-                                             temp_storage):
+    def test_start_load_caches_skip_existing(
+        self, mock_vllm_config_producer, mock_vllm_config_consumer, temp_storage
+    ):
         """Test cache loading skips already cached items."""
         # Setup: producer saves cache
         producer = ECSharedStorageConnector(
@@ -408,7 +434,7 @@ class TestCacheLoading:
         encoder_cache = {mm_hash: existing_cache}
 
         # Load (should skip since already exists)
-        with patch('safetensors.torch.load_file') as mock_load:
+        with patch("safetensors.torch.load_file") as mock_load:
             consumer.start_load_caches(encoder_cache=encoder_cache)
             # Should not call load_file since cache exists
             mock_load.assert_not_called()
@@ -438,8 +464,7 @@ class TestCacheLoading:
 class TestFilenameGeneration:
     """Test filename and path generation."""
 
-    def test_generate_foldername(self, mock_vllm_config_producer,
-                                 temp_storage):
+    def test_generate_foldername(self, mock_vllm_config_producer, temp_storage):
         """Test folder name generation."""
         connector = ECSharedStorageConnector(
             vllm_config=mock_vllm_config_producer,
@@ -462,8 +487,7 @@ class TestFilenameGeneration:
         mm_hash = "test_file_hash"
         filename = connector._generate_filename_debug(mm_hash)
 
-        expected = os.path.join(temp_storage, mm_hash,
-                                "encoder_cache.safetensors")
+        expected = os.path.join(temp_storage, mm_hash, "encoder_cache.safetensors")
         assert filename == expected
         assert os.path.isdir(os.path.dirname(filename))  # Folder created
 
@@ -577,8 +601,7 @@ class TestEdgeCases:
             role=ECConnectorRole.SCHEDULER,
         )
 
-        mock_request = Mock()
-        mock_request.mm_hashes = []
+        mock_request = MockRequest("req_empty", [], [])
 
         result = connector.has_caches(mock_request)
 

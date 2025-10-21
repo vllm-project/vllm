@@ -83,16 +83,10 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | Model Type                  | Status                                                                             |
 |-----------------------------|------------------------------------------------------------------------------------|
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
-| **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
+| **Encoder-Decoder Models**  | <nobr>🟢 Whisper only</nobr>                                                       |
 | **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
 | **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟢 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
-
-vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
-
-!!! tip
-
-    This corresponds to the V1 column in our [list of supported models](../models/supported_models.md).
 
 See below for the status of models that are not yet supported or have more features planned in V1.
 
@@ -107,21 +101,20 @@ to enable simultaneous generation and embedding using the same engine instance i
 #### Mamba Models
 
 Models using selective state-space mechanisms instead of standard transformer attention are supported.
-Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`) are supported.
-Please note that prefix caching is not yet supported for these models.
+Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`,`FalconMambaForCausalLM`) are supported.
 
-Models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
-`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`).
-Please note that prefix caching is not yet supported for these models.
+Hybrid models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
+`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`, `Plamo2ForCausalLM`).
 
-Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`).
-Please note that prefix caching is not yet supported for these models.
-It is also necessary to enforce eager mode for these models in V1.
+Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`, `Lfm2ForCausalLM`).
+
+Please note that prefix caching is not yet supported for any of the above models.
 
 #### Encoder-Decoder Models
 
-Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
-are not yet supported.
+Whisper is supported. Other models requiring cross-attention between separate
+encoder and decoder (e.g., `BartForConditionalGeneration`,
+`MllamaForConditionalGeneration`) are not supported.
 
 ### Features
 

@@ -36,12 +36,14 @@ limitations under the License.
 #if !defined(CUDA_VERSION) || CUDA_VERSION < 12040
 void sm100_cutlass_mla_decode(
     torch::Tensor const& out,
+    torch::Tensor const& lse,
     torch::Tensor const& q_nope,
     torch::Tensor const& q_pe,
     torch::Tensor const& kv_c_and_k_pe_cache,
     torch::Tensor const& seq_lens,
     torch::Tensor const& page_table,
     torch::Tensor const& workspace,
+    double sm_scale,
     int64_t num_kv_splits) {
   TORCH_CHECK(false, "CUDA version must be >= 12.4 for cutlass_mla_decode");
 }
@@ -64,11 +66,11 @@ struct IsPersistent {
   static const bool value = v;
 };
 
-template <typename T, bool IsPaged128, typename PersistenceOption = IsPersistent<true>>
+template <typename T, typename TOut, bool IsPaged128, typename PersistenceOption = IsPersistent<true>>
 struct MlaSm100 {
   using Element = T;
   using ElementAcc = float;
-  using ElementOut = T;
+  using ElementOut = TOut;
 
   using TileShape = Shape<_128, _128, Shape<_512, _64>>;
   using TileShapeH = cute::tuple_element_t<0, TileShape>;
@@ -99,6 +101,7 @@ struct MlaSm100 {
 template <typename T>
 typename T::Fmha::Arguments args_from_options(
     at::Tensor const& out,
+    at::Tensor const& lse,
     at::Tensor const& q_nope,
     at::Tensor const& q_pe,
     at::Tensor const& kv_c_and_k_pe_cache,
@@ -162,7 +165,10 @@ typename T::Fmha::Arguments args_from_options(
        stride_PT,
        page_count_total,
        page_size},
-      {static_cast<ElementOut*>(out.data_ptr()), stride_O, static_cast<ElementAcc*>(nullptr), stride_LSE},
+      {static_cast<ElementOut*>(out.data_ptr()),
+       stride_O,
+       static_cast<ElementAcc*>(lse.defined() ? lse.data_ptr() : nullptr),
+       stride_LSE},
       hw_info,
       // TODO(trevor-m): Change split_kv back to -1 when
       // https://github.com/NVIDIA/cutlass/issues/2274 is fixed. Split_kv=1 will
@@ -178,9 +184,10 @@ typename T::Fmha::Arguments args_from_options(
   return arguments;
 }
 
-template <typename Element, bool IsPaged128, typename PersistenceOption>
+template <typename Element, typename ElementOut, bool IsPaged128, typename PersistenceOption>
 void runMla(
     at::Tensor const& out,
+    at::Tensor const& lse,
     at::Tensor const& q_nope,
     at::Tensor const& q_pe,
     at::Tensor const& kv_c_and_k_pe_cache,
@@ -190,9 +197,9 @@ void runMla(
     double sm_scale,
     int64_t num_kv_splits,
     cudaStream_t stream) {
-  using MlaSm100Type = MlaSm100<Element, IsPaged128, PersistenceOption>;
+  using MlaSm100Type = MlaSm100<Element, ElementOut, IsPaged128, PersistenceOption>;
   typename MlaSm100Type::Fmha fmha;
-  auto arguments = args_from_options<MlaSm100Type>(out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, sm_scale, num_kv_splits);
+  auto arguments = args_from_options<MlaSm100Type>(out, lse, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, sm_scale, num_kv_splits);
 
   CUTLASS_CHECK(fmha.can_implement(arguments));
 
@@ -214,6 +221,7 @@ void runMla(
 
 void sm100_cutlass_mla_decode(
     torch::Tensor const& out,
+    torch::Tensor const& lse,
     torch::Tensor const& q_nope,
     torch::Tensor const& q_pe,
     torch::Tensor const& kv_c_and_k_pe_cache,
@@ -233,14 +241,14 @@ void sm100_cutlass_mla_decode(
   DISPATCH_BOOL(page_size == 128, IsPaged128, [&] {
     DISPATCH_BOOL(num_kv_splits <= 1, NotManualSplitKV, [&] {
       if (in_dtype == at::ScalarType::Half) {
-        runMla<cutlass::half_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
-          out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
+        runMla<cutlass::half_t, cutlass::half_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
+          out, lse, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
       } else if (in_dtype == at::ScalarType::BFloat16) {
-        runMla<cutlass::bfloat16_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
-          out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
+        runMla<cutlass::bfloat16_t, cutlass::bfloat16_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
+          out, lse, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
       } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
-        runMla<cutlass::float_e4m3_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
-          out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
+        runMla<cutlass::float_e4m3_t, cutlass::bfloat16_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
+          out, lse, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
       } else {
         TORCH_CHECK(false, "Unsupported input data type of MLA");
       }
@@ -253,7 +261,7 @@ void sm100_cutlass_mla_decode(
 int64_t sm100_cutlass_mla_get_workspace_size(int64_t max_seq_len, int64_t num_batches, int64_t sm_count, int64_t num_kv_splits) {
   // Workspace size depends on ElementAcc and ElementLSE (same as ElementAcc)
   // which are float, so Element type here doesn't matter.
-  using MlaSm100Type = MlaSm100<cutlass::half_t, true>;
+  using MlaSm100Type = MlaSm100<cutlass::half_t, cutlass::half_t, true>;
 
   // Get split kv. Requires problem shape and sm_count only.
   typename MlaSm100Type::Fmha::Arguments arguments;

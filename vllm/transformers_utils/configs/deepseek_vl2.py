@@ -25,20 +25,22 @@ class VisionEncoderConfig(PretrainedConfig):
     deterministic: bool = False
     num_recomputing_layers: int = 0
 
-    def __init__(self,
-                 model_name: str = "vit_so400m_patch14_siglip_384.webli",
-                 image_size: int = 384,
-                 patch_size: int = 16,
-                 width: int = 1024,
-                 layers: int = 24,
-                 heads: int = 16,
-                 mlp_ratio: int = 4,
-                 global_pool: str = "map",
-                 ignore_head: bool = True,
-                 class_token: bool = False,
-                 num_classes: int = 0,
-                 use_checkpoint: bool = False,
-                 **kwargs):
+    def __init__(
+        self,
+        model_name: str = "vit_so400m_patch14_siglip_384.webli",
+        image_size: int = 384,
+        patch_size: int = 16,
+        width: int = 1024,
+        layers: int = 24,
+        heads: int = 16,
+        mlp_ratio: int = 4,
+        global_pool: str = "map",
+        ignore_head: bool = True,
+        class_token: bool = False,
+        num_classes: int = 0,
+        use_checkpoint: bool = False,
+        **kwargs,
+    ):
         self.model_name = model_name
         self.image_size = image_size
         self.patch_size = patch_size
@@ -65,14 +67,16 @@ class MlpProjectorConfig(PretrainedConfig):
     downsample_ratio: int = 2
     token_pooling: bool = False
 
-    def __init__(self,
-                 projector_type: str = "downsample_mlp_gelu",
-                 input_dim: int = 1152,
-                 n_embed: int = 2048,
-                 depth: int = 2,
-                 mlp_ratio: int = 1,
-                 downsample_ratio: int = 2,
-                 **kwargs):
+    def __init__(
+        self,
+        projector_type: str = "downsample_mlp_gelu",
+        input_dim: int = 1152,
+        n_embed: int = 2048,
+        depth: int = 2,
+        mlp_ratio: int = 1,
+        downsample_ratio: int = 2,
+        **kwargs,
+    ):
         self.projector_type = projector_type
         self.input_dim = input_dim
         self.n_embed = n_embed
@@ -84,7 +88,6 @@ class MlpProjectorConfig(PretrainedConfig):
 
 
 class DeepseekV2Config(PretrainedConfig):
-
     model_type = "deepseek_v2"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -106,14 +109,14 @@ class DeepseekV2Config(PretrainedConfig):
         qk_rope_head_dim=64,
         v_head_dim=128,
         qk_nope_head_dim=128,
-        topk_method='gready',
+        topk_method="gready",
         n_group=None,
         topk_group=None,
         num_experts_per_tok=None,
         moe_layer_freq=1,
         first_k_dense_replace=0,
         norm_topk_prob=False,
-        scoring_func='softmax',
+        scoring_func="softmax",
         aux_loss_alpha=0.001,
         seq_aux=True,
         hidden_act="silu",
@@ -191,14 +194,15 @@ class DeepseekVLV2Config(PretrainedConfig):
 
     tile_tag: str = "2D"
     global_view_pos: str = "head"
-    candidate_resolutions: tuple[tuple[int, int]] = ((384, 384), )
+    candidate_resolutions: tuple[tuple[int, int]] = ((384, 384),)
 
-    def __init__(self,
-                 tile_tag: str = "tile_tag",
-                 global_view_pos: str = "head",
-                 candidate_resolutions: tuple[tuple[int,
-                                                    int]] = ((384, 384), ),
-                 **kwargs):
+    def __init__(
+        self,
+        tile_tag: str = "tile_tag",
+        global_view_pos: str = "head",
+        candidate_resolutions: tuple[tuple[int, int]] = ((384, 384),),
+        **kwargs,
+    ):
         super().__init__(**kwargs)
 
         vision_config = kwargs.get("vision_config", {})

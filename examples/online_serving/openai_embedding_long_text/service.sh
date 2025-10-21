@@ -103,7 +103,7 @@ POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"normalize\": true, \"enab
 vllm serve "$MODEL_NAME" \
   --tensor-parallel-size "$GPU_COUNT" \
   --enforce-eager \
-  --override-pooler-config "$POOLER_CONFIG" \
+  --pooler-config "$POOLER_CONFIG" \
   --served-model-name ${MODEL_CODE} \
   --api-key "$API_KEY" \
   --trust-remote-code \
@@ -120,7 +120,7 @@ echo "   - API Key: $API_KEY"
 echo "   - Native Pooling: $POOLING_TYPE | Cross-chunk: MEAN"
 echo ""
 echo "🧪 Test the server with:"
-echo "   python examples/online_serving/openai_embedding_long_text_client.py"
+echo "   python examples/online_serving/openai_embedding_long_text/client.py"
 echo ""
 echo "📚 Enhanced features enabled:"
 echo "   ✅ Intelligent native pooling type detection"

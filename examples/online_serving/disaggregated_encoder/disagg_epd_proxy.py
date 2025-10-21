@@ -39,7 +39,6 @@ import os
 import random
 import uuid
 from collections.abc import AsyncIterator
-from typing import Optional
 
 import aiohttp
 import uvicorn
@@ -54,9 +53,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 logger = logging.getLogger("proxy")
 
 app = FastAPI()
-encode_session: Optional[aiohttp.ClientSession] = None
-prefill_session: Optional[aiohttp.ClientSession] = None
-decode_session: Optional[aiohttp.ClientSession] = None
+encode_session: aiohttp.ClientSession | None = None
+prefill_session: aiohttp.ClientSession | None = None
+decode_session: aiohttp.ClientSession | None = None
 
 ###############################################################################
 # Utils
@@ -376,7 +375,7 @@ async def _post_if_available(
     url: str,
     payload: dict,
     headers: dict,
-) -> Optional[dict]:
+) -> dict | None:
     """
     POST `payload` to `url`.
 

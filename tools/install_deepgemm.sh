@@ -6,7 +6,7 @@ set -e
 
 # Default values
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-DEEPGEMM_GIT_REF="7b6b5563b9d4c1ae07ffbce7f78ad3ac9204827c"
+DEEPGEMM_GIT_REF="594953acce41793ae00a1233eb516044d604bcb6"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do

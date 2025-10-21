@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-PIDS=()
+declare -a PIDS=()
 
 ###############################################################################
 # Configuration -- override via env before running
@@ -168,21 +168,24 @@ python disagg_epd_proxy.py \
     --decode-servers-urls "http://localhost:$DECODE_PORT" \
     >"${PROXY_LOG}" 2>&1 &
 
+PIDS+=($!)
+
 wait_for_server $PROXY_PORT
 echo "All services are up!"
 
 ###############################################################################
 # Benchmark
-cd ../../../benchmarks/
-python benchmark_serving.py \
-  --backend           openai-chat \
-  --model             $MODEL \
-  --dataset-name      hf \
-  --dataset-path      lmarena-ai/VisionArena-Chat \
-  --seed              0 \
-  --endpoint          /v1/chat/completions \
-  --num-prompts       $NUM_PROMPTS \
-  --port              $PROXY_PORT
+vllm bench serve \
+  --model               $MODEL \
+  --backend             openai-chat \
+  --endpoint            /v1/chat/completions \
+  --dataset-name        hf \
+  --dataset-path        lmarena-ai/VisionArena-Chat \
+  --seed                0 \
+  --num-prompts         $NUM_PROMPTS \
+  --port                $PROXY_PORT
+
+PIDS+=($!)
 ###############################################################################
 
 # cleanup

@@ -36,7 +36,6 @@ MODELS_ON_S3 = [
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
     # "meta-llama/Llama-2-7b-hf",
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "meta-llama/Llama-3.2-1B",
     "meta-llama/Llama-3.2-1B-Instruct",
     "meta-llama/Meta-Llama-3-8B",

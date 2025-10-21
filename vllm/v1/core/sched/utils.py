@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from typing import Optional
 
 import torch
 
@@ -10,19 +9,19 @@ from vllm.v1.request import Request, RequestStatus
 
 def remove_all(lst: list, items_to_remove: set) -> list:
     """Remove all items from a list that are in the items_to_remove set.
-    
+
     This method optimizes for the common case of removing a single item,
     falling back to list comprehension for multiple items.
-    
+
     Args:
         lst: The list to remove items from
         items_to_remove: Set of items to remove
-    
+
     Returns:
         Either the modified original list (for single item removal) or
         a new list (for multiple item removal). Callers should use the
         returned value.
-    
+
     Note:
         For single item removal, this modifies the original list in-place
         and returns it. For multiple items, it creates and returns a new list.
@@ -40,11 +39,13 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     return [item for item in lst if item not in items_to_remove]
 
 
-def check_stop(request: Request,
-               max_model_len: int,
-               pooler_output: Optional[torch.Tensor] = None) -> bool:
-    if (request.num_tokens >= max_model_len
-            or request.num_output_tokens >= request.max_tokens):
+def check_stop(
+    request: Request, max_model_len: int, pooler_output: torch.Tensor | None = None
+) -> bool:
+    if (
+        request.num_tokens >= max_model_len
+        or request.num_output_tokens >= request.max_tokens
+    ):
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
         return True
 
@@ -56,9 +57,12 @@ def check_stop(request: Request,
 
     sampling_params = request.sampling_params
     assert sampling_params is not None
+
+    if request.num_output_tokens < sampling_params.min_tokens:
+        return False
+
     last_token_id = request.output_token_ids[-1]
-    if (not sampling_params.ignore_eos
-            and last_token_id == request.eos_token_id):
+    if not sampling_params.ignore_eos and last_token_id == request.eos_token_id:
         request.status = RequestStatus.FINISHED_STOPPED
         return True
 

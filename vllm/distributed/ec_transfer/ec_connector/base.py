@@ -9,7 +9,7 @@ The class provides the following primitives:
     is used by the worker-side to load/save Encoder cache.
         check_caches_exist() - Check whether Encoder cache of requests exist
         update_state_after_alloc() - update ECConnector state after
-        allocate. This will decide to load the cache or not 
+        allocate. This will decide to load the cache or not
         request_finished() - called when a request is finished,
         free the cache with the requests
 
@@ -24,7 +24,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -52,16 +52,19 @@ class ECConnectorMetadata(ABC):  # noqa: B024
     Abstract Metadata used to communicate between the
     Scheduler ECConnector and Worker ECConnector.
     """
+
     pass
 
 
 class ECConnectorBase(ABC):
-
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
-        self._connector_metadata: Optional[ECConnectorMetadata] = None
+        self._connector_metadata: ECConnectorMetadata | None = None
         self._vllm_config = vllm_config
         self._role = role
-        self._is_producer = vllm_config.ec_transfer_config.is_ec_producer
+        if vllm_config.ec_transfer_config is not None:
+            self._is_producer = vllm_config.ec_transfer_config.is_ec_producer
+        else:
+            raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
     @property
     def role(self) -> ECConnectorRole:
@@ -75,11 +78,10 @@ class ECConnectorBase(ABC):
     # Worker-side methods
     # ==============================
 
-    def bind_connector_metadata(
-            self, connector_metadata: ECConnectorMetadata) -> None:
+    def bind_connector_metadata(self, connector_metadata: ECConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
 
-        This function should be called by the model runner every time 
+        This function should be called by the model runner every time
         before the model execution. The metadata will be used for runtime
         EC cache loading.
 
@@ -91,7 +93,7 @@ class ECConnectorBase(ABC):
     def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
 
-        This function should be called by the model runner every time 
+        This function should be called by the model runner every time
         after the model execution.
         """
         self._connector_metadata = None
@@ -115,7 +117,7 @@ class ECConnectorBase(ABC):
     ):
         """
         Initialize with the EC caches.
-        Args: 
+        Args:
             ec_caches: dictionary of encoder cache
         """
         # TODO: Implement this later for P2P feature
@@ -130,7 +132,7 @@ class ECConnectorBase(ABC):
 
         Args:
             **kwargs: additional arguments for the load operation
-            
+
         """
         pass
 
@@ -146,7 +148,7 @@ class ECConnectorBase(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -173,12 +175,12 @@ class ECConnectorBase(ABC):
     ) -> list[bool]:
         """
         Check if encoder cache exists for each mm data of requests
-        
+
         Args:
             request (Request): the request object.
 
         Returns:
-            A list bool where ith value is True if cache exist for 
+            A list bool where ith value is True if cache exist for
             ith mm_data of requests
         """
         pass
@@ -195,7 +197,8 @@ class ECConnectorBase(ABC):
 
     @abstractmethod
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> ECConnectorMetadata:
+        self, scheduler_output: SchedulerOutput
+    ) -> ECConnectorMetadata:
         """
         Build the connector metadata for this step.
 
@@ -218,7 +221,8 @@ class ECConnectorBase(ABC):
         return
 
     def request_finished(
-            self, request: "Request") -> tuple[bool, Optional[dict[str, Any]]]:
+        self, request: "Request"
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its encoder cache is freed.
 

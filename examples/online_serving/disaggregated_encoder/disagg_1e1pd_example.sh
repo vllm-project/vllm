@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-PIDS=()
+declare -a PIDS=()
 
 ###############################################################################
 # Configuration -- override via env before running
@@ -84,8 +84,9 @@ mkdir -p $EC_SHARED_STORAGE_PATH
 # Encoder worker
 ###############################################################################
 CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.0 \
+    --gpu-memory-utilization 0.7 \
     --port "$ENCODE_PORT" \
+    --enforce-eager \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 4096 \
@@ -107,6 +108,7 @@ PIDS+=($!)
 CUDA_VISIBLE_DEVICES="$GPU_PD" VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve "$MODEL" \
     --gpu-memory-utilization 0.7 \
     --port "$PREFILL_DECODE_PORT" \
+    --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs 128 \
     --ec-transfer-config '{
@@ -135,21 +137,24 @@ python disagg_epd_proxy.py \
     --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
     >"${PROXY_LOG}" 2>&1 &
 
+PIDS+=($!)
+
 wait_for_server $PROXY_PORT
 echo "All services are up!"
 
 ###############################################################################
 # Benchmark
-cd ../../../benchmarks/
-python benchmark_serving.py \
-  --backend           openai-chat \
-  --model             $MODEL \
-  --dataset-name      hf \
-  --dataset-path      lmarena-ai/VisionArena-Chat \
-  --seed              0 \
-  --endpoint          /v1/chat/completions \
-  --num-prompts       $NUM_PROMPTS \
-  --port              $PROXY_PORT
+vllm bench serve \
+  --model               $MODEL \
+  --backend             openai-chat \
+  --endpoint            /v1/chat/completions \
+  --dataset-name        hf \
+  --dataset-path        lmarena-ai/VisionArena-Chat \
+  --seed                0 \
+  --num-prompts         $NUM_PROMPTS \
+  --port                $PROXY_PORT
+
+PIDS+=($!)
 ###############################################################################
 
 # cleanup
