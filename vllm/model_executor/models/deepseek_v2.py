@@ -577,15 +577,11 @@ def sparse_attn_indexer(
             topk_indices = torch.empty(
                 num_rows, topk_tokens, dtype=torch.int32, device=logits.device
             )
-            topk_values = torch.empty(
-                num_rows, topk_tokens, dtype=logits.dtype, device=logits.device
-            )
             torch.ops._C.top_k_per_row(
                 logits,
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
                 topk_indices,
-                topk_values,
                 num_rows,
                 logits.stride(0),
                 logits.stride(1),
@@ -642,15 +638,11 @@ def sparse_attn_indexer(
         topk_indices = torch.empty(
             num_rows, topk_tokens, dtype=torch.int32, device=logits.device
         )
-        topk_values = torch.empty(
-            num_rows, topk_tokens, dtype=logits.dtype, device=logits.device
-        )
         torch.ops._C.top_k_per_row(
             logits,
             torch.zeros(num_rows, dtype=torch.int32, device=logits.device),
             index_end_pos.to(dtype=torch.int32, device=logits.device),
             topk_indices,
-            topk_values,
             num_rows,
             logits.stride(0),
             logits.stride(1),
@@ -1312,6 +1304,17 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return SharedFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=0,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
