@@ -14,6 +14,7 @@ vllm serve Qwen/Qwen3-1.7B --reasoning-parser qwen3 \
 import json
 
 from openai import OpenAI
+from utils import get_first_model
 
 
 def get_weather(latitude: float, longitude: float) -> str:
@@ -49,14 +50,17 @@ input_messages = [
 
 def main():
     base_url = "http://0.0.0.0:8000/v1"
-    model = "Qwen/Qwen3-1.7B"
     client = OpenAI(base_url=base_url, api_key="empty")
+    model = get_first_model(client)
     response = client.responses.create(
         model=model, input=input_messages, tools=tools, tool_choice="required"
     )
-    tool_call = response.output[0]
-    args = json.loads(tool_call.arguments)
 
+    for out in response.output:
+        if out.type == "function_call":
+            print("Function call:", out.name, out.arguments)
+            tool_call = out
+    args = json.loads(tool_call.arguments)
     result = get_weather(args["latitude"], args["longitude"])
 
     input_messages.append(tool_call)  # append model's function call message

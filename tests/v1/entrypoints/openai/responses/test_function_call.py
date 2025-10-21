@@ -119,8 +119,10 @@ async def test_function_tool_use(
     )
 
     assert len(response.output) >= 1
-    tool_call = response.output[0]
-
+    tool_call = None
+    for out in response.output:
+        if out.type == "function_call":
+            tool_call = out
     assert tool_call.type == "function_call"
     assert json.loads(tool_call.arguments) is not None
 
@@ -164,8 +166,10 @@ async def test_named_tool_use(client: openai.AsyncOpenAI):
         tools=tools,
         tool_choice={"type": "function", "name": "get_weather"},
     )
-    assert len(response.output) == 1
-    tool_call = response.output[0]
+    assert len(response.output) >= 1
+    for out in response.output:
+        if out.type == "function_call":
+            tool_call = out
     assert tool_call.type == "function_call"
     assert tool_call.name == "get_weather"
     args = json.loads(tool_call.arguments)
