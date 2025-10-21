@@ -9,13 +9,21 @@
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+from collections.abc import Iterable
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Optional, Tuple, Type
 from functools import partial
+from transformers import CLIPVisionConfig
+
+from vllm.attention.layer import MultiHeadAttention
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+from .clip import CLIPVisionEmbeddings, CLIPEncoder
 
 
 def get_abs_pos(abs_pos, tgt_size):
@@ -508,3 +516,135 @@ def _build_sam(
             out_chans=prompt_embed_dim,
         )
     return image_encoder
+
+
+class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
+
+    def get_abs_pos(abs_pos, tgt_size):
+        # abs_pos: L, C
+        # tgt_size: M
+        # return: M, C
+        dim = abs_pos.size(-1)
+        abs_pos_new = abs_pos.squeeze(0)
+        cls_token, old_pos_embed = abs_pos_new[:1], abs_pos_new[1:]
+
+        src_size = int(math.sqrt(abs_pos_new.shape[0] - 1))
+        tgt_size = int(math.sqrt(tgt_size))
+        dtype = abs_pos.dtype
+
+        if src_size != tgt_size:
+            old_pos_embed = old_pos_embed.view(1, src_size, src_size, dim).permute(0, 3, 1,
+                                                                                        2).contiguous()
+            old_pos_embed = old_pos_embed.to(torch.float32)
+            new_pos_embed = F.interpolate(
+                old_pos_embed,
+                size=(tgt_size, tgt_size),
+                mode='bicubic',
+                antialias=True,
+                align_corners=False,
+            ).to(dtype)
+            new_pos_embed = new_pos_embed.permute(0, 2, 3, 1)
+            new_pos_embed = new_pos_embed.view(tgt_size * tgt_size, dim)
+            vision_pos_embed = torch.cat([cls_token, new_pos_embed], dim=0)
+            vision_pos_embed = vision_pos_embed.view(1, tgt_size * tgt_size + 1, dim)
+            return vision_pos_embed
+        else:
+            return abs_pos
+
+    def forward(self, pixel_values: torch.Tensor, patch_embeds: torch.Tensor | None = None) -> torch.Tensor:
+        batch_size = pixel_values.shape[0]
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(
+            pixel_values.to(dtype=target_dtype)
+        )  # shape = [*, width, grid, grid]
+        patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
+
+        class_embeds = self.class_embedding.expand(batch_size, 1, -1)
+        embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
+        embeddings = embeddings + self.position_embedding(self.position_ids)
+
+        batch_size = pixel_values.shape[0]
+        target_dtype = self.patch_embedding.weight.dtype
+        if patch_embeds is not None:
+            patch_embeds = patch_embeds
+        else:
+            patch_embeds = self.patch_embedding(pixel_values)
+        patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
+
+        class_embeds = self.class_embedding.expand(batch_size, 1, -1)
+        embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
+        embeddings = embeddings + get_abs_pos(self.position_embedding(self.position_ids), embeddings.size(1))
+        return embeddings
+
+
+class DeepCLIPVisionTransformer(nn.Module):
+    def __init__(
+        self,
+        config: CLIPVisionConfig,
+        quant_config: QuantizationConfig | None = None,
+        *,
+        num_hidden_layers_override: int | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+
+        self.config = config
+        embed_dim = config.hidden_size
+
+        self.embeddings = DeepCLIPVisionEmbeddings(config)
+
+        # NOTE: This typo of "layrnorm" is not fixed on purpose to match
+        # the original transformers code and name of the model weights.
+        self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+
+        self.transformer = CLIPEncoder(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.encoder",
+            attn_cls=MultiHeadAttention,
+        )
+
+        num_hidden_layers = config.num_hidden_layers
+        if len(self.transformer.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {num_hidden_layers} "
+                f"layers, but you requested {len(self.transformer.layers)} layers."
+            )
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        patch_embeds: torch.Tensor | None = None,
+        *,
+        select_layers: list[int] | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.embeddings(pixel_values, patch_embeds)
+        hidden_states = self.pre_layrnorm(hidden_states)
+
+        # Produces either the last layer output or all of the hidden states,
+        # depending on if we have select_layers or not
+        encoder_outputs = self.transformer(
+            inputs_embeds=hidden_states,
+            return_all_hidden_states=select_layers is not None,
+        )
+        return encoder_outputs
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

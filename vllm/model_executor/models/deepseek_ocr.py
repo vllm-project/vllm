@@ -34,9 +34,8 @@ from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper, init_vllm_registered_model, maybe_prefix)
 
-from .deepencoder import build_sam_vit_b
+from .deepencoder import build_sam_vit_b, DeepCLIPVisionTransformer
 from .deepseek_vl2 import MlpProjector
-from .clip import CLIPVisionModel
 # from deepencoder.clip_sdpa import build_clip_l
 # from deepencoder.build_linear import MlpProjector
 # from addict import Dict
@@ -266,9 +265,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         "lm_head.": "language_model.lm_head.",
         # remove "model." prefix for other components
         "model.": "",
-    },
-    orig_to_new_substr={
-        ".transformer.": ".encoder.",
     })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -323,7 +319,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             projection_dim=512,
             layer_norm_eps=1e-5,
         )
-        self.vision_model = CLIPVisionModel(config=clip_vision_config)
+        self.vision_model = DeepCLIPVisionTransformer(config=clip_vision_config)
 
         n_embed = 1280
         self.projector = MlpProjector(self.projector_config)
