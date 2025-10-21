@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG 5f65b85703c7ed75fda01e06495077caad207c3f
+        GIT_TAG 28417e516fcbf6257a422ba117ef5b6f44da5682
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -66,6 +66,7 @@ if(FLASH_MLA_ARCHS)
         ${flashmla_SOURCE_DIR}/csrc/extension/torch_api.cpp
         ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/pybind.cpp
         ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/flash_fwd_mla_fp8_sm90.cu
+        ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/flash_fwd_mla_metadata.cu
     )
 
     set(FlashMLA_INCLUDES
