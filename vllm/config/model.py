@@ -788,25 +788,20 @@ class ModelConfig:
         cls += "MoE" if self.get_num_experts() > 1 else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
-        convert = None
+        task = None
         if defaults := try_match_architecture_defaults(self.architectures[0]):
-            _, (runner, convert) = defaults
-        # Overwrite with user-specified values
+            _, (runner, task) = defaults
+        # User specified value take precedence
         if self.runner != "auto":
             runner = self.runner
-        if self.convert not in {"auto", "none"}:
-            convert = self.convert
-        # Fall back to default values if still not set
-        if runner is None:
-            runner = "generate"
-        if convert in {None, "none"}:
-            convert = "embed"
-        # Resolve Transformers backend task
-        if runner == "pooling":
-            if convert == "embed":
-                return cls + "EmbeddingModel"
-            if convert == "classify":
-                return cls + "ForSequenceClassification"
+        # Only consider Transformers backend pooling classes if we're wrapping an
+        # architecture that defaults to pooling. Otherwise, we return the LM class
+        # and use adapters.
+        if runner == "pooling" and task in {"embed", "classify"}:
+            if task == "embed":
+                cls += "EmbeddingModel"
+            elif task == "classify":
+                cls += "ForSequenceClassification"
         else:
             cls += "ForCausalLM"
         return cls
