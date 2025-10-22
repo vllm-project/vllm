@@ -190,6 +190,7 @@ class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        quant_config: QuantizationConfig,
         prefix: str = "",
     ):
         super().__init__()
@@ -235,6 +236,7 @@ class GptOssModel(nn.Module):
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
         self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
@@ -246,6 +248,7 @@ class GptOssModel(nn.Module):
             lambda prefix: TransformerBlock(
                 vllm_config,
                 prefix=prefix,
+                quant_config=self.quant_config,
             ),
             prefix=f"{prefix}.layers",
         )
