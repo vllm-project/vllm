@@ -19,7 +19,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Optional
 
 import prometheus_client
 import pydantic
