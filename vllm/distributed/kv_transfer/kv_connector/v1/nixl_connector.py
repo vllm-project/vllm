@@ -216,7 +216,9 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
@@ -325,7 +327,7 @@ class NixlConnectorScheduler:
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
-        self._encoded_xfer_handshake_metadata: dict[int, dict[int, Any]] = {}
+        self._encoded_xfer_handshake_metadata: dict[int, Any] = {}
         self._stop_event = threading.Event()
 
         # Requests that need to start recv/send.
@@ -346,7 +348,9 @@ class NixlConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
@@ -419,9 +423,7 @@ class NixlConnectorScheduler:
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart(
-                    (identity, b"", encoded_data[target_tp_rank])
-                )
+                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -870,7 +872,6 @@ class NixlConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
         )
 
-
     def _nixl_handshake(
         self,
         host: str,
@@ -896,9 +897,7 @@ class NixlConnectorWorker:
 
         # Send query for the request.
         with zmq_ctx(zmq.REQ, path) as sock:
-            msg = msgspec.msgpack.encode(
-                (GET_META_MSG, p_remote_rank)
-            )
+            msg = msgspec.msgpack.encode((GET_META_MSG, p_remote_rank))
             # Set receive timeout to 5 seconds to avoid hanging on dead server
             sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
             sock.send(msg)
