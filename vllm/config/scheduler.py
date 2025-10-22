@@ -331,4 +331,12 @@ class SchedulerConfig:
                 f"max_num_partial_prefills ({self.max_num_partial_prefills})."
             )
 
+        if self.enable_hybrid_chunked_prefill and not self.chunked_prefill_enabled:
+            raise ValueError(
+                "Hybrid chunked prefill can only be enabled when chunked "
+                "prefill is enabled. Please set --enable-chunked-prefill=True "
+                "or disable hybrid chunked prefill by setting "
+                "--enable-hybrid-chunked-prefill=False."
+            )
+
         return self
