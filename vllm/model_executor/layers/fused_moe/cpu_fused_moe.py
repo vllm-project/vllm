@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from vllm import _custom_ops as ops
 from vllm import envs
 
+
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     output = torch.empty_like(x[..., : x.shape[-1] // 2])
     torch.ops._C.silu_and_mul(output, x)
@@ -240,7 +241,7 @@ class CPUFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
         use_onednn_mm = ops._supports_onednn and ops.is_onednn_acl_supported()
 
-        num_experts = layer.global_num_experts
+        num_experts = layer.w13_weight.size(0)
         has_w13_bias = hasattr(layer, "w13_bias")
         has_w2_bias = hasattr(layer, "w2_bias")
 
@@ -266,9 +267,13 @@ class CPUFusedMOE:
                     )
                 )
             else:
-                layer.gate_up_linear.append(lambda x, w=layer_w13_weight, b=layer_w13_bias: F.linear(x, w, b))
-                layer.down_linear.append(lambda x, w=layer_w2_weight, b=layer_w2_bias: F.linear(x, w, b))
-        if use_onednn_mm: # remove weight
+                layer.gate_up_linear.append(
+                    lambda x, w=layer_w13_weight, b=layer_w13_bias: F.linear(x, w, b)
+                )
+                layer.down_linear.append(
+                    lambda x, w=layer_w2_weight, b=layer_w2_bias: F.linear(x, w, b)
+                )
+        if use_onednn_mm:  # remove weight
             layer.w13_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
 
