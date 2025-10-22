@@ -23,13 +23,13 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.utils import (
+from vllm.utils.async_utils import in_loop
+from vllm.utils.network_utils import (
     close_sockets,
     get_open_port,
     get_open_zmq_inproc_path,
     make_zmq_socket,
 )
-from vllm.utils.async_utils import in_loop
 from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
@@ -46,7 +46,7 @@ from vllm.v1.engine.utils import (
     CoreEngineProcManager,
     launch_core_engines,
 )
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)

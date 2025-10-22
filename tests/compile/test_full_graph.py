@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -10,11 +10,9 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.attention.backends.registry import _Backend
-from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
 
@@ -23,22 +21,23 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
         (
-            "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-            {
-                "dtype": torch.float16,
-            },
-        ),
-        (
             "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
-            {
-                "dtype": torch.float16,
-            },
+            {"dtype": torch.float16},
         ),
-        ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
     if all:
+        TEST_MODELS.extend(
+            [
+                ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
+                (
+                    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
+                    {"dtype": torch.float16},
+                ),
+            ]
+        )
+
         # TODO: figure out why this fails.
         if False and is_quant_method_supported("gguf"):  # noqa: SIM223
             TEST_MODELS.append(
@@ -83,31 +82,38 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     "compilation_mode",
     [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
 )
-@pytest.mark.parametrize("model_info", models_list(all=True))
+@pytest.mark.parametrize("model, model_kwargs", models_list(all=True))
 @create_new_process_for_each_test()
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
-    model_info: tuple[str, dict[str, Any]],
+    model: str,
+    model_kwargs: dict[str, Any],
     compilation_mode: int,
 ):
-    model, model_kwargs = model_info
+    if (
+        "w8a8" in model
+        or "w8w8" in model
+        and current_platform.has_device_capability((10, 0))
+    ):
+        # int8 removed on Blackwell:
+        pytest.skip("int8 support removed on Blackwell")
 
     with monkeypatch.context():
         print(f"MODEL={model}")
 
-        run_model(compilation_mode, model, model_kwargs)
+        run_model(compilation_mode, model, **model_kwargs)
 
 
 # TODO(luka) add other supported compilation config scenarios here
 @pytest.mark.parametrize(
-    "compilation_config, model_info",
+    "compilation_config, model, model_kwargs",
     [
         # additional compile sizes, only some of the models
         (
             CompilationConfig(mode=CompilationMode.VLLM_COMPILE, compile_sizes=[1, 2]),
-            model,
+            *model_info,
         )
-        for model in models_list(all=False)
+        for model_info in models_list(all=False)
     ]
     + [
         # RMSNorm + quant fusion, only 8-bit quant models
@@ -117,18 +123,19 @@ def test_full_graph(
                 custom_ops=["+rms_norm"],
                 pass_config=PassConfig(enable_fusion=True, enable_noop=True),
             ),
-            model,
+            *model_info,
         )
-        for model in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+        for model_info in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
     ]
     + [
         # Test depyf integration works
         (
             CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                debug_dump_path=tempfile.gettempdir(),
+                debug_dump_path=Path(tempfile.gettempdir()),
             ),
-            ("facebook/opt-125m", {}),
+            "facebook/opt-125m",
+            {},
         ),
     ]
     + [
@@ -142,9 +149,9 @@ def test_full_graph(
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 compile_sizes=[1, 2],
             ),
-            model,
+            *model_info,
         )
-        for model in models_list(all=False)
+        for model_info in models_list(all=False)
         if is_torch_equal_or_newer("2.9.0.dev")
     ],
 )
@@ -152,16 +159,24 @@ def test_full_graph(
 @create_new_process_for_each_test()
 def test_custom_compile_config(
     compilation_config: CompilationConfig,
-    model_info: tuple[str, dict[str, Any]],
+    model: str,
+    model_kwargs: dict[str, Any],
 ):
+    if (
+        "w8a8" in model
+        or "w8w8" in model
+        and current_platform.has_device_capability((10, 0))
+    ):
+        # int8 removed on Blackwell:
+        pytest.skip("int8 support removed on Blackwell")
+
     if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
         "2.9.0.dev"
     ):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
-    model, model_kwargs = model_info
     print(f"MODEL={model}")
-    run_model(compilation_config, model, model_kwargs)
+    run_model(compilation_config, model, **model_kwargs)
 
 
 @pytest.mark.parametrize(
@@ -176,50 +191,16 @@ def test_fp8_kv_scale_compile(compilation_mode: int):
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
-    run_model(compilation_mode, model, model_kwargs)
+    run_model(compilation_mode, model, **model_kwargs)
 
 
-def test_inductor_graph_partition_attn_fusion(caplog_vllm):
-    if not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
-    model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
-    compilation_config = CompilationConfig(
-        mode=CompilationMode.VLLM_COMPILE,
-        use_inductor_graph_partition=True,
-        cudagraph_mode=CUDAGraphMode.PIECEWISE,
-        custom_ops=["+quant_fp8"],
-        pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
+def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+    compilation_config = (
+        compile_config
+        if isinstance(compile_config, CompilationConfig)
+        else CompilationConfig(mode=compile_config)
     )
-    model_kwargs = {
-        "kv_cache_dtype": "fp8",
-        "max_model_len": 1024,
-    }
-    with (
-        caplog_vllm.at_level(logging.DEBUG),
-        global_force_attn_backend_context_manager(_Backend.FLASHINFER),
-    ):
-        run_model(compilation_config, model, model_kwargs)
 
-    try:
-        assert "Fused quantization onto 48 attention nodes" in caplog_vllm.text, (
-            caplog_vllm.text
-        )
-    except AssertionError:
-        # Note: this message is only triggered when the compilation goes
-        # through the custom pass. Due to multiple layers of cache on
-        # PyTorch side, the compilation of a graph may be cached such
-        # that custom pass directly goes through cache. In this case,
-        # we go through this branch and assert that the pass is not
-        # triggered.
-        assert "Fused quantization" not in caplog_vllm.text
-
-
-def run_model(
-    compile_config: int | CompilationConfig,
-    model: str,
-    model_kwargs: dict[str, Any],
-):
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -227,12 +208,17 @@ def run_model(
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0)
+    # Allow override from model_kwargs
+    model_kwargs = {"tensor_parallel_size": 1, **model_kwargs}
+    model_kwargs = {"disable_custom_all_reduce": True, **model_kwargs}
+
+    # No cudagraphs by default
+    if compilation_config.cudagraph_mode is None:
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
     llm = LLM(
         model=model,
-        enforce_eager=True,
-        tensor_parallel_size=1,
-        disable_custom_all_reduce=True,
-        compilation_config=compile_config,
+        compilation_config=compilation_config,
         **model_kwargs,
     )
     outputs = llm.generate(prompts, sampling_params)

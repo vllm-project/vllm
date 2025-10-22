@@ -1,7 +1,5 @@
 # Using Docker
 
-[](){ #deployment-docker-pre-built-image }
-
 ## Use vLLM's Official Docker Image
 
 vLLM offers an official Docker image for deployment.
@@ -10,7 +8,7 @@ The image can be used to run OpenAI compatible server and is available on Docker
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+    --env "HF_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
@@ -22,7 +20,7 @@ This image can also be used with other container engines such as [Podman](https:
 ```bash
 podman run --device nvidia.com/gpu=all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
-  --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+  --env "HF_TOKEN=$HF_TOKEN" \
   -p 8000:8000 \
   --ipc=host \
   docker.io/vllm/vllm-openai:latest \
@@ -37,7 +35,7 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
     memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 !!! note
-    Optional dependencies are not included in order to avoid licensing issues (e.g. <gh-issue:8030>).
+    Optional dependencies are not included in order to avoid licensing issues (e.g. <https://github.com/vllm-project/vllm/issues/8030>).
 
     If you need to use those dependencies (having accepted the license terms),
     create a custom Dockerfile on top of the base image with an extra layer that installs them:
@@ -62,11 +60,9 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
     RUN uv pip install --system git+https://github.com/huggingface/transformers.git
     ```
 
-[](){ #deployment-docker-build-image-from-source }
-
 ## Building vLLM's Docker Image from Source
 
-You can build and run vLLM from source via the provided <gh-file:docker/Dockerfile>. To build vLLM:
+You can build and run vLLM from source via the provided [docker/Dockerfile](../../docker/Dockerfile). To build vLLM:
 
 ```bash
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
@@ -128,7 +124,7 @@ To run vLLM with the custom-built Docker image:
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
-    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
+    --env "HF_TOKEN=<secret>" \
     vllm/vllm-openai <args...>
 ```
 
