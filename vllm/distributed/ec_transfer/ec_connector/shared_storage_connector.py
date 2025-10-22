@@ -65,8 +65,8 @@ class ECSharedStorageConnector(ECConnectorBase):
         encoder_cache
 
         Args:
-            encoder_cache (dict[str, torch.Tensor]): A dictionary that maps
-            mm_hash identifiers to their corresponding encoder cache tensors.
+            encoder_cache (dict[str, torch.Tensor]): Reference 
+            to encoder cache storage inside worker.
         """
 
         # Get the metadata
@@ -95,8 +95,8 @@ class ECSharedStorageConnector(ECConnectorBase):
         Start saving the EC cache for each mm_data from the encoder cache.
 
         Args:
-            encoder_cache (dict[str, torch.Tensor]): A dictionary that maps
-            mm_hash identifiers to their corresponding encoder cache tensors.
+            encoder_cache (dict[str, torch.Tensor]): Reference 
+            to encoder cache storage inside worker.
             mm_hash (str): The mm_hash identifier for the cache to be saved.
         """
         # Return if it is PD Instance

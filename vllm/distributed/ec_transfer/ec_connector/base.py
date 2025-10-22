@@ -124,24 +124,31 @@ class ECConnectorBase(ABC):
         return
 
     @abstractmethod
-    def start_load_caches(self, encoder_cache, **kwargs) -> None:
+    def start_load_caches(self, 
+                          encoder_cache: dict[str, torch.Tensor], 
+                          **kwargs) -> None:
         """
         Start loading the cache from the connector to vLLM's encoder cache.
         This is called before _gather_mm_embeddings for EC Connector
         For EC the encoder_cache and mm_hash is store in kwargs
 
         Args:
-            encoder_cache: Reference to encoder cache storage inside worker
+            encoder_cache (dict[str, torch.Tensor]): Reference 
+            to encoder cache storage inside worker
         """
         pass
 
     @abstractmethod
-    def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
+    def save_caches(self, 
+                    encoder_cache: dict[str, torch.Tensor], 
+                    mm_hash: str, 
+                    **kwargs) -> None:
         """
         Save caches into connector
         Args:
-            encoder_cache: Reference to encoder cache storage inside worker
-            mm_hash: Hash of the multimodal data
+            encoder_cache (dict[str, torch.Tensor]): Reference 
+            to encoder cache storage inside worker.
+            mm_hash (str): Hash of the multimodal data.
         """
         pass
 
