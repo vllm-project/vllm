@@ -47,11 +47,12 @@ class ECConnectorModelRunnerMixin:
     @staticmethod
     def maybe_get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
+        encoder_cache: dict[str, torch.Tensor],
         **kwargs,
     ) -> AbstractContextManager[ECConnectorOutput | None]:
         return (
             ECConnectorModelRunnerMixin._get_ec_connector_output(
-                scheduler_output, **kwargs
+                scheduler_output, encoder_cache, **kwargs
             )
             if has_ec_transfer()
             else nullcontext()
@@ -63,6 +64,7 @@ class ECConnectorModelRunnerMixin:
     @contextmanager
     def _get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
+        encoder_cache: dict[str, torch.Tensor],
         **kwargs,
     ) -> Generator[ECConnectorOutput, None, None]:
         output = ECConnectorOutput()
@@ -73,7 +75,7 @@ class ECConnectorModelRunnerMixin:
         ec_connector.bind_connector_metadata(scheduler_output.ec_connector_metadata)
 
         if not ec_connector.is_producer:
-            ec_connector.start_load_caches(**kwargs)
+            ec_connector.start_load_caches(encoder_cache, **kwargs)
 
         try:
             yield output

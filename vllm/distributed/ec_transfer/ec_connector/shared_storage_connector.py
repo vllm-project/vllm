@@ -60,18 +60,18 @@ class ECSharedStorageConnector(ECConnectorBase):
         else:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
-    def start_load_caches(self, **kwargs) -> None:
+    def start_load_caches(self, encoder_cache, **kwargs) -> None:
         """Start loading the EC cache from the connector buffer to worker
         encoder_cache
 
         Args:
-            **kwargs: additional arguments for the load operation
+            encoder_cache (dict[str, torch.Tensor]): A dictionary that maps
+            mm_hash identifiers to their corresponding encoder cache tensors.
         """
 
         # Get the metadata
         metadata: ECConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, ECSharedStorageConnectorMetadata)
-        encoder_cache = kwargs.get("encoder_cache")  # returns None if missing
         assert encoder_cache is not None
         if metadata is None:
             logger.warning(
@@ -91,10 +91,13 @@ class ECSharedStorageConnector(ECConnectorBase):
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
-        """Start saving the EC cache for each mm_datas from encoder cache
+        """
+        Start saving the EC cache for each mm_data from the encoder cache.
 
         Args:
-            **kwargs: additional arguments for the save operation.
+            encoder_cache (dict[str, torch.Tensor]): A dictionary that maps
+            mm_hash identifiers to their corresponding encoder cache tensors.
+            mm_hash (str): The mm_hash identifier for the cache to be saved.
         """
         # Return if it is PD Instance
         if not self.is_producer:

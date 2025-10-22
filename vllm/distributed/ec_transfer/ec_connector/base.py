@@ -124,15 +124,14 @@ class ECConnectorBase(ABC):
         return
 
     @abstractmethod
-    def start_load_caches(self, **kwargs) -> None:
+    def start_load_caches(self, encoder_cache, **kwargs) -> None:
         """
         Start loading the cache from the connector to vLLM's encoder cache.
         This is called before _gather_mm_embeddings for EC Connector
         For EC the encoder_cache and mm_hash is store in kwargs
 
         Args:
-            **kwargs: additional arguments for the load operation
-
+            encoder_cache: Reference to encoder cache storage inside worker
         """
         pass
 
