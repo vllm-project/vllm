@@ -32,6 +32,7 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import _Backend
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -81,16 +82,18 @@ from vllm.transformers_utils.config import (
     maybe_override_with_speculators,
 )
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
+from vllm.utils import FlexibleArgumentParser, is_in_ray_actor
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.network_utils import get_ip
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
-    from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
+    from vllm.v1.executor import Executor
 else:
-    ExecutorBase = Any
+    Executor = Any
     QuantizationMethods = Any
     LoadFormats = Any
     UsageContext = Any
@@ -366,7 +369,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: (
-        str | DistributedExecutorBackend | type[ExecutorBase] | None
+        str | DistributedExecutorBackend | type[Executor] | None
     ) = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
@@ -435,6 +438,7 @@ class EngineArgs:
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
+    enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str, Any]] = get_field(
         MultiModalConfig, "media_io_kwargs"
@@ -449,6 +453,9 @@ class EngineArgs:
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+    mm_encoder_attn_backend: _Backend | str | None = (
+        MultiModalConfig.mm_encoder_attn_backend
+    )
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
@@ -479,6 +486,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
     guided_decoding_disable_fallback: bool | None = None
@@ -890,6 +898,9 @@ class EngineArgs:
             "--limit-mm-per-prompt", **multimodal_kwargs["limit_per_prompt"]
         )
         multimodal_group.add_argument(
+            "--enable-mm-embeds", **multimodal_kwargs["enable_mm_embeds"]
+        )
+        multimodal_group.add_argument(
             "--media-io-kwargs", **multimodal_kwargs["media_io_kwargs"]
         )
         multimodal_group.add_argument(
@@ -910,6 +921,10 @@ class EngineArgs:
         )
         multimodal_group.add_argument(
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"]
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-attn-backend",
+            **multimodal_kwargs["mm_encoder_attn_backend"],
         )
         multimodal_group.add_argument(
             "--interleave-mm-strings", **multimodal_kwargs["interleave_mm_strings"]
@@ -1148,6 +1163,7 @@ class EngineArgs:
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            enable_mm_embeds=self.enable_mm_embeds,
             interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
             skip_mm_profiling=self.skip_mm_profiling,
@@ -1157,6 +1173,7 @@ class EngineArgs:
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
+            mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1291,7 +1308,8 @@ class EngineArgs:
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
             CpuArchEnum.POWERPC,
             CpuArchEnum.S390X,
@@ -1304,6 +1322,13 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
+
         assert self.enable_chunked_prefill is not None
 
         sliding_window: int | None = None
@@ -1529,7 +1554,6 @@ class EngineArgs:
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
-            send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER and parallel_config.use_ray),
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,

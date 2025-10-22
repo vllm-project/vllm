@@ -557,6 +557,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             torch.ops._C.silu_and_mul(output, input)
         elif activation == "gelu":
             torch.ops._C.gelu_and_mul(output, input)
+        elif activation == "swigluoai":
+            # alpha = 1.702, limit = 7.0
+            torch.ops._C.swigluoai_and_mul(output, input)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 

@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from vllm.platforms import current_platform
-from vllm.utils.functools import identity
+from vllm.utils.func_utils import identity
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -109,8 +109,7 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 4},
             )
         ],
-        # TODO: Revert to "auto" when CPU backend can use torch > 2.6
-        dtype="bfloat16" if current_platform.is_cpu() else "auto",
+        vllm_runner_kwargs={"enable_mm_embeds": True},
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_vl": VLMTestInfo(
