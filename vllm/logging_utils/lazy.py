@@ -16,7 +16,7 @@ class lazy:
     def __str__(self) -> str:
         return str(self._factory())
 
-    def __repr__(self) -> str:  # pragma: no cover - parity with __str__
+    def __repr__(self) -> str: 
         return str(self)
 
 
