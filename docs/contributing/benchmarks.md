@@ -7,7 +7,7 @@ toc_depth: 4
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
 - **[Benchmark CLI](#benchmark-cli)**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Batch Scripts](#batch-scripts)**: Run `vllm bench` against multiple configurations conveniently
+- **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
 - **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
 - **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
@@ -925,15 +925,13 @@ throughput numbers correctly is also adjusted.
 
 </details>
 
-## Batch Scripts
+## Parameter Sweeps
 
-### Batch Serving Script
+### Online Benchmark
 
-[`vllm/benchmarks/serve_multi.py`](../../vllm/benchmarks/serve_multi.py) automatically starts `vllm serve` and runs `vllm bench serve` over multiple configurations.
+[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
 
-#### Batch Mode
-
-The basic purpose of this script is to evaluate vLLM under different settings. Follows these steps to run the script:
+Follow these steps to run the script:
 
 1. Construct the base command to `vllm serve`, and pass it to the `--serve-cmd` option.
 2. Construct the base command to `vllm bench serve`, and pass it to the `--bench-cmd` option.
@@ -996,7 +994,7 @@ The basic purpose of this script is to evaluate vLLM under different settings. F
 Example command:
 
 ```bash
-python vllm/benchmarks/serve_multi.py \
+python -m vllm.benchmarks.sweep.serve \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1018,9 +1016,9 @@ python vllm/benchmarks/serve_multi.py \
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
   
-#### SLA Mode
+### SLA Auto-Tuner
 
-By passing SLA constraints via `--sla-params`, you can run this script in SLA mode, causing it to adjust either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints.
+[`vllm/benchmarks/sweep/serve_sla.py`](../../vllm/benchmarks/sweep/serve_sla.py) is a wrapper over [`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
 
 For example, to ensure E2E latency within different target values for 99% of requests:
 
@@ -1044,7 +1042,7 @@ For example, to ensure E2E latency within different target values for 99% of req
 Example command:
 
 ```bash
-python vllm/benchmarks/serve_multi.py \
+python -m vllm.benchmarks.sweep.serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1065,6 +1063,24 @@ The algorithm for adjusting the SLA variable is as follows:
     SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
 
     For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
+
+### Visualizer
+
+[`vllm/benchmarks/sweep/plot.py`](../../vllm/benchmarks/sweep/plot.py) can be used to plot performance curves from parameter sweep results.
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
+    --var-x max_concurrency \
+    --row-by random_input_len \
+    --col-by random_output_len \
+    --curve-by api_server_count,max_num_batched_tokens \
+    --filter-by 'max_concurrency<=1024'
+```
+
+!!! tip
+    You can use `--dry-run` to preview the figures to be plotted.
 
 ## Performance Benchmarks
 
