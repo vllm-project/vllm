@@ -19,6 +19,7 @@ import requests
 #   --task embed --trust-remote-code
 #   --skip-tokenizer-init --enforce-eager
 #   --io-processor-plugin prithvi_to_tiff
+#   --enable-mm-embeds
 
 
 def main():
