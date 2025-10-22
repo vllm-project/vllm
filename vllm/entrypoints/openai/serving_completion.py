@@ -5,7 +5,6 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from http import HTTPStatus
 from typing import cast
 
 import jinja2
@@ -292,12 +291,11 @@ class OpenAIServingCompletion(OpenAIServing):
 
             for final_res in final_res_batch_checked:
                 for output in final_res.outputs:
-                    if output.finish_reason == "error":
-                        return self.create_error_response(
-                            "Internal server error",
-                            err_type="InternalServerError",
-                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                        )
+                    error_response = self._handle_error_finish_reason(
+                        output.finish_reason, request_id
+                    )
+                    if error_response:
+                        return error_response
 
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
@@ -447,12 +445,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
-                    if finish_reason == "error":
-                        error_data = self.create_streaming_error_response(
-                            "Internal server error",
-                            err_type="InternalServerError",
-                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                        )
+                    error_data = self._handle_streaming_error_finish_reason(
+                        finish_reason, request_id
+                    )
+                    if error_data:
                         yield f"data: {error_data}\n\n"
                         yield "data: [DONE]\n\n"
                         return
