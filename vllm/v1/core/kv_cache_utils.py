@@ -943,9 +943,11 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    group_size = min([len(layers) for layers in same_type_layers.values()])
+    spec_with_min_size = min(same_type_layers, key=lambda spec: len(same_type_layers[spec]))
+    spec_with_min_size_layers = same_type_layers.pop(spec_with_min_size)
+    group_size = len(spec_with_min_size_layers)
     grouped_layers = []
-    for layers in same_type_layers.values():
+    for layers in [spec_with_min_size_layers, *same_type_layers.values()]:
         num_padding_layers = group_size - len(layers) % group_size
         if num_padding_layers != group_size:
             logger.warning(
