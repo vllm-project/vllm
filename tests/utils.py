@@ -351,7 +351,8 @@ class RemoteAnthropicServer:
             env.update(env_dict)
         self.proc = subprocess.Popen(
             [
-                "python3 -m",
+                sys.executable,
+                "-m",
                 "vllm.entrypoints.anthropic.api_server",
                 model,
                 *vllm_serve_args,
