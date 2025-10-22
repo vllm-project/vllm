@@ -289,9 +289,7 @@ class RoseAll2AllManager(All2AllManagerBase):
 
         kwargs["nets_per_gpu"] = _nets_per_gpu()
         kwargs["dp_group"] = tp_group
-        kwargs["node_group"] = (
-            global_group if getattr(kwargs, "nvlink", False) else None
-        )
+        kwargs["node_group"] = global_group if kwargs.get("nvlink", False) else None
         kwargs["global_group"] = global_group
         kwargs["device"] = self.device
 
