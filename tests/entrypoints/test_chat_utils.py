@@ -845,7 +845,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
 
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -859,7 +859,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
