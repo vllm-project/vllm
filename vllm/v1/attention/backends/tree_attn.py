@@ -188,7 +188,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             device=device,
         )
 
-        self.reorder_spec.reorder_batch_threshold = self.tree_attn_bias.shape[0]
+        self.reorder_spec.decode_threshold = self.tree_attn_bias.shape[0]
 
     def build(
         self,

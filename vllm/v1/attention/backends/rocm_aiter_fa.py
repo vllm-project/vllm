@@ -303,10 +303,10 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> "AiterFlashAttentionMetadata":
-        assert self.reorder_spec.reorder_batch_threshold is not None
+        assert self.reorder_spec.decode_threshold is not None
         split_ret = split_decodes_prefills_and_extends(
             common_attn_metadata,
-            decode_threshold=self.reorder_spec.reorder_batch_threshold,
+            decode_threshold=self.reorder_spec.decode_threshold,
         )
 
         (

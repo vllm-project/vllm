@@ -583,7 +583,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        if self.reorder_spec.reorder_batch_threshold is not None:
+        if self.reorder_spec.decode_threshold is not None:
             # NOTE(lucas): currently no backend supports the custom masking
             #  required for DCP with q_len > 1, so we assert here. Remove this
             #  assert once the custom mask is support is added to FA3.
@@ -591,20 +591,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.dcp_world_size > 1
                 and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN_MLA"
             ):
-                assert self.reorder_spec.reorder_batch_threshold == 1, (
-                    "DCP not support reorder_batch_threshold > 1 now."
+                assert self.reorder_spec.decode_threshold == 1, (
+                    "DCP not support decode_threshold > 1 now."
                 )
             if self.reorder_spec.split_extend:
                 reorder_batch_to_split_decodes_prefills_and_extends(
                     self.input_batch,
                     scheduler_output,
-                    decode_threshold=self.reorder_spec.reorder_batch_threshold,
+                    decode_threshold=self.reorder_spec.decode_threshold,
                 )
             else:
                 reorder_batch_to_split_decodes_and_prefills(
                     self.input_batch,
                     scheduler_output,
-                    decode_threshold=self.reorder_spec.reorder_batch_threshold,
+                    decode_threshold=self.reorder_spec.decode_threshold,
                 )
 
     # Note: used for model runner override.
@@ -4129,9 +4129,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.reorder_spec = reduce(
             lambda a, b: ReorderSpec(
-                reorder_batch_threshold=min_none_high(
-                    a.reorder_batch_threshold, b.reorder_batch_threshold
-                ),
+                decode_threshold=min_none_high(a.decode_threshold, b.decode_threshold),
                 split_extend=a.split_extend or b.split_extend,
             ),
             specs,

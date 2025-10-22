@@ -82,7 +82,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
-        self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        self._init_decode_threshold(1, self.use_spec_decode)
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()

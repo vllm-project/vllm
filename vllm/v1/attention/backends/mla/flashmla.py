@@ -72,7 +72,7 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(
-        512, query_len_support=QueryLenSupport.UNIFORM
+        512, decode_query_len_support=QueryLenSupport.UNIFORM
     )
     # ^ TODO(matt): tune this
 

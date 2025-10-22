@@ -354,7 +354,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.q_data_type = self.model_config.dtype
 
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
+        self._init_decode_threshold(1, supports_spec_as_decode=can_use_trtllm)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -470,11 +470,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> FlashInferMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        assert self.reorder_spec.reorder_batch_threshold is not None
+        assert self.reorder_spec.decode_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_spec.reorder_batch_threshold,
+                decode_threshold=self.reorder_spec.decode_threshold,
                 require_uniform=True,
             )
         )
@@ -552,7 +552,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_last_page_len_np,
         )
 
-        uses_spec_reorder = self.reorder_spec.reorder_batch_threshold > 1
+        uses_spec_reorder = self.reorder_spec.decode_threshold > 1
         prefill_use_trtllm = use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,

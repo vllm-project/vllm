@@ -29,7 +29,7 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # enable full CUDA Graph support for decode-only capture
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(
-        1, query_len_support=QueryLenSupport.UNIFORM
+        1, decode_query_len_support=QueryLenSupport.UNIFORM
     )
 
 

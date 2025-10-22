@@ -71,15 +71,47 @@ class QueryLenSupport(Enum):
 @dataclass
 class ReorderSpec:
     """
-    The ReorderSpec should be hold by the attention metadata builder of the
-    attention backend, used to decide how to reorder the input request in
-    model_runner before execution on model. If multiple attention backend
-    have different ReorderSpec in a single model, high tolerance one will
-    be selected."""
+    Defines how the model runner reorders requests within a batch for attention
+    backends that distinguish between prefill, extend, and decode phases.
 
-    reorder_batch_threshold: int | None = None
+    Core controls
+    - decode_threshold: Query lengths ≤ this value are treated as decode. If
+    None, no reorder will be applied.
+    - split_extend: If True, split prefill into [extend_prefill, pure_prefill].
+    - decode_query_len_support:
+        - SINGLE_ONLY: single-token only (no spec decode)
+        - UNIFORM: uniform multi-token queries (spec decode, equal lengths)
+        - VARLEN: variable-length queries (spec decode, mixed lengths)
+
+    Example input
+      query_len: [7, 10,  3,  1,  2,  5,  2, 15]
+      seq_len:   [10, 10,  8,  9,  8,  5, 10, 20]
+
+    Case 1: decode_threshold=3
+      query_len: [3,  1,  2,  2,  7, 10,  5, 15]
+      seq_len:   [8,  9,  8, 10, 10, 10,  5, 20]
+                 └──── dec ────┘└──── pre ─────┘
+      → Reordered as [decode, prefill].
+
+    Case 2: decode_threshold=3, split_extend=True,
+      query_len: [3,  1,  2,  2,  7, 15, 10,   5]
+      seq_len:   [8,  9,  8, 10, 10, 20, 10,   5]
+                 └────── dec ──────┘└ ext ─┘└pre┘
+      → Reordered as [decode, extend_prefill, pure_prefill].
+
+    Case 3 (Future/TODO):
+        decode_threshold=3, split_extend=True, query_len_support=UNIFORM
+      (Move the most common ≤ decode_threshold to the front to form the largest
+       *uniform* decode region. Here, the uniform decode region is the two q_len=2’s.)
+      query_len: [2,  2,  3,  1,  7, 15, 10,  5]
+      seq_len:   [8, 10,  8,  9, 10, 20, 10,  5]
+                 └u dec┘ └─dec─┘└──── pre ─────┘
+      → Reordered as [uniform-decode(2s), decode, prefill].
+    """
+
+    decode_threshold: int | None = None
     """The threshold for reordering the batch into decode and prefill 
-    requests. If `reorder_batch_threshold` is not None, prefill and 
+    requests. If `decode_threshold` is not None, prefill and 
     decode request will be reordered according to this value. query 
     length <= threshold will be considered as decode"""
 
@@ -89,12 +121,12 @@ class ReorderSpec:
     in a single batch. Once this flag is set, the request will be reordered to 
     [decode:extend_prefill:pure_prefill]"""
 
-    query_len_support: QueryLenSupport = QueryLenSupport.SINGLE_ONLY
+    decode_query_len_support: QueryLenSupport = QueryLenSupport.SINGLE_ONLY
     """Defines the level of query length support for this backend.
     - SINGLE_ONLY: Only single-token queries (no spec decode support)
     - UNIFORM: Supports uniform multi-token queries (spec decode with uniform lengths)
     - VARLEN: Supports variable-length queries (spec decode with mixed lengths)
-    If set to UNIFORM or VARLEN, this will increase `reorder_batch_threshold` when
+    If set to UNIFORM or VARLEN, this will increase `decode_threshold` when
     speculative decoding is enabled."""
 
 
@@ -294,7 +326,6 @@ class AttentionCGSupport(enum.Enum):
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
-    # reorder_batch_threshold: int | None = None
     # Attention backend's reorder spec which controls if and
     # how to reorder the request before actually execute the
     # model (default: no reorder)
@@ -313,24 +344,21 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
 
-    def _init_reorder_batch_threshold(
-        self, reorder_batch_threshold: int = 1, supports_spec_as_decode: bool = False
+    def _init_decode_threshold(
+        self, decode_threshold: int = 1, supports_spec_as_decode: bool = False
     ) -> None:
-        self.reorder_spec.reorder_batch_threshold = reorder_batch_threshold
-        if (
-            self.reorder_spec.reorder_batch_threshold is not None
-            and supports_spec_as_decode
-        ):
+        self.reorder_spec.decode_threshold = decode_threshold
+        if self.reorder_spec.decode_threshold is not None and supports_spec_as_decode:
             # If the backend supports spec-as-decode kernels, then we can set
-            # the reorder_batch_threshold based on the number of speculative
+            # the decode_threshold based on the number of speculative
             # tokens from the config.
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                self.reorder_spec.reorder_batch_threshold = max(
-                    self.reorder_spec.reorder_batch_threshold,
+                self.reorder_spec.decode_threshold = max(
+                    self.reorder_spec.decode_threshold,
                     1 + speculative_config.num_speculative_tokens,
                 )
 
@@ -800,8 +828,10 @@ def split_decodes_prefills_and_extends(
 
     Returns:
         num_decodes: The number of decode requests.
+        num_extends: The number of extend requests.
         num_prefills: The number of prefill requests.
         num_decode_tokens: The number of tokens in the decode requests.
+        num_extend_tokens: The number of tokens in the extend requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
     max_query_len = common_attn_metadata.max_query_len

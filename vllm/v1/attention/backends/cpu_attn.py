@@ -361,7 +361,7 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.scheduler_config = vllm_config.scheduler_config
-        self._init_reorder_batch_threshold(1, False)
+        self._init_decode_threshold(1, False)
 
         self.seq_start_loc_cpu = torch.zeros(
             vllm_config.scheduler_config.max_num_seqs + 1,
@@ -385,11 +385,11 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_start_loc_np = query_start_loc_cpu.numpy()
 
-        assert self.reorder_spec.reorder_batch_threshold is not None
+        assert self.reorder_spec.decode_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_spec.reorder_batch_threshold,
+                decode_threshold=self.reorder_spec.decode_threshold,
                 require_uniform=True,
             )
         )

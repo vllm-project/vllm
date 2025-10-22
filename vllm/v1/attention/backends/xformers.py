@@ -230,11 +230,11 @@ class XFormersAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> XFormersAttentionMetadata:
-        assert self.reorder_spec.reorder_batch_threshold is not None
+        assert self.reorder_spec.decode_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_spec.reorder_batch_threshold,
+                decode_threshold=self.reorder_spec.decode_threshold,
             )
         )
 
