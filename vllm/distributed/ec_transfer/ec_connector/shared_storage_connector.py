@@ -61,12 +61,17 @@ class ECSharedStorageConnector(ECConnectorBase):
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
     def start_load_caches(self, encoder_cache, **kwargs) -> None:
-        """Start loading the EC cache from the connector buffer to worker
-        encoder_cache
+        """
+        Start loading the cache from the connector into vLLM's encoder cache.
+
+        This method loads the encoder cache based on metadata provided by the scheduler.
+        It is called before `_gather_mm_embeddings` for the EC Connector. For EC,
+        the `encoder_cache` and `mm_hash` are stored in `kwargs`.
 
         Args:
-            encoder_cache (dict[str, torch.Tensor]): Reference
-            to encoder cache storage inside worker.
+            encoder_cache (dict[str, torch.Tensor]): A dictionary mapping multimodal data hashes
+                (`mm_hash`) to encoder cache tensors.
+            kwargs (dict): Additional keyword arguments for the connector.
         """
 
         # Get the metadata
@@ -92,12 +97,16 @@ class ECSharedStorageConnector(ECConnectorBase):
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         """
-        Start saving the EC cache for each mm_data from the encoder cache.
+        Save the encoder cache to the connector.
+
+        This method saves the encoder cache from the worker's local storage
+        to shared storage or another external connector.
 
         Args:
-            encoder_cache (dict[str, torch.Tensor]): Reference
-            to encoder cache storage inside worker.
-            mm_hash (str): The mm_hash identifier for the cache to be saved.
+            encoder_cache (dict[str, torch.Tensor]): A dictionary mapping multimodal data hashes
+                (`mm_hash`) to encoder cache tensors.
+            mm_hash (str): The hash of the multimodal data whose cache is being saved.
+            kwargs (dict): Additional keyword arguments for the connector.
         """
         # Return if it is PD Instance
         if not self.is_producer:
