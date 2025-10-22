@@ -285,6 +285,8 @@ class RoseAll2AllManager(All2AllManagerBase):
             ranks=dp_group.ranks,
         )
 
+        kwargs["nvlink"] = True
+
         kwargs["nets_per_gpu"] = _nets_per_gpu()
         kwargs["dp_group"] = tp_group
         kwargs["node_group"] = (
