@@ -27,27 +27,31 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+LEGACY_WEIGHTS_MAPPER = WeightsMapper(
+    # These are applied in order, so the order matters!
+    orig_to_new_prefix={
+        # Handle BERT-like models
+        "roberta": "model",
+        "bert": "model",
+        # Add `model.` prefix for base model checkpoints
+        "": "model.",
+        # Remove `model.` prefix if it was already there
+        "model.model.": "model.",
+    },
+    orig_to_new_suffix={
+        # Replace legacy suffixes used for norms
+        ".gamma": ".weight",
+        ".beta": ".bias",
+    },
+)
+"""Weights mapping for legacy models.
+
+- Legacy models stored the base model weights under different prefixes
+- Some legacy models used `.gamma` and `.beta` in place of `.weight` and `.bias`"""
+
+
 class LegacyMixin:
-    hf_to_vllm_mapper = WeightsMapper(
-        # These are applied in order, so the order matters!
-        orig_to_new_prefix={
-            # Handle BERT-like models
-            "roberta": "model",
-            "bert": "model",
-            # Add `model.` prefix for base model checkpoints
-            "": "model.",
-            # Remove `model.` prefix if it was already there
-            "model.model.": "model.",
-            # Classifier/scoring heads will be adjacent to `model`
-            "model.score": "classifier",
-            "model.classifier": "classifier",
-        },
-        orig_to_new_suffix={
-            # Replace legacy suffixes used for norms
-            ".gamma": ".weight",
-            ".beta": ".bias",
-        },
-    )
+    hf_to_vllm_mapper = LEGACY_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
