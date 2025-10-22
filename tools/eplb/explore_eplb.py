@@ -10,66 +10,54 @@ Usage:
     python explore_eplb.py --model deepseek-ai/DeepSeek-V2-Lite --num-prompts 500
 """
 
-import argparse
 import json
 import os
-import random
 from pathlib import Path
 
 import torch
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
-from vllm.benchmarks.datasets import SonnetDataset
+from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.config.parallel import EPLBConfig
 from vllm.logger import init_logger
+from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
 
-def load_prompts(
-    model_name: str,
-    num_prompts: int,
-    input_len: int,
-    output_len: int,
-    prefix_len: int,
-    seed: int,
-):
-    dataset_path = Path(__file__).parent / "benchmarks" / "sonnet.txt"
+def has_mapping_changed(prev_stats, current_stats):
+    """Detect if expert mapping has changed between two stats snapshots.
 
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Sonnet dataset not found at {dataset_path}")
+    Uses CUDA tensors for fast comparison of large mappings.
+    """
+    if not prev_stats or not current_stats:
+        return False
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    # Convert to CUDA tensors for fast comparison
+    device = torch.device("cuda:0")
 
-    assert tokenizer.chat_template or tokenizer.default_chat_template, (
-        "Tokenizer/model must have chat template for sonnet dataset."
+    # Compare physical_to_logical_map
+    prev_map = torch.tensor(
+        prev_stats.get("physical_to_logical_map", []), dtype=torch.int64, device=device
+    )
+    curr_map = torch.tensor(
+        current_stats.get("physical_to_logical_map", []),
+        dtype=torch.int64,
+        device=device,
     )
 
-    # Common kwargs for dataset instantiation
-    common_kwargs = {
-        "dataset_path": str(dataset_path),
-        "random_seed": seed,
-    }
+    if not torch.equal(prev_map, curr_map):
+        return True
 
-    # Sample kwargs (same as in throughput.py for sonnet)
-    sample_kwargs = {
-        "tokenizer": tokenizer,
-        "num_requests": num_prompts,
-        "input_len": input_len,
-        "output_len": output_len,
-        "prefix_len": prefix_len,
-        "return_prompt_formatted": True,
-    }
-
-    # Remove None values
-    sample_kwargs = {k: v for k, v in sample_kwargs.items() if v is not None}
-
-    # Instantiate and sample (same pattern as throughput.py)
-    dataset = SonnetDataset(**common_kwargs)
-    requests = dataset.sample(**sample_kwargs)
-
-    return [req.prompt for req in requests]
+    # Also compare logical_replica_count as it affects routing
+    prev_replica = torch.tensor(
+        prev_stats.get("logical_replica_count", []), dtype=torch.int64, device=device
+    )
+    curr_replica = torch.tensor(
+        current_stats.get("logical_replica_count", []), dtype=torch.int64, device=device
+    )
+    return bool(not torch.equal(prev_replica, curr_replica))
 
 
 def _get_eplb_stats_from_worker(worker):
@@ -144,7 +132,7 @@ def get_eplb_stats(llm):
             # Calculate stats
             mean_load = layer_load.float().mean().item()
             max_load = layer_load.max().item()
-            balancedness = mean_load / max_load if max_load > 0 else 1.0
+            balancedness = mean_load / max_load if max_load > 0 else 0.0
 
             per_layer_stats.append(
                 {
@@ -176,64 +164,131 @@ def get_eplb_stats(llm):
         return None
 
 
-def print_stats(stats, label="Stats", top_k_experts=10):
-    """Print statistics in a readable format."""
+def generate_summary(stats, top_k_experts=10, tp_size=1):
+    """Generate a summary with top-k expert load percentages and per-GPU loads.
+
+    Returns a dict with:
+    - model_summary: Total load across all layers with top-k experts and GPU loads
+    - per_layer_summary: Per-layer summaries with top-k experts and GPU loads
+    """
     if not stats:
-        print(f"\n{label}: No stats available")
-        return
+        return None
 
-    print(f"\n{'=' * 80}")
-    print(f"{label}")
-    print(f"{'=' * 80}")
-    print(
-        f"Step: {stats['current_step']}/{stats['step_interval']} "
-        f"(rearrange in {stats['steps_until_rearrange']} steps)"
+    num_physical_experts = stats["num_physical_experts"]
+    experts_per_gpu = num_physical_experts // tp_size
+
+    # Aggregate logical load and physical load across all layers
+    num_logical_experts = stats["num_logical_experts"]
+    total_logical_load = [0.0] * num_logical_experts
+    total_physical_load = [0.0] * num_physical_experts
+
+    for layer_stat in stats["per_layer_stats"]:
+        logical_load = layer_stat["logical_load"]
+        physical_load = layer_stat["physical_load"]
+        for i, load in enumerate(logical_load):
+            total_logical_load[i] += load
+        for i, load in enumerate(physical_load):
+            total_physical_load[i] += load
+
+    # Calculate per-GPU load (model-wide)
+    gpu_loads = []
+    total_load_all = sum(total_physical_load)
+    gpu_load_values = []
+    for gpu_id in range(tp_size):
+        start_idx = gpu_id * experts_per_gpu
+        end_idx = start_idx + experts_per_gpu
+        gpu_load = sum(total_physical_load[start_idx:end_idx])
+        gpu_percentage = (gpu_load / total_load_all * 100) if total_load_all > 0 else 0
+        gpu_loads.append(gpu_percentage)
+        gpu_load_values.append(gpu_load)
+
+    # Calculate balancedness for GPU loads
+    mean_gpu_load = (
+        sum(gpu_load_values) / len(gpu_load_values) if gpu_load_values else 0
     )
-    print(
-        f"Experts: {stats['num_logical_experts']} logical, "
-        f"{stats['num_physical_experts']} physical"
-    )
-    print(f"Layers: {stats['num_layers']}")
+    max_gpu_load = max(gpu_load_values) if gpu_load_values else 0
+    gpu_balancedness = mean_gpu_load / max_gpu_load if max_gpu_load > 0 else 1.0
 
-    # Show top loaded experts per layer
-    print(f"\nTop {top_k_experts} Most Loaded Logical Experts (by layer):")
-    print("-" * 80)
+    model_summary = {
+        "total_gpu_load": {
+            "gpu_loads": gpu_loads,
+            "balancedness": gpu_balancedness,
+        },
+    }
 
+    # Per-layer summaries
+    per_layer_summary = []
     for layer_stat in stats["per_layer_stats"]:
         layer_idx = layer_stat["layer"]
         logical_load = layer_stat["logical_load"]
-        total_load = sum(logical_load)
+        physical_load = layer_stat["physical_load"]
+        total_load = sum(physical_load)
 
-        if total_load == 0:
-            print(f"\nLayer {layer_idx}: No load recorded")
-            continue
+        # Calculate per-GPU load for this layer
+        layer_gpu_loads = []
+        layer_gpu_load_values = []
+        for gpu_id in range(tp_size):
+            start_idx = gpu_id * experts_per_gpu
+            end_idx = start_idx + experts_per_gpu
+            gpu_load = sum(physical_load[start_idx:end_idx])
+            gpu_percentage = (gpu_load / total_load * 100) if total_load > 0 else 0
+            layer_gpu_loads.append(gpu_percentage)
+            layer_gpu_load_values.append(gpu_load)
 
-        # Get top K experts by load
+        # Calculate balancedness for this layer's GPU loads
+        mean_layer_gpu_load = (
+            sum(layer_gpu_load_values) / len(layer_gpu_load_values)
+            if layer_gpu_load_values
+            else 0
+        )
+        max_layer_gpu_load = max(layer_gpu_load_values) if layer_gpu_load_values else 0
+        layer_gpu_balancedness = (
+            mean_layer_gpu_load / max_layer_gpu_load if max_layer_gpu_load > 0 else 1.0
+        )
+
+        # Calculate top-k experts for this layer
         expert_loads = [
             (expert_id, load) for expert_id, load in enumerate(logical_load) if load > 0
         ]
         expert_loads.sort(key=lambda x: x[1], reverse=True)
 
-        print(f"\nLayer {layer_idx} (Total tokens: {total_load:.0f}):")
-        print(f"  {'Expert ID':<12} {'Load':<12} {'Percentage':<12} {'Replicas'}")
-        print("  " + "-" * 55)
-
-        replica_counts = stats["logical_replica_count"][layer_idx]
+        top_k_list = []
         for expert_id, load in expert_loads[:top_k_experts]:
-            percentage = (load / total_load) * 100
-            num_replicas = replica_counts[expert_id]
-            print(
-                f"  {expert_id:<12} {load:<12.0f} {percentage:<11.2f}% {num_replicas}"
+            percentage = (load / total_load * 100) if total_load > 0 else 0
+            replica_count = stats["logical_replica_count"][layer_idx][expert_id]
+            top_k_list.append(
+                {
+                    "expert_id": expert_id,
+                    "percentage": percentage,
+                    "replicas": replica_count,
+                }
             )
 
-        if len(expert_loads) > top_k_experts:
-            remaining_load = sum(load for _, load in expert_loads[top_k_experts:])
-            remaining_pct = (remaining_load / total_load) * 100
-            print(
-                "  ... (%d more experts, %.1f%% of load)",
-                len(expert_loads) - top_k_experts,
-                remaining_pct,
-            )
+        remaining_load = sum(load for _, load in expert_loads[top_k_experts:])
+        remaining_pct = (remaining_load / total_load * 100) if total_load > 0 else 0
+
+        per_layer_summary.append(
+            {
+                "layer": layer_idx,
+                "gpu_loads": layer_gpu_loads,
+                "gpu_balancedness": layer_gpu_balancedness,
+                f"top_{top_k_experts}_experts": top_k_list,
+                "remaining_experts": {
+                    "count": len(expert_loads) - top_k_experts,
+                    "percentage": remaining_pct,
+                },
+            }
+        )
+
+    return {
+        "step": stats["current_step"],
+        "step_interval": stats["step_interval"],
+        "num_logical_experts": stats["num_logical_experts"],
+        "num_physical_experts": stats["num_physical_experts"],
+        "num_layers": stats["num_layers"],
+        "model_summary": model_summary,
+        "per_layer_summary": per_layer_summary,
+    }
 
 
 def analyze_and_save_rearrangement(
@@ -394,40 +449,38 @@ def print_rearrangement_summary(summary):
     for layer_summary in summary["per_layer_summary"]:
         if layer_summary["experts_moved"] > 0:
             print(
-                "  Layer %d: %d expert(s) moved",
-                layer_summary["layer"],
-                layer_summary["experts_moved"],
+                f"Layer {layer_summary['layer']}: "
+                f"{layer_summary['experts_moved']} expert(s) moved"
             )
 
 
 def main(args):
-    # Set random seed (same as throughput.py)
-    if args.seed is None:
-        args.seed = 0
-    random.seed(args.seed)
-
     logger.info("=" * 80)
     logger.info("EPLB Exploration Script")
     logger.info("=" * 80)
     logger.info("Model: %s", args.model)
     logger.info("Number of prompts: %d", args.num_prompts)
+    logger.info("Dataset: %s", args.dataset_name)
     logger.info("TP Size: %d", args.tp)
     logger.info("EPLB Window Size: %d", args.eplb_window_size)
     logger.info("EPLB Step Interval: %d", args.eplb_step_interval)
     logger.info("Redundant Experts: %d", args.num_redundant_experts)
-    logger.info("Seed: %s", args.seed)
+    logger.info("Seed: %d", args.seed)
     logger.info("=" * 80)
 
-    # Load prompts
-    logger.info("\nLoading %d prompts from sonnet dataset...", args.num_prompts)
-    prompts = load_prompts(
-        model_name=args.model,
-        num_prompts=args.num_prompts,
-        input_len=args.input_len,
-        output_len=args.output_len,
-        prefix_len=args.prefix_len,
-        seed=args.seed,
+    # Load prompts using get_samples
+    logger.info(
+        "\nLoading %d prompts from %s dataset...", args.num_prompts, args.dataset_name
     )
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+
+    # Set backend if not set (for get_samples compatibility)
+    if not hasattr(args, "backend"):
+        args.backend = "vllm"
+
+    sample_requests = get_samples(args, tokenizer)
+    prompts = [req.prompt for req in sample_requests]
+
     logger.info("Loaded %d prompts", len(prompts))
     logger.info("Example prompt: %s...", prompts[0][:100])
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -451,6 +504,21 @@ def main(args):
         eplb_config=eplb_config,
     )
 
+    if args.dataset_name == "sonnet":
+        args.output_len = args.sonnet_output_len
+    elif args.dataset_name == "custom":
+        args.output_len = args.custom_output_len
+    elif args.dataset_name == "sharegpt":
+        args.output_len = args.sharegpt_output_len
+    elif args.dataset_name == "burstgpt":
+        args.output_len = args.burstgpt_output_len
+    elif args.dataset_name == "hf":
+        args.output_len = args.hf_output_len
+    elif args.dataset_name == "spec_bench":
+        args.output_len = args.spec_bench_output_len
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset_name}")
+
     # Sampling params
     sampling_params = SamplingParams(
         temperature=0.8,
@@ -466,23 +534,32 @@ def main(args):
         logger.error("EPLB is not enabled or stats unavailable!")
         return
 
-    print_stats(initial_stats, "Initial State", top_k_experts=args.top_k_experts)
-
     # Create output directories
     output_dir = Path(args.output_dir)
-    snapshots_dir = output_dir / "snapshots"
-    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    detailed_dir = output_dir / "detailed_snapshots"
+    summary_dir = output_dir / "summaries"
+    detailed_dir.mkdir(parents=True, exist_ok=True)
+    summary_dir.mkdir(parents=True, exist_ok=True)
 
     # Track all snapshots
     snapshots = [initial_stats]
-    previous_step = initial_stats["current_step"]
+    previous_stats = initial_stats
     rearrangement_summaries = []
 
-    # Save initial snapshot
-    initial_snapshot_file = snapshots_dir / "snapshot_0_initial.json"
-    with open(initial_snapshot_file, "w") as f:
+    # Save initial detailed snapshot and summary
+    initial_detailed_file = detailed_dir / "snapshot_0_initial.json"
+    with open(initial_detailed_file, "w") as f:
         json.dump(initial_stats, f, indent=2)
-    logger.info("Saved initial snapshot to %s", initial_snapshot_file)
+
+    initial_summary = generate_summary(
+        initial_stats, top_k_experts=args.top_k_experts, tp_size=args.tp
+    )
+    initial_summary_file = summary_dir / "summary_0_initial.json"
+    with open(initial_summary_file, "w") as f:
+        json.dump(initial_summary, f, indent=2)
+
+    logger.info("Saved initial detailed snapshot to %s", initial_detailed_file)
+    logger.info("Saved initial summary to %s", initial_summary_file)
 
     logger.info("\nProcessing prompts and tracking rearrangements...")
 
@@ -510,30 +587,41 @@ def main(args):
                 current_stats["step_interval"],
             )
 
-            # Check if rearrangement just happened
-            # Step counter wraps to 0 after reaching step_interval
-            if current_step == 0 and previous_step > 0:
+            # Check if rearrangement just happened by comparing expert mappings
+            if has_mapping_changed(previous_stats, current_stats):
                 rearrangement_num = len(snapshots)
                 logger.info("Rearrangement #%d detected!", rearrangement_num)
                 snapshots.append(current_stats)
 
-                # Save snapshot
-                snapshot_file = (
-                    snapshots_dir / f"snapshot_{rearrangement_num}_after_rearrange.json"
+                # Save detailed snapshot
+                detailed_file = (
+                    detailed_dir / f"snapshot_{rearrangement_num}_after_rearrange.json"
                 )
-                with open(snapshot_file, "w") as f:
+                with open(detailed_file, "w") as f:
                     json.dump(current_stats, f, indent=2)
-                logger.info("Saved snapshot to %s", snapshot_file)
+
+                # Save summary
+                current_summary = generate_summary(
+                    current_stats, top_k_experts=args.top_k_experts, tp_size=args.tp
+                )
+                summary_file = (
+                    summary_dir / f"summary_{rearrangement_num}_after_rearrange.json"
+                )
+                with open(summary_file, "w") as f:
+                    json.dump(current_summary, f, indent=2)
+
+                logger.info("Saved detailed snapshot to %s", detailed_file)
+                logger.info("Saved summary to %s", summary_file)
 
                 # Analyze and save rearrangement details
-                summary = analyze_and_save_rearrangement(
+                rearrange_summary = analyze_and_save_rearrangement(
                     snapshots[-2], snapshots[-1], args.tp, rearrangement_num, output_dir
                 )
-                if summary:
-                    rearrangement_summaries.append(summary)
-                    print_rearrangement_summary(summary)
+                if rearrange_summary:
+                    rearrangement_summaries.append(rearrange_summary)
+                    print_rearrangement_summary(rearrange_summary)
 
-            previous_step = current_step
+            previous_stats = current_stats
 
     logger.info("\nGenerated %d outputs", len(prompts))
 
@@ -568,14 +656,15 @@ def main(args):
 
     logger.info("\n%s", "=" * 80)
     logger.info("All results saved to %s", output_dir)
-    logger.info("  - Snapshots: %s", snapshots_dir)
+    logger.info("  - Detailed snapshots: %s", detailed_dir)
+    logger.info("  - Summaries: %s", summary_dir)
     logger.info("  - Rearrangements: %s", output_dir / "rearrangements")
     logger.info("  - Overall summary: %s", overall_summary_file)
     logger.info("%s", "=" * 80)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Explore EPLB behavior on MoE models")
+    parser = FlexibleArgumentParser(description="Explore EPLB behavior on MoE models")
 
     parser.add_argument(
         "--model",
@@ -584,33 +673,6 @@ if __name__ == "__main__":
         help="Model name or path",
     )
     parser.add_argument("--tp", type=int, default=4, help="Tensor parallel size")
-    parser.add_argument(
-        "--num-prompts", type=int, default=500, help="Number of prompts to process"
-    )
-    parser.add_argument(
-        "--input-len",
-        type=int,
-        default=550,
-        help="Input length for sonnet dataset (default: 550)",
-    )
-    parser.add_argument(
-        "--output-len",
-        type=int,
-        default=150,
-        help="Output length for sonnet dataset (default: 150)",
-    )
-    parser.add_argument(
-        "--prefix-len",
-        type=int,
-        default=0,
-        help="Prefix length for sonnet dataset (default: 0)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Random seed for dataset sampling (default: 0)",
-    )
     parser.add_argument(
         "--max-len", type=int, default=2048, help="Max model sequence length"
     )
@@ -647,6 +709,9 @@ if __name__ == "__main__":
         default=10,
         help="Number of top loaded experts to display per layer",
     )
+
+    # Add dataset-related arguments from benchmarks
+    add_dataset_parser(parser)
 
     args = parser.parse_args()
     main(args)
