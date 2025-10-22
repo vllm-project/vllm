@@ -262,7 +262,7 @@ class RoseAll2AllManager(All2AllManagerBase):
         self.device = device
         self.handle_cache = Cache()
 
-    def get_handle(self, kwargs):
+    def get_handle(self, kwargs, nvlink: bool = True):
         from rose.distributed.torch_group import TorchParallelGroup
         from rose.kernels.efa_all_to_all import EfaAllToAll
 
@@ -285,11 +285,9 @@ class RoseAll2AllManager(All2AllManagerBase):
             ranks=dp_group.ranks,
         )
 
-        kwargs["nvlink"] = True
-
         kwargs["nets_per_gpu"] = _nets_per_gpu()
         kwargs["dp_group"] = tp_group
-        kwargs["node_group"] = global_group if kwargs.get("nvlink", False) else None
+        kwargs["node_group"] = global_group if nvlink else None
         kwargs["global_group"] = global_group
         kwargs["device"] = self.device
 
