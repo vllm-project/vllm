@@ -1672,6 +1672,7 @@ class EngineArgs:
             "FLASH_ATTN_MLA",
             "FLASHINFER",
             "FLASHINFER_MLA",
+            "GROUPED_DIFF_ATTN",
             "ROCM_AITER_MLA",
             "TORCH_SDPA",
             "FLEX_ATTENTION",

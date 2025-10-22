@@ -176,9 +176,6 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         if num_kv_heads is None:
             num_kv_heads = num_heads
-        assert num_heads % num_kv_heads == 0, (
-            f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
-        )
 
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
@@ -263,6 +260,13 @@ class Attention(nn.Module, AttentionLayerBase):
         self.backend = backend_name_to_enum(self.attn_backend.get_name())
         self.dtype = dtype
 
+        if self.backend != _Backend.GROUPED_DIFF_ATTN:
+            # In GDA, num_kv_heads can be different from num_heads
+            assert num_heads % num_kv_heads == 0, (
+                f"num_heads ({num_heads}) is not divisible by "
+                f"num_kv_heads ({num_kv_heads})"
+            )
+
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
@@ -341,6 +345,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
+            is_output_shape_given = output_shape is not None
             output_shape = output_shape if output_shape is not None else query.shape
             output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
             hidden_size = output_shape[-1]
@@ -348,7 +353,8 @@ class Attention(nn.Module, AttentionLayerBase):
             # NOTE(woosuk): We do this outside the custom op to minimize the
             # CPU overheads from the non-CUDA-graph regions.
             query = query.view(-1, self.num_heads, self.head_size)
-            output = output.view(-1, self.num_heads, self.head_size)
+            if not is_output_shape_given:
+                output = output.view(-1, self.num_heads, self.head_size)
             if key is not None:
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:

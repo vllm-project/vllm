@@ -22,6 +22,7 @@ class _Backend(enum.Enum):
     FLASHMLA = enum.auto()
     FLASHMLA_SPARSE = enum.auto()
     FLASH_ATTN_MLA = enum.auto()
+    GROUPED_DIFF_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
     NO_ATTENTION = enum.auto()
@@ -45,6 +46,7 @@ BACKEND_MAP = {
     _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",  # noqa: E501
     _Backend.FLASHMLA_SPARSE: "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend",  # noqa: E501
     _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",  # noqa: E501
+    _Backend.GROUPED_DIFF_ATTN: "vllm.v1.attention.backends.grouped_diff_attn.GroupedDifferentialAttentionBackend",  # noqa: E501
     _Backend.PALLAS: "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
     _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",  # noqa: E501
     _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",  # noqa: E501
