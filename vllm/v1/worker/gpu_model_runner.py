@@ -235,9 +235,6 @@ class GPUModelRunner(
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 
         set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
-        from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-
-        init_batch_invariance()
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -1949,15 +1946,16 @@ class GPUModelRunner(
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if (
-            self.scheduler_config.chunked_prefill_enabled
-            and "encode" in supported_tasks
-        ):
-            supported_tasks.remove("encode")
+        if self.scheduler_config.chunked_prefill_enabled:
+            if "token_embed" in supported_tasks:
+                supported_tasks.remove("token_embed")
+            if "token_classify" in supported_tasks:
+                supported_tasks.remove("token_classify")
 
             logger.debug_once(
                 "Chunked prefill is not supported with "
-                "encode task which using ALL pooling. "
+                "token_embed and token_classify tasks "
+                "which using ALL pooling. "
                 "Please turn off chunked prefill by "
                 "`--no-enable-chunked-prefill` before using it."
             )
@@ -4575,7 +4573,6 @@ class GPUModelRunner(
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        # TODO skip this for encoder model runner
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()

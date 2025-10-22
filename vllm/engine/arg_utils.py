@@ -1619,6 +1619,7 @@ class EngineArgs:
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1739,7 +1740,7 @@ class EngineArgs:
     ) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # V1 always uses chunked prefills and prefix caching
+        # V1 uses chunked prefills and prefix caching by default
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
