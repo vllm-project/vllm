@@ -44,36 +44,34 @@ To call the server, in your preferred text editor, create a script that uses an 
 
 We currently support the following OpenAI APIs:
 
-- [Completions API][completions-api] (`/v1/completions`)
+- [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
-- [Chat Completions API][chat-api] (`/v1/chat/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template][chat-template].
+- [Chat Completions API](#chat-api) (`/v1/chat/completions`)
+    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
     - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
-- [Embeddings API][embeddings-api] (`/v1/embeddings`)
+- [Embeddings API](#embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../models/pooling_models.md).
-- [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
+- [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
-- [Translation API][translations-api] (`/v1/audio/translations`)
+- [Translation API](#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 
 In addition, we have the following custom APIs:
 
-- [Tokenizer API][tokenizer-api] (`/tokenize`, `/detokenize`)
+- [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
-- [Pooling API][pooling-api] (`/pooling`)
+- [Pooling API](#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../models/pooling_models.md).
-- [Classification API][classification-api] (`/classify`)
+- [Classification API](#classification-api) (`/classify`)
     - Only applicable to [classification models](../models/pooling_models.md).
-- [Score API][score-api] (`/score`)
+- [Score API](#score-api) (`/score`)
     - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
-- [Re-rank API][rerank-api] (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
     - Only applicable to [cross-encoder models](../models/pooling_models.md).
-
-[](){ #chat-template }
 
 ## Chat Template
 
@@ -92,7 +90,7 @@ and all chat requests will error.
 vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
 
-vLLM community provides a set of chat templates for popular models. You can find them under the <gh-dir:examples> directory.
+vLLM community provides a set of chat templates for popular models. You can find them under the [examples](../../examples) directory.
 
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
 both a `type` and a `text` field. An example is provided below:
@@ -174,18 +172,16 @@ with `--enable-request-id-headers`.
 
 ## API Reference
 
-[](){ #completions-api }
-
 ### Completions API
 
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: <gh-file:examples/online_serving/openai_completion_client.py>
+Code example: [examples/online_serving/openai_completion_client.py](../../examples/online_serving/openai_completion_client.py)
 
 #### Extra parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ??? code
 
@@ -201,8 +197,6 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/protocol.py:completion-extra-params"
     ```
 
-[](){ #chat-api }
-
 ### Chat API
 
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
@@ -214,11 +208,11 @@ see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more inf
 
 - *Note: `image_url.detail` parameter is not supported.*
 
-Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
+Code example: [examples/online_serving/openai_chat_completion_client.py](../../examples/online_serving/openai_chat_completion_client.py)
 
 #### Extra parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ??? code
 
@@ -234,16 +228,14 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
     ```
 
-[](){ #embeddings-api }
-
 ### Embeddings API
 
 Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: <gh-file:examples/online_serving/pooling/openai_embedding_client.py>
+Code example: [examples/online_serving/pooling/openai_embedding_client.py](../../examples/online_serving/pooling/openai_embedding_client.py)
 
-If the model has a [chat template][chat-template], you can replace `inputs` with a list of `messages` (same schema as [Chat API][chat-api])
+If the model has a [chat template](../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
 
 ??? code
@@ -289,7 +281,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
-        and can be found here: <gh-file:examples/template_vlm2vec_phi3v.jinja>
+        and can be found here: [examples/template_vlm2vec_phi3v.jinja](../../examples/template_vlm2vec_phi3v.jinja)
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
@@ -336,13 +328,13 @@ and passing a list of `messages` in the request. Refer to the examples below for
         Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
-        by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
+        by a custom chat template: [examples/template_dse_qwen2_vl.jinja](../../examples/template_dse_qwen2_vl.jinja)
 
     !!! important
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
         example below for details.
 
-Full example: <gh-file:examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py>
+Full example: [examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py](../../examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py)
 
 #### Extra parameters
 
@@ -369,8 +361,6 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
     ```
 
-[](){ #transcriptions-api }
-
 ### Transcriptions API
 
 Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);
@@ -379,7 +369,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 !!! note
     To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
-Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
+Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
 
 #### API Enforced Limits
 
@@ -468,7 +458,7 @@ For `verbose_json` response format:
 
 #### Extra Parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ??? code
 
@@ -484,8 +474,6 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
     ```
 
-[](){ #translations-api }
-
 ### Translations API
 
 Our Translation API is compatible with [OpenAI's Translations API](https://platform.openai.com/docs/api-reference/audio/createTranslation);
@@ -496,11 +484,11 @@ Please mind that the popular `openai/whisper-large-v3-turbo` model does not supp
 !!! note
     To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
-Code example: <gh-file:examples/online_serving/openai_translation_client.py>
+Code example: [examples/online_serving/openai_translation_client.py](../../examples/online_serving/openai_translation_client.py)
 
 #### Extra Parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:translation-sampling-params"
@@ -512,8 +500,6 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
 ```
 
-[](){ #tokenizer-api }
-
 ### Tokenizer API
 
 Our Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
@@ -522,17 +508,13 @@ It consists of two endpoints:
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
-[](){ #pooling-api }
-
 ### Pooling API
 
 Our Pooling API encodes input prompts using a [pooling model](../models/pooling_models.md) and returns the corresponding hidden states.
 
-The input format is the same as [Embeddings API][embeddings-api], but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
+The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Code example: <gh-file:examples/online_serving/pooling/openai_pooling_client.py>
-
-[](){ #classification-api }
+Code example: [examples/online_serving/pooling/openai_pooling_client.py](../../examples/online_serving/pooling/openai_pooling_client.py)
 
 ### Classification API
 
@@ -540,7 +522,7 @@ Our Classification API directly supports Hugging Face sequence-classification mo
 
 We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
-Code example: <gh-file:examples/online_serving/pooling/openai_classification_client.py>
+Code example: [examples/online_serving/pooling/openai_classification_client.py](../../examples/online_serving/pooling/openai_classification_client.py)
 
 #### Example Requests
 
@@ -649,8 +631,6 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
 ```
 
-[](){ #score-api }
-
 ### Score API
 
 Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
@@ -658,7 +638,7 @@ Usually, the score for a sentence pair refers to the similarity between two sent
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
-Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
+Code example: [examples/online_serving/openai_cross_encoder_score.py](../../examples/online_serving/openai_cross_encoder_score.py)
 
 #### Single inference
 
@@ -839,7 +819,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
         print("Scoring output:", response_json["data"][0]["score"])
         print("Scoring output:", response_json["data"][1]["score"])
         ```
-Full example: <gh-file:examples/online_serving/openai_cross_encoder_score_for_multimodal.py>
+Full example: [examples/online_serving/openai_cross_encoder_score_for_multimodal.py](../../examples/online_serving/openai_cross_encoder_score_for_multimodal.py)
 
 #### Extra parameters
 
@@ -856,8 +836,6 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
 ```
 
-[](){ #rerank-api }
-
 ### Re-rank API
 
 Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
@@ -871,7 +849,7 @@ endpoints are compatible with both [Jina AI's re-rank API interface](https://jin
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
-Code example: <gh-file:examples/online_serving/pooling/jinaai_rerank_client.py>
+Code example: [examples/online_serving/pooling/jinaai_rerank_client.py](../../examples/online_serving/pooling/jinaai_rerank_client.py)
 
 #### Example Request
 
@@ -949,6 +927,6 @@ Key capabilities:
 - Scales from a single GPU to a multi-node cluster without code changes.
 - Provides observability and autoscaling policies through Ray dashboards and metrics.
 
-The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: <gh-file:examples/online_serving/ray_serve_deepseek.py>.
+The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: [examples/online_serving/ray_serve_deepseek.py](../../examples/online_serving/ray_serve_deepseek.py).
 
 Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/serving-llms.html).

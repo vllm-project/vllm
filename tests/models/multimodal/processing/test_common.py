@@ -327,6 +327,7 @@ def _test_processing_correctness_one(
     [
         "rhymes-ai/Aria",
         "CohereForAI/aya-vision-8b",
+        "Open-Bee/Bee-8B-RL",
         "Salesforce/blip2-opt-2.7b",
         "facebook/chameleon-7b",
         "CohereLabs/command-a-vision-07-2025",

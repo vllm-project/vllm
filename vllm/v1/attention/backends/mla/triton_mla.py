@@ -13,6 +13,9 @@ from vllm.attention.backends.abstract import (
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import (
@@ -158,7 +161,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
-        num_kv_splits = 4  # TODO: heuristic
+
+        # For batch invariance, use only 1 split to ensure deterministic reduction
+        num_kv_splits = 1 if vllm_is_batch_invariant() else 4
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(

@@ -87,22 +87,6 @@ class XPUPlatform(Platform):
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        """
-        Check if the kv_cache_dtype is supported.
-        XPU only support fp8 kv cache with triton backend.
-        """
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN"
-        ):
-            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
-
-        return False
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -160,6 +144,8 @@ class XPUPlatform(Platform):
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+        if vllm_config.kv_transfer_config is not None:
+            vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
         if parallel_config.distributed_executor_backend is None:
             if parallel_config.world_size > 1:
@@ -168,7 +154,7 @@ class XPUPlatform(Platform):
                 parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
-            # spawn needs calling `if __name__ == '__main__':``
+            # spawn needs calling `if __name__ == '__main__':`
             # fork is not supported for xpu start new process.
             if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -261,6 +247,10 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from src_cache to dst_cache on XPU."""
         _src_cache = src_cache[:, src_block_indices]
+        if _src_cache.shape[2:] != dst_cache.shape[2:]:
+            # To support TP_ratio, HOST KV might be initiated with HND
+            # while XPU device KV is with NHD
+            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
@@ -273,4 +263,8 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
+        if _src_cache.shape[2:] != dst_cache.shape[2:]:
+            # XPU device KV is with NHD while HOST KV
+            # might be initiated with HND for TP_ratio support
+            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.cpu()

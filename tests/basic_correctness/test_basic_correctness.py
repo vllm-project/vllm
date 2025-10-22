@@ -20,7 +20,7 @@ from ..models.utils import check_outputs_equal
 from ..utils import multi_gpu_test
 
 MODELS = [
-    "google/gemma-2-2b-it",
+    "hmellor/tiny-random-Gemma2ForCausalLM",
     "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
@@ -29,7 +29,7 @@ TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("distilbert/distilgpt2")
+    llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
@@ -125,14 +125,14 @@ def test_models(
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, test_suite, extra_env",
     [
-        ("distilbert/distilgpt2", "ray", "", "L4", {}),
-        ("distilbert/distilgpt2", "mp", "", "L4", {}),
-        ("distilbert/distilgpt2", "ray", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
-        ("distilbert/distilgpt2", "mp", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
+        ("facebook/opt-125m", "ray", "", "L4", {}),
+        ("facebook/opt-125m", "mp", "", "L4", {}),
+        ("facebook/opt-125m", "ray", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
+        ("facebook/opt-125m", "mp", "", "L4", {"VLLM_SLEEP_WHEN_IDLE": "1"}),
         ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
-        ("distilbert/distilgpt2", "ray", "", "A100", {}),
-        ("distilbert/distilgpt2", "mp", "", "A100", {}),
+        ("facebook/opt-125m", "ray", "", "A100", {}),
+        ("facebook/opt-125m", "mp", "", "A100", {}),
     ],
 )
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
@@ -157,11 +157,9 @@ def test_models_distributed(
             and distributed_executor_backend == "ray"
             and attention_backend == ""
             and test_suite == "L4"
+            and enable_prompt_embeds
         ):  # noqa
-            if enable_prompt_embeds:
-                pytest.skip("enable_prompt_embeds does not work with ray compiled dag.")
-            monkeypatch_context.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
-            monkeypatch_context.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
+            pytest.skip("enable_prompt_embeds does not work with ray compiled dag.")
 
         if attention_backend:
             monkeypatch_context.setenv(

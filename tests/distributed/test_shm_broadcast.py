@@ -10,7 +10,8 @@ import torch.distributed as dist
 
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import get_open_port, update_environment_variables
+from vllm.utils import update_environment_variables
+from vllm.utils.network_utils import get_open_port
 
 
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:

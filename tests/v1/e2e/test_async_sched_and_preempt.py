@@ -3,6 +3,7 @@
 from typing import Any
 
 import pytest
+import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
 
@@ -12,6 +13,7 @@ from ...models.utils import check_outputs_equal
 MODEL = "Qwen/Qwen3-0.6B"
 
 
+@dynamo_config.patch(cache_size_limit=16)
 def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor, and various sampling parameters."""
@@ -39,7 +41,7 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-        # m.setenv("VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT", "1")
+        # m.setenv("VLLM_BATCH_INVARIANT", "1")
 
         outputs: list[tuple[str, list]] = []
         for test_preemption in [False, True]:

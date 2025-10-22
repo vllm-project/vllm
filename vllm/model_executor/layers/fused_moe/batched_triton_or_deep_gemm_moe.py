@@ -8,8 +8,8 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.deep_gemm_utils import deep_gemm_block_shape
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
+from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
 
 
 class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -31,7 +31,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.allow_deep_gemm = (
             allow_deep_gemm
             and self.quant_config.use_fp8_w8a8
-            and self.block_shape == deep_gemm_block_shape()
+            and self.block_shape == get_mk_alignment_for_contiguous_layout()
         )
 
         self.batched_deep_gemm_experts = (

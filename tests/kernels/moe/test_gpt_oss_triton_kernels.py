@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.utils import has_triton_kernels
+from vllm.utils.import_utils import has_triton_kernels
 
 if not has_triton_kernels():
     pytest.skip(

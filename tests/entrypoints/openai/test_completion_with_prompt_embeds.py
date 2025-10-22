@@ -292,3 +292,16 @@ async def test_prompt_logprobs_raises_error(
             temperature=0.0,
             extra_body={"prompt_embeds": encoded_embeds, "prompt_logprobs": True},
         )
+
+
+@pytest.mark.asyncio
+async def test_empty_prompt_embeds(
+    client_with_prompt_embeds: openai.AsyncOpenAI,
+) -> None:
+    await client_with_prompt_embeds.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=5,
+        temperature=0.0,
+        extra_body={"prompt_embeds": []},
+    )

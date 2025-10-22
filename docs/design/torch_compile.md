@@ -19,8 +19,8 @@ vLLM will take all the available factors into consideration, and decide a direct
 
 The factors considered include:
 
-- All the related configs (see the `compute_hash` functions in their respective configs in the [config folder](gh-file:vllm/config))
-- PyTorch configs (see the `compute_hash` functions in the [compiler_interface.py](gh-file:vllm/compilation/compiler_interface.py))
+- All the related configs (see the `compute_hash` functions in their respective configs in the [config folder](../../vllm/config))
+- PyTorch configs (see the `compute_hash` functions in the [compiler_interface.py](../../vllm/compilation/compiler_interface.py))
 - The model's forward function and the relevant functions called by the forward function (see below)
 
 With all these factors taken into consideration, usually we can guarantee that the cache is safe to use, and will not cause any unexpected behavior. Therefore, the cache is enabled by default. If you want to debug the compilation process, or if you suspect the cache is causing some issues, you can disable it by setting the environment variable `VLLM_DISABLE_COMPILE_CACHE=1`.

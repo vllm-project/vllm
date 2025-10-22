@@ -117,7 +117,7 @@ class ZmqEventPublisher(EventPublisher):
     Parameters
     ----------
     endpoint:
-        PUB address. Use ``tcp://*:5557`` to bind or ``tcp://host:5557`` to
+        PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
         connect.
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can

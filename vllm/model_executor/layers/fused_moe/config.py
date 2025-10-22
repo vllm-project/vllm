@@ -14,8 +14,9 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.utils import cdiv, has_triton_kernels
+from vllm.utils import cdiv
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
@@ -517,6 +518,26 @@ def mxfp4_w4a16_moe_quant_config(
     )
 
 
+def mxfp4_mxfp8_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc("mxfp8"),
+        _a2=FusedMoEQuantDesc("mxfp8"),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+    )
+
+
 def ocp_mx_moe_quant_config(
     quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
@@ -663,6 +684,17 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @staticmethod
+    def flatten_tp_across_dp(
+        tp_size: int, dp_size: int, dp_rank: int
+    ) -> tuple[int, int]:
+        tp_rank = 0 if tp_size == 1 else get_tensor_model_parallel_rank()
+        # There are actually dp_size * tp_size devices. Update tp_size
+        # and tp_rank so we shard across all devices.
+        flatten_tp_size = dp_size * tp_size
+        flatten_tp_rank = dp_rank * tp_size + tp_rank
+        return flatten_tp_size, flatten_tp_rank
+
+    @staticmethod
     def make(
         tp_size_: int, dp_size_: int, vllm_parallel_config: ParallelConfig
     ) -> "FusedMoEParallelConfig":
@@ -737,19 +769,13 @@ class FusedMoEParallelConfig:
                 between the 4 devices.
         """
 
-        def flatten_tp_across_dp(dp_rank: int):
-            tp_rank = 0 if tp_size_ == 1 else get_tensor_model_parallel_rank()
-            # There are actually dp_size_ * tp_size_ devices. Update tp_size
-            # and tp_rank so we shard across all devices.
-            tp_size = dp_size_ * tp_size_
-            tp_rank = dp_rank * tp_size_ + tp_rank
-            return tp_size, tp_rank
-
         use_ep = dp_size_ * tp_size_ > 1 and vllm_parallel_config.enable_expert_parallel
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+            tp_size_, dp_size_, dp_rank
+        )
 
         if not use_ep:
             return FusedMoEParallelConfig(

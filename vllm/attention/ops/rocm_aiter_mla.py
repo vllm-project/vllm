@@ -5,7 +5,7 @@
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
 def get_aiter_mla_metadata(

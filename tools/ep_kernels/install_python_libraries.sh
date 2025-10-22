@@ -126,7 +126,7 @@ do_build \
     "https://github.com/deepseek-ai/DeepEP" \
     "DeepEP" \
     "setup.py" \
-    "abba6ad" \
+    "73b6ea4" \
     "export NVSHMEM_DIR=$WORKSPACE/nvshmem; "
 
 if [ "$MODE" = "wheel" ]; then

@@ -230,6 +230,26 @@ def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
+@pytest.fixture(scope="session")
+def deepseekv2_lora_files():
+    return snapshot_download(repo_id="wuchen01/DeepSeek-V2-Lite-Chat-All-LoRA")
+
+
+@pytest.fixture(scope="session")
+def gptoss20b_lora_files():
+    return snapshot_download(repo_id="LevinZheng/gpt-oss-20b-lora-adapter")
+
+
+@pytest.fixture(scope="session")
+def qwen3moe_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def olmoe_lora_files():
+    return snapshot_download(repo_id="jeeejeee/olmoe-instruct-text2sql-spider")
+
+
 @pytest.fixture
 def reset_default_device():
     """

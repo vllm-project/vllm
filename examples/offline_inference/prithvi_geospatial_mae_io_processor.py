@@ -38,6 +38,7 @@ def main():
         max_num_seqs=32,
         io_processor_plugin="prithvi_to_tiff",
         model_impl="terratorch",
+        enable_mm_embeds=True,
     )
 
     pooling_params = PoolingParams(task="token_classify", activation=False)
