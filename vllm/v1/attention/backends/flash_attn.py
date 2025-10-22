@@ -303,7 +303,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         max_num_splits = 0  # 0 means use FA3's heuristics, not CG compatible
         if self.use_full_cuda_graph and num_actual_tokens <= self.max_cudagraph_size:
             # NOTE(woosuk): Setting num_splits > 1 may increase the memory
-            # usage, because theintermediate buffers of size [num_splits,
+            # usage, because theintermediate bffers of size [num_splits,
             # num_heads, num_tokens, head_size] are allocated. Therefore,
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
