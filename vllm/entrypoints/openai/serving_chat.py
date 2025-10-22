@@ -6,7 +6,6 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from http import HTTPStatus
 from typing import Final
 
 import jinja2
@@ -1111,12 +1110,10 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         # check for error finish reason and abort streaming
                         # finish_reason='error' indicates a retryable error
-                        if output.finish_reason == "error":
-                            error_data = self.create_streaming_error_response(
-                                "Internal server error",
-                                err_type="InternalServerError",
-                                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                            )
+                        error_data = self._handle_streaming_error_finish_reason(
+                            output.finish_reason, request_id
+                        )
+                        if error_data:
                             yield f"data: {error_data}\n\n"
                             yield "data: [DONE]\n\n"
                             return
@@ -1322,12 +1319,11 @@ class OpenAIServingChat(OpenAIServing):
         # Check for error finish reason and return 500 error
         # finish_reason='error' indicates a retryable request-level internal error
         for output in final_res.outputs:
-            if output.finish_reason == "error":
-                return self.create_error_response(
-                    "Internal server error",
-                    err_type="InternalServerError",
-                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
+            error_response = self._handle_error_finish_reason(
+                output.finish_reason, request_id
+            )
+            if error_response:
+                return error_response
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":

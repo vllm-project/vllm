@@ -597,6 +597,10 @@ class OpenAIServingResponses(OpenAIServing):
                 elif context.finish_reason == "abort":
                     status = "cancelled"
                 elif context.finish_reason == "error":
+                    logger.error(
+                        "Request %s failed with an internal error during generation",
+                        request.request_id,
+                    )
                     return self.create_error_response(
                         "Internal server error",
                         err_type="InternalServerError",
@@ -612,12 +616,11 @@ class OpenAIServingResponses(OpenAIServing):
             final_output = final_res.outputs[0]
 
             # finish_reason='error' indicates a retryable request-level internal error
-            if final_output.finish_reason == "error":
-                return self.create_error_response(
-                    "Internal server error",
-                    err_type="InternalServerError",
-                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
+            error_response = self._handle_error_finish_reason(
+                final_output.finish_reason, request.request_id
+            )
+            if error_response:
+                return error_response
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
@@ -1210,12 +1213,10 @@ class OpenAIServingResponses(OpenAIServing):
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
-                if output.finish_reason == "error":
-                    error_data = self.create_streaming_error_response(
-                        "Internal server error",
-                        err_type="InternalServerError",
-                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
+                error_data = self._handle_streaming_error_finish_reason(
+                    output.finish_reason, request.request_id
+                )
+                if error_data:
                     yield _increment_sequence_number_and_return(
                         TypeAdapter(StreamingResponsesResponse).validate_json(
                             error_data
@@ -1518,12 +1519,10 @@ class OpenAIServingResponses(OpenAIServing):
             assert isinstance(ctx, StreamingHarmonyContext)
 
             # finish_reason='error' indicates a retryable error
-            if ctx.finish_reason == "error":
-                error_data = self.create_streaming_error_response(
-                    "Internal server error",
-                    err_type="InternalServerError",
-                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
+            error_data = self._handle_streaming_error_finish_reason(
+                ctx.finish_reason, request.request_id
+            )
+            if error_data:
                 yield _increment_sequence_number_and_return(
                     TypeAdapter(StreamingResponsesResponse).validate_json(error_data)
                 )
