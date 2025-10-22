@@ -19,16 +19,21 @@
 from vllm.compilation.decorators import support_torch_compile
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
-from vllm.model_executor.models.transformers.legacy import LegacyMixin
+from vllm.model_executor.models.transformers.legacy import (
+    LEGACY_WEIGHTS_MAPPER,
+    LegacyMixin,
+)
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.multimodal import (
     DYNAMIC_ARG_DIMS,
+    MULTIMODAL_WEIGHTS_MAPPER,
     MultiModalDummyInputsBuilder,
     MultiModalMixin,
     MultiModalProcessingInfo,
     MultiModalProcessor,
 )
 from vllm.model_executor.models.transformers.pooling import (
+    SEQUENCE_CLASSIFICATION_WEIGHTS_MAPPER,
     EmbeddingMixin,
     SequenceClassificationMixin,
 )
@@ -94,7 +99,8 @@ class TransformersMultiModalEmbeddingModel(EmbeddingMixin, MultiModalMixin, Base
 @support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForSequenceClassification(
     SequenceClassificationMixin, LegacyMixin, Base
-): ...
+):
+    hf_to_vllm_mapper = LEGACY_WEIGHTS_MAPPER | SEQUENCE_CLASSIFICATION_WEIGHTS_MAPPER
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
@@ -113,7 +119,10 @@ class TransformersMoEForSequenceClassification(
 )
 class TransformersMultiModalForSequenceClassification(
     SequenceClassificationMixin, MultiModalMixin, Base
-): ...
+):
+    hf_to_vllm_mapper = (
+        MULTIMODAL_WEIGHTS_MAPPER | SEQUENCE_CLASSIFICATION_WEIGHTS_MAPPER
+    )
 
 
 def __getattr__(name: str):
