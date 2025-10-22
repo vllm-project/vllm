@@ -520,6 +520,8 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
+    _POLL_TIMEOUT = 0.1  # Handshake thread polls for stop event every 100ms
+
     @dataclass
     class TpKVTopology:
         """
@@ -719,6 +721,7 @@ class NixlConnectorWorker:
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
+        self._nixl_handshake_listener_stop_event: threading.Event | None = None
         # Background thread for initializing new NIXL handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -773,6 +776,7 @@ class NixlConnectorWorker:
     def _nixl_handshake_listener(
         metadata: NixlAgentMetadata,
         ready_event: threading.Event,
+        stop_event: threading.Event,
         base_port: int,
         tp_rank: int,
     ):
@@ -791,7 +795,14 @@ class NixlConnectorWorker:
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
-            while True:
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            while not stop_event.is_set():
+                events = dict(
+                    poller.poll(timeout=NixlConnectorWorker._POLL_TIMEOUT * 1000)
+                )
+                if sock not in events:
+                    continue
                 identity, _, msg = sock.recv_multipart()
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
@@ -1101,14 +1112,21 @@ class NixlConnectorWorker:
             attn_backend_name=self.backend_name,
             kv_cache_layout=self.kv_cache_layout,
         )
-        ready_event = threading.Event()
+        ready_event, stop_event = threading.Event(), threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
+            args=(
+                metadata,
+                ready_event,
+                stop_event,
+                self.side_channel_port,
+                self.tp_rank,
+            ),
             daemon=True,
             name="nixl_handshake_listener",
         )
         self._nixl_handshake_listener_t.start()
+        self._nixl_handshake_listener_stop_event = stop_event
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
     def add_remote_agent(
@@ -1782,11 +1800,19 @@ class NixlConnectorWorker:
         self._invalid_block_ids = set()
         return result
 
+    def __del__(self):
+        self.shutdown()
+
     def shutdown(self):
         """Shutdown the connector worker."""
         self._handshake_initiation_executor.shutdown(wait=False)
+        if self._nixl_handshake_listener_stop_event is not None:
+            self._nixl_handshake_listener_stop_event.set()
+            self._nixl_handshake_listener_stop_event = None
         if self._nixl_handshake_listener_t is not None:
-            self._nixl_handshake_listener_t.join(timeout=0)
+            # Generous timeout to allow the thread to exit
+            self._nixl_handshake_listener_t.join(timeout=self._POLL_TIMEOUT * 10)
+            assert not self._nixl_handshake_listener_t.is_alive()
             self._nixl_handshake_listener_t = None
         for handles in self._recving_transfers.values():
             for handle, _ in handles:
