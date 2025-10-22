@@ -71,13 +71,13 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:request_decode_time_seconds` - Requests decode time.
 - `vllm:request_max_num_generation_tokens` - Max generation tokens in a sequence group.
 
-See [the PR which added this Dashboard](gh-pr:2316) for interesting and useful background on the choices made here.
+See [the PR which added this Dashboard](https://github.com/vllm-project/vllm/pull/2316) for interesting and useful background on the choices made here.
 
 ### Prometheus Client Library
 
-Prometheus support was initially added [using the aioprometheus library](gh-pr:1890), but a switch was made quickly to [prometheus_client](gh-pr:2730). The rationale is discussed in both linked PRs.
+Prometheus support was initially added [using the aioprometheus library](https://github.com/vllm-project/vllm/pull/1890), but a switch was made quickly to [prometheus_client](https://github.com/vllm-project/vllm/pull/2730). The rationale is discussed in both linked PRs.
 
-During those migrations we briefly lost a `MetricsMiddleware` to track HTTP metrics, but this was reinstated [using prometheus_fastapi_instrumentator](gh-pr:15657):
+During those migrations we briefly lost a `MetricsMiddleware` to track HTTP metrics, but this was reinstated [using prometheus_fastapi_instrumentator](https://github.com/vllm-project/vllm/pull/15657):
 
 ```bash
 $ curl http://0.0.0.0:8000/metrics 2>/dev/null  | grep -P '^http_(?!.*(_bucket|_created|_sum)).*'
@@ -90,9 +90,9 @@ http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201
 
 ### Multi-process Mode
 
-Historically, metrics were collected in the engine core process and multiprocess mode was used to make them available in the API server process. See <gh-pr:7279>.
+Historically, metrics were collected in the engine core process and multiprocess mode was used to make them available in the API server process. See <https://github.com/vllm-project/vllm/pull/7279>.
 
-More recently, metrics are collected in the API server process and multiprocess mode is only used when `--api-server-count > 1`. See <gh-pr:17546> and details on [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
+More recently, metrics are collected in the API server process and multiprocess mode is only used when `--api-server-count > 1`. See <https://github.com/vllm-project/vllm/pull/17546> and details on [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
 
 ### Built in Python/Process Metrics
 
@@ -119,27 +119,27 @@ The ["Even Better Observability"](gh-issue:3616) feature where was where much of
 
 To help understand the background to the metrics design, here are some of the relevant PRs which added the original, now legacy, metrics:
 
-- <gh-pr:1890>
-- <gh-pr:2316>
-- <gh-pr:2730>
-- <gh-pr:4464>
-- <gh-pr:7279>
+- <https://github.com/vllm-project/vllm/pull/1890>
+- <https://github.com/vllm-project/vllm/pull/2316>
+- <https://github.com/vllm-project/vllm/pull/2730>
+- <https://github.com/vllm-project/vllm/pull/4464>
+- <https://github.com/vllm-project/vllm/pull/7279>
 
 ### Metrics Implementation PRs
 
 For background, here are the relevant PRs relating to the metrics implementation <gh-issue:10582>:
 
-- <gh-pr:11962>
-- <gh-pr:11973>
-- <gh-pr:10907>
-- <gh-pr:12416>
-- <gh-pr:12478>
-- <gh-pr:12516>
-- <gh-pr:12530>
-- <gh-pr:12561>
-- <gh-pr:12579>
-- <gh-pr:12592>
-- <gh-pr:12644>
+- <https://github.com/vllm-project/vllm/pull/11962>
+- <https://github.com/vllm-project/vllm/pull/11973>
+- <https://github.com/vllm-project/vllm/pull/10907>
+- <https://github.com/vllm-project/vllm/pull/12416>
+- <https://github.com/vllm-project/vllm/pull/12478>
+- <https://github.com/vllm-project/vllm/pull/12516>
+- <https://github.com/vllm-project/vllm/pull/12530>
+- <https://github.com/vllm-project/vllm/pull/12561>
+- <https://github.com/vllm-project/vllm/pull/12579>
+- <https://github.com/vllm-project/vllm/pull/12592>
+- <https://github.com/vllm-project/vllm/pull/12644>
 
 ### Metrics Collection
 
@@ -383,7 +383,7 @@ distinguish between per-adapter counts. This should be revisited.
 Note that `multiprocess_mode="livemostrecent"` is used - the most
 recent metric is used, but only from currently running processes.
 
-This was added in <gh-pr:9477> and there is
+This was added in <https://github.com/vllm-project/vllm/pull/9477> and there is
 [at least one known user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54).
 If we revisit this design and deprecate the old metric, we should
 coordinate with downstream users so they can migrate before the removal.
@@ -427,8 +427,8 @@ suddenly (from their perspective) when it is removed, even if there is
 an equivalent metric for them to use.
 
 As an example, see how `vllm:avg_prompt_throughput_toks_per_s` was
-[deprecated](gh-pr:2764) (with a comment in the code),
-[removed](gh-pr:12383), and then [noticed by a user](gh-issue:13218).
+[deprecated](https://github.com/vllm-project/vllm/pull/2764) (with a comment in the code),
+[removed](https://github.com/vllm-project/vllm/pull/12383), and then [noticed by a user](gh-issue:13218).
 
 In general:
 
@@ -448,20 +448,20 @@ the project-wide deprecation policy.
 
 ### Unimplemented - `vllm:tokens_total`
 
-Added by <gh-pr:4464>, but apparently never implemented. This can just be
+Added by <https://github.com/vllm-project/vllm/pull/4464>, but apparently never implemented. This can just be
 removed.
 
 ### Duplicated - Queue Time
 
 The `vllm:time_in_queue_requests` Histogram metric was added by
-<gh-pr:9659> and its calculation is:
+<https://github.com/vllm-project/vllm/pull/9659> and its calculation is:
 
 ```python
     self.metrics.first_scheduled_time = now
     self.metrics.time_in_queue = now - self.metrics.arrival_time
 ```
 
-Two weeks later, <gh-pr:4464> added `vllm:request_queue_time_seconds` leaving
+Two weeks later, <https://github.com/vllm-project/vllm/pull/4464> added `vllm:request_queue_time_seconds` leaving
 us with:
 
 ```python
@@ -527,7 +527,7 @@ Some legacy metrics are only relevant in the context of "parallel
 sampling". This is where the `n` parameter in a request is used to
 request multiple completions from the same prompt.
 
-As part of adding parallel sampling support in <gh-pr:10980>, we should
+As part of adding parallel sampling support in <https://github.com/vllm-project/vllm/pull/10980>, we should
 also add these metrics.
 
 - `vllm:request_params_n` (Histogram)
@@ -552,7 +552,7 @@ model and then validate those tokens with the larger model.
 - `vllm:spec_decode_num_draft_tokens_total` (Counter)
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
-There is a PR under review (<gh-pr:12193>) to add "prompt lookup (ngram)"
+There is a PR under review (<https://github.com/vllm-project/vllm/pull/12193>) to add "prompt lookup (ngram)"
 speculative decoding to v1. Other techniques will follow. We should
 revisit these metrics in this context.
 
@@ -573,7 +573,7 @@ see:
 - [Standardizing Large Model Server Metrics in Kubernetes](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)
 - [Benchmarking LLM Workloads for Performance Evaluation and Autoscaling in Kubernetes](https://docs.google.com/document/d/1k4Q4X14hW4vftElIuYGDu5KDe2LtV1XammoG-Xi3bbQ)
 - [Inference Perf](https://github.com/kubernetes-sigs/wg-serving/tree/main/proposals/013-inference-perf)
-- <gh-issue:5041> and <gh-pr:12726>.
+- <gh-issue:5041> and <https://github.com/vllm-project/vllm/pull/12726>.
   
 This is a non-trivial topic. Consider this comment from Rob:
 
@@ -640,7 +640,7 @@ fall under the more general heading of "Observability".
 
 vLLM has support for OpenTelemetry tracing:
 
-- Added by <gh-pr:4687> and reinstated by <gh-pr:20372>
+- Added by <https://github.com/vllm-project/vllm/pull/4687> and reinstated by <https://github.com/vllm-project/vllm/pull/20372>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
 - [User-facing docs](../examples/online_serving/opentelemetry.md)
@@ -671,7 +671,7 @@ documentation for this option states:
 > use of possibly costly and or blocking operations and hence might
 > have a performance impact.
 
-The metrics were added by <gh-pr:7089> and who up in an OpenTelemetry trace
+The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and who up in an OpenTelemetry trace
 as:
 
 ```text
