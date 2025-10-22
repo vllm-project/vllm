@@ -377,7 +377,6 @@ class SiglipAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[MultiHeadAttention],
     ) -> None:
         super().__init__()
 
@@ -494,7 +493,6 @@ class SiglipEncoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[MultiHeadAttention],
     ) -> None:
         super().__init__()
 
@@ -504,7 +502,6 @@ class SiglipEncoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            attn_cls=attn_cls,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -540,7 +537,6 @@ class SiglipEncoder(nn.Module):
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[MultiHeadAttention],
     ) -> None:
         super().__init__()
 
@@ -557,7 +553,6 @@ class SiglipEncoder(nn.Module):
                     config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
-                    attn_cls=attn_cls,
                 )
                 for layer_idx in range(num_hidden_layers)
             ]
@@ -601,7 +596,6 @@ class SiglipTextTransformer(nn.Module):
             config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
-            attn_cls=MultiHeadAttention,
         )
 
         self.final_layer_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -675,10 +669,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         )
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        batch_size = hidden_state.shape[0]
-        seq_len = hidden_state.shape[1]
+        batch_size, seq_len = hidden_state.size(0), hidden_state.size(1)
 
-        probe = self.probe.repeat(batch_size, 1, 1)
+        probe = self.probe.expand(batch_size, -1, -1)
 
         hidden_state = self.attention(probe, hidden_state, hidden_state)[0]
 
@@ -690,7 +683,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         pooled = hidden_state[:, 0]
 
         # prepare for pooling
-        return pooled.unsqueeze(1).repeat(1, seq_len, 1)
+        return pooled.unsqueeze(1).expand(-1, seq_len, -1)
 
 
 class SiglipVisionTransformer(nn.Module):
@@ -715,7 +708,6 @@ class SiglipVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            attn_cls=MultiHeadAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers

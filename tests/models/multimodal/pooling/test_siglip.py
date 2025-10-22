@@ -30,16 +30,13 @@ def _run_test(
     model: str,
     *,
     dtype: str,
-    max_model_len: int | None = None,
 ) -> None:
     kwargs = {
         "runner": "pooling",
         "dtype": dtype,
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.3,
+        "max_model_len": 64,
     }
-    if max_model_len is not None:
-        kwargs["max_model_len"] = max_model_len
 
     with vllm_runner(model, **kwargs) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
@@ -92,7 +89,6 @@ def test_models_text(
         input_images,  # type: ignore
         model,
         dtype=dtype,
-        max_model_len=64,  # Text only, no images
     )
 
 
@@ -104,18 +100,12 @@ def test_models_image(
     image_assets,
     model: str,
     dtype: str,
-    monkeypatch,
 ) -> None:
     input_texts_images = [
         (text, asset.pil_image) for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
-
-    # Vision encoder produces 196 tokens for 224x224 image (14x14 patches)
-    # Text encoder has max_position_embeddings=64, but vision encoder is separate
-    # Allow longer max_model_len to accommodate vision encoder output
-    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
 
     _run_test(
         hf_runner,
@@ -124,7 +114,6 @@ def test_models_image(
         input_images,
         model,
         dtype=dtype,
-        max_model_len=256,  # Accommodate vision encoder output (196 tokens)
     )
 
 
@@ -135,20 +124,16 @@ def test_models_text_image_no_crash(
     image_assets,
     model: str,
     dtype: str,
-    monkeypatch,
 ) -> None:
     texts = [HF_TEXT_PROMPTS[0]]
     images = [image_assets[0].pil_image]
-
-    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
 
     with vllm_runner(
         model,
         runner="pooling",
         dtype=dtype,
         enforce_eager=True,
-        gpu_memory_utilization=0.3,
-        max_model_len=256,
+        max_model_len=64,
     ) as vllm_model:
         with pytest.raises(ValueError, match="not both"):
             vllm_model.embed(texts, images=images)
