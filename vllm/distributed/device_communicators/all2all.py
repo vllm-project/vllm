@@ -293,6 +293,8 @@ class RoseAll2AllManager(All2AllManagerBase):
         kwargs["global_group"] = global_group
         kwargs["device"] = self.device
 
+        logger.debug("ROSE args = %s", kwargs)
+
         return self.handle_cache.get_or_create(
             kwargs,
             EfaAllToAll,
