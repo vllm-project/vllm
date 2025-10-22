@@ -601,6 +601,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     else None,
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+
+    # Pipeline stage rank order by node IP
+    # Allows manual control of which node is responsible for which PP stage.
+    # This is useful for multi-node setups where you want to control which
+    # node handles which pipeline stage.
+    # Format: "ip1,ip2,ip3,..." where IPs are listed in PP rank order
+    # (rank 0, rank 1, rank 2, etc.)
+    # Example with 2 nodes for PP=2:
+    #   VLLM_PP_RANK_ORDER="100.88.122.120,100.108.135.70"
+    # This makes 100.88.122.120 handle PP rank 0 and 100.108.135.70 handle PP rank 1.
+    # If not set, the default behavior sorts by driver node first, then by IP.
+    "VLLM_PP_RANK_ORDER":
+    lambda: os.getenv("VLLM_PP_RANK_ORDER", None),
+
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
@@ -1458,6 +1472,7 @@ def compute_hash() -> str:
     #     factorize(key)
     environment_variables_to_hash = [
         "VLLM_PP_LAYER_PARTITION",
+        "VLLM_PP_RANK_ORDER",
         "VLLM_MLA_DISABLE",
         "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
         "VLLM_USE_TRITON_FLASH_ATTN",
