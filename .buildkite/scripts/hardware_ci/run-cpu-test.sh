@@ -70,7 +70,7 @@ function cpu_tests() {
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pytest -x -s -v \
-    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs[False-10-32-neuralmagic/Llama-3.2-1B-quantized.w8a8]"
+    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 
   # Note: disable it until supports V1
   # Run AWQ test
