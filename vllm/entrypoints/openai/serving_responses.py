@@ -939,7 +939,7 @@ class OpenAIServingResponses(OpenAIServing):
             raise ValueError(f"Invalid tool_choice: {request.tool_choice}")
         return function_calls, content
 
-    def _parse_chat_tool_call(
+    def _construct_chat_message_with_tool_call(
         self, item: ResponseInputOutputItem
     ) -> ChatCompletionMessageParam:
         if item.get("type") == "function_call":
@@ -1018,7 +1018,7 @@ class OpenAIServingResponses(OpenAIServing):
             messages.append({"role": "user", "content": request.input})
         else:
             for item in request.input:
-                messages.append(self._parse_chat_tool_call(item))
+                messages.append(self._construct_chat_message_with_tool_call(item))
         return messages
 
     def _construct_harmony_system_input_message(
