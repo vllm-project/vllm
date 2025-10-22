@@ -3,7 +3,7 @@
 `
 rocm/ali-private:ubuntu22.04_rocm6.4.3.127_aiter_6b586ae_vllm_5b842c2_20250911
 `
-2. Intall dependencies
+2. Install dependencies
 
 ```bash
 pip install flash-linear-attention
