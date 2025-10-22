@@ -669,7 +669,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         )
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len = hidden_state.size(0), hidden_state.size(1)
+        batch_size, seq_len = hidden_state.shape[:2]
 
         probe = self.probe.expand(batch_size, -1, -1)
 
