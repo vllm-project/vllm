@@ -194,33 +194,32 @@ class CoreEngineProcManager:
         """Shutdown all procs."""
         self._finalizer()
 
-    def join_first(self):
-        """Wait for any process to exit."""
-        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            sentinels = [proc.sentinel for proc in self.processes]
-            while self.processes is not None:
-                died = connection.wait(sentinels)
-                for sentinel in died:
-                    died_proc = next(
-                        proc for proc in self.processes if proc.sentinel == sentinel
-                    )
-                    fault_info = FaultInfo(
-                        type="engine_core dead",
-                        message=f"Engine core proc {died_proc.pid} "
-                        f"(PID: {died_proc.name}) died unexpectedly.",
-                        engine_id=died_proc.name[-1],
-                        additional_info=None,
-                    )
-                    self.engine_down_socket.send_multipart(
-                        [b"", fault_info.serialize().encode("utf-8")]
-                    )
+    def start_engine_core_monitor(self):
+        sentinels = [proc.sentinel for proc in self.processes]
+        while self.processes is not None:
+            died = connection.wait(sentinels)
+            for sentinel in died:
+                died_proc = next(
+                    proc for proc in self.processes if proc.sentinel == sentinel
+                )
+                fault_info = FaultInfo(
+                    type="engine_core dead",
+                    message=f"Engine core proc {died_proc.pid} "
+                    f"(PID: {died_proc.name}) died unexpectedly.",
+                    engine_id=died_proc.name[-1],
+                    additional_info=None,
+                )
+                self.engine_down_socket.send_multipart(
+                    [b"", fault_info.serialize().encode("utf-8")]
+                )
+                sentinels.remove(sentinel)
+                logger.error(
+                    "Engine core proc %s died unexpectedly",
+                    died_proc,
+                )
 
-                    logger.error(
-                        "Engine core proc %s died unexpectedly",
-                        died_proc,
-                    )
-        else:
-            connection.wait(proc.sentinel for proc in self.processes)
+    def join_first(self):
+        connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -320,15 +319,18 @@ class CoreEngineActorManager:
 
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
-            num_identity = 1
+            zmq_addr = (
+                f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
+                f"{vllm_config.fault_tolerance_config.fault_report_port}"
+            )
             identity = generate_identity_group(
-                "core_engine_actor_manager", "clinet_guard", "report", num_identity
+                "core_engine_actor_manager", "clinet_guard", "report", 1
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
-                path=vllm_config.fault_tolerance_config.fault_report_addr,
+                path=zmq_addr,
                 socket_type=zmq.DEALER,
-                bind=True,
+                bind=False,
                 identity=identity,
             )
 
