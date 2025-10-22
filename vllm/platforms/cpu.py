@@ -297,6 +297,9 @@ class CpuPlatform(Platform):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
+        # Disable multi-stream for shared experts as no Stream on CPU
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")
         if "libiomp5.so" in ld_prealod_str:
