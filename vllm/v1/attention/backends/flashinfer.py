@@ -409,7 +409,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_kv_cache_layout())
+                self._get_workspace_buffer(), get_kv_cache_layout(), backend="fa2")
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self,
