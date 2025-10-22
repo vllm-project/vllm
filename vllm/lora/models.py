@@ -426,7 +426,6 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
-                module_lora.optimize()
                 # Note (gnovack) - If MOE lora weights are not split into
                 # num_experts chunks, we split them here
                 if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
