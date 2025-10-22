@@ -104,21 +104,21 @@ def maybe_get_vit_flash_attn_backend(
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             attn_backend = _Backend.ROCM_AITER_FA
-        elif on_gfx9():
+
+        elif check_upstream_fa_availability(torch.get_default_dtype()) and on_gfx9():
             attn_backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
         else:
             return _Backend.TORCH_SDPA, None
-    else:
-        if (
-            attn_backend != _Backend.FLASH_ATTN
-            and attn_backend != _Backend.ROCM_AITER_FA
-            and check_upstream_fa_availability(torch.get_default_dtype())
+
+    elif current_platform.is_cuda():
+        if attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
+            torch.get_default_dtype()
         ):
             attn_backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
-
-    if current_platform.is_rocm() and attn_backend == _Backend.FLASH_ATTN:
-        use_upstream_fa = True
+    else:
+        return _Backend.TORCH_SDPA, None
 
     if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
         if attn_backend == _Backend.ROCM_AITER_FA:
