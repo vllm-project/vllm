@@ -113,7 +113,7 @@ Therefore, these metrics are unavailable when `--api-server-count > 1`. It's que
 
 ## Metrics Design
 
-The ["Even Better Observability"](gh-issue:3616) feature where was where much of the metrics design was planned. For example, see where [a detailed roadmap was laid out](gh-issue:3616#issuecomment-2030858781).
+The ["Even Better Observability"](https://github.com/vllm-project/vllm/issues/3616) feature where was where much of the metrics design was planned. For example, see where [a detailed roadmap was laid out](https://github.com/vllm-project/vllm/issues/3616#issuecomment-2030858781).
 
 ### Legacy PRs
 
@@ -127,7 +127,7 @@ To help understand the background to the metrics design, here are some of the re
 
 ### Metrics Implementation PRs
 
-For background, here are the relevant PRs relating to the metrics implementation <gh-issue:10582>:
+For background, here are the relevant PRs relating to the metrics implementation <https://github.com/vllm-project/vllm/issues/10582>:
 
 - <https://github.com/vllm-project/vllm/pull/11962>
 - <https://github.com/vllm-project/vllm/pull/11973>
@@ -390,7 +390,7 @@ coordinate with downstream users so they can migrate before the removal.
 
 ### Prefix Cache metrics
 
-The discussion in <gh-issue:10582> about adding prefix cache metrics yielded
+The discussion in <https://github.com/vllm-project/vllm/issues/10582> about adding prefix cache metrics yielded
 some interesting points which may be relevant to how we approach
 future metrics.
 
@@ -428,7 +428,7 @@ an equivalent metric for them to use.
 
 As an example, see how `vllm:avg_prompt_throughput_toks_per_s` was
 [deprecated](https://github.com/vllm-project/vllm/pull/2764) (with a comment in the code),
-[removed](https://github.com/vllm-project/vllm/pull/12383), and then [noticed by a user](gh-issue:13218).
+[removed](https://github.com/vllm-project/vllm/pull/12383), and then [noticed by a user](https://github.com/vllm-project/vllm/issues/13218).
 
 In general:
 
@@ -499,7 +499,7 @@ cache to complete other requests), we swap kv cache blocks out to CPU
 memory. This is also known as "KV cache offloading" and is configured
 with `--swap-space` and `--preemption-mode`.
 
-Historically, [vLLM has long supported beam search](gh-issue:6226). The
+Historically, [vLLM has long supported beam search](https://github.com/vllm-project/vllm/issues/6226). The
 SequenceGroup encapsulated the idea of N Sequences which
 all shared the same prompt kv blocks. This enabled KV cache block
 sharing between requests, and copy-on-write to do branching. CPU
@@ -512,7 +512,7 @@ and the part of the prompt that was evicted can be recomputed.
 
 SequenceGroup was removed in V1, although a replacement will be
 required for "parallel sampling" (`n>1`).
-[Beam search was moved out of the core](gh-issue:8306). There was a
+[Beam search was moved out of the core](https://github.com/vllm-project/vllm/issues/8306). There was a
 lot of complex code for a very uncommon feature.
 
 In V1, with prefix caching being better (zero over head) and therefore
@@ -573,7 +573,7 @@ see:
 - [Standardizing Large Model Server Metrics in Kubernetes](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)
 - [Benchmarking LLM Workloads for Performance Evaluation and Autoscaling in Kubernetes](https://docs.google.com/document/d/1k4Q4X14hW4vftElIuYGDu5KDe2LtV1XammoG-Xi3bbQ)
 - [Inference Perf](https://github.com/kubernetes-sigs/wg-serving/tree/main/proposals/013-inference-perf)
-- <gh-issue:5041> and <https://github.com/vllm-project/vllm/pull/12726>.
+- <https://github.com/vllm-project/vllm/issues/5041> and <https://github.com/vllm-project/vllm/pull/12726>.
   
 This is a non-trivial topic. Consider this comment from Rob:
 
