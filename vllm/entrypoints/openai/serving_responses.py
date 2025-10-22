@@ -48,6 +48,7 @@ from openai.types.responses.response_output_text import Logprob, LogprobTopLogpr
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
@@ -63,7 +64,6 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
-    extract_tool_types,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
@@ -104,6 +104,23 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+
+def extract_tool_types(tools: list[Tool]) -> set[str]:
+    """
+    Extracts the tool types from the given tools.
+    """
+    tool_types: set[str] = set()
+    for tool in tools:
+        if tool.type == "mcp":
+            # Allow the MCP Tool type to enable built in tools if the
+            # server_label is allowlisted in
+            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
+            if tool.server_label in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
+                tool_types.add(tool.server_label)
+        else:
+            tool_types.add(tool.type)
+    return tool_types
 
 
 class OpenAIServingResponses(OpenAIServing):

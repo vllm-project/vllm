@@ -73,23 +73,6 @@ def has_custom_tools(tool_types: set[str]) -> bool:
     return not tool_types.issubset(MCP_BUILTIN_TOOLS)
 
 
-def extract_tool_types(tools: list[Tool]) -> set[str]:
-    """
-    Extracts the tool types from the given tools.
-    """
-    tool_types: set[str] = set()
-    for tool in tools:
-        if tool.type == "mcp":
-            # Allow the MCP Tool type to enable built in tools if the
-            # server_label is allowlisted in
-            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-            if tool.server_label in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
-                tool_types.add(tool.server_label)
-        else:
-            tool_types.add(tool.type)
-    return tool_types
-
-
 def get_encoding():
     global _harmony_encoding
     if _harmony_encoding is None:
