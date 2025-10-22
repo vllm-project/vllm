@@ -153,7 +153,7 @@ def _fused_moe_lora_kernel(
     if SPLIT_K == 1:
         tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
-        tl.atomic_add(c_ptrs, accumulator, mask=c_mask)
+        tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
 
 
 @torch.inference_mode()
