@@ -690,7 +690,8 @@ def sparse_attn_indexer_fake(
     _flattened_kv = torch.empty(
         [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
     )
-    _k_fp8 = _flattened_kv[..., :head_dim].view(torch.float8_e4m3fn).contiguous()
+    fp8_dtype = current_platform.fp8_dtype()
+    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
     _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
