@@ -12,7 +12,11 @@ import base64
 import requests
 import torch
 
-from vllm.entrypoints.openai.protocol import EMBED_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.serial_utils import (
+    EMBED_DTYPE_TO_TORCH_DTYPE,
+    ENDIANNESS,
+    binary2tensor,
+)
 
 
 def post_http_request(prompt: dict, api_url: str) -> requests.Response:
@@ -34,24 +38,25 @@ def main(args):
     api_url = f"http://{args.host}:{args.port}/v1/embeddings"
     model_name = args.model
 
-    for embed_dtype, torch_dtype in EMBED_DTYPE_TO_TORCH_DTYPE.items():
-        prompt = {
-            "model": model_name,
-            "input": "vLLM is great!",
-            "encoding_format": "base64",
-            "embed_dtype": embed_dtype,
-        }
-        response = post_http_request(prompt=prompt, api_url=api_url)
+    # The OpenAI client does not support the embed_dtype and endianness parameters.
+    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+        for endianness in ENDIANNESS:
+            prompt = {
+                "model": model_name,
+                "input": "vLLM is great!",
+                "encoding_format": "base64",
+                "embed_dtype": embed_dtype,
+                "endianness": endianness,
+            }
+            response = post_http_request(prompt=prompt, api_url=api_url)
 
-        embedding = []
-        for data in response.json()["data"]:
-            embedding.append(
-                torch.frombuffer(
-                    base64.b64decode(data["embedding"]), dtype=torch_dtype
-                ).to(torch.float32)
-            )
-        embedding = torch.cat(embedding)
-        print(embed_dtype, embedding.shape)
+            embedding = []
+            for data in response.json()["data"]:
+                binary = base64.b64decode(data["embedding"])
+                tensor = binary2tensor(binary, (-1,), embed_dtype, endianness)
+                embedding.append(tensor.to(torch.float32))
+            embedding = torch.cat(embedding)
+            print(embed_dtype, endianness, embedding.shape)
 
 
 if __name__ == "__main__":
