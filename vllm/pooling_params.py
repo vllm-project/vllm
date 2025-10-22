@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Optional
 import msgspec
 
 from vllm.sampling_params import RequestOutputKind
-from vllm.tasks import PoolingTask
+from vllm.tasks import POOLING_TASKS, PoolingTask
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, PoolerConfig
@@ -78,6 +78,7 @@ class PoolingParams(
     def verify(
         self, task: PoolingTask, model_config: Optional["ModelConfig"] = None
     ) -> None:
+        assert task in POOLING_TASKS
         if self.task is None:
             self.task = task
         elif self.task != task:

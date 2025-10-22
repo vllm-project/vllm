@@ -162,6 +162,9 @@ class OpenAIServingPooling(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             if is_io_processor_request:
+                assert self.io_processor is not None and isinstance(
+                    request, IOProcessorRequest
+                )
                 pooling_params = self.io_processor.validate_or_generate_params()
             else:
                 pooling_params = request.to_pooling_params()

@@ -1016,6 +1016,7 @@ class LLM:
 
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
+            assert self.io_processor is not None
             io_processor_prompt = True
             if self.io_processor is None:
                 raise ValueError(
@@ -1032,9 +1033,18 @@ class LLM:
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
 
         if io_processor_prompt:
-            pooling_params = self.io_processor.validate_or_generate_params(
-                pooling_params
-            )
+            assert self.io_processor is not None
+            if is_list_of(pooling_params, PoolingParams):
+                validated_pooling_params: list[PoolingParams] = []
+                for param in as_iter(pooling_params):
+                    validated_pooling_params.append(
+                        self.io_processor.validate_or_generate_params(param)
+                    )
+                pooling_params = validated_pooling_params
+            else:
+                pooling_params = self.io_processor.validate_or_generate_params(
+                    pooling_params
+                )
         else:
             if pooling_params is None:
                 # Use default pooling params.
