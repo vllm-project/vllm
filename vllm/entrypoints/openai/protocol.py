@@ -48,6 +48,12 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
+)
+
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
     from openai.types.responses import ResponseTextConfig
@@ -83,18 +89,6 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
-
-EMBED_DTYPE_TO_TORCH_DTYPE = {
-    "float32": torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    # I'm not sure if other platforms' CPUs support the fp8 data format.
-    # EMBED_DTYPE only uses the fp8 data representation,
-    # does not use fp8 computation, and only occurs on the CPU.
-    # Apologize for any possible break.
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-}
 
 logger = init_logger(__name__)
 
@@ -1531,7 +1525,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str | None = None
     input: list[int] | list[list[int]] | str | list[str]
-    encoding_format: Literal["float", "base64"] = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1564,11 +1558,20 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
     )
-    embed_dtype: str = Field(
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
-            "What dtype to use for base64 encoding. Default to using "
-            "float32 for base64 encoding to match the OpenAI python client behavior."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
     # --8<-- [end:embedding-extra-params]
@@ -1585,7 +1588,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     model: str | None = None
     messages: list[ChatCompletionMessageParam]
 
-    encoding_format: Literal["float", "base64"] = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1650,11 +1653,20 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
     )
-    embed_dtype: str = Field(
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
-            "Which dtype to use for base64 encoding. Defaults to float32 "
-            "to match OpenAI API."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
     # --8<-- [end:chat-embedding-extra-params]
@@ -1701,11 +1713,21 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     """
     activation: bool = False
 
-    embed_dtype: str = Field(
+    encoding_format: EncodingFormat = "float"
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
-            "What dtype to use for base64 encoding. Default to using "
-            "float32 for base64 encoding to match the OpenAI python client behavior."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
 
@@ -1905,6 +1927,12 @@ class EmbeddingResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
+class EmbeddingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
+
+
 class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
@@ -1918,6 +1946,12 @@ class PoolingResponse(OpenAIBaseModel):
     model: str
     data: list[PoolingResponseData]
     usage: UsageInfo
+
+
+class PoolingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
 
 
 class ScoreResponseData(OpenAIBaseModel):
