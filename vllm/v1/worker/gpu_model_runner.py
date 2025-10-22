@@ -1272,9 +1272,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
-        common_prefix_lens: list[list[int]] | None = None,
         for_cudagraph_capture: bool = False,
         scheduled_encoder_inputs: dict[str, list[int]] | None = None,
+        common_prefix_lens: list[list[int]] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1374,9 +1374,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             for attn_gid, attn_group in enumerate(self.attn_groups[kv_cache_gid]):
                 common_prefix_len = (
-                    0
-                    if common_prefix_lens is None
-                    else common_prefix_lens[kv_cache_gid][attn_gid]
+                    common_prefix_lens[kv_cache_gid][attn_gid]
+                    if common_prefix_lens
+                    else 0
                 )
                 builder = attn_group.get_metadata_builder()
 
@@ -2506,8 +2506,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
-                        common_prefix_lens=common_prefix_lens,
                         scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+                        common_prefix_lens=common_prefix_lens,
                     )
                 )
 
