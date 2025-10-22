@@ -1301,10 +1301,8 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
-        model_config = self.create_model_config()
-        self.model = model_config.model
-        self.tokenizer = model_config.tokenizer
-
+        # Check if the model is a speculator and override model/tokenizer/config
+        # BEFORE creating ModelConfig, so the config is created with the target model
         (self.model, self.tokenizer, self.speculative_config) = (
             maybe_override_with_speculators(
                 model=self.model,
@@ -1314,6 +1312,10 @@ class EngineArgs:
                 vllm_speculative_config=self.speculative_config,
             )
         )
+
+        model_config = self.create_model_config()
+        self.model = model_config.model
+        self.tokenizer = model_config.tokenizer
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
         #   and fall back to V0 for experimental or unsupported features.
