@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 
@@ -134,7 +134,7 @@ class KVOutputAggregator:
         self._expected_finished_count = expected_finished_count
 
     @classmethod
-    def from_connector(cls, connector: "KVConnectorBase_V1", world_size: int):
+    def from_connector(cls, connector: "KVConnectorBase", world_size: int):
         return cls(connector.get_finished_count() or world_size)
 
     def aggregate(
