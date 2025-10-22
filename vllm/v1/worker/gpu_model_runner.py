@@ -216,7 +216,7 @@ class ExecuteModelState(NamedTuple):
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     hidden_states: torch.Tensor
-    sample_hidden_states: torch.Tensor
+    sample_hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     kv_connector_output: KVConnectorOutput | None
 
@@ -2585,6 +2585,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         all_gather_group=get_tp_group(),
                         all_gather_tensors=all_gather_tensors,
                     )
+                    sample_hidden_states = None
                     logits = None
                 else:
                     sample_hidden_states = hidden_states[logits_indices]
@@ -2646,6 +2647,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
+            assert sample_hidden_states is not None
             with record_function_or_nullcontext("Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,

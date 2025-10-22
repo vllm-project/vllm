@@ -6,6 +6,8 @@ from copy import deepcopy
 
 from tblib import pickling_support
 
+from tests.v1.entrypoints.conftest import sample_json_schema as _sample_json_schema  # noqa
+
 # ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
@@ -77,6 +79,8 @@ _PromptMultiModalInput = list[_M] | list[list[_M]]
 PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
+
+sample_json_schema = _sample_json_schema
 
 
 def _read_prompts(filename: str) -> list[str]:
