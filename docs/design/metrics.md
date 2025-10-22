@@ -95,6 +95,12 @@ http_request_duration_highr_seconds_count 201.0
 http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201.0
 ```
 
+### Multi-process Mode
+
+Historically, metrics were collected in the engine core process and multiprocess mode was used to make them available in the API server process. See <gh-pr:7279>.
+
+More recently, metrics are collected in the API server process and multiprocess mode is only used when `--api-server-count > 1`. See <gh-pr:17546> and details on [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
+
 ### Built in Python/Process Metrics
 
 The following metrics are supported by default by `prometheus_client`, but they are not exposed when multiprocess mode is used:
@@ -110,7 +116,7 @@ The following metrics are supported by default by `prometheus_client`, but they 
 - `process_open_fds`
 - `process_max_fds`
 
-This is relevant because if we move away from multiprocess mode we get these back. However, it's questionable how relevant these are if they don't aggregate these stats for all processes that make up a vLLM instance.
+Therefore, these metrics are unavailable when `--api-server-count > 1`. It's questionable how relevant these are since they do not aggregate these stats for all processes that make up a vLLM instance.
 
 ## v1 Design
 
