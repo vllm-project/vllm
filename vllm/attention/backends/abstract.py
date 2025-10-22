@@ -144,6 +144,16 @@ class AttentionBackend(ABC):
         ) or block_size_literal in supported_block_sizes
 
     @classmethod
+    def get_default_block_size(cls) -> "BlockSize":
+        supported_block_sizes = cls.get_supported_block_sizes()
+        if not supported_block_sizes:
+            raise ValueError(
+                f"Fallback failed, no explicitly supported block sizes for "
+                f"backend {cls.get_name()}"
+            )
+        return supported_block_sizes[0]
+
+    @classmethod
     def is_mla(cls) -> bool:
         return False
 

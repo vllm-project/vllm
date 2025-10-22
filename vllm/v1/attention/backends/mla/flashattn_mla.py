@@ -70,6 +70,10 @@ class FlashAttnMLABackend(MLACommonBackend):
         return block_size % 16 == 0
 
     @classmethod
+    def get_default_block_size(cls) -> BlockSize:
+        return 16
+
+    @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(9, 0)
 
