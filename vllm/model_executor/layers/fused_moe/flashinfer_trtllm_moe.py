@@ -49,7 +49,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     # NOTE: scales of hidden states have to be transposed!
     a_sf_t = a_sf.t().contiguous()
     return flashinfer_trtllm_fp8_block_scale_moe(
-        routing_logits=routing_logits,
+        routing_logits=routing_logits, 
         routing_bias=routing_bias,
         hidden_states=a_q,
         hidden_states_scale=a_sf_t,

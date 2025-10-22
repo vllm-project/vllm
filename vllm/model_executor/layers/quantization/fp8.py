@@ -167,14 +167,14 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
             logger.info_once("Using DeepGEMM backend for FP8 MoE")
             return Fp8MoeBackend.DEEPGEMM
 
-    # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
-    if (
-        current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
-        and block_quant
-    ):
-        logger.info_once("Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE")
-        return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
+    # # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
+    # if (
+    #     current_platform.is_cuda()
+    #     and current_platform.is_device_capability(100)
+    #     and block_quant
+    # ):
+    #     logger.info_once("Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE")
+    #     return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
 
     # default to Triton
     logger.info_once("Using Triton backend for FP8 MoE")
@@ -1302,7 +1302,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         topk_weights, topk_ids, zero_expert_result = select_result
-
+        # if (topk_ids.shape[0] <100):
+        #     print("=== MoE Routing Results ===")
+        #     print(f"topk_ids: {topk_ids}")
+        #     print(f"topk_weights: {topk_weights}")
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts,

@@ -104,10 +104,12 @@ class RoutingMethodType(IntEnum):
     DeepSeekV3 = (2,)
     # Llama4: Top1 -> Sigmoid
     Llama4 = (3,)
-    # Qwen3: Softmax -> TopK -> Renormalize
+    # RenormalizeNaive: Softmax -> TopK -> Renormalize
     RenormalizeNaive = (4,)
+    # TopK: TopK (no softmax)
+    TopK = (5,)
     # Unspecified
-    Unspecified = 5.0
+    Unspecified = 6.0
 
 
 @dataclass
