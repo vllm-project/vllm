@@ -48,11 +48,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_s
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import (
-    has_triton_kernels,
-    round_up,
-)
+from vllm.utils import round_up
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
