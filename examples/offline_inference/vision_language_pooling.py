@@ -82,6 +82,30 @@ def run_clip(query: Query) -> ModelRequestData:
     )
 
 
+def run_siglip(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""  # For image input, make sure that the prompt text is empty
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="google/siglip-base-patch16-224",
+        runner="pooling",
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
+
+
 def run_e5_v(query: Query) -> ModelRequestData:
     llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
 
@@ -327,6 +351,7 @@ def run_score(model: str, modality: QueryModality, seed: int | None):
 
 model_example_map = {
     "clip": run_clip,
+    "siglip": run_siglip,
     "e5_v": run_e5_v,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,

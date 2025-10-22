@@ -83,6 +83,47 @@ def run_clip(client: OpenAI, model: str):
     print("Text embedding output:", response.data[0].embedding)
 
 
+def run_siglip(client: OpenAI, model: str):
+    """
+    Start the server using:
+
+    vllm serve google/siglip-base-patch16-224 \
+        --runner pooling
+    """
+
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        ],
+        model=model,
+        encoding_format="float",
+    )
+
+    print("Image embedding output:", response.data[0].embedding)
+
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "a photo of a cat"},
+                ],
+            }
+        ],
+        model=model,
+        encoding_format="float",
+    )
+
+    print("Text embedding output:", response.data[0].embedding)
+
+
 def run_vlm2vec(client: OpenAI, model: str):
     """
     Start the server using:
@@ -212,6 +253,7 @@ def run_dse_qwen2_vl(client: OpenAI, model: str):
 
 model_example_map = {
     "clip": run_clip,
+    "siglip": run_siglip,
     "vlm2vec": run_vlm2vec,
     "dse_qwen2_vl": run_dse_qwen2_vl,
 }
