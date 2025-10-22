@@ -62,7 +62,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int | None = Field(default=None, gt=0)  # type: ignore
+    num_speculative_tokens: int = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -112,10 +112,10 @@ class SpeculativeConfig:
     only affects the EAGLE method of speculation."""
 
     # Ngram proposer configuration
-    prompt_lookup_max: int | None = Field(default=None, ge=0)
+    prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer, required
     when method is set to ngram."""
-    prompt_lookup_min: int | None = Field(default=None, ge=0)
+    prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
 
@@ -215,8 +215,7 @@ class SpeculativeConfig:
 
         return hf_config
 
-    @model_validator(mode="after")
-    def _configure(self) -> Self:
+    def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
@@ -283,14 +282,6 @@ class SpeculativeConfig:
                 self.prompt_lookup_max = self.prompt_lookup_min
 
             # Validate values
-            if self.prompt_lookup_min < 1:
-                raise ValueError(
-                    f"prompt_lookup_min={self.prompt_lookup_min} must be > 0"
-                )
-            if self.prompt_lookup_max < 1:
-                raise ValueError(
-                    f"prompt_lookup_max={self.prompt_lookup_max} must be > 0"
-                )
             if self.prompt_lookup_min > self.prompt_lookup_max:
                 raise ValueError(
                     f"prompt_lookup_min={self.prompt_lookup_min} must "
