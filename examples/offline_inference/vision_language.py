@@ -210,18 +210,20 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
-        max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
         logits_processors=[NGramPerReqLogitsProcessor],
     )
 
     # deepseek-ocr use plain prompt template
     prompts = [f"<image>\n{question}" for question in questions]
+
+    # (IMPORTANT) Use the custom logits processor and avoid skipping
+    # special tokens for this model for the optimal OCR performance.
+    # This sampling params config is taken from the official OCR inference example.
     sampling_params = [
         SamplingParams(
-            temperature=0.2,
-            max_tokens=64,
+            temperature=0.0,
+            max_tokens=8192,
             # ngram logit processor args
             extra_args=dict(
                 ngram_size=30,
@@ -229,6 +231,7 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
                 # whitelist: <td>, </td>
                 whitelist_token_ids={128821, 128822},
             ),
+            skip_special_tokens=False,
         )
         for _ in questions
     ]
