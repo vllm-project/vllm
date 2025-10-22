@@ -29,6 +29,7 @@ from vllm.model_executor.layers.pooler import (
 )
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
+from vllm.model_executor.models.utils import WeightsMapper
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -54,8 +55,20 @@ class EmbeddingMixin(VllmModelForPooling):
         )
 
 
+SEQUENCE_CLASSIFICATION_WEIGHTS_MAPPER = WeightsMapper(
+    orig_to_new_prefix={
+        "model.score": "classifier",
+        "model.classifier": "classifier",
+    }
+)
+"""Weights mapping for sequence classification models.
+
+- Classification/scoring heads will be adjacent to `model`"""
+
+
 class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
     default_pooling_type = "CLS"
+    hf_to_vllm_mapper = SEQUENCE_CLASSIFICATION_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
