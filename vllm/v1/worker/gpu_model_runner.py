@@ -435,11 +435,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
 
         # Persistent buffers for Context Parallism
+        max_num_padded_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size 
         self.pcp_allgather_restore_idx = self._make_buffer(
-            self.max_num_tokens, dtype=torch.int64
+            max_num_padded_tokens,
+            dtype=torch.int64
         )
         self.pcp_padded_slot_mapping = torch.empty(
-            (self.max_num_tokens,),
+            (max_num_padded_tokens,),
             dtype=torch.int64,
             device=self.device,
         )
@@ -448,7 +450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
         self.pcp_unpad_mask_cpu_tensor = torch.zeros(
-            (self.max_num_tokens,), device="cpu", dtype=torch.bool, pin_memory=True
+            (max_num_padded_tokens,), device="cpu", dtype=torch.bool, pin_memory=True
         )
         self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
 
