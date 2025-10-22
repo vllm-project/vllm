@@ -266,24 +266,24 @@ class RayDistributedExecutor(Executor):
                 ips = [ip.strip() for ip in pp_rank_order.split(',')]
                 for idx, ip_addr in enumerate(ips):
                     pp_rank_map[ip_addr] = idx
-                
-                logger.info("Using custom PP rank order: %s", pp_rank_map)
-                sorted_worker_metadata = sorted(
-                    worker_metadata,
-                    key=lambda item: sort_by_pp_rank_order(item, pp_rank_map))
-            except Exception as e:
+            except (ValueError, AttributeError) as e:
                 logger.warning(
                     "Failed to parse VLLM_PP_RANK_ORDER='%s': %s. "
                     "Falling back to default sorting.", pp_rank_order, e)
                 sorted_worker_metadata = sorted(
                     worker_metadata, key=sort_by_driver_then_worker_ip)
+            else:
+                logger.info("Using custom PP rank order: %s", pp_rank_map)
+                sorted_worker_metadata = sorted(
+                    worker_metadata,
+                    key=lambda item: sort_by_pp_rank_order(item, pp_rank_map))
         else:
             # After sorting, the workers on the same node will be
             # close to each other, and the workers on the driver
             # node will be placed first.
             sorted_worker_metadata = sorted(
                 worker_metadata, key=sort_by_driver_then_worker_ip)
-                
+
         for i, item in enumerate(sorted_worker_metadata):
             item.adjusted_rank = i
         self.workers = [item.worker for item in sorted_worker_metadata]
