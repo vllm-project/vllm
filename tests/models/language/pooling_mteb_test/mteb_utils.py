@@ -31,7 +31,7 @@ MTEB_RERANK_LANGS = ["eng"]
 MTEB_RERANK_TOL = 2e-3
 
 
-class VllmMtebEncoder:  # implements mteb.EncoderProtocol
+class VllmMtebEncoder(mteb.EncoderProtocol):
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
@@ -53,7 +53,7 @@ class VllmMtebEncoder:  # implements mteb.EncoderProtocol
         return embeds
 
 
-class VllmMtebCrossEncoder:  # implements mteb.CrossEncoderProtocol
+class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
@@ -75,7 +75,7 @@ class VllmMtebCrossEncoder:  # implements mteb.CrossEncoderProtocol
         return scores
 
 
-class OpenAIClientMtebEncoder:  # implements mteb.EncoderProtocol
+class OpenAIClientMtebEncoder(mteb.EncoderProtocol):
     def __init__(self, model_name: str, client):
         self.model_name = model_name
         self.client = client
@@ -102,7 +102,7 @@ class OpenAIClientMtebEncoder:  # implements mteb.EncoderProtocol
         return embeds
 
 
-class ScoreClientMtebEncoder:  # implements mteb.CrossEncoderProtocol
+class ScoreClientMtebEncoder(mteb.CrossEncoderProtocol):
     def __init__(self, model_name: str, url):
         self.model_name = model_name
         self.url = url
