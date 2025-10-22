@@ -1042,6 +1042,7 @@ class LLM:
                     )
                 pooling_params = validated_pooling_params
             else:
+                assert not is_list_of(pooling_params, PoolingParams)
                 pooling_params = self.io_processor.validate_or_generate_params(
                     pooling_params
                 )
