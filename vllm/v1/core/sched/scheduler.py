@@ -232,9 +232,8 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.long_prefill_token_threshold(request) < num_new_tokens:
+            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
             
             # Apply dynamic token budget constraints
             effective_budget = self.get_dynamic_token_budget(request, token_budget)
