@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
@@ -49,10 +50,10 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import (
     has_triton_kernels,
-    is_torch_equal_or_newer,
     round_up,
 )
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -746,6 +747,23 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=layer.w2_bias,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
+            )
+        elif self.mxfp4_backend in [
+            Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM,
+            Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS,
+        ]:
+            return mxfp4_mxfp8_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
+        elif self.mxfp4_backend in [Mxfp4Backend.SM100_FI_MXFP4_BF16]:
+            return mxfp4_w4a16_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
             )
         else:
             w1_scale = layer.w13_weight_scale

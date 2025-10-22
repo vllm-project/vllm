@@ -247,6 +247,7 @@ _MULTIMODAL_MODELS = {
         "aya_vision",
         "AyaVisionForConditionalGeneration",
     ),
+    "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": (
         "chameleon",
@@ -263,7 +264,6 @@ _MULTIMODAL_MODELS = {
         "Ernie4_5_VLMoeForConditionalGeneration",
     ),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
-    "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
     "Gemma3nForConditionalGeneration": (
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
@@ -298,6 +298,10 @@ _MULTIMODAL_MODELS = {
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
+    "LightOnOCRForConditionalGeneration": (
+        "lightonocr",
+        "LightOnOCRForConditionalGeneration",
+    ),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
@@ -329,10 +333,6 @@ _MULTIMODAL_MODELS = {
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
-    "PaliGemmaForConditionalGeneration": (
-        "paligemma",
-        "PaliGemmaForConditionalGeneration",
-    ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "Phi4MultimodalForCausalLM": ("phi4_multimodal", "Phi4MultimodalForCausalLM"),  # noqa: E501
@@ -402,6 +402,14 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "Gemma3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "PaliGemmaForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
