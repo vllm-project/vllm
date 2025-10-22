@@ -1283,8 +1283,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
                 self.seq_lens.cpu[:num_reqs],
                 self.dcp_world_size,
+                self.dcp_rank,
                 self.parallel_config.dcp_kv_cache_interleave_size,
-            )[:, self.dcp_rank]
+            )
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 
         attn_metadata: PerLayerAttnMetadata = {}

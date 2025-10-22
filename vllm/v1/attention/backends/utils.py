@@ -997,6 +997,7 @@ def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_world_size: int = 1,
+    dcp_rank: int | None = None,
     dcp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp, kv_cache size stored on each rank may be different,
@@ -1004,12 +1005,15 @@ def get_dcp_local_seq_lens(
     Only consider dcp now, we can extend the case of cp based on this.
     """
     num_requests = seq_lens.size(0)
-    seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, dcp_world_size)
-    rank_offsets = (
-        torch.arange(dcp_world_size, dtype=torch.int32)
-        .unsqueeze(0)
-        .repeat(num_requests, 1)
-    )
+    if dcp_rank is None:
+        rank_offsets = (
+            torch.arange(dcp_world_size, dtype=torch.int32)
+            .unsqueeze(0)
+            .repeat(num_requests, 1)
+        )
+    else:
+        rank_offsets = torch.Tensor([[dcp_rank]]).to(dtype=torch.int32)
+    seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, rank_offsets.shape[1])
     base = (
         seq_lens_tiled
         // dcp_kv_cache_interleave_size
