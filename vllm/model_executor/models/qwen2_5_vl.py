@@ -89,7 +89,7 @@ from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
-    apply_rotary_pos_emb_vision,
+    apply_rotary_pos_emb_vision_2c,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -398,10 +398,7 @@ class Qwen2_5_VisionAttention(nn.Module):
 
         q, k, v = (rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
         if rotary_pos_emb is not None:
-            # [2 * b, s, heads, head_dim]
-            qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
-            q, k = torch.chunk(qk_rotated, 2, dim=0)
+            q, k = apply_rotary_pos_emb_vision_2c(q, k, rotary_pos_emb)
 
         if self.is_flash_attn_backend:
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])

@@ -54,6 +54,8 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+        self._gemm_func = dispatch_unquantized_gemm()
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
@@ -66,7 +68,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return self._gemm_func(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)

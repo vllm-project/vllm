@@ -1980,3 +1980,12 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
+
+
+# These functions are used by sphinx to build the documentation
+def _engine_args_parser():
+    return EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+
+def _async_engine_args_parser():
+    return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(), async_args_only=True)

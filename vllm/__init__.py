@@ -83,6 +83,7 @@ __all__ = [
     "bc_linter_include",
     "__version_tuple__",
     "LLM",
+    "FastSyncLLM",
     "ModelRegistry",
     "PromptType",
     "TextPrompt",

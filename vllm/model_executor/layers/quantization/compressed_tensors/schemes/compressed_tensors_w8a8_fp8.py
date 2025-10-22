@@ -33,6 +33,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -148,7 +149,31 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight, weight_scale, input_scale = process_fp8_weight_channel_strategy(
                 layer.weight, layer.weight_scale, getattr(layer, "input_scale", None)
             )
-            weight = weight.t()
+
+            from vllm._aiter_ops import use_swizzle_gemm
+
+            use_swizzle_gemm = use_swizzle_gemm(*weight.shape, dtype=weight.dtype)
+            self.use_aiter_and_is_supported = (
+                self.use_aiter_and_is_supported and use_swizzle_gemm
+            )
+
+            if self.use_aiter_and_is_supported:
+                from aiter.ops.shuffle import shuffle_weight
+
+                # keep the weight as (N, K)
+                weight = Parameter(
+                    shuffle_weight(weight, layout=(16, 16)), requires_grad=False
+                )
+            else:
+                # keep the weight as (K, N)
+                weight = Parameter(weight.t(), requires_grad=False)
+
+            if current_platform.is_rocm():
+                self.fp8_linear = Fp8LinearOp(
+                    act_quant_static=self.is_static_input_scheme,
+                    act_quant_group_shape=self.act_q_group_shape,
+                    pad_output=not use_swizzle_gemm,
+                )
 
         elif self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False

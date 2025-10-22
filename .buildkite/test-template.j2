@@ -1,0 +1,47 @@
+{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
+{% set docker_image_amd = "rocm/vllm-ci-private:$BUILDKITE_COMMIT" %}
+{% set default_working_dir = "vllm/tests" %}
+{% set hf_home = "/root/.cache/huggingface" %}
+
+steps:
+  - label: ":docker: build image"
+    depends_on: ~
+    commands:
+      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f docker/Dockerfile.rocm  --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942' --target test --progress plain ."
+      - "docker push {{ docker_image_amd }}"
+    key: "amd-build"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    agents:
+      queue: amd-cpu
+    soft_fail: false
+
+{% for step in steps %}
+{% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+  - label: "AMD: {{ step.label }}"
+    depends_on: 
+      - "amd-build"
+    agents:
+{% if step.amd_gpus and step.amd_gpus==8%}
+      queue: amd_gpu
+{% elif step.amd_gpus and step.amd_gpus==4%}
+      queue: amd_gpu
+{% elif step.amd_gpus and step.amd_gpus==2%}
+      queue: amd_gpu
+{% else%}
+      queue: amd_gpu
+{% endif%}
+    commands: 
+      - bash .buildkite/scripts/hardware_ci/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+    env:
+      DOCKER_BUILDKIT: "1"
+    priority: 100
+    soft_fail: false
+{% endif %}
+{% endfor %}

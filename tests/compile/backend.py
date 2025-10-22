@@ -106,6 +106,36 @@ class TestBackend:
             assert num_pre == 0, f"Unexpected op {op.name()} in pre-pass graph"
             assert num_post > 0, f"Op {op.name()} not found in post-pass graph"
 
+    def check_before_fused_auto_custom_ops(
+        self, ops: Sequence[tuple[OpOverload, bool]], fully_replaced=True
+    ):
+        # currently only used for aiter custom ops that are
+        # registered with mutable scheme directly on vllm namespace
+        # while they are fused with auto_functionalized ops.
+
+        for op, target_op_only in ops:
+            num_pre = len(list(find_op_nodes(op, self.graph_pre_pass, target_op_only)))
+            num_post = len(
+                list(find_op_nodes(op, self.graph_post_pass, target_op_only))
+            )
+            assert num_pre > 0, f"Op {op.name()} not found in pre-pass graph"
+            assert num_pre > num_post, f"All nodes remain for op {op.name()}"
+            if fully_replaced:
+                assert num_post == 0, f"Unexpected op {op.name()} in post-pass graph"
+
+    def check_after_fused_auto_custom_ops(self, ops: Sequence[tuple[OpOverload, bool]]):
+        # currently only used for aiter custom ops that
+        # are registered with mutable scheme directly on vllm namespace
+        # while they are fused with auto_functionalized ops.
+
+        for op, target_op_only in ops:
+            num_pre = len(list(find_op_nodes(op, self.graph_pre_pass, target_op_only)))
+            num_post = len(
+                list(find_op_nodes(op, self.graph_post_pass, target_op_only))
+            )
+            assert num_pre == 0, f"Unexpected op {op.name()} in pre-pass graph"
+            assert num_post > 0, f"Op {op.name()} not found in post-pass graph"
+
     def op_count(self, op: OpOverload, before=False) -> int:
         graph = self.graph_pre_pass if before else self.graph_post_pass
         return len(list(find_op_nodes(op, graph)))

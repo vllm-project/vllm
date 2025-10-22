@@ -8,12 +8,16 @@ from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm._aiter_ops import aiter_ops
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -28,6 +32,52 @@ USE_ROWWISE_TORCH_SCALED_MM = (
     and version.parse(torch.__version__) >= version.parse("2.7")
     and current_platform.has_device_capability(94)
 )
+
+if current_platform.is_rocm():
+
+    def rocm_aiter_gemm_a8w8_bpreshuffle_impl(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        out_dtype: torch.dtype | None = None,
+        scale_a: torch.Tensor | None = None,
+        scale_b: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # This AITER function can be used for
+        # - per-token activations + per-channel weights
+        #   e.g. vllm/model_executor/layers/quantization/utils/w8a8_utils.py
+        # accept the weight as # keep the weight as (N, K)
+        # NOTE: The weight has to be shuffled in the
+        # process_weights_after_loading of the CompressedTensorsW8A8Fp8 class
+
+        m = input.shape[0]
+        n = weight.shape[0]
+        from aiter import gemm_a8w8_bpreshuffle_ck
+
+        Y = torch.empty(m, n, dtype=out_dtype, device=input.device)
+        gemm_a8w8_bpreshuffle_ck(input, weight, scale_a, scale_b, Y)
+        return Y
+
+    def rocm_aiter_gemm_a8w8_bpreshuffle_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        out_dtype: torch.dtype | None = None,
+        scale_a: torch.Tensor | None = None,
+        scale_b: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        m = input.shape[0]
+        n = weight.shape[0]
+        if out_dtype is None:
+            out_dtype = input.dtype
+        return torch.empty((m, n), dtype=out_dtype, device=input.device)
+
+    if current_platform.is_rocm():
+        direct_register_custom_op(
+            op_name="rocm_aiter_gemm_a8w8_bpreshuffle",
+            op_func=rocm_aiter_gemm_a8w8_bpreshuffle_impl,
+            mutates_args=[],
+            fake_impl=rocm_aiter_gemm_a8w8_bpreshuffle_fake,
+            dispatch_key=current_platform.dispatch_key,
+        )
 
 
 def sparse_cutlass_supported() -> bool:
@@ -158,6 +208,27 @@ def cutlass_w8a8_scaled_mm(
     output = ops.cutlass_scaled_mm(
         qinput, weight, out_dtype=out_dtype, scale_a=scale_a, scale_b=scale_b, bias=bias
     )
+    return output.view(*output_shape)
+
+
+def rocm_aiter_per_tensor_w8a8_scaled_mm(
+    qinput: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    bias: torch.Tensor,
+    output_shape: list,
+) -> torch.Tensor:
+    output = aiter_ops.rocm_aiter_tuned_gemm(
+        qinput,
+        weight.t(),
+        out_dtype=out_dtype,
+        scale_a=scale_a,
+        scale_b=scale_b,
+        bias=bias,
+    )
+
     return output.view(*output_shape)
 
 
@@ -306,6 +377,24 @@ def torch_per_token_w8a8_scaled_mm(
     return output
 
 
+def rocm_aiter_per_token_w8a8_scaled_mm(
+    qinput: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    bias: torch.Tensor,
+    output_shape: list,
+) -> torch.Tensor:
+    output = torch.ops.vllm.rocm_aiter_gemm_a8w8_bpreshuffle(
+        qinput, weight, out_dtype=out_dtype, scale_a=scale_a, scale_b=scale_b
+    )
+    if bias is not None:
+        output = output + bias
+
+    return output.view(*output_shape)
+
+
 def torch_channelwise_w8a8_scaled_mm(
     *,
     qinput: torch.Tensor,
@@ -361,6 +450,8 @@ def dispatch_w8a8_scaled_mm(
     preferred_backend: str, per_tensor_weights: bool, per_tensor_activations: bool
 ) -> Callable[..., torch.Tensor]:
     if per_tensor_weights and per_tensor_activations:
+        if preferred_backend == "aiter":
+            return rocm_aiter_per_tensor_w8a8_scaled_mm
         if preferred_backend == "rocm":
             return rocm_per_tensor_w8a8_scaled_mm
         if preferred_backend == "flashinfer":
@@ -379,6 +470,8 @@ def dispatch_w8a8_scaled_mm(
         and not per_tensor_activations
         and USE_ROWWISE_TORCH_SCALED_MM
     ):
+        if preferred_backend == "aiter":
+            return rocm_aiter_per_token_w8a8_scaled_mm
         return torch_per_token_w8a8_scaled_mm
     # Normally, torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
@@ -401,7 +494,19 @@ class Fp8LinearOp:
         act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
         pad_output: bool | None = None,
     ):
-        if current_platform.is_rocm():
+        # AITER is only supported on ROCm and only for FP8_FNUZ
+        # and at the moment are MI300 series
+        self.use_aiter_and_is_supported = (
+            current_platform.is_rocm()
+            and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_LINEAR
+            and current_platform.is_fp8_fnuz()
+            and pad_output is not True
+        )
+
+        if self.use_aiter_and_is_supported:
+            self.preferred_backend = "aiter"
+        elif current_platform.is_rocm():
             self.preferred_backend = "rocm"
         elif current_platform.is_cuda() and cutlass_fp8_supported():
             if has_flashinfer() and current_platform.has_device_capability(100):
@@ -422,6 +527,8 @@ class Fp8LinearOp:
                 config.mode < CompilationMode.VLLM_COMPILE
                 and self.preferred_backend == "torch"
             )
+        else:
+            pad_output = pad_output and self.preferred_backend == "torch"
 
         self.output_padding = 17 if pad_output else None
         self.act_quant_static = act_quant_static
@@ -448,6 +555,8 @@ class Fp8LinearOp:
 
         # View input as 2D matrix for fp8 methods
         input_2d = input.view(-1, input.shape[-1])
+
+        # weight is transposed (K, N)
         output_shape = [*input.shape[:-1], weight.shape[1]]
 
         if out_dtype is None:
@@ -464,6 +573,12 @@ class Fp8LinearOp:
         else:
             qinput, x_scale = input_2d, input_scale
 
+        # It seems that there are some linear layer loader
+        # loads per-tensor quant weight scale as 2 dimensional tensor
+        # so the only way to know if weight is per tensor quantized
+        # is to check the number of elements in the weight scale tensor.
+        per_tensor_weights = weight_scale.numel() == 1
+
         # Must have dim() conditions
         # In per-token quant scenario, when the number of token is 1,
         # the scale will only have 1 elements.
@@ -472,8 +587,13 @@ class Fp8LinearOp:
         # Example:
         # When the number of token is 1, per-token scale is [[1]]
         # When per-tensor scale is [1] or ().
-        per_tensor_weights = (weight_scale.numel() == 1) and weight_scale.dim() < 2
         per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
+
+        if self.use_aiter_and_is_supported and not (
+            per_tensor_weights and per_tensor_activations
+        ):
+            # weight is in (N, K)
+            output_shape = [*input.shape[:-1], weight.shape[0]]
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(

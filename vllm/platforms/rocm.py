@@ -176,6 +176,36 @@ def use_rocm_custom_paged_attention(
         )
 
 
+@cache
+def use_rocm_aiter_paged_attention(
+    qtype: torch.dtype,
+    head_size: int,
+    block_size: int,
+    gqa_ratio: int,
+    max_seq_len: int,
+    sliding_window: int,
+    alibi_slopes: torch.Tensor | None = None,
+) -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+
+    # custom paged attn always supported on V0. On V1, requires sliding window
+    # disabled due to observed numerical discrepancy.
+    if ON_GFX9:
+        return (
+            (not envs.VLLM_USE_V1 or sliding_window == 0 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 128)
+            and (block_size == 16)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16)
+            and max_seq_len <= 128 * 1024
+            and alibi_slopes is None
+            and not (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+            and (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN and envs.VLLM_ROCM_USE_AITER)
+        )
+    return False
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -199,6 +229,18 @@ class RocmPlatform(Platform):
         "petit_nvfp4",
         "torchao",
     ]
+    _fp8_dtype: torch.dtype = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove non-serializable attributes
+        state.pop("logger", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Re-initialize non-serializable attributes
+        self.logger = init_logger(__name__)
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
@@ -441,21 +483,25 @@ class RocmPlatform(Platform):
         return any(gfx in gcn_arch for gfx in ["gfx95"])
 
     @classmethod
+    @cache
     def supports_fp8(cls) -> bool:
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx12"])
 
     @classmethod
+    @cache
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
         return "gfx94" in torch.cuda.get_device_properties(0).gcnArchName
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
-        if cls.is_fp8_fnuz():
-            return torch.float8_e4m3fnuz
-        else:
-            return torch.float8_e4m3fn
+        if cls._fp8_dtype is None:
+            if cls.is_fp8_fnuz():
+                cls._fp8_dtype = torch.float8_e4m3fnuz
+            else:
+                cls._fp8_dtype = torch.float8_e4m3fn
+        return cls._fp8_dtype
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
@@ -473,6 +519,7 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 
     @classmethod
+    @cache
     def is_navi(cls) -> bool:
         return "gfx1" in torch.cuda.get_device_properties(0).gcnArchName
 

@@ -38,6 +38,12 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+    import aiter as rocm_aiter
+    from aiter import get_hip_quant
+
+    aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
+
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):

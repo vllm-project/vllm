@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import ProcessGroup
@@ -19,10 +21,36 @@ from vllm.platforms import current_platform
 
 from .base_device_communicator import DeviceCommunicatorBase
 
+if TYPE_CHECKING:
+    # For type checking, import both types
+    from vllm.distributed.device_communicators.custom_all_reduce import (
+        CustomAllreduce,
+    )
+
+    try:
+        from aiter.dist.custom_all_reduce import (
+            CustomAllreduce as AITERCustomAllreduce,
+        )
+    except ImportError:
+        AITERCustomAllreduce = CustomAllreduce  # type: ignore
+
 logger = init_logger(__name__)
 
 
+@cache
+def is_rocm_aiter_custom_allreduce_enabled() -> bool:
+    """Check if aiter custom allreduce is enabled for ROCm platform."""
+    return (
+        current_platform.is_rocm()
+        and envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE
+    )
+
+
 class CudaCommunicator(DeviceCommunicatorBase):
+    if TYPE_CHECKING:
+        ca_comm: CustomAllreduce | AITERCustomAllreduce | None
+
     def __init__(
         self,
         cpu_group: ProcessGroup,
@@ -44,10 +72,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
 
+        self.use_aiter_custom_allreduce = is_rocm_aiter_custom_allreduce_enabled()
         # lazy import to avoid documentation build error
-        from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce,
-        )
+        if self.use_aiter_custom_allreduce:
+            from aiter.dist.custom_all_reduce import (
+                CustomAllreduce as AITERCustomAllreduce,
+            )
+
+            logger.info("Using aiter.dist.custom_all_reduce for ROCm platform")
+        else:
+            from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
+                CustomAllreduce,
+            )
+
+            AITERCustomAllreduce = None
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
@@ -63,7 +101,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
 
-        self.ca_comm: CustomAllreduce | None = None
+        self.ca_comm = None
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         if use_torch_symm_mem and current_platform.is_cuda():
@@ -74,14 +112,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
-            self.ca_comm = CustomAllreduce(
-                group=self.cpu_group,
-                device=self.device,
-                symm_mem_enabled=(
-                    self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
-                ),
-            )
-
+            if self.use_aiter_custom_allreduce and AITERCustomAllreduce is not None:
+                self.ca_comm = AITERCustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                )
+            else:
+                self.ca_comm = CustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                    symm_mem_enabled=(
+                        self.symm_mem_comm is not None
+                        and not self.symm_mem_comm.disabled
+                    ),
+                )
             if current_platform.is_rocm():
                 # Initialize a custom quick all-reduce implementation for AMD.
                 # Quick reduce is designed as a complement to custom allreduce.

@@ -539,6 +539,102 @@ def get_gaudi_sw_version():
     return "0.0.0"  # when hl-smi is not available
 
 
+def override_version(version_str: str = "0.9.2.dev+g3b1e4c6"):
+    """
+    Override the version information in vllm/_version.py file.
+
+    Args:
+        version_str: The new version string to set
+    """
+    file_path = "vllm/_version.py"
+
+    def parse_version_tuple(version: str) -> tuple[int | str, ...]:
+        """Parse version string into tuple format"""
+        # Handle different version formats
+        if "+g" in version:
+            # Format like "0.9.2.dev+g3b1e4c6"
+            main_part, git_part = version.split("+g", 1)
+            git_part = "g" + git_part
+        else:
+            main_part = version
+            git_part = None
+
+        # Split main part by dots
+        parts = main_part.split(".")
+        result = []
+
+        for part in parts:
+            # Check if part contains 'dev' followed by numbers
+            if "dev" in part:
+                if part == "dev":
+                    result.append("dev")
+                elif part.startswith("dev"):
+                    # Extract number after 'dev'
+                    dev_match = re.match(r"dev(\d+)", part)
+                    if dev_match:
+                        result.append(f"dev{dev_match.group(1)}")
+                    else:
+                        result.append(part)
+                else:
+                    # Split at 'dev'
+                    before_dev, after_dev = part.split("dev", 1)
+                    if before_dev:
+                        try:
+                            result.append(int(before_dev))
+                        except ValueError:
+                            result.append(before_dev)
+                    if after_dev:
+                        result.append(f"dev{after_dev}")
+                    else:
+                        result.append("dev")
+            else:
+                # Try to convert to int, otherwise keep as string
+                try:
+                    result.append(int(part))
+                except ValueError:
+                    result.append(part)
+
+        # Add git part if present
+        if git_part:
+            result.append(git_part)
+
+        return tuple(result)
+
+    # Read the current file
+    try:
+        with open(file_path) as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: {file_path} not found")
+        return
+
+    # Generate new version tuple
+    new_version_tuple = parse_version_tuple(version_str)
+
+    # Replace version string
+    content = re.sub(
+        r"__version__ = version = '[^']*'",
+        f"__version__ = version = '{version_str}'",
+        content,
+    )
+
+    # Replace version tuple
+    content = re.sub(
+        r"__version_tuple__ = version_tuple = \([^)]*\)",
+        f"__version_tuple__ = version_tuple = {repr(new_version_tuple)}",
+        content,
+    )
+
+    # Write back to file
+    try:
+        with open(file_path, "w") as f:
+            f.write(content)
+        print(f"Successfully updated version to {version_str}")
+        print(f"Version tuple: {new_version_tuple}")
+    except Exception as e:
+        print(f"Error writing to {file_path}: {e}")
+
+
 def get_vllm_version() -> str:
     # Allow overriding the version. This is useful to build platform-specific
     # wheels (e.g. CPU, TPU) without modifying the source.
@@ -547,6 +643,10 @@ def get_vllm_version() -> str:
 
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
+
+    version = "0.11.1rc2.dev+ge9fce7b"
+    override_version(version)
+    sep = ""
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
@@ -576,6 +676,7 @@ def get_vllm_version() -> str:
     else:
         raise RuntimeError("Unknown runtime environment")
 
+    print("final version", version)
     return version
 
 

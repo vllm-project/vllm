@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
+    VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
-    VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+    VLLM_FUSED_MOE_CHUNK_SIZE: int = 32768
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
@@ -104,15 +105,16 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
-    VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_TRITON_ROPE: bool = True
+    VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE: bool = True
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
-    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -859,20 +861,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_PAGED_ATTN": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in ("true", "1")
     ),
-    # use aiter linear op if aiter ops are enabled
-    # The following list of related ops
-    # - scaled_mm (per-tensor / rowwise)
+    # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
+    ),
+    # use aiter rms norm op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
-    ),
-    # use aiter rms norm op if aiter ops are enabled.
-    "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter mla ops.
     # By default is enabled.
@@ -883,6 +883,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+    ),
+    # Whether to use aiter custom allreduce for ROCm platform.
+    # By default is disabled, uses vLLM built-in custom allreduce.
+    "VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE", "True").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter fp4 gemm asm.
     # By default is disabled.
@@ -907,7 +913,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use aiter fusion shared experts ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # use rocm skinny gemms
@@ -1504,6 +1510,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_LINEAR",
         "VLLM_ROCM_USE_AITER_MOE",
         "VLLM_ROCM_USE_AITER_RMSNORM",
+        "VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE",
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
         "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",

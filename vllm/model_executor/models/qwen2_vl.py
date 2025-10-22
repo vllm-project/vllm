@@ -58,6 +58,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     dispatch_rotary_emb_function,
 )
+from vllm.model_executor.layers.rotary_embedding.flash_attn_rotary import (
+    apply_rotary_2c,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -309,6 +312,15 @@ def apply_rotary_pos_emb_vision(t: torch.Tensor, freqs: torch.Tensor) -> torch.T
     sin = freqs.sin()
     output = rotary_emb_function(t_, cos, sin).type_as(t)
     return output
+
+
+def apply_rotary_pos_emb_vision_2c(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    freqs: torch.Tensor,
+) -> torch.Tensor:
+    out_q, out_k = apply_rotary_2c(q, k, freqs)
+    return out_q.type_as(q), out_k.type_as(k)
 
 
 class Qwen2VisionAttention(nn.Module):

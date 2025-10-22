@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
 
+from functools import cache
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,6 +18,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
+@cache
 def is_rocm_aiter_rmsnorm_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER_RMSNORM and envs.VLLM_ROCM_USE_AITER
 

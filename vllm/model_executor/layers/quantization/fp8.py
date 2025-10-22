@@ -6,6 +6,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -717,6 +718,111 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
         )
 
+    def _maybe_pad_rocm_aiter_block_scaled_fused_moe_weights(
+        self,
+        w2_weight,
+        w2_weight_scale_inv,
+        w13_weight,
+        w13_weight_scale_inv,
+        block_k=128,
+        block_n=128,
+    ):
+        """
+        Pads the MoE weights and scales to align with block quantization
+        requirements.
+
+        aiter.fmoe_fp8_blockscale_g1u1 only support out dtype = bf16,
+        inter_dim % 256 = 0 and fc_scale_blkn and fc_scale_blkk is 128
+        """
+
+        if not self.rocm_aiter_moe_enabled:
+            return (w2_weight, w2_weight_scale_inv, w13_weight, w13_weight_scale_inv)
+
+        if self.rocm_aiter_moe_enabled and (
+            w2_weight.shape[-1] % 256 == 0 and w13_weight.shape[-2] % 256 == 0
+        ):
+            return (w2_weight, w2_weight_scale_inv, w13_weight, w13_weight_scale_inv)
+
+        logger.info_once(
+            "ROCm AITER Padding MoE weights and scales for block quantization."
+        )
+        # for now this is enabled for DeepSeekV3 and Qwen3
+        assert block_k == 128, "block_k must be 128"
+        assert block_n == 128, "block_n must be 128"
+        assert block_k == block_n, "block_k and block_n must be the same value: 128"
+
+        num_experts, hidden_size, inter_dim = w2_weight.shape
+        padded_inter_dim = ((inter_dim + 255) // 256) * 256
+        # inter_dim_block_scale = layer.w2_weight_scale_inv.shape[2]
+        #  = ((intermediate_size_per_partition + block_n - 1) // block_n)
+        inter_dim_block_scale = (inter_dim + block_n - 1) // block_n
+        padded_inter_dim_block_scale = (padded_inter_dim + block_n - 1) // block_n
+
+        # k_block_scale is also known as hidden_size_block
+        # Pad w2_weight to
+        #   [num_experts, hidden_size, inter_dim]
+        # Padding Logic:
+        #   [expert(local_expert:EP), hidden_size, inter_dim]
+        # after padding inter_dim with 0.0 to multiple of 256
+        #   [expert(local_expert:EP), hidden_size, padded_inter_dim]
+        if padded_inter_dim > inter_dim:
+            pad_size = padded_inter_dim - inter_dim
+            w2_weight = F.pad(w2_weight, (0, pad_size), value=0.0)
+
+        # Pad w2_weight_scale_inv to
+        #   [num_experts, k_block_scale, inter_dim_block_scale]
+        # Padding Logic:
+        #   [expert(local_expert:EP), k_block_scale, inter_dim_block_scale]
+        # after padding inter_dim with 1.0
+        #   [expert(local_expert:EP), k_block_scale, padded_inter_dim_block_scale] # noqa: E501
+        if padded_inter_dim_block_scale > inter_dim_block_scale:
+            pad_size = padded_inter_dim_block_scale - inter_dim_block_scale
+            w2_weight_scale_inv = F.pad(w2_weight_scale_inv, (0, pad_size), value=1.0)
+
+        # Pad w13_weight to
+        #   [num_experts, 2 * inter_dim, hidden_size]
+        # Padding Logic:
+        #   ​[expert(local_expert:EP), inter_dim*2, dim]
+        # after reshape
+        #   [expert(local_expert:EP), 2, inter_dim, dim]
+        # after right padding
+        #   [expert(local_expert:EP), 2, padded_inter_dim, dim]
+        # after reshape
+        #   [expert(local_expert:EP), 2 * padded_inter_dim, dim]
+        w13_weight = w13_weight.view(num_experts, 2, inter_dim, hidden_size)
+        if padded_inter_dim > inter_dim:
+            pad_size = padded_inter_dim - inter_dim
+            w13_weight = F.pad(w13_weight, (0, 0, 0, pad_size), value=0.0)
+        w13_weight = w13_weight.view(num_experts, 2 * padded_inter_dim, hidden_size)
+
+        # Pad w13_weight_scale_inv to
+        #   [num_experts, 2 * inter_dim_block_scale, k_block_scale]
+        # Padding Logic:
+        #   k_block_scale = ((hidden_size + block_k - 1) // block_k)
+        #   ​[expert(local_expert:EP), inter_dim_block_scale*2, k_block_scale] # noqa: E501
+        # after reshape
+        #   [expert(local_expert:EP), 2, inter_dim_block_scale, k_block_scale] # noqa: E501
+        # after right padding with 1.0
+        #   [expert(local_expert:EP), 2, padded_inter_dim_block_scale, k_block_scale] # noqa: E501
+        # after reshape
+        #   [expert(local_expert:EP), 2 * padded_inter_dim_block_scale, k_block_scale] # noqa: E501
+        k_block_scale = w13_weight_scale_inv.shape[
+            2
+        ]  # k_block_scale = (hidden_size + block_k - 1) // block_k
+        w13_weight_scale_inv = w13_weight_scale_inv.view(
+            num_experts, 2, inter_dim_block_scale, k_block_scale
+        )
+        if padded_inter_dim_block_scale > inter_dim_block_scale:
+            pad_size = padded_inter_dim_block_scale - inter_dim_block_scale
+            w13_weight_scale_inv = F.pad(
+                w13_weight_scale_inv, (0, 0, 0, pad_size), value=1.0
+            )
+        w13_weight_scale_inv = w13_weight_scale_inv.view(
+            num_experts, 2 * padded_inter_dim_block_scale, k_block_scale
+        )
+
+        return w2_weight, w2_weight_scale_inv, w13_weight, w13_weight_scale_inv
+
     def create_weights(
         self,
         layer: Module,
@@ -871,6 +977,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
+            assert self.quant_config.weight_block_size is not None
             assert self.quant_config.activation_scheme == "dynamic"
             if current_platform.is_fp8_fnuz():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = (
@@ -897,6 +1004,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w13_weight_scale_inv = layer.w13_weight_scale_inv.data
                 w2_weight = layer.w2_weight
                 w2_weight_scale_inv = layer.w2_weight_scale_inv
+
+            (w2_weight, w2_weight_scale_inv, w13_weight, w13_weight_scale_inv) = (
+                self._maybe_pad_rocm_aiter_block_scaled_fused_moe_weights(
+                    w2_weight,
+                    w2_weight_scale_inv,
+                    w13_weight,
+                    w13_weight_scale_inv,
+                    block_n=self.quant_config.weight_block_size[0],
+                    block_k=self.quant_config.weight_block_size[1],
+                )
+            )
 
             # torch.compile() cannot use Parameter subclasses.
             layer.w13_weight = Parameter(w13_weight, requires_grad=False)

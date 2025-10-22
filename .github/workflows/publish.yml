@@ -1,0 +1,82 @@
+# This workflow will upload a Python Package to Release asset
+# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions
+
+name: Create Release
+
+on:
+  push:
+    tags:
+      - v*
+
+# Needed to create release and upload assets
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Retrieve tag and create release
+    name: Create Release
+    runs-on: self-hosted
+    container:
+      image: rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Extract branch info
+        shell: bash
+        run: |
+          echo "release_tag=${GITHUB_REF#refs/*/}" >> "$GITHUB_ENV"
+
+      - name: Create Release
+        id: create_release
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          RELEASE_TAG: ${{ env.release_tag }}
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+          script: |
+            const script = require('.github/workflows/scripts/create_release.js')
+            await script(github, context, core)
+
+  wheel:
+    name: Build Wheel
+    runs-on: self-hosted
+    container:
+      image: rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0
+    needs: release
+
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: Prepare
+        run: |
+          pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+          pip3 install -U triton
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build wheel
+        shell: bash
+        env:
+          CMAKE_BUILD_TYPE: Release # do not compile with debug symbol to reduce wheel size
+        run: |
+          bash -x .github/workflows/scripts/build.sh
+          wheel_name=$(find dist -name "*whl" -print0 | xargs -0 -n 1 basename)
+          asset_name=${wheel_name//"linux"/"manylinux1"}
+          echo "wheel_name=${wheel_name}" >> "$GITHUB_ENV"
+          echo "asset_name=${asset_name}" >> "$GITHUB_ENV"
+
+      - name: Upload vllm Release Asset
+        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.release.outputs.upload_url }}
+          asset_path: ./dist/${{ env.wheel_name }}
+          asset_name: ${{ env.asset_name }}
+          asset_content_type: application/*

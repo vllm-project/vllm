@@ -80,16 +80,27 @@ class SiluAndMul(CustomOp):
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        self.fp8_dtype = current_platform.fp8_dtype()
+
+    def forward_native(
+        self, x: torch.Tensor, scale: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cuda(
+        self, x: torch.Tensor, scale: torch.Tensor | None = None
+    ) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
+        if scale is None:
+            out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+            self.op(out, x)
+        else:
+            # for scaled fp8 output
+            out = torch.empty(output_shape, dtype=self.fp8_dtype, device=x.device)
+            torch.ops._C.scaled_silu_and_mul(out, x, scale)
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:

@@ -10,7 +10,7 @@ export PYTHONPATH=".."
 echo "--- Confirming Clean Initial State"
 while true; do
         sleep 3
-        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+        if grep -q clean ${BUILDKITE_AGENT_META_DATA_RESET_TARGET}; then
                 echo "GPUs state is \"clean\""
                 break
         fi
@@ -49,18 +49,18 @@ cleanup_docker
 
 echo "--- Resetting GPUs"
 
-echo "reset" > /opt/amdgpu/etc/gpu_state
+echo "reset" > ${BUILDKITE_AGENT_META_DATA_RESET_TARGET}
 
 while true; do
         sleep 3
-        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+	if grep -q clean ${BUILDKITE_AGENT_META_DATA_RESET_TARGET}; then
                 echo "GPUs state is \"clean\""
                 break
         fi
 done
 
 echo "--- Pulling container" 
-image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
+image_name="rocm/vllm-ci-private:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
 
