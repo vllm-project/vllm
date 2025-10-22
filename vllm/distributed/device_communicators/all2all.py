@@ -263,7 +263,7 @@ class RoseAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
     def get_handle(self, kwargs):
-        from rose.distributed import TorchParallelGroup
+        from rose.distributed.torch_group import TorchParallelGroup
         from rose.kernels.efa_all_to_all import EfaAllToAll
 
         ep_group = get_ep_group()
