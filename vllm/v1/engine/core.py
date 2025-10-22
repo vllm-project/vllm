@@ -160,9 +160,7 @@ class EngineCore:
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(
-                self.scheduler.connector.get_finished_count()  # type: ignore
-            )
+            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
