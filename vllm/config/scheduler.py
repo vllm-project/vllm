@@ -107,12 +107,6 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    send_delta_data: bool = False
-    """Private API. If used, scheduler sends delta data to
-    workers instead of an entire data. It should be enabled only
-    when SPMD worker architecture is enabled. I.e.,
-    VLLM_USE_RAY_SPMD_WORKER=1"""
-
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:\n
     - "fcfs" means first come first served, i.e. requests are handled in order
@@ -131,12 +125,12 @@ class SchedulerConfig:
     some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
     it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
 
-    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
-    # or "mod.custom_class".
-    scheduler_cls: str | type[object] = "vllm.core.scheduler.Scheduler"
-    """The scheduler class to use. "vllm.core.scheduler.Scheduler" is the
-    default scheduler. Can be a class directly or the path to a class of form
-    "mod.custom_class"."""
+    # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
+    # (default) or "mod.custom_class".
+    scheduler_cls: str | type[object] = "vllm.v1.core.sched.scheduler.Scheduler"
+    """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
+    the default scheduler. Can be a class directly or the path to a class of
+    form "mod.custom_class"."""
 
     disable_hybrid_kv_cache_manager: bool = False
     """If set to True, KV cache manager will allocate the same size of KV cache

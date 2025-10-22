@@ -67,20 +67,17 @@ class _HfExamplesInfo:
 
     is_available_online: bool = True
     """
-    Set this to ``False`` if the name of this architecture no longer exists on
+    Set this to `False` if the name of this architecture no longer exists on
     the HF repo. To maintain backwards compatibility, we have not removed them
     from the main model registry, so without this flag the registry tests will
     fail.
     """
 
     trust_remote_code: bool = False
-    """The ``trust_remote_code`` level required to load the model."""
-
-    v0_only: bool = False
-    """The model is only available with the vLLM V0 engine."""
+    """The `trust_remote_code` level required to load the model."""
 
     hf_overrides: dict[str, Any] = field(default_factory=dict)
-    """The ``hf_overrides`` required to load the model."""
+    """The `hf_overrides` required to load the model."""
 
     max_model_len: int | None = None
     """
@@ -265,7 +262,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
-        extras={"tiny": "bigcode/tiny_starcoder_py"},
+        extras={
+            "tiny": "bigcode/tiny_starcoder_py",
+            "santacoder": "bigcode/gpt_bigcode-santacoder",
+        },
         min_transformers_version="4.55.1",
         transformers_version_reason="HF model broken in 4.55.0",
     ),
@@ -330,6 +330,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "guard": "meta-llama/Llama-Guard-3-1B",
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "tiny": "hmellor/tiny-random-LlamaForCausalLM",
         },
     ),
     "LLaMAForCausalLM": _HfExamplesInfo(
@@ -565,6 +566,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"),
+    "BeeForConditionalGeneration": _HfExamplesInfo(
+        "Open-Bee/Bee-8B-RL",
+        trust_remote_code=True,
+    ),
     "Blip2ForConditionalGeneration": _HfExamplesInfo(
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
@@ -579,6 +584,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_transformers_version="4.48",
         transformers_version_reason="HF model is not compatible.",
         hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
+    ),
+    "DeepseekOCRForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-OCR",
     ),
     "DotsOCRForCausalLM": _HfExamplesInfo(
         "rednote-hilab/dots.ocr", trust_remote_code=True
@@ -651,6 +659,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
         trust_remote_code=True,
     ),
+    "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
+        "lightonai/LightOnOCR-1B",
+        is_available_online=False,
+    ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         max_model_len=10240,
@@ -694,7 +706,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
-        v0_only=True,
     ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
@@ -752,6 +763,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen-VL",
         extras={"chat": "Qwen/Qwen-VL-Chat"},
         trust_remote_code=True,
+        max_transformers_version="4.53.3",
+        transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
         hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
@@ -910,11 +923,11 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
         "allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"
     ),
-    "TransformersMoEForMultimodalLM": _HfExamplesInfo(
+    "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="4.57.0.dev0"
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
@@ -922,6 +935,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     ),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
         "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+    ),
+    "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(
+        "google/gemma-3-4b-it"
     ),
 }
 

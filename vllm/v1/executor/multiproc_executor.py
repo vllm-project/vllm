@@ -33,15 +33,18 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.utils import (
     _maybe_force_spawn,
     decorate_logs,
+    get_mp_context,
+    set_process_title,
+)
+from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
-    get_mp_context,
     get_open_port,
-    set_process_title,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
@@ -176,7 +179,7 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(
+    def execute_model(  # type: ignore[override]
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
@@ -201,6 +204,7 @@ class MultiprocExecutor(Executor):
         )
 
         # aggregate all workers output to a single output
+        assert self.kv_output_aggregator is not None
         if non_block:
             return self.kv_output_aggregator.async_aggregate(outputs, self.output_rank)
         return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
@@ -454,6 +458,10 @@ class WorkerProc:
 
         # Load model
         self.worker.load_model()
+
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     @staticmethod
     def make_worker_process(

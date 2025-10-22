@@ -87,22 +87,6 @@ class XPUPlatform(Platform):
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        """
-        Check if the kv_cache_dtype is supported.
-        XPU only support fp8 kv cache with triton backend.
-        """
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN"
-        ):
-            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
-
-        return False
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -144,7 +128,7 @@ class XPUPlatform(Platform):
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
-        from vllm.config import CompilationLevel, CUDAGraphMode
+        from vllm.config import CompilationMode, CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
@@ -155,7 +139,7 @@ class XPUPlatform(Platform):
         )
 
         if vllm_config.lora_config is not None:
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.mode = CompilationMode.NONE
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -168,7 +152,7 @@ class XPUPlatform(Platform):
                 parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
-            # spawn needs calling `if __name__ == '__main__':``
+            # spawn needs calling `if __name__ == '__main__':`
             # fork is not supported for xpu start new process.
             if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -236,8 +220,8 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             device_name = cls.get_device_name().lower()
             # client gpu a770
             if device_name.count("a770") > 0:
