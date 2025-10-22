@@ -283,7 +283,6 @@ def as_seq_cls_model(cls: _T) -> _T:
         Pooler,
     )
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
-    from vllm.sequence import IntermediateTensors
 
     from .utils import maybe_prefix
 
@@ -320,17 +319,6 @@ def as_seq_cls_model(cls: _T) -> _T:
                         pooler_config, classifier=self.score, act_fn="score"
                     ),
                 }
-            )
-
-        def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
-        ) -> torch.Tensor:
-            return super().forward(
-                input_ids, positions, intermediate_tensors, inputs_embeds
             )
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
