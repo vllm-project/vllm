@@ -118,12 +118,23 @@ The following metrics are supported by default by `prometheus_client`, but they 
 
 Therefore, these metrics are unavailable when `--api-server-count > 1`. It's questionable how relevant these are since they do not aggregate these stats for all processes that make up a vLLM instance.
 
-## v1 Design
+## Metrics Design
 
-### v1 PRs
+The ["Even Better Observability"](gh-issue:3616) feature where was where much of the metrics design was planned. For example, see where [a detailed roadmap was laid out](gh-issue:3616#issuecomment-2030858781).
 
-For background, here are the relevant v1 PRs relating to the v1
-metrics issue <gh-issue:10582>:
+### Legacy PRs
+
+To help understand the background to the metrics design, here are some of the relevant PRs which added the original, now legacy, metrics:
+
+- <gh-pr:1890>
+- <gh-pr:2316>
+- <gh-pr:2730>
+- <gh-pr:4464>
+- <gh-pr:7279>
+
+### Metrics Implementation PRs
+
+For background, here are the relevant PRs relating to the metrics implementation <gh-issue:10582>:
 
 - <gh-pr:11962>
 - <gh-pr:11973>
