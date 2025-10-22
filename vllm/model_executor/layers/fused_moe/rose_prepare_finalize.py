@@ -54,7 +54,7 @@ def rose_hidden_dim_scale(
 class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
-        a2a: rose.AllToAllKernel,
+        a2a: rose.kernels.all_to_all.AllToAllKernel,
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
