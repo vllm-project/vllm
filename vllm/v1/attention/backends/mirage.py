@@ -108,9 +108,6 @@ class MirageAttentionBackend(AttentionBackend):
 class MirageAttentionMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
 
-    # The data type of the query
-    q_data_type: torch.dtype
-
     # For handling prefill decode split
     num_decodes: int
     num_decode_tokens: int
@@ -250,17 +247,14 @@ class MirageAttentionMetadataBuilder(AttentionMetadataBuilder[MirageAttentionMet
         )
 
         # uses_spec_reorder = self.reorder_batch_threshold > 1
-        
-        assert self.q_data_type == torch.bfloat16, "MirageAttentionBackend currently only supports bfloat16"
 
         attn_metadata = MirageAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
-            q_data_type=self.q_data_type,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
-            qo_indptr_gpu=common_attn_metadata.query_start_loc_gpu,
+            qo_indptr_gpu=common_attn_metadata.query_start_loc,
             paged_kv_indptr_gpu=self.paged_kv_indptr,
             paged_kv_indices_gpu=self.paged_kv_indices,
             paged_kv_last_page_len_gpu=self.paged_kv_last_page_len,
