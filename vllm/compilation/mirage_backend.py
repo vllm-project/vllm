@@ -56,9 +56,18 @@ def build_model_config(
     state_dict: dict[str, torch.Tensor],
     k_cache_tensors: list[torch.Tensor],
     v_cache_tensors: list[torch.Tensor],
-    position_embeddings: torch.Tensor,
+    position_embeddings_: torch.Tensor,
     parallel_config: ParallelConfig,
 ) -> MirageModelConfig:
+    whole_dim = position_embeddings_.shape[-1]
+    cos_tensor_ = position_embeddings_[:, 0:whole_dim//2].unsqueeze(0)
+    sin_tensor_ = position_embeddings_[:, whole_dim//2:].unsqueeze(0)
+    
+    cos_tensor = torch.cat([cos_tensor_, cos_tensor_], dim=-1)
+    sin_tensor = torch.cat([sin_tensor_, sin_tensor_], dim=-1)
+    
+    position_embeddings = (cos_tensor, sin_tensor)
+    logger.info(f"[Mirage] position_embeddings: {position_embeddings[0].shape}, {position_embeddings[1].shape}")
     mirage_model_config = MirageModelConfig(
         # model architecture
         hidden_size=model_config.get_hidden_size(),
@@ -75,6 +84,7 @@ def build_model_config(
         position_embeddings=position_embeddings,
         # model weights
         state_dict=state_dict,
+        with_lm_head=False,
     )
     return mirage_model_config
 
@@ -88,9 +98,9 @@ def build_mpk_metadata(
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
     parallel_config = vllm_config.parallel_config
-    attn_metadata = forward_context.attn_metadata
-    logger.info(f"[Mirage] Forward context: {forward_context}, attn_metadata: {attn_metadata}")
-    
+    # For now we assume only one attention group
+    attn_metadata = list(forward_context.attn_metadata.values())[0]
+
     static_forward_context = forward_context.no_compile_layers # layer names to layers
     k_cache_tensors = []
     v_cache_tensors = []
@@ -275,7 +285,7 @@ class MirageBackend:
                 logger.info(f"[Mirage] MPK metadata: {mpk_metadata.info_as_string()}")
                 self.mpk = MPK(mpk_metadata)
                 self.mpk.build()
-                self.mpk.compile()
+                self.mpk.compile(output_dir=os.path.join(os.path.dirname(__file__), "mirage_backend_output"))
                 
                 self.compiled = True
                 
