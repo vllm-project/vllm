@@ -305,6 +305,16 @@ class Scheduler(SchedulerInterface):
                 # Transition to verification state and get tokens to verify
                 tokens_to_verify = request.start_self_spec_verification()
 
+                # CRITICAL FIX: Trim verification batch to exactly the threshold
+                # This prevents metrics assertion failures and ensures consistent batch sizes
+                # With n-gram assistance, pending tokens can exceed threshold due to multi-token acceptance
+                if len(tokens_to_verify) > self.self_spec_threshold:
+                    logger.debug(
+                        f"[SELF_SPEC_NGRAM] Request {request.request_id}: Trimmed verification batch | "
+                        f"total_pending={len(tokens_to_verify)} → verify_now={self.self_spec_threshold}"
+                    )
+                    tokens_to_verify = tokens_to_verify[:self.self_spec_threshold]
+
                 # During verification, use full KV indices (no sparse attention)
                 #self.req_to_sparse_selected_kv_indices[request.request_id] = []
                 self.req_to_full_kv_start_offset[request.request_id] = 0
@@ -314,6 +324,7 @@ class Scheduler(SchedulerInterface):
                 logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: TRANSITION ACCUMULATING→VERIFYING | "
                             f"pending_tokens={len(request._pending_output_tokens)} | "
                             f"spec_token_ids={len(tokens_to_verify)} | "
+                            f"num_computed_tokens={request.num_computed_tokens} | "
                             f"full_kv_offset: {old_offset}→0")
 
                 # Reuse the existing spec decoding interface
