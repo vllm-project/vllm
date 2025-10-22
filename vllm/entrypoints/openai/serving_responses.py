@@ -862,19 +862,18 @@ class OpenAIServingResponses(OpenAIServing):
         if message_item:
             outputs.append(message_item)
         if function_calls:
-            outputs.extend(
-                [
-                    ResponseFunctionToolCall(
-                        id=f"fc_{random_uuid()}",
-                        call_id=f"call_{random_uuid()}",
-                        type="function_call",
-                        status="completed",
-                        name=tool_call.name,
-                        arguments=tool_call.arguments,
-                    )
-                    for tool_call in function_calls
-                ]
-            )
+            tool_call_items = [
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_uuid()}",
+                    call_id=f"call_{random_uuid()}",
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+                for tool_call in function_calls
+            ]
+            outputs.extend(tool_call_items)
         return outputs
 
     def _extract_tool_calls(
