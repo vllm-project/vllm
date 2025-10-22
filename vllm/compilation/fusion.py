@@ -508,7 +508,12 @@ if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
             def replacement(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
                 # AITER's fused_mul_add requires that a either be a
                 # scalar or have the same number of elements as x.
-                if a.numel() == x.numel() or a.numel() == 1:
+                if (
+                    isinstance(a, torch.Tensor)
+                    and isinstance(b, torch.Tensor)
+                    and (a.numel() in [1, x.numel()])
+                    and (b.numel() in [1, x.numel()])
+                ):
                     return self.fused_mul_add_matcher.forward_custom(x, a, b)
                 else:
                     return self.fused_mul_add_matcher.forward_native(x, a, b)
