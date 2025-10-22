@@ -31,7 +31,7 @@ MTEB_RERANK_LANGS = ["en"]
 MTEB_RERANK_TOL = 2e-3
 
 
-class VllmMtebEncoder:  # implements mteb.EncoderProtocol
+class VllmMtebEncoder:  # implements
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
