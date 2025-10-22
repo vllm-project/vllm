@@ -90,12 +90,14 @@ def _merge_mm_kwargs(
     if kwargs_cls is None:
         try:
             from transformers.processing_utils import ProcessingKwargs
+
             kwargs_cls = ProcessingKwargs
         except Exception:
             kwargs_cls = None
     if mm_config.mm_processor_dynamic_kwargs is None:
-        mm_config.mm_processor_dynamic_kwargs = \
+        mm_config.mm_processor_dynamic_kwargs = (
             _collect_dynamic_keys_from_processing_kwargs(kwargs_cls)
+        )
     # Dynamic-wins: filter out dynamic (call-time) keys from constructor kwargs
     if mm_config.mm_processor_dynamic_kwargs:
         allowed_kwargs = {
