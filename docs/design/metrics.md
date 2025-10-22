@@ -636,18 +636,18 @@ fall under the more general heading of "Observability".
 
 vLLM has support for OpenTelemetry tracing:
 
-- Added by <gh-pr:4687>
+- Added by <gh-pr:4687> and reinstated by <gh-pr:20372>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
 - [User-facing docs](../examples/online_serving/opentelemetry.md)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
-  
+
 OpenTelemetry has a
 [Gen AI Working Group](https://github.com/open-telemetry/community/blob/main/projects/gen-ai.md).
 
-Since metrics is a big enough topic on its own, we are going to tackle
-the topic of tracing separately.
+Since metrics is a big enough topic on its own, we consider the topic
+of tracing to be quite separate from metrics.
 
 ### OpenTelemetry Model Forward vs Execute Time
 
