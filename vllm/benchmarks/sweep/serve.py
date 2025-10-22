@@ -41,6 +41,19 @@ def run_server(
     print("[END SERVER]")
 
 
+def _update_run_data(
+    run_data: dict[str, object],
+    serve_overrides: ParameterSweepItem,
+    bench_overrides: ParameterSweepItem,
+    run_number: int,
+):
+    run_data["run_number"] = run_number
+    run_data.update(serve_overrides)
+    run_data.update(bench_overrides)
+
+    return run_data
+
+
 def run_benchmark(
     server: ServerProcess | None,
     bench_cmd: list[str],
@@ -73,7 +86,12 @@ def run_benchmark(
 
         with output_path.open("rb") as f:
             run_data = json.load(f)
-            return run_data
+            return _update_run_data(
+                run_data,
+                serve_overrides,
+                bench_overrides,
+                run_number,
+            )
 
     if server is None:
         if not dry_run:
@@ -90,8 +108,12 @@ def run_benchmark(
     with output_path.open("rb") as f:
         run_data = json.load(f)
 
-    run_data["run_number"] = run_number
-    run_data.update(serve_overrides)
+    run_data = _update_run_data(
+        run_data,
+        serve_overrides,
+        bench_overrides,
+        run_number,
+    )
 
     with output_path.open("w") as f:
         json.dump(run_data, f, indent=4)
