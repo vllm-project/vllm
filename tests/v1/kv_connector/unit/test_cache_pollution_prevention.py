@@ -67,7 +67,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     )
 
     # request 1: will have invalid blocks
-    request1 = create_request(num_tokens=num_prompt_tokens, request_id="req1")
+    request1 = create_request(num_tokens=num_prompt_tokens, request_id=1)
     recompute_scheduler.add_request(request=request1)
 
     req_num_new_matched_tokens = {
