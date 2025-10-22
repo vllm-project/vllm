@@ -829,7 +829,7 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
                 status=None,  # NOTE: Only the last output item has status.
             )
-        function_calls, content = self._extract_tool_calls(
+        function_calls, content = self._parse_tool_calls_from_content(
             request, tokenizer, content=content
         )
         if content:
@@ -876,7 +876,7 @@ class OpenAIServingResponses(OpenAIServing):
             outputs.extend(tool_call_items)
         return outputs
 
-    def _extract_tool_calls(
+    def _parse_tool_calls_from_content(
         self,
         request: ResponsesRequest,
         tokenizer: AnyTokenizer,
