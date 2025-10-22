@@ -585,6 +585,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         transformers_version_reason="HF model is not compatible.",
         hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
     ),
+    "DeepseekOCRForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-OCR",
+    ),
     "DotsOCRForCausalLM": _HfExamplesInfo(
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
