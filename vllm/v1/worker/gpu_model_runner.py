@@ -313,18 +313,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
+            self.drafter: (
+                NgramProposer | SuffixDecodingProposer | EagleProposer | MedusaProposer
+            )
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.method == "suffix":
-                self.drafter = SuffixDecodingProposer(self.vllm_config)  # type: ignore
+                self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
-                self.drafter = EagleProposer(self.vllm_config, self.device, self)  # type: ignore
+                self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "medusa":
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
-                )  # type: ignore
+                )
             else:
                 raise ValueError(
                     "Unknown speculative decoding method: "
