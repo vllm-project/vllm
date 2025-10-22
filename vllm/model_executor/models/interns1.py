@@ -184,6 +184,8 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         hf_processor.video_processor = cached_video_processor_from_config(
             self.ctx.model_config, processor_cls=InternVLVideoProcessor, **kwargs
         )
+        if hf_processor.video_processor.size != hf_processor.image_processor.size:
+            hf_processor.video_processor.size = hf_processor.image_processor.size
         return hf_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
