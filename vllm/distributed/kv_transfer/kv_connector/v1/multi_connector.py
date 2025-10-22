@@ -324,11 +324,32 @@ class MultiConnector(KVConnectorBase_V1):
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
     ) -> KVConnectorStats | None:
-        return (
-            MultiKVConnectorStats(data=data)
-            if data is not None
-            else MultiKVConnectorStats()
-        )
+        if data is None:
+            return MultiKVConnectorStats()
+        
+        # Reconstruct nested KVConnectorStats objects from their serialized forms
+        reconstructed_data = {}
+        for connector_name, stats_dict in data.items():
+            # Get the connector class to reconstruct its stats
+            try:
+                connector_cls = KVConnectorFactory._registry[connector_name]()
+            except KeyError:
+                logger.warning(
+                    "Unknown connector '%s' in stats data, skipping reconstruction",
+                    connector_name
+                )
+                continue
+            
+            # stats_dict is the serialized dataclass which contains {'data': {...}}
+            # We need to extract the inner 'data' field to avoid double-nesting
+            inner_data = stats_dict.get('data') if isinstance(stats_dict, dict) else stats_dict
+            
+            # Use the connector's build_kv_connector_stats to reconstruct
+            reconstructed_stats = connector_cls.build_kv_connector_stats(inner_data)
+            if reconstructed_stats is not None:
+                reconstructed_data[connector_name] = reconstructed_stats
+        
+        return MultiKVConnectorStats(data=reconstructed_data)
 
     def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
         # Group connector stats by connector type.
