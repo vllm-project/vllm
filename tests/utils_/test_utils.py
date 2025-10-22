@@ -20,7 +20,6 @@ from vllm.utils import (
     FlexibleArgumentParser,
     bind_kv_cache,
 )
-from vllm.utils.system_utils import unique_filepath
 from ..utils import create_new_process_for_each_test, flat_product
 
 
@@ -464,18 +463,6 @@ def test_load_config_file(tmp_path):
     # Assert that the processed arguments match the expected output
     assert processed_args == expected_args
     os.remove(str(config_file_path))
-
-
-def test_unique_filepath():
-    temp_dir = tempfile.mkdtemp()
-    path_fn = lambda i: Path(temp_dir) / f"file_{i}.txt"
-    paths = set()
-    for i in range(10):
-        path = unique_filepath(path_fn)
-        path.write_text("test")
-        paths.add(path)
-    assert len(paths) == 10
-    assert len(list(Path(temp_dir).glob("*.txt"))) == 10
 
 
 def test_flat_product():
