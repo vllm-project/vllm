@@ -373,17 +373,18 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     recompute_scheduler: Scheduler,
 ):
     """
-    Test Issue 4: Async recompute case - invalid blocks not cached after transfer.
+    Test Issue 4: Async recompute case - invalid blocks not cached after
+    transfer.
 
-    When a request with async KV loading has invalid blocks and retry_policy is 'recompute':
+    When async KV loading has invalid blocks and retry_policy is 'recompute':
     1. Blocks are allocated but not cached yet (no hash)
     2. evict_blocks() is called but is a no-op (blocks not cached)
     3. When async transfer completes, only valid blocks should be cached
     4. Invalid blocks should never enter the prefix cache
 
-    This test verifies END-TO-END that the eviction call on uncached async blocks
-    doesn't matter because the failed_recving_kv_req_ids protection ensures only
-    valid blocks are cached when the transfer completes.
+    This test verifies END-TO-END that the eviction call on uncached async
+    blocks doesn't matter because the failed_recving_kv_req_ids protection
+    ensures only valid blocks are cached when the transfer completes.
     """
     from unittest.mock import patch
 
@@ -477,7 +478,7 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     # now simulate async transfer completing
     model_runner_output_2 = create_model_runner_output(
         reqs=[],
-        finished_recving=[request.request_id],
+        finished_recving={request.request_id},
         invalid_block_ids=None,
         use_eos=False,
     )
@@ -509,11 +510,12 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     ):
         # call schedule() again - this triggers _update_waiting_for_remote_kv()
         # which should call cache_blocks with the truncated value
-        scheduler_output_2 = recompute_scheduler.schedule()
+        recompute_scheduler.schedule()
 
     # verify cache_blocks was called with the truncated value
     assert len(cache_blocks_calls) == 1, (
-        f"cache_blocks should be called exactly once, got {len(cache_blocks_calls)} calls"
+        f"cache_blocks should be called exactly once, "
+        f"got {len(cache_blocks_calls)} calls"
     )
     cached_req_id, cached_num_tokens = cache_blocks_calls[0]
     assert cached_req_id == request.request_id
