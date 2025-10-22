@@ -8,7 +8,7 @@ from vllm import envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import set_env_var
+from vllm.utils.system_utils import set_env_var
 
 from .post_cleanup import PostCleanupPass
 from .vllm_inductor_pass import VllmInductorPass
