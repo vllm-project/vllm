@@ -174,22 +174,12 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
-    
-    def get_dynamic_token_budget(self, request: Optional[Request], available_budget: int) -> int:
+    def get_dynamic_token_budget(self, request: Request, available_budget: int) -> int:
         """Get the effective token budget for scheduling a request.
         
         This method can be overridden by subclasses to implement dynamic scheduling constraints
         based on runtime conditions. For example, data parallel schedulers might want to 
         consider per-rank token budgets or resource availability.
-        
-        Args:
-            request: The request being considered for scheduling. Can be None if checking
-                    general scheduling constraints.
-            available_budget: The base token budget available for scheduling.
-                    
-        Returns:
-            The effective token budget that should be used for this request.
-            Should not exceed available_budget.
         """
         return available_budget
     
