@@ -607,12 +607,14 @@ class VllmBackend:
 
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
 
-        logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
-        logger.info_once(
-            "Using cache directory: %s for vLLM's torch.compile",
-            local_cache_dir,
-            scope="local",
-        )
+        if disable_cache:
+            logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
+        else:
+            logger.info_once(
+                "Using cache directory: %s for vLLM's torch.compile",
+                local_cache_dir,
+                scope="local",
+            )
 
         self.compiler_manager.initialize_cache(
             local_cache_dir, disable_cache, self.prefix
@@ -624,7 +626,7 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.time() - torch_compile_start_time
-        logger.debug_once(
+        logger.info_once(
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
         self.compilation_config.compilation_time += dynamo_time
