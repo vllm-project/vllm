@@ -138,6 +138,8 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
             logger.info_once("Using FlashInfer FP8 MoE TRTLLM backend for SM100")
             return Fp8MoeBackend.FLASHINFER_TRTLLM
         else:
+            if block_quant:
+                raise ValueError("FlashInfer FP8 MoE CUTLASS backend does not support block quantization")
             logger.info_once("Using FlashInfer FP8 MoE CUTLASS backend for SM100")
             return Fp8MoeBackend.FLASHINFER_CUTLASS
 
