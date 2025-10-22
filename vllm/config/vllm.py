@@ -712,7 +712,11 @@ class VllmConfig:
             )
 
             # determine the cudagraph_capture_sizes
-            if self.compilation_config.cudagraph_capture_sizes:
+            if self.compilation_config.cudagraph_capture_sizes is not None:
+                assert len(self.compilation_config.cudagraph_capture_sizes) > 0, (
+                    "cudagraph_capture_sizes should contain at least one element "
+                    "when using cuda graph."
+                )
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
                 cudagraph_capture_sizes = dedup_sizes
@@ -750,6 +754,15 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
                 and self.compilation_config.max_cudagraph_capture_size != valid_max_size
             ):
+                # this assertion take effect only when both two flags are user-specified
+                # and they are inconsistent with each other
+                assert self.compilation_config.cudagraph_capture_sizes is None, (
+                    "customized max_cudagraph_capture_size"
+                    f"(={self.compilation_config.max_cudagraph_capture_size}) should be"
+                    " consistent with the max value of cudagraph_capture_sizes"
+                    f"(={valid_max_size})"
+                )
+
                 logger.warning(
                     "Truncating max_cudagraph_capture_size to %d",
                     valid_max_size,

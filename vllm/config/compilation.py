@@ -687,7 +687,11 @@ class CompilationConfig:
         return VllmBackend(vllm_config)
 
     def post_init_cudagraph_sizes(self) -> None:
-        """To complete the initialization of config"""
+        """To complete the initialization after cudagraph related
+        configs are set. This includes:
+        - initialize compile_sizes
+        - pre-compute the mapping bs_to_padded_graph_size
+        """
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
@@ -707,6 +711,8 @@ class CompilationConfig:
 
         # make sure the sizes are in ascending order
         self.cudagraph_capture_sizes.sort()
+        if self.cudagraph_capture_sizes:
+            assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [
