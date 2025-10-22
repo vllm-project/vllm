@@ -15,8 +15,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
-    from vllm.config.cache import CacheDType
+    from vllm.config import VllmConfig
 else:
     _Backend = None
 
@@ -466,12 +465,6 @@ class RocmPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: "CacheDType", model_config: "ModelConfig"
-    ) -> bool:
-        return True
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

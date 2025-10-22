@@ -14,7 +14,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import import_pynvml
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -24,8 +23,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
-    from vllm.config.cache import CacheDType
+    from vllm.config import VllmConfig
 else:
     _Backend = None
 
@@ -382,18 +380,6 @@ class CudaPlatformBase(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: "CacheDType", model_config: "ModelConfig"
-    ) -> bool:
-        if not envs.VLLM_ATTENTION_BACKEND:
-            return True
-        from vllm.attention.backends.registry import _Backend, backend_to_class
-
-        attention_backend = _Backend[envs.VLLM_ATTENTION_BACKEND]
-        backend_class = backend_to_class(attention_backend)
-        return backend_class.supports_kv_cache_dtype(kv_cache_dtype)
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

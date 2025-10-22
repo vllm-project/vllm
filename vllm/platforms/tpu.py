@@ -16,12 +16,11 @@ from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
-    from vllm.config.cache import BlockSize, CacheDType
+    from vllm.config import VllmConfig
+    from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
 else:
     BlockSize = None
-    ModelConfig = None
     VllmConfig = None
     PoolingParams = None
     _Backend = None
@@ -221,12 +220,6 @@ class TpuPlatform(Platform):
             and params.sampling_type == SamplingType.RANDOM_SEED
         ):
             raise ValueError("Torch XLA does not support per-request seed.")
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: "CacheDType", model_config: "ModelConfig"
-    ) -> bool:
-        return True
 
     @classmethod
     @torch.compile(backend="openxla")
