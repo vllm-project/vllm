@@ -405,3 +405,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     @property
     def quant_method(self):
         return self.base_layer.quant_method
+
+    @property
+    def is_internal_router(self) -> bool:
+        return self.base_layer.is_internal_router
