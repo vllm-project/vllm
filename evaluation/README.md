@@ -30,6 +30,7 @@
    pip uninstall vllm
    git clone -b dev/perf git@github.com:ROCm/vllm.git
    cd vllm
+   /root/.cache/vllm/
    python3 -m pip install -r requirements/common.txt
    export PYTORCH_ROCM_ARCH="gfx942"
    python3 setup.py develop
@@ -64,7 +65,8 @@
     export NCCL_DEBUG=WARN
     export VLLM_RPC_TIMEOUT=1800000
     export VLLM_ROCM_USE_AITER_MHA=0
-    export VLLM_ROCM_USE_TRITON_ROPE=1
+    export VLLM_ROCM_USE_TRITON_ROPE=1 # add for acc
+    export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 # add for acc, perf is not good for some cases
 
     # for profiling
     export VLLM_TORCH_PROFILER_DIR="deepseek_in3k_out1k"
