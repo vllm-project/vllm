@@ -802,6 +802,39 @@ class OpenAIServing:
         )
         return json_str
 
+    def _handle_streaming_error_finish_reason(
+        self, finish_reason: str | None, request_id: str
+    ) -> str | None:
+        """handle error finish reason in streaming mode by logging and
+        returning error data if found"""
+        if finish_reason == "error":
+            logger.error(
+                "Request %s failed with an internal error during generation",
+                request_id,
+            )
+            return self.create_streaming_error_response(
+                "Internal server error",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return None
+
+    def _handle_error_finish_reason(
+        self, finish_reason: str | None, request_id: str
+    ) -> ErrorResponse | None:
+        """handle error finish reason by logging and returning 500 if found"""
+        if finish_reason == "error":
+            logger.error(
+                "Request %s failed with an internal error during generation",
+                request_id,
+            )
+            return self.create_error_response(
+                "Internal server error",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return None
+
     async def _check_model(
         self,
         request: AnyRequest,
