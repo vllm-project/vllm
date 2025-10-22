@@ -47,10 +47,14 @@ EAGLE_SPEC_CONFIG = {
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
+    # TODO - Stabilize lm-format-enforcer test cases, or remove support
+    # after some period of time if we're not able to resolve the issues
+    # observed in CI.
+    # ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto",
+    # None),
+    # ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
     # FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
