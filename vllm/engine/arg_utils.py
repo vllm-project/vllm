@@ -32,6 +32,7 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import _Backend
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -88,12 +89,12 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
-    from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
+    from vllm.v1.executor import Executor
 else:
-    ExecutorBase = Any
+    Executor = Any
     QuantizationMethods = Any
     LoadFormats = Any
     UsageContext = Any
@@ -369,7 +370,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: (
-        str | DistributedExecutorBackend | type[ExecutorBase] | None
+        str | DistributedExecutorBackend | type[Executor] | None
     ) = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
@@ -452,6 +453,9 @@ class EngineArgs:
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+    mm_encoder_attn_backend: _Backend | str | None = (
+        MultiModalConfig.mm_encoder_attn_backend
+    )
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
@@ -921,6 +925,10 @@ class EngineArgs:
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"]
         )
         multimodal_group.add_argument(
+            "--mm-encoder-attn-backend",
+            **multimodal_kwargs["mm_encoder_attn_backend"],
+        )
+        multimodal_group.add_argument(
             "--interleave-mm-strings", **multimodal_kwargs["interleave_mm_strings"]
         )
         multimodal_group.add_argument(
@@ -1184,6 +1192,7 @@ class EngineArgs:
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
+            mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1564,7 +1573,6 @@ class EngineArgs:
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
-            send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER and parallel_config.use_ray),
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
