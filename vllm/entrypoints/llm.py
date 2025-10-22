@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 import itertools
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
@@ -445,17 +446,36 @@ class LLM:
         eval_dataset: Optional[Sequence[dict[str, Any]]] = None,
         eval_steps: Optional[int] = None,
     ) -> Sequence[dict[str, Any]]:
+        # Tokenize the dataset
         tokenizer = self.get_tokenizer()
         self.set_tokenizer_pad_token(tokenizer.eos_token)
-
         dataset = Dataset.from_list(train_dataset + eval_dataset)
         tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
 
+        # Split the tokenized dataset into train and eval
         tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
         tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
 
+        # TODO(girfan): Verify this with PEFT.
+        num_steps_per_epoch = math.ceil(len(tokenized_train_dataset) / batch_size)
+        total_steps = num_steps_per_epoch * num_epochs
+        num_training_steps = math.ceil(total_steps / gradient_accumulation_steps)
+
+        # Make the LoRA trainable
+        # TODO(girfan): Make this cleaner.
+        training_manager = self.llm_engine.model_executor.driver_worker.model_runner.training_manager
+        training_manager.make_lora_trainable(
+            lora_request,
+            learning_rate=learning_rate,
+            num_training_steps=num_training_steps,
+            num_warmup_steps=warmup_steps,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        )
+
+        # Add the training requests to the LLM engine
         request_ids = self._add_training_requests(tokenized_train_dataset, lora_request, use_tqdm)
 
+        # Run the engine
         outputs = self._run_engine(use_tqdm=use_tqdm)
 
         # TODO(girfan): Implement this.

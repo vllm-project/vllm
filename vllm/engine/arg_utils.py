@@ -399,6 +399,9 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    lora_alpha: int = LoRAConfig.lora_alpha
+    lora_training_target_modules: List[str] = LoRAConfig.training_target_modules
+    enable_lora_training: bool = LoRAConfig.enable_lora_training
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[
@@ -1414,7 +1417,10 @@ class EngineArgs:
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
-            and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+            and self.max_cpu_loras > 0 else None,
+            lora_alpha=self.lora_alpha,
+            training_target_modules=self.lora_training_target_modules,
+            enable_lora_training=self.enable_lora_training) if self.enable_lora else None
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":

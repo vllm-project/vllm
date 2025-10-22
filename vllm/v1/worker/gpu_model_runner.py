@@ -94,6 +94,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_splitting import get_dp_padding_ubatch, ubatch_split
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.lora.training_manager import TrainingManager
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -2694,6 +2695,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 self.model = UBatchWrapper(self.model, self.vllm_config,
                                            CUDAGraphMode.NONE, self.device)
+
+        if self.lora_config and self.lora_config.enable_lora_training:
+            self.training_manager = TrainingManager(
+                model_runner=self,
+                lora_manager=self.lora_manager,
+                lora_config=self.lora_config,
+                device=self.device,
+                dtype=self.dtype,
+            )
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \

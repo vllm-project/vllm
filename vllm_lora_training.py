@@ -83,11 +83,15 @@ llm = LLM(
     model=BASE_MODEL_PATH,
     max_model_len=MAX_LENGTH,
     gpu_memory_utilization=0.5,
-    enable_lora=True,
-    max_lora_rank=LORA_RANK,
     enforce_eager=True,
     disable_log_stats=True,
     seed=42,
+    enable_lora=True,
+    max_lora_rank=LORA_RANK,
+    lora_alpha=LORA_ALPHA,
+    lora_training_target_modules=TARGET_MODULES,
+    lora_extra_vocab_size=0,
+    enable_lora_training=True,
 )
 
 print("\n[3/4] Creating LoRA request...")

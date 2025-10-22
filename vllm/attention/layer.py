@@ -303,8 +303,24 @@ class Attention(nn.Module, AttentionLayerBase):
                                   attn_metadata,
                                   output=output)
             else:
-                torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                # Avoid fused custom op during training; it lacks autograd kernel.
+                forward_context: ForwardContext = get_forward_context()
+                attn_metadata = forward_context.attn_metadata
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[self.layer_name]
+                if attn_metadata is not None and attn_metadata.is_training:
+                    # Route through backend impl to ensure autograd-safe path
+                    self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                    self.impl.forward(self,
+                                      query,
+                                      key,
+                                      value,
+                                      self_kv_cache,
+                                      attn_metadata,
+                                      output=output)
+                else:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -316,8 +332,18 @@ class Attention(nn.Module, AttentionLayerBase):
                 return self.impl.forward(self, query, key, value,
                                          self_kv_cache, attn_metadata)
             else:
-                return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name)
+                # Avoid fused custom op during training
+                forward_context = get_forward_context()
+                attn_metadata = forward_context.attn_metadata
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[self.layer_name]
+                if attn_metadata.is_training:
+                    self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                    return self.impl.forward(self, query, key, value,
+                                             self_kv_cache, attn_metadata)
+                else:
+                    return torch.ops.vllm.unified_attention(
+                        query, key, value, self.layer_name)
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)

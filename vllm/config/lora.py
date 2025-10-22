@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union, List
 
 import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
+from dataclasses import field
 
 import vllm.envs as envs
 from vllm.config.utils import config
@@ -62,6 +63,12 @@ class LoRAConfig:
     bias_enabled: bool = False
     """[DEPRECATED] Enable bias for LoRA adapters. This option will be
     removed in v0.12.0."""
+    lora_alpha: int = 16
+    """LoRA alpha."""
+    training_target_modules: List[str] | None = None
+    """Target modules for LoRA training."""
+    enable_lora_training: bool = False
+    """Enable LoRA training."""
 
     def compute_hash(self) -> str:
         """
@@ -119,6 +126,9 @@ class LoRAConfig:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
+
+        if self.training_target_modules is None:
+            self.training_target_modules = ["q_proj", "v_proj"]
 
     def verify_with_cache_config(self, cache_config: CacheConfig):
         if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
