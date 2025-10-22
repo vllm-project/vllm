@@ -68,8 +68,8 @@ def _get_backend_priorities(
             _Backend.TRITON_ATTN: 2,
             _Backend.FLEX_ATTENTION: 3,
             # MLA backends
-            _Backend.FLASHMLA: 0,
-            _Backend.FLASH_ATTN_MLA: 1,
+            _Backend.FLASH_ATTN_MLA: 0,
+            _Backend.FLASHMLA: 1,
             _Backend.FLASHINFER_MLA: 2,
             _Backend.TRITON_MLA: 3,
         }
