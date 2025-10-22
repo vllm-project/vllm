@@ -342,7 +342,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if not envs.VLLM_USE_V1:
             return
 
-        user_mamba_block_size = vllm_config.cache_config.mamba_block_size
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -414,10 +414,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             def lcm(a, b):
                 return a * b // gcd(a, b)
 
-            base_chunk_size = (
-                user_mamba_block_size 
-                or model_config.get_mamba_chunk_size()
-            )
+            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
+
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
