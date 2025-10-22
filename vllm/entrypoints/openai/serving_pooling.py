@@ -9,6 +9,7 @@ from typing import Final, cast
 
 import jinja2
 from fastapi import Request
+from typing_extensions import assert_never
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
