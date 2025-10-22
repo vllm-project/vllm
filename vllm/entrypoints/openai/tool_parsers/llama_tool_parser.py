@@ -71,7 +71,7 @@ class Llama3JsonToolParser(ToolParser):
     ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
-        Only extracts JSON content and ignores any surrounding plain text.
+        Extracts JSON tool calls and preserves surrounding plain-text content.
         Supports both single JSON and multiple JSONs separated by semicolons.
         """
         # Quick check before running regex
@@ -89,6 +89,19 @@ class Llama3JsonToolParser(ToolParser):
 
         try:
             json_str = match.group(0)
+
+            # Extract surrounding text
+            prefix = model_output[: match.start()]
+            suffix = model_output[match.end() :]
+
+            # Combine and clean context
+            context_parts = [prefix.strip(), suffix.strip()]
+            context: Union[str, None] = " ".join(part for part in context_parts if part)
+
+            # Treat whitespace-only as empty
+            if not context or context.isspace():
+                context = None
+
             # Split by semicolon and strip whitespace
             json_objects = [obj.strip() for obj in json_str.split(";")]
 
@@ -114,7 +127,7 @@ class Llama3JsonToolParser(ToolParser):
                 )
 
             return ExtractedToolCallInformation(
-                tools_called=True, tool_calls=tool_calls, content=None
+                tools_called=True, tool_calls=tool_calls, content=context
             )
 
         except Exception:
