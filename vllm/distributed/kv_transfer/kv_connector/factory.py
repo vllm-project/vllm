@@ -67,6 +67,22 @@ class KVConnectorFactory:
         return connector_cls(config, role)
 
     @classmethod
+    def get_connector_class_by_name(
+        cls, connector_name: str
+    ) -> type[KVConnectorBaseType] | None:
+        """Get a registered connector class by name.
+
+        Args:
+            connector_name: Name of the registered connector.
+
+        Returns:
+            The connector class if found, None otherwise.
+        """
+        if connector_name not in cls._registry:
+            return None
+        return cls._registry[connector_name]()
+
+    @classmethod
     def get_connector_class(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> type[KVConnectorBaseType]:

@@ -326,29 +326,39 @@ class MultiConnector(KVConnectorBase_V1):
     ) -> KVConnectorStats | None:
         if data is None:
             return MultiKVConnectorStats()
-        
-        # Reconstruct nested KVConnectorStats objects from their serialized forms
+
+        # data is a dict mapping connector name to their serialized data.
+        # In here, we need to reconstruct nested KVConnectorStats objects from
+        # their serialized forms
+        # We need to use the connector_name to lookup the connector class
         reconstructed_data = {}
         for connector_name, stats_dict in data.items():
             # Get the connector class to reconstruct its stats
-            try:
-                connector_cls = KVConnectorFactory._registry[connector_name]()
-            except KeyError:
+            connector_cls = KVConnectorFactory.get_connector_class_by_name(
+                connector_name
+            )
+            if connector_cls is None:
                 logger.warning(
                     "Unknown connector '%s' in stats data, skipping reconstruction",
-                    connector_name
+                    connector_name,
                 )
                 continue
-            
-            # stats_dict is the serialized dataclass which contains {'data': {...}}
+
+            # stats_dict is the serialized dataclass
+            # which contains {'data': {...}}
             # We need to extract the inner 'data' field to avoid double-nesting
-            inner_data = stats_dict.get('data') if isinstance(stats_dict, dict) else stats_dict
-            
+            assert isinstance(stats_dict, dict) and "data" in stats_dict, (
+                f"Expected a dict with a 'data' field, got {stats_dict}"
+            )
+            inner_data = stats_dict["data"]
+
             # Use the connector's build_kv_connector_stats to reconstruct
-            reconstructed_stats = connector_cls.build_kv_connector_stats(inner_data)
+            reconstructed_stats = connector_cls.build_kv_connector_stats(
+                inner_data=inner_data
+            )
             if reconstructed_stats is not None:
                 reconstructed_data[connector_name] = reconstructed_stats
-        
+
         return MultiKVConnectorStats(data=reconstructed_data)
 
     def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
