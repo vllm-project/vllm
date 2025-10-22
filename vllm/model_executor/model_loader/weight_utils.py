@@ -662,13 +662,12 @@ def runai_safetensors_weights_iterator(
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
 
-        def get_device():
-            is_cuda = current_platform.is_cuda()
-            return f"cuda:{torch.cuda.current_device()}" if is_cuda else "cpu"
+        is_cuda = current_platform.is_cuda()
+        device = f"cuda:{torch.cuda.current_device()}" if is_cuda else "cpu"
 
         streamer.stream_files(
             hf_weights_files,
-            device=get_device(),
+            device=device,
             is_distributed=is_distributed,
         )
         total_tensors = sum(
