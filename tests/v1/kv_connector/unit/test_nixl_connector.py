@@ -345,29 +345,22 @@ def test_kv_transfer_handshake(dist_init):
     # Here we are testing the retrieval of NIXLAgentMetadata.
     # Knowing the implementation detail, we override the add_remote_agent
     # to validate the metadata received is the same as the one in prefill_connector.
-    received_metadata = None
+    with patch.object(
+        decode_connector.connector_worker, "add_remote_agent"
+    ) as mock_add_remote_agent:
+        mock_add_remote_agent.return_type = "remote_agent"
 
-    def mock_add_remote_agent(
-        agent_metadata: NixlAgentMetadata,
-        remote_tp_rank: int,
-        remote_tp_size: int,
-    ):
-        nonlocal received_metadata
-        received_metadata = (agent_metadata, remote_tp_rank, remote_tp_size)
-        return "remote_agent"
+        decode_connector.connector_worker._nixl_handshake(
+            kv_connector_metadata["remote_host"],
+            kv_connector_metadata["remote_port"],
+            kv_connector_metadata["tp_size"],
+            kv_connector_metadata["remote_engine_id"],
+        )
 
-    decode_connector.connector_worker.add_remote_agent = mock_add_remote_agent
-
-    decode_connector.connector_worker._nixl_handshake(
-        kv_connector_metadata["remote_host"],
-        kv_connector_metadata["remote_port"],
-        kv_connector_metadata["tp_size"],
-        kv_connector_metadata["remote_engine_id"],
-    )
-    assert received_metadata is not None
-    assert received_metadata[1] == 0  # remote_tp_rank
-    assert received_metadata[2] == 1  # remote_tp_size
-    assert metadata[0][0] == received_metadata[0]
+        received_metadata = mock_add_remote_agent.call_args.args
+        assert received_metadata[1] == 0  # remote_tp_rank
+        assert received_metadata[2] == 1  # remote_tp_size
+        assert metadata[0] == received_metadata[0]
 
     # Need to shutdown the background thread to release NIXL side channel port
     scheduler_connector.shutdown()
@@ -703,6 +696,7 @@ class TestNixlHandshake:
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
+                device_id=[0],
                 num_blocks=1,
                 # prefill TP=1, decode TP=2, remote block_lens is double to local
                 block_lens=[i * 2 for i in worker.block_len_per_layer],
