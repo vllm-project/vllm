@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 import cloudpickle
 
@@ -243,7 +243,7 @@ class RayDistributedExecutor(Executor):
             ip = item.ip
             return 0 if ip == driver_ip else 1, ip_counts[ip], ip
 
-        def sort_by_pp_rank_order(item: RayWorkerMetaData, pp_rank_map: Dict[str, int]):
+        def sort_by_pp_rank_order(item: RayWorkerMetaData, pp_rank_map: dict[str, int]):
             """
             Sort the workers based on the custom pipeline parallel rank order.
             If VLLM_PP_RANK_ORDER is set, use it to determine the rank.
@@ -259,7 +259,7 @@ class RayDistributedExecutor(Executor):
         pp_rank_order = envs.VLLM_PP_RANK_ORDER
         if pp_rank_order:
             # Parse the PP rank order
-            pp_rank_map: Dict[str, int] = {}
+            pp_rank_map: dict[str, int] = {}
             try:
                 # Format: "ip1,ip2,ip3,..."
                 ips = [ip.strip() for ip in pp_rank_order.split(",")]
@@ -274,13 +274,13 @@ class RayDistributedExecutor(Executor):
                 )
                 sorted_worker_metadata = sorted(
                     worker_metadata, key=sort_by_driver_then_worker_ip
-                    )
+                )
             else:
                 logger.info("Using custom PP rank order: %s", pp_rank_map)
                 sorted_worker_metadata = sorted(
                     worker_metadata,
                     key=lambda item: sort_by_pp_rank_order(item, pp_rank_map),
-                    )
+                )
         else:
             # After sorting, the workers on the same node will be
             # close to each other, and the workers on the driver

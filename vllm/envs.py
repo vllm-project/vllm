@@ -7,7 +7,6 @@ import json
 import os
 import sys
 import tempfile
-from typing import Optional
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -48,7 +47,7 @@ if TYPE_CHECKING:
     VLLM_ATTENTION_BACKEND: str | None = None
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
-    VLLM_PP_RANK_ORDER: Optional[str] = None
+    VLLM_PP_RANK_ORDER: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
