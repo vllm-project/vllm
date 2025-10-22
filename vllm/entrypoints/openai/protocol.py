@@ -1726,9 +1726,6 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
         ),
     )
 
-    def to_pooling_params(self):
-        return PoolingParams()
-
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
     request_id: str | None = None

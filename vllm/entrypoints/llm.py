@@ -1014,19 +1014,6 @@ class LLM:
                 "pooling model."
             )
 
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
-
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
-
-        for param in as_iter(pooling_params):
-            param.verify(pooling_task, model_config)
-            # for backwards compatibility
-            if truncate_prompt_tokens is not None:
-                param.truncate_prompt_tokens = truncate_prompt_tokens
-
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
             io_processor_prompt = True
@@ -1043,6 +1030,24 @@ class LLM:
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
+
+        if io_processor_prompt:
+            pooling_params = self.io_processor.validate_or_generate_params(
+                pooling_params
+            )
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
+
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
+
+        for param in as_iter(pooling_params):
+            param.verify(pooling_task, model_config)
+            # for backwards compatibility
+            if truncate_prompt_tokens is not None:
+                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         self._validate_and_add_requests(
             prompts=prompts,

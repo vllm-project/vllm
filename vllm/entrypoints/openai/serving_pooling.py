@@ -161,7 +161,10 @@ class OpenAIServingPooling(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            pooling_params = request.to_pooling_params()
+            if is_io_processor_request:
+                pooling_params = self.io_processor.validate_or_generate_params()
+            else:
+                pooling_params = request.to_pooling_params()
 
             if "token_embed" in self.supported_tasks:
                 pooling_task = "token_embed"
