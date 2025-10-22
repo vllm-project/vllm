@@ -1013,7 +1013,7 @@ def get_dcp_local_seq_lens(
         )
     else:
         rank_offsets = torch.Tensor([[dcp_rank]]).to(dtype=torch.int32)
-    seq_lens_tiled = seq_lens.unsqueeze(-1).repeat(1, rank_offsets.shape[1])
+    seq_lens_tiled = seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
     base = (
         seq_lens_tiled
         // dcp_kv_cache_interleave_size

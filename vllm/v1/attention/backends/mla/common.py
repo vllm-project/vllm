@@ -222,6 +222,7 @@ from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    get_dcp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -998,8 +999,15 @@ def reorg_kvcache(
     k_pe_segments = []
     src_token_idx = 0
     max_seq_len_check = 0
-    for cp_chunk_seq_len, origin_context_len in zip(
-        cp_chunk_seq_lens_lst, origin_context_lens
+    local_context_lens_allrank = get_dcp_local_seq_lens(
+        torch.Tensor(origin_context_lens),
+        cp_world_size,
+        None,
+        interleave_size,
+    )
+    # print(origin_context_lens, local_context_lens_allrank)
+    for cp_chunk_seq_len, origin_context_len, local_context_lens in zip(
+        cp_chunk_seq_lens_lst, origin_context_lens, local_context_lens_allrank
     ):
         chunk_context_len = chunk_size
         if cp_chunk_seq_len != 0:
@@ -1007,25 +1015,10 @@ def reorg_kvcache(
                 chunk_context_len, origin_context_len - chunk_size * chunk_idx
             )
 
-        interleave_remainder = chunk_context_len % (interleave_size * cp_world_size)
-        if interleave_remainder > 0:
-            cp_target_rank = interleave_remainder // interleave_size
-            cp_target_rank_remainder = interleave_remainder % interleave_size
-        else:
-            cp_target_rank = cp_world_size
-            cp_target_rank_remainder = interleave_size
-
         cur_seq_len = 0
         for rank in range(cp_world_size):
-            if rank > cp_target_rank and cp_chunk_seq_len:
-                real_cp_chunk_seq_len = cp_chunk_seq_len - interleave_size
-            elif rank == cp_target_rank and cp_chunk_seq_len:
-                real_cp_chunk_seq_len = (
-                    cp_chunk_seq_len - interleave_size + cp_target_rank_remainder
-                )
-            else:
-                real_cp_chunk_seq_len = cp_chunk_seq_len
-            if real_cp_chunk_seq_len:
+            real_cp_chunk_seq_len = local_context_lens[rank]
+            if real_cp_chunk_seq_len != 0:
                 kv_c_segment = allgatered_kv_c_normed[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
