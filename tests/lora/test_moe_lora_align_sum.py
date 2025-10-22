@@ -68,6 +68,8 @@ def test_moe_lora_align_block_size(
         num_experts,
         block_size,
         max_loras,
+        max_num_tokens_padded,
+        max_num_m_blocks,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_pad,

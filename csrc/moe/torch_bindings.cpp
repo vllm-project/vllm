@@ -40,6 +40,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor token_lora_mapping,"
       "                     int num_experts,"
       "                     int block_size, int max_loras, "
+      "                     int max_num_tokens_padded, "
+      "                     int max_num_m_blocks, "
       "                     Tensor !sorted_token_ids,"
       "                     Tensor !experts_ids,"
       "                     Tensor !num_tokens_post_pad) -> () ");

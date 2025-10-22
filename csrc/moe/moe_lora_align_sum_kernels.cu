@@ -124,18 +124,14 @@ __global__ void moe_lora_align_sum_kernel(
 void moe_lora_align_block_size(torch::Tensor topk_ids,
                                torch::Tensor token_lora_mapping,
                                int64_t num_experts, int64_t block_size,
-                               int64_t max_loras,
+                               int64_t max_loras, int64_t max_num_tokens_padded,
+                               int64_t max_num_m_blocks,
                                torch::Tensor sorted_token_ids,
                                torch::Tensor expert_ids,
                                torch::Tensor num_tokens_post_pad) {
   const int topk_num = topk_ids.size(1);
 
-  int max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1);
-
   TORCH_CHECK(block_size > 0, "block_size should be greater than 0. ");
-  max_num_tokens_padded = round_to_next_multiple_of(
-      max_num_tokens_padded, static_cast<int>(block_size));
-  int max_num_m_blocks = div_ceil(max_num_tokens_padded, block_size);
 
   int device_max_shared_mem;
   auto dev = topk_ids.get_device();

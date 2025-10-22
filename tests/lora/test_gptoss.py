@@ -36,7 +36,7 @@ def test_gptoss20b_lora(gptoss20b_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         enable_lora=True,
-        max_loras=1,
+        max_loras=4,
         trust_remote_code=True,
     )
 
