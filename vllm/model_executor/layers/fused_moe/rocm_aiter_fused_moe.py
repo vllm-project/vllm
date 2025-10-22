@@ -281,6 +281,8 @@ def rocm_aiter_fused_moe_impl(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    dtype: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -302,6 +304,8 @@ def rocm_aiter_fused_moe_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        num_local_tokens=num_local_tokens,
+        dtype=dtype,
     )
 
 
@@ -319,6 +323,8 @@ def rocm_aiter_fused_moe_fake(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    dtype: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -435,6 +441,8 @@ def rocm_aiter_fused_experts(
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    dtype: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -521,6 +529,8 @@ def rocm_aiter_fused_experts(
             a1_scale=quant_config.a1_scale,
             a2_scale=quant_config.a2_scale,
             doweight_stage1=apply_router_weight_on_input,
+            num_local_tokens=num_local_tokens,
+            dtype=dtype,
         )
 
 

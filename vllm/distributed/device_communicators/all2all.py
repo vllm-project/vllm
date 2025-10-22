@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_pplx
+from vllm.utils import has_deep_ep, has_mori, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_all2all
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -486,3 +486,74 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
+
+
+class MoriAll2AllManager(All2AllManagerBase):
+    def __init__(self, cpu_group):
+        assert has_mori(), (
+            "MoRI kernels not found. Please follow https://github.com/ROCm/mori/blob/main/README.md"
+            " to install MoRI kernels."
+        )  # noqa
+        import mori
+
+        super().__init__(cpu_group)
+        self.handle_cache = Cache()
+
+        torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+        mori.shmem.shmem_torch_process_group_init("mori")
+
+    def _make_mori_config(
+        self,
+        quant_dtype: int,
+        hidden_dim: int,
+        scale_dim: int,
+        scale_type_size: int,
+        max_num_token_per_rank: int,
+        dtype: torch.dtype,
+        num_experts: int,
+        topk: int,
+    ):
+        import mori  # type: ignore[import-not-found]
+
+        if not self.internode:
+            # single node
+            mori_config = mori.ops.EpDispatchCombineConfig(
+                data_type=quant_dtype,
+                rank=self.rank,
+                world_size=self.world_size,
+                hidden_dim=hidden_dim,
+                scale_dim=scale_dim,
+                scale_type_size=scale_type_size,  # torch.float32.itemsize,
+                max_token_type_size=dtype.itemsize,
+                max_num_inp_token_per_rank=max_num_token_per_rank,
+                num_experts_per_rank=num_experts // self.world_size,
+                num_experts_per_token=topk,
+            )
+        else:
+            # multi node
+            mori_config = mori.ops.EpDispatchCombineConfig(
+                data_type=quant_dtype,
+                rank=self.rank,
+                world_size=self.world_size,
+                hidden_dim=hidden_dim,
+                scale_dim=scale_dim,
+                scale_type_size=scale_type_size,
+                max_token_type_size=dtype.itemsize,
+                max_num_inp_token_per_rank=max_num_token_per_rank,
+                num_experts_per_rank=num_experts // self.world_size,
+                num_experts_per_token=topk,
+                warp_num_per_block=16,
+                block_num=64,
+                kernel_type=mori.ops.EpDispatchCombineKernelType.InterNode,
+            )
+        return mori_config
+
+    def get_handle(self, kwargs):
+        import mori  # type: ignore[import-not-found]
+
+        mori_config = self._make_mori_config(**kwargs)
+        logger.debug("MoRI all2all args %s", mori_config)
+        handle: mori.ops.EpDispatchCombineOp = self.handle_cache.get_or_create(
+            mori_config, mori.ops.EpDispatchCombineOp
+        )
+        return handle
