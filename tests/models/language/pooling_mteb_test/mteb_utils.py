@@ -7,6 +7,8 @@ import mteb
 import numpy as np
 import requests
 import torch
+from mteb.models import ModelMeta
+from mteb.types import Array
 from torch.utils.data import DataLoader
 
 import tests.ci_envs as ci_envs
@@ -30,8 +32,31 @@ MTEB_RERANK_TASKS = ["NFCorpus"]
 MTEB_RERANK_LANGS = ["eng"]
 MTEB_RERANK_TOL = 2e-3
 
+_empty_model_meta = ModelMeta(
+    loader=None,
+    name=None,
+    revision=None,
+    release_date=None,
+    languages=None,
+    framework=[],
+    similarity_fn_name=None,
+    n_parameters=None,
+    memory_usage_mb=None,
+    max_tokens=None,
+    embed_dim=None,
+    license=None,
+    open_weights=None,
+    public_training_code=None,
+    public_training_data=None,
+    use_instructions=None,
+    training_datasets=None,
+    modalities=["text"],  # 'image' can be added to evaluate multimodal models
+)
+
 
 class VllmMtebEncoder(mteb.EncoderProtocol):
+    mteb_model_meta = _empty_model_meta
+
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
@@ -52,8 +77,34 @@ class VllmMtebEncoder(mteb.EncoderProtocol):
         embeds = embeds[np.argsort(r)]
         return embeds
 
+    def similarity(
+        self,
+        embeddings1: np.ndarray,
+        embeddings2: np.ndarray,
+    ) -> np.ndarray:
+        # Cosine similarity
+        norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
+        norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
+        sim = np.dot(embeddings1, embeddings2.T) / (norm1 * norm2.T)
+        return sim
+
+    def similarity_pairwise(
+        self,
+        embeddings1: Array,
+        embeddings2: Array,
+    ) -> Array:
+        # Cosine similarity
+        norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
+        norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
+        sim = np.sum(embeddings1 * embeddings2, axis=1) / (
+            norm1.flatten() * norm2.flatten()
+        )
+        return sim
+
 
 class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
+    mteb_model_meta = _empty_model_meta
+
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
@@ -75,7 +126,7 @@ class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
         return scores
 
 
-class OpenAIClientMtebEncoder(mteb.EncoderProtocol):
+class OpenAIClientMtebEncoder(VllmMtebEncoder):
     def __init__(self, model_name: str, client):
         self.model_name = model_name
         self.client = client
@@ -103,6 +154,8 @@ class OpenAIClientMtebEncoder(mteb.EncoderProtocol):
 
 
 class ScoreClientMtebEncoder(mteb.CrossEncoderProtocol):
+    mteb_model_meta = _empty_model_meta
+
     def __init__(self, model_name: str, url):
         self.model_name = model_name
         self.url = url
