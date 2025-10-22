@@ -220,17 +220,13 @@ class DeepseekOCRProcessor(ProcessorMixin):
         prompt: str,
         images: list[Image.Image],
         crop_mode: bool = CROP_MODE,
-        **kwargs,
     ):
         """
 
         Args:
             prompt (str): the formatted prompt;
-            conversations (List[Dict]): conversations with a list of messages;
             images (List[ImageType]): the list of images;
-            inference_mode (bool): if True, then remove the last eos token;
-            system_prompt (str): the system prompt;
-            **kwargs:
+            crop_mode (bool): if True, then crop the image;
 
         Returns:
             outputs (BaseProcessorOutput): the output of the processor,
@@ -289,8 +285,8 @@ class DeepseekOCRProcessor(ProcessorMixin):
         Args:
             prompt (str): the formatted prompt;
             images (List[ImageType]): the list of images;
-            inference_mode (bool): if True, then remove the last eos token;
-            **kwargs:
+            crop_mode (bool): if True, then crop the image;
+            **kwargs: Additional keyword arguments.
 
         Returns:
             outputs (BaseProcessorOutput): the output of the processor,
