@@ -717,15 +717,25 @@ class NixlConnectorWorker:
         # TODO temporary, once nixl allows for telemetry flag in config
         # (next release), we can remove this env var.
         os.environ["NIXL_TELEMETRY_ENABLE"] = "1"
+
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
+        # Configure NIXL num_threads to avoid UAR exhaustion on Mellanox NICs.
+        # Each UCX thread allocates UARs (doorbell pages) via DevX, and
+        # excessive NIXL UAR usage can exhaust NIC UAR space. This can cause
+        # components like NVSHMEM (used by DeepEP kernels) to fail during RDMA
+        # initialization with "mlx5dv_devx_alloc_uar" errors.
+        # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
+        num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
+            "num_threads", 4
+        )
         if nixl_agent_config is None:
             config = None
         else:
             config = (
                 nixl_agent_config(backends=self.nixl_backends)
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=8)
+                else nixl_agent_config(num_threads=num_threads)
             )
 
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
