@@ -795,51 +795,45 @@ def reorder_batch_to_split_decodes_and_prefills(
     Returns:
         True if the batch was modified, False otherwise.
     """
-    # We now want to reorder the batch so that the "decode" requests are at
-    # the front and the "prefill" requests are at the back using the least
-    # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
-    # requests where attention is likely memory-bound and "prefill" to mean
-    # requests where attention is likely compute-bound, TODO(lucas): figure out
-    # a better naming here)
-    decodes = []
-    prefills = []
-    num_decode_tokens = 0
-    num_prefill_tokens = 0
+    # We now want to reorder the batch into decode → extend → prefill order
+    # where:
+    #   decode: request with num_scheduled_tokens <= decode_threshold
+    #   extend: non-decode request with existing context
+    #   prefill: non-decode request with no existing context
+    # NOTE for now we loosely use "decode" to mean requests where attention is
+    #  likely memory-bound and "prefill" to mean requests where attention is 
+    #  likely compute-bound, 
+    # TODO(lucas): figure out a better naming here
+    num_reqs = len(input_batch.req_ids)
+    num_scheduled_tokens_np = np.array(
+        [scheduler_output.num_scheduled_tokens[req_id] for req_id in input_batch.req_ids])
+    num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
-    for i, req_id in enumerate(input_batch.req_ids):
-        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        if num_tokens <= decode_threshold:
-            decodes.append(i)
-            num_decode_tokens += num_tokens
-        else:
-            prefills.append(i)
-            num_prefill_tokens += num_tokens
+    is_decode = num_scheduled_tokens_np <= decode_threshold
+    is_extend = (~is_decode) & (num_computed_tokens_np > num_scheduled_tokens_np)
+    is_prefill = (~is_decode) & (num_computed_tokens_np == num_scheduled_tokens_np)
 
-    # We hope that this is fairly minimal since decodes
-    # should be around for a number of iterations so hopefully they are
-    # relatively stationary (and new request are generally appended to the
-    # persistent batch so already should be at the back)
-    # To achieve this we loop over the decodes in descending order and
-    # the prefills in ascending order. We swap decodes from the  "back"
-    # i.e. past where the last decode should be in the reodorered with
-    # prefills from the front of the batch.
-    # `decodes` and `prefills` are already in ascending order just based on
-    # the above loop
-    num_decodes = len(decodes)
-    num_prefills = len(prefills)
+    # Desired order: decode → extend → prefill    
+    order_key = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
+    order_key[is_extend] = 1
+    order_key[is_prefill] = 2
+
+    # get a permutation of the indices that sorts the order_key, basically this means if
+    # we reordered the batch like request[perm] we'd be in the desired order
+    perm = np.argsort(order_key, kind="stable")
+    # old_idx -> new_pos
+    dest = np.empty_like(perm)
+    dest[perm] = np.arange(num_reqs)
+
     modified_batch = False
-
-    for i in range(1, min(num_decodes, num_prefills) + 1):
-        # If the decode is at the "back" of the batch, i, we can swap it
-        # with the prefill closest to the front of the batch
-        decode_idx = decodes[num_decodes - i]
-        if decode_idx < num_decodes:
-            break
-
-        input_batch.swap_states(prefills[i - 1], decode_idx)
-        modified_batch = True
-
+    for i in range(num_reqs):
+        while dest[i] != i:
+            j = dest[i]  # destination index for the element currently at i
+            input_batch.swap_states(i, j)
+            dest[i], dest[j] = dest[j], dest[i]
+            modified_batch = True
     return modified_batch
+
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
