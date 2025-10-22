@@ -475,15 +475,26 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     def function_call_parsing(cls, data):
         """Parse function_call dictionaries into ResponseFunctionToolCall objects.
-
         This ensures Pydantic can properly resolve union types in the input field.
         Function calls provided as dicts are converted to ResponseFunctionToolCall
         objects before validation, while invalid structures are left for Pydantic
         to reject with appropriate error messages.
         """
+
         input_data = data.get("input")
-        if not isinstance(input_data, list):
+
+        # Early return for None, strings, or bytes
+        # (strings are iterable but shouldn't be processed)
+        if input_data is None or isinstance(input_data, (str, bytes)):
             return data
+
+        # Convert iterators (like ValidatorIterator) to list
+        if not isinstance(input_data, list):
+            try:
+                input_data = list(input_data)
+            except TypeError:
+                # Not iterable, leave as-is for Pydantic to handle
+                return data
 
         processed_input = []
         for item in input_data:
