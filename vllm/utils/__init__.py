@@ -28,11 +28,7 @@ from argparse import (
     _ArgumentGroup,
 )
 from collections import defaultdict
-from collections.abc import (
-    Callable,
-    Sequence,
-)
-from concurrent.futures.process import ProcessPoolExecutor
+from collections.abc import Callable
 from functools import cache, partial, wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -45,6 +41,7 @@ import yaml
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
+from vllm.utils.hardware_utils import cuda_is_initialized, xpu_is_initialized
 
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
@@ -170,21 +167,6 @@ def round_down(x: int, y: int) -> int:
     return (x // y) * y
 
 
-@cache
-def is_pin_memory_available() -> bool:
-    from vllm.platforms import current_platform
-
-    return current_platform.is_pin_memory_available()
-
-
-@cache
-def is_uva_available() -> bool:
-    """Check if Unified Virtual Addressing (UVA) is available."""
-    # UVA requires pinned memory.
-    # TODO: Add more requirements for UVA if needed.
-    return is_pin_memory_available()
-
-
 # TODO: This function can be removed if transformer_modules classes are
 # serialized by value when communicating between processes
 def init_cached_hf_modules() -> None:
@@ -215,35 +197,6 @@ def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
         )
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
-
-
-def cuda_is_initialized() -> bool:
-    """Check if CUDA is initialized."""
-    if not torch.cuda._is_compiled():
-        return False
-    return torch.cuda.is_initialized()
-
-
-def xpu_is_initialized() -> bool:
-    """Check if XPU is initialized."""
-    if not torch.xpu._is_compiled():
-        return False
-    return torch.xpu.is_initialized()
-
-
-def cuda_get_device_properties(
-    device, names: Sequence[str], init_cuda=False
-) -> tuple[Any, ...]:
-    """Get specified CUDA device property values without initializing CUDA in
-    the current process."""
-    if init_cuda or cuda_is_initialized():
-        props = torch.cuda.get_device_properties(device)
-        return tuple(getattr(props, name) for name in names)
-
-    # Run in subprocess to avoid initializing CUDA as a side effect.
-    mp_ctx = multiprocessing.get_context("fork")
-    with ProcessPoolExecutor(max_workers=1, mp_context=mp_ctx) as executor:
-        return executor.submit(cuda_get_device_properties, device, names, True).result()
 
 
 def weak_bind(

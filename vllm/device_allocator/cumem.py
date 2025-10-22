@@ -18,7 +18,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import is_pin_memory_available
+from vllm.utils.hardware_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 

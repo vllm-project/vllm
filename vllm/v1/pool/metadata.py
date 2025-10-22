@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.pooling_params import PoolingParams
-from vllm.utils import is_pin_memory_available
+from vllm.utils.hardware_utils import is_pin_memory_available
 
 pin_memory = is_pin_memory_available()
 

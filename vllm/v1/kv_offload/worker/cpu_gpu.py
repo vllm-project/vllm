@@ -7,7 +7,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.attention import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_pin_memory_available
+from vllm.utils.hardware_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,

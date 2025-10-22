@@ -4,7 +4,7 @@
 import torch
 
 from vllm.model_executor.layers.utils import apply_penalties
-from vllm.utils import is_pin_memory_available
+from vllm.utils.hardware_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
 
 
