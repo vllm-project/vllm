@@ -285,7 +285,8 @@ class DeepseekOCRMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         images_spatial_crop = hf_inputs.get("images_spatial_crop", torch.empty((0, 2)))
-        patches_per_image = images_spatial_crop.prod(dim=-1)
+        is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
+        patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             images_spatial_crop=MultiModalFieldConfig.batched("image"),
@@ -515,7 +516,9 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> NestedTensors:
         images_in_this_batch = []
 
-        images_crop = images_crop.split(images_spatial_crop.prod(dim=-1).tolist())
+        is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
+        patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
+        images_crop = images_crop.split(patches_per_image.tolist())
         for jdx in range(images_spatial_crop.size(0)):
             patches = images_crop[jdx]
             image_ori = pixel_values[[jdx]]
