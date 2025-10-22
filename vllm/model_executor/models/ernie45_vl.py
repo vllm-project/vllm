@@ -1404,9 +1404,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         else:
             self.visual_token_mask = None
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,
