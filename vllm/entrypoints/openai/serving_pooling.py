@@ -32,7 +32,7 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import SupportedTask
+from vllm.tasks import PoolingTask, SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import (
     EmbedDType,
@@ -169,6 +169,7 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 pooling_params = request.to_pooling_params()
 
+            pooling_task: PoolingTask
             if "token_embed" in self.supported_tasks:
                 pooling_task = "token_embed"
             elif "token_classify" in self.supported_tasks:
