@@ -34,8 +34,8 @@ MTEB_RERANK_TOL = 2e-3
 
 _empty_model_meta = ModelMeta(
     loader=None,
-    name=None,
-    revision=None,
+    name="vllm/model",
+    revision="1",
     release_date=None,
     languages=None,
     framework=[],
