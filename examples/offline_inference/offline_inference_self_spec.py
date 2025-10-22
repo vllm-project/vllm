@@ -31,6 +31,7 @@ def load_prompts(args, tokenizer):
             #"The future of AI is", 
             #"The future of technology is",
             "The mission of a PhD student is",
+            "Can you please repeat the following sentence: 'The future of AI is' for 3 times' ?",
             #"9 out of 10 cheerleaders are 64 tall.  The 10th cheerleader is 60 tall.  If they build a human pyramid, where 4 girls are on the bottom,  3 stand on top of the 4, 2 stand on top of the 3 and the shortest girl is at the top, how tall is the human pyramid in feet?"
         ]
         return prompts[:args.num_prompts]
@@ -85,18 +86,22 @@ def get_speculative_config(args):
     if args.enable_sspec:
         config = {
             "method": args.sspec_method,
-            "model": None,
+            #"model": None,
             "num_speculative_tokens": args.num_speculative_tokens,  # Self-spec threshold (ACCUMULATING → VERIFYING)
         }
 
         # Add n-gram parameters for self_spec_ngram
         if args.sspec_method == "self_spec_ngram":
-            # Use prompt_lookup_max/min if provided, otherwise use ngram_draft_tokens
+            # Set num_ngram_draft_tokens (controls draft size per step)
+            config["num_ngram_draft_tokens"] = args.ngram_draft_tokens
+
+            # Set prompt_lookup_max/min (controls n-gram window size for matching)
+            # If not provided, use ngram_draft_tokens as default
             lookup_max = args.prompt_lookup_max if args.prompt_lookup_max is not None else args.ngram_draft_tokens
             lookup_min = args.prompt_lookup_min if args.prompt_lookup_min is not None else args.ngram_draft_tokens
 
-            config["prompt_lookup_max"] = lookup_max  # Number of n-gram draft tokens per step
-            config["prompt_lookup_min"] = lookup_min
+            config["prompt_lookup_max"] = lookup_max  # N-gram window size (max)
+            config["prompt_lookup_min"] = lookup_min  # N-gram window size (min)
 
         return config
     return None
@@ -162,12 +167,13 @@ def main():
         print(f"Method: {speculative_config['method']}")
         print(f"Self-spec threshold (ACCUMULATING → VERIFYING): {speculative_config['num_speculative_tokens']} tokens")
         if speculative_config['method'] == 'self_spec_ngram':
-            print(f"N-gram drafts per step: {speculative_config['prompt_lookup_max']} tokens (max)")
-            print(f"                        {speculative_config['prompt_lookup_min']} tokens (min)")
+            print(f"N-gram draft tokens per step: {speculative_config.get('num_ngram_draft_tokens', 'NOT SET')} tokens")
+            print(f"N-gram window size: max={speculative_config['prompt_lookup_max']}, min={speculative_config['prompt_lookup_min']}")
             print(f"")
             print(f"Expected behavior:")
-            print(f"  - During ACCUMULATING: N-gram proposes ~{speculative_config['prompt_lookup_max']} drafts/step")
-            print(f"  - Reaches threshold in ~{speculative_config['num_speculative_tokens'] // speculative_config['prompt_lookup_max']} steps (with good acceptance)")
+            ngram_drafts = speculative_config.get('num_ngram_draft_tokens', 3)
+            print(f"  - During ACCUMULATING: N-gram proposes up to {ngram_drafts} drafts/step")
+            print(f"  - Reaches threshold in ~{speculative_config['num_speculative_tokens'] // ngram_drafts} steps (with good acceptance)")
             print(f"  - Then VERIFYING: All {speculative_config['num_speculative_tokens']} tokens verified with full KV")
         print(f"Sparse attention config: sink_size={args.sink_size}, recent_ratio={args.recent_ratio}")
         print(f"{'='*70}\n")
@@ -177,7 +183,7 @@ def main():
     llm = LLM(**llm_kwargs)
 
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=64, top_p=1.0, ignore_eos=False)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=96, top_p=1.0, ignore_eos=False)
 
 
     # Generate outputs
@@ -216,44 +222,42 @@ def main():
          # Print metrics if available
         try:
             metrics = llm.get_metrics()
-        # Display self-spec request state statistics
+
+            # Display self-spec request state statistics from Prometheus metrics
             print("\n" + "="*80)
-            print("SELF-SPEC REQUEST STATE STATISTICS")
+            print("SELF-SPEC STATISTICS FROM PROMETHEUS METRICS")
             print("="*80)
 
-            total_tokens_history = llm.llm_engine.stat_logger.total_scheduled_tokens_history
-            total_reqs_history = llm.llm_engine.stat_logger.num_scheduled_reqs_history
-            accumulating_history = llm.llm_engine.stat_logger.num_cached_reqs_in_accumulating_history
-            verifying_history = llm.llm_engine.stat_logger.num_cached_reqs_in_verifying_history
+            # Extract metrics from Prometheus snapshot (similar to math_eval.py)
+            total_draft_tokens = 0
+            total_accepted_tokens = 0
+            num_drafts = 0
 
-            print(f"Total iterations recorded: {len(total_reqs_history)}")
-            print()
+            for metric in metrics:
+                metric_name = metric.name if hasattr(metric, 'name') else str(metric)
 
-            # Calculate summary statistics
-            if total_reqs_history:
-                total_tokens_sum = sum(total_tokens_history)
-                total_reqs_sum = sum(total_reqs_history)
-                accumulating_sum = sum(accumulating_history)
-                verifying_sum = sum(verifying_history)
+                if 'spec_decode_num_draft_tokens' in metric_name and hasattr(metric, 'value'):
+                    total_draft_tokens = int(metric.value)
+                elif 'spec_decode_num_accepted_tokens' in metric_name and 'per_pos' not in metric_name and hasattr(metric, 'value'):
+                    total_accepted_tokens = int(metric.value)
+                elif 'spec_decode_num_drafts' in metric_name and hasattr(metric, 'value'):
+                    num_drafts = int(metric.value)
 
-                print("SUMMARY STATISTICS:")
-                print(f"  Total scheduled tokens across all iterations: {total_tokens_sum:,}")
-                print(f"  Total scheduled requests across all iterations: {total_reqs_sum:,}")
-                print(f"  Total accumulating requests: {accumulating_sum:,}")
-                print(f"  Total verifying requests: {verifying_sum:,}")
+            if total_draft_tokens > 0 or total_accepted_tokens > 0:
+                acceptance_rate = (total_accepted_tokens / total_draft_tokens) if total_draft_tokens > 0 else 0.0
+
+                print("SPECULATIVE DECODING METRICS:")
+                print(f"  Draft tokens proposed: {total_draft_tokens:,}")
+                print(f"  Tokens accepted: {total_accepted_tokens:,}")
+                print(f"  Tokens rejected: {total_draft_tokens - total_accepted_tokens:,}")
+                print(f"  Acceptance rate: {acceptance_rate * 100:.2f}%")
+                print(f"  Number of drafts: {num_drafts:,}")
+                if num_drafts > 0:
+                    print(f"  Avg draft tokens per draft: {total_draft_tokens / num_drafts:.2f}")
+                    print(f"  Avg accepted per draft: {total_accepted_tokens / num_drafts:.2f}")
                 print()
-
-                # Calculate average per iteration
-                avg_tokens = total_tokens_sum / len(total_tokens_history)
-                avg_reqs = total_reqs_sum / len(total_reqs_history)
-                avg_accumulating = accumulating_sum / len(accumulating_history)
-                avg_verifying = verifying_sum / len(verifying_history)
-
-                print("AVERAGE PER ITERATION:")
-                print(f"  Avg scheduled tokens: {avg_tokens:.2f}")
-                print(f"  Avg scheduled requests: {avg_reqs:.2f}")
-                print(f"  Avg accumulating requests: {avg_accumulating:.2f}")
-                print(f"  Avg verifying requests: {avg_verifying:.2f}")
+            else:
+                print("No speculative decoding metrics available yet.")
                 print()
 
             # # Show iteration-by-iteration breakdown (first 10 and last 10 iterations)
@@ -297,8 +301,11 @@ def main():
 
             # print("="*80)
             print_metrics(metrics)
-        except AssertionError:
-            print("\nNo metrics available")
+        except Exception as e:
+            if "Stat logging disabled" in str(e):
+                print("\nWarning: Stat logging is disabled. Cannot retrieve metrics.")
+            else:
+                print(f"\nCould not retrieve metrics: {e}")
 
 
 def print_metrics(metrics):

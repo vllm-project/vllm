@@ -38,6 +38,8 @@ class SpecDecodingStats:
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
+        if num_accepted_tokens > self.num_spec_tokens:
+            print("Holdon!!! num_accepted_tokens", num_accepted_tokens, "self.num_spec_tokens", self.num_spec_tokens)
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1

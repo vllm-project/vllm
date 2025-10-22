@@ -101,6 +101,12 @@ class SpeculativeConfig:
     prompt_lookup_min: Optional[int] = None
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+    num_ngram_draft_tokens: Optional[int] = None
+    """Number of draft tokens to generate per step for self_spec_ngram.
+    For 'ngram' method, this is controlled by num_speculative_tokens.
+    For 'self_spec_ngram', this controls how many n-gram drafts are proposed
+    during ACCUMULATING phase, while num_speculative_tokens controls the
+    threshold for transitioning to VERIFYING. If not provided, defaults to 3."""
 
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
@@ -281,6 +287,22 @@ class SpeculativeConfig:
                 raise ValueError(
                     f"prompt_lookup_min={self.prompt_lookup_min} must "
                     f"be <= prompt_lookup_max={self.prompt_lookup_max}")
+
+            # Set num_ngram_draft_tokens for self_spec_ngram
+            if self.method == "self_spec_ngram":
+                if self.num_ngram_draft_tokens is None:
+                    # Default to 3 draft tokens per step
+                    self.num_ngram_draft_tokens = 3
+
+                # Validate num_ngram_draft_tokens
+                if self.num_ngram_draft_tokens < 1:
+                    raise ValueError(
+                        f"num_ngram_draft_tokens={self.num_ngram_draft_tokens} must be > 0")
+                if self.num_ngram_draft_tokens > self.num_speculative_tokens:
+                    logger.warning(
+                        f"num_ngram_draft_tokens={self.num_ngram_draft_tokens} is greater than "
+                        f"num_speculative_tokens={self.num_speculative_tokens}. "
+                        f"This may waste computation as drafts will be capped at threshold.")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set

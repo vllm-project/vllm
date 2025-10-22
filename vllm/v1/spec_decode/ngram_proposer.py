@@ -6,6 +6,9 @@ import numpy as np
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class NgramProposer:
@@ -19,10 +22,21 @@ class NgramProposer:
         self.min_n = vllm_config.speculative_config.prompt_lookup_min
         # Maximum length of the n-gram to match.
         self.max_n = vllm_config.speculative_config.prompt_lookup_max
-        # Number of tokens follow the match. If there are less than k
-        # tokens follow the match, we will return the maximum amount of
-        # tokens until the end.
-        self.k = vllm_config.speculative_config.num_speculative_tokens
+
+        # Number of draft tokens to generate per step.
+        # For 'ngram' method: use num_speculative_tokens
+        # For 'self_spec_ngram' method: use num_ngram_draft_tokens (defaults to 3)
+        if vllm_config.speculative_config.method == "self_spec_ngram":
+            # For self_spec_ngram, num_ngram_draft_tokens controls draft size
+            # while num_speculative_tokens controls the ACCUMULATING→VERIFYING threshold
+            self.k = vllm_config.speculative_config.num_ngram_draft_tokens
+            assert self.k is not None, "num_ngram_draft_tokens should be set by __post_init__"
+            logger.info(f"[SELF_SPEC_NGRAM] NgramProposer initialized for self_spec_ngram | "
+                        f"draft_size_per_step={self.k} | "
+                        f"threshold={vllm_config.speculative_config.num_speculative_tokens}")
+        else:
+            # For regular ngram, use num_speculative_tokens as before
+            self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
         self.max_model_len = vllm_config.model_config.max_model_len
 
@@ -157,6 +171,12 @@ class NgramProposer:
             num_tokens_no_spec,
             token_ids_cpu,
         )
+
+        # Debug: Log the draft token counts with k value
+        draft_counts = [len(d) for d in draft_token_ids]
+        if any(draft_counts):
+            logger.debug(f"[NGRAM] propose() | k={self.k} | requests={len(draft_token_ids)} | "
+                        f"draft_counts={draft_counts} | total={sum(draft_counts)}")
 
         return draft_token_ids
 

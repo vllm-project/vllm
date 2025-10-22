@@ -290,6 +290,7 @@ class Scheduler(SchedulerInterface):
             if self.use_self_specs and self.should_start_self_spec_verification(request):
                 logger.debug(f"Request {request.request_id}: starting self-spec verification")
 
+
                 # Adjust num_computed_tokens to exclude pending tokens
                 # The scheduler has been incrementing num_computed_tokens for pending tokens,
                 # but when we move them to spec_token_ids for verification, they should be
@@ -305,12 +306,15 @@ class Scheduler(SchedulerInterface):
                 tokens_to_verify = request.start_self_spec_verification()
 
                 # During verification, use full KV indices (no sparse attention)
-                self.req_to_sparse_selected_kv_indices[request.request_id] = []
+                #self.req_to_sparse_selected_kv_indices[request.request_id] = []
                 self.req_to_full_kv_start_offset[request.request_id] = 0
                 # CRITICAL: Also reset the request object field so scheduler reads 0
-                # old_offset = request.full_kv_start_block_offset  # For debug only
+                old_offset = request.full_kv_start_block_offset
                 request.full_kv_start_block_offset = 0
-                # print(f"[TRANSITION TO VERIFYING] req_id={request.request_id}, reset full_kv_start_block_offset {old_offset}→0")
+                logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: TRANSITION ACCUMULATING→VERIFYING | "
+                            f"pending_tokens={len(request._pending_output_tokens)} | "
+                            f"spec_token_ids={len(tokens_to_verify)} | "
+                            f"full_kv_offset: {old_offset}→0")
 
                 # Reuse the existing spec decoding interface
                 request.spec_token_ids = tokens_to_verify
@@ -428,6 +432,11 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
+            # Debug: Check spec_token_ids
+            logger.debug(f"[DEBUG] schedule() checking spec_token_ids | req_id={request.request_id} | "
+                        f"has_spec_tokens={bool(request.spec_token_ids)} | "
+                        f"spec_token_count={len(request.spec_token_ids) if request.spec_token_ids else 0}")
+
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (num_new_tokens +
                                              request.num_computed_tokens -
@@ -437,6 +446,8 @@ class Scheduler(SchedulerInterface):
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
                         request.spec_token_ids)
+                    logger.debug(f"[DEBUG] schedule() added to scheduled_spec_decode_tokens | req_id={request.request_id} | "
+                                f"num_tokens={len(request.spec_token_ids)}")
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -869,8 +880,9 @@ class Scheduler(SchedulerInterface):
                 recent_sizes_list.append(0)
                 full_kv_start_block_offsets_list.append(0)
                 # Debug: Log what scheduler is sending for VERIFYING requests
-                # if req.self_spec_state == SelfSpecState.VERIFYING:
-                #     print(f"[SCHEDULER VERIFYING] req_id={req_id}, sending offset=0, req.full_kv_start_block_offset={req.full_kv_start_block_offset}")
+                if self.use_self_specs and req.self_spec_state == SelfSpecState.VERIFYING:
+                    logger.debug(f"[SELF_SPEC_NGRAM] Request {req_id}: VERIFYING in scheduler | "
+                                 f"full_kv_offset={req.full_kv_start_block_offset}")
 
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
@@ -1113,8 +1125,11 @@ class Scheduler(SchedulerInterface):
             if new_token_ids:
                 new_token_ids, stopped, should_flip_to_accumulating = self._update_request_with_output(
                     request, new_token_ids)
-                # print(f"[update_from_output] request {request.request_id}: {request.self_spec_state}")
-                # print(f"[update_from_output] request {request.request_id}: {request.output_token_ids}")
+                if self.use_self_specs:
+                    logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: update_from_output | "
+                                 f"state={request.self_spec_state} | "
+                                 f"output_tokens={len(request.output_token_ids)} | "
+                                 f"pending={len(request._pending_output_tokens)}")
                 #breakpoint()
             # Stop checking for pooler models.
             pooler_output = None
@@ -1269,6 +1284,9 @@ class Scheduler(SchedulerInterface):
             if request.self_spec_state == SelfSpecState.ACCUMULATING:
                 # In accumulating mode, tokens go to pending buffer (not committed yet)
                 request.add_pending_token(output_token_id)
+                logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: ACCUMULATING | "
+                             f"added token to pending | "
+                             f"pending_count={len(request._pending_output_tokens)}/{self.self_spec_threshold}")
                 # Don't check stop conditions on pending tokens
             elif request.self_spec_state == SelfSpecState.NORMAL:
                 # Normal mode: commit tokens immediately
@@ -1320,11 +1338,13 @@ class Scheduler(SchedulerInterface):
         self,
         draft_token_ids: DraftTokenIds,
     ) -> None:
+        logger.debug(f"[DEBUG] update_draft_token_ids called | num_requests={len(draft_token_ids.req_ids)}")
         for req_id, spec_token_ids in zip(
                 draft_token_ids.req_ids,
                 draft_token_ids.draft_token_ids,
         ):
             request = self.requests.get(req_id)
+            logger.debug(f"[DEBUG] update_draft_token_ids | req_id={req_id} | spec_token_ids={len(spec_token_ids)} | request_exists={request is not None}")
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.
                 continue
@@ -1339,6 +1359,14 @@ class Scheduler(SchedulerInterface):
                     spec_token_ids)
             else:
                 request.spec_token_ids = spec_token_ids
+
+            # Debug: Log draft token updates for self-spec
+            if self.use_self_specs and hasattr(request, 'self_spec_state'):
+                note = 'OVERRIDDEN at L316' if request.self_spec_state == SelfSpecState.VERIFYING else 'from n-gram'
+                logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: update_draft_token_ids | "
+                             f"state={request.self_spec_state} | "
+                             f"draft_tokens={len(spec_token_ids)} | "
+                             f"note={note}")
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
@@ -1457,6 +1485,7 @@ class Scheduler(SchedulerInterface):
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
+            print("self.num_spec_tokens", self.num_spec_tokens, "num_draft_tokens", num_draft_tokens, "num_accepted_tokens", num_accepted_tokens)
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens,

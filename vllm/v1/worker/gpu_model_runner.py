@@ -296,6 +296,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             elif self.speculative_config.method == "self_spec_ngram":
                 # Self-spec with n-gram assistance during ACCUMULATING phase
                 self.drafter = NgramProposer(self.vllm_config)
+                logger.info(f"[SELF_SPEC_NGRAM] Initialized NgramProposer | "
+                            f"k={self.drafter.k} (num_ngram_draft_tokens) | "
+                            f"min_n={self.drafter.min_n} | max_n={self.drafter.max_n}")
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -763,10 +766,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
 
-            # # DEBUG: Print spec token info (even if skipped for last_rank)
-            # print(f"[update_states] spec_token_ids for req_id={req_id}")
-            # print(f"  is_last_rank={is_last_rank}")
-            # print(f"  spec_token_ids={list(spec_token_ids) if spec_token_ids else []}")
+            # DEBUG: Print spec token info (even if skipped for last_rank)
+            logger.debug(f"[update_states] spec_token_ids for req_id={req_id}")
+            logger.debug(f"  is_last_rank={is_last_rank}")
+            logger.debug(f"  spec_token_ids={list(spec_token_ids) if spec_token_ids else []}")
 
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
@@ -1333,7 +1336,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
 
-        #print(f"[prepare_inputs] self.input_ids: {self.input_ids.cpu[:total_num_scheduled_tokens]}")
+        logger.debug(f"[prepare_inputs] self.input_ids: {self.input_ids.cpu[:total_num_scheduled_tokens]}")
         #breakpoint()
         
         logits_indices_padded = None
@@ -1394,18 +1397,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_common_prefix_blocks[kv_cache_group_id])
 
             # ===== SELF-SPEC: Detect if any request is in ACCUMULATING state =====
-            use_selective_kv = True
-            # for req_idx in range(num_reqs):
-            #     req_id = self.input_batch.req_ids[req_idx]
-            #     if req_id in self.requests:
-            #         request = self.requests[req_id]
-            #         if (hasattr(request, 'self_spec_state') and
-            #                 request.self_spec_state == SelfSpecState.ACCUMULATING):
-            #             use_selective_kv = True
-            #             logger.debug(
-            #                 f"Detected request {req_id} in ACCUMULATING state, "
-            #                 "using selective KV attention")
-            #             break
+            use_selective_kv = False
+            for req_idx in range(num_reqs):
+                req_id = self.input_batch.req_ids[req_idx]
+                if req_id in self.requests:
+                    request = self.requests[req_id]
+                    if (hasattr(request, 'self_spec_state') and
+                            request.self_spec_state == SelfSpecState.ACCUMULATING):
+                        use_selective_kv = True
+                        logger.debug(
+                            f"Detected request {req_id} in ACCUMULATING state, "
+                            "using selective KV attention")
+                        break
 
             # ===== STREAMING CACHE: Build tensors for CommonAttentionMetadata =====
             sink_sizes_gpu = None
@@ -2701,6 +2704,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
+                logger.debug(f"[DEBUG] Local propose_draft_token_ids set _draft_token_ids | is_none={self._draft_token_ids is None} | "
+                            f"counts={[len(d) for d in self._draft_token_ids] if self._draft_token_ids else None}")
 
         use_padded_batch_for_eagle = self.speculative_config and \
             self.speculative_config.use_eagle() and \
@@ -2718,6 +2723,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec_decode_common_attn_metadata.seq_lens.max() +
             self.speculative_config.num_speculative_tokens
             <= effective_drafter_max_model_len)
+        logger.debug(f"[DEBUG] input_fits_in_drafter check | "
+                    f"fits={input_fits_in_drafter} | "
+                    f"has_metadata={spec_decode_common_attn_metadata is not None} | "
+                    f"max_seq_len={spec_decode_common_attn_metadata.seq_lens.max() if spec_decode_common_attn_metadata else None} | "
+                    f"num_spec_tokens={self.speculative_config.num_speculative_tokens if self.speculative_config else None} | "
+                    f"max_model_len={effective_drafter_max_model_len}")
         if use_padded_batch_for_eagle and input_fits_in_drafter:
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
@@ -2740,7 +2751,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and input_fits_in_drafter):
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
+            logger.debug(f"[DEBUG] Calling propose_draft_token_ids for ngram/self-spec")
             propose_draft_token_ids(valid_sampled_token_ids)
+        else:
+            logger.debug(f"[DEBUG] NOT calling propose_draft_token_ids | "
+                        f"has_spec_config={self.speculative_config is not None} | "
+                        f"not_eagle={not use_padded_batch_for_eagle if self.speculative_config else None} | "
+                        f"fits={input_fits_in_drafter}")
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
@@ -2767,6 +2784,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        logger.debug(f"[DEBUG] take_draft_token_ids called | _draft_token_ids_is_none={self._draft_token_ids is None}")
         if self._draft_token_ids is None:
             return None
         req_ids = self.input_batch.req_ids
@@ -2774,6 +2792,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             draft_token_ids = self._draft_token_ids.tolist()
         else:
             draft_token_ids = self._draft_token_ids
+        logger.debug(f"[DEBUG] take_draft_token_ids returning | num_reqs={len(req_ids)} | draft_counts={[len(d) for d in draft_token_ids]}")
         self._draft_token_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
@@ -2797,6 +2816,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs)
+            logger.debug(f"[NGRAM] propose_draft_token_ids | "
+                        f"num_requests={len(draft_token_ids)} | "
+                        f"draft_counts={[len(d) for d in draft_token_ids]} | "
+                        f"total_drafts={sum(len(d) for d in draft_token_ids)} | "
+                        f"draft_token_ids={draft_token_ids}")
         elif self.speculative_config.method == "self_spec_ngram":
             # Self-spec with n-gram: propose drafts for all requests
             # Scheduler will override with pending_output_tokens when transitioning to VERIFYING
@@ -2807,6 +2831,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs)
+            logger.debug(f"[SELF_SPEC_NGRAM] propose_draft_token_ids | "
+                        f"num_requests={len(draft_token_ids)} | "
+                        f"draft_counts={[len(d) for d in draft_token_ids]} | "
+                        f"total_drafts={sum(len(d) for d in draft_token_ids)}")
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)

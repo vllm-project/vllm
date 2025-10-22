@@ -281,7 +281,7 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        # print(f"[EngineCore] Scheduler output: {scheduler_output}")
+        logger.debug(f"[EngineCore] Scheduler output: {scheduler_output}")
         #breakpoint()
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
@@ -293,9 +293,11 @@ class EngineCore:
                 scheduler_output.total_num_scheduled_tokens > 0)
 
     def post_step(self, model_executed: bool) -> None:
+        logger.debug(f"[DEBUG] post_step called | use_spec_decode={self.use_spec_decode} | model_executed={model_executed}")
         if self.use_spec_decode and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
+            logger.debug(f"[DEBUG] post_step got draft_token_ids | is_none={draft_token_ids is None}")
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
