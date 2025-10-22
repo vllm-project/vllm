@@ -22,6 +22,13 @@ class TTModelLoader(BaseModelLoader):
         scheduler_config = vllm_config.scheduler_config
 
         model_class, _ = get_model_architecture(model_config)
+        optimizations = model_config.override_tt_config.get(
+            "optimizations", None)
+        if optimizations is not None:
+            assert optimizations in [
+                "performance", "accuracy"
+            ], f"""Invalid optimizations configuration `{optimizations}`, 
+            allowed values are 'performance' or 'accuracy'"""
 
         # Model receives max_batch_size as batch_size_per_dp * dp_size
         if envs.VLLM_USE_V1:
@@ -42,6 +49,7 @@ class TTModelLoader(BaseModelLoader):
             max_batch_size,
             max_seq_len=model_config.max_model_len,
             tt_data_parallel=data_parallel,
+            optimizations=optimizations,
         )
         return model
 
