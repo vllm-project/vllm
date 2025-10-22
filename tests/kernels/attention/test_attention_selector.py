@@ -205,7 +205,7 @@ def test_env(
                         assert backend.get_name() == expected
                 elif name == "FLASHINFER":
                     backend = get_attn_backend(
-                        16, torch.float16, None, block_size, use_mla=use_mla
+                        64, torch.float16, None, block_size, use_mla=use_mla
                     )
                     expected = "FLASHINFER"
                     assert backend.get_name() == expected
