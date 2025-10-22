@@ -1480,9 +1480,8 @@ class Qwen3VLForConditionalGeneration(
                 )
         return mm_input_by_modality
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,

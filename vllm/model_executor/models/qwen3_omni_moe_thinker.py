@@ -1421,7 +1421,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
         return loaded_weights
 
-    @classmethod
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
