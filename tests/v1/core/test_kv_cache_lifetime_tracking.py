@@ -299,8 +299,7 @@ class TestPrometheusMetricIntegration:
     def test_prometheus_metric_recording(self):
         """Test that lifetime statistics are recorded to Prometheus."""
         from vllm.v1.metrics.loggers import PrometheusStatLogger
-        from vllm.v1.metrics.stats import (KVCacheLifetimeStats,
-                                           PrefixCacheStats, SchedulerStats)
+        from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 
         with patch('vllm.v1.metrics.loggers.unregister_vllm_metrics'):
             # Mock VllmConfig
@@ -317,17 +316,11 @@ class TestPrometheusMetricIntegration:
             mock_histogram = MagicMock()
             logger.histogram_kv_cache_lifetime_seconds = {0: mock_histogram}
 
-            # Create scheduler stats with lifetime data
-            lifetime_stats = KVCacheLifetimeStats()
-            lifetime_stats.add_block_lifetime(10.0)
-            lifetime_stats.add_block_lifetime(20.0)  # Average should be 15.0
-
             scheduler_stats = SchedulerStats(
                 num_running_reqs=1,
                 num_waiting_reqs=0,
                 kv_cache_usage=0.5,
                 prefix_cache_stats=PrefixCacheStats(),
-                kv_cache_lifetime_stats=lifetime_stats,
                 kv_cache_block_lifetimes=[10.0, 20.0])
 
             # Record the stats
