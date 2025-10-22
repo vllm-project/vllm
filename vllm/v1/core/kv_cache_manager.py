@@ -343,6 +343,25 @@ class KVCacheManager:
         """
         self.coordinator.free(request.request_id)
 
+    def get_cached_block_ids(self, block_ids: set[int]) -> set[int]:
+        """filter a set() of block IDs to only those that are cached
+
+        Args:
+            block_ids: set() of input block IDs to filter.
+
+        Returns:
+            set() of block IDs that are currently cached
+        """
+        num_blocks = len(self.block_pool.blocks)
+        cached_block_ids = set()
+        for block_id in block_ids:
+            assert 0 <= block_id < num_blocks, (
+                f"Invalid block_id {block_id} (num_blocks={num_blocks})"
+            )
+            if self.block_pool.blocks[block_id].block_hash is not None:
+                cached_block_ids.add(block_id)
+        return cached_block_ids
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 
