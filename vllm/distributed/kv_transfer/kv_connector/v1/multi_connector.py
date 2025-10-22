@@ -354,7 +354,7 @@ class MultiConnector(KVConnectorBase_V1):
 
             # Use the connector's build_kv_connector_stats to reconstruct
             reconstructed_stats = connector_cls.build_kv_connector_stats(
-                inner_data=inner_data
+                data=inner_data
             )
             if reconstructed_stats is not None:
                 reconstructed_data[connector_name] = reconstructed_stats
