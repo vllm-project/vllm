@@ -280,22 +280,6 @@ class DeepseekOCRProcessor(ProcessorMixin):
         crop_mode: bool = CROP_MODE,
         **kwargs,
     ):
-        """
-
-        Args:
-            prompt (str): the formatted prompt;
-            images (List[ImageType]): the list of images;
-            crop_mode (bool): if True, then crop the image;
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            outputs (BaseProcessorOutput): the output of the processor,
-                - input_ids (torch.LongTensor): [N + image tokens]
-                - images (torch.FloatTensor): [n_images, 3, H, W]
-                - image_id (int): the id of the image token
-                - num_image_tokens (List[int]): the number of image tokens
-        """
-
         prepare = self.process_one(
             prompt=prompt,
             images=images,
