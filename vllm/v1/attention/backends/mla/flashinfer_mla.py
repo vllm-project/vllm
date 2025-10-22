@@ -56,11 +56,11 @@ class FlashInferMLABackend(MLACommonBackend):
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(7, 5)
+        return DeviceCapability(10, 0)
 
     @classmethod
     def get_max_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(12, 1)
+        return DeviceCapability(10, 3)
 
     @classmethod
     def get_required_kv_cache_layout(
