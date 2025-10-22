@@ -216,7 +216,7 @@ class ExecuteModelState(NamedTuple):
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     hidden_states: torch.Tensor
-    sample_hidden_states: torch.Tensor | None
+    sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     kv_connector_output: KVConnectorOutput | None
 
@@ -2574,6 +2574,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Rare case.
                 assert not self.is_pooling_model
 
+                sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
                     all_gather_tensors = {
                         "residual": not is_residual_scattered_for_sp(
@@ -2585,10 +2586,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         all_gather_group=get_tp_group(),
                         all_gather_tensors=all_gather_tensors,
                     )
-                    sample_hidden_states = None
                     logits = None
                 else:
-                    sample_hidden_states = hidden_states[logits_indices]
                     logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data = {}
@@ -2647,7 +2646,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            assert sample_hidden_states is not None
             with record_function_or_nullcontext("Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
