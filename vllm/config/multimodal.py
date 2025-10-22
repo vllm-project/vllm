@@ -163,22 +163,21 @@ class MultiModalConfig:
         from vllm.attention.backends.registry import (
             _Backend as BackendEnum,
         )
-        from vllm.attention.backends.registry import (
-            backend_name_to_enum,
-        )
 
         if value is None or isinstance(value, BackendEnum):
             return value
 
-        if isinstance(value, str):
-            candidate = backend_name_to_enum(value.upper())
-            if candidate is not None:
-                return candidate
-
-        valid_backends = ", ".join(sorted(BackendEnum.__members__.keys()))
-        raise ValueError(
-            f"Invalid mm encoder attention backend. Expected one of: {valid_backends}."
+        assert isinstance(value, str), (
+            "mm_encoder_attn_backend must be a string or a BackendEnum."
         )
+        try:
+            return BackendEnum[value.upper()]
+        except KeyError as exc:
+            valid_backends = ", ".join(sorted(BackendEnum.__members__.keys()))
+            raise ValueError(
+                f"Invalid mm encoder attention backend. "
+                f"Expected one of: {valid_backends}."
+            ) from exc
 
     @model_validator(mode="after")
     def _validate_multimodal_config(self):
