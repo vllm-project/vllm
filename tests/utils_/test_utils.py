@@ -19,8 +19,8 @@ from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.utils import (
     FlexibleArgumentParser,
     bind_kv_cache,
-    unique_filepath,
 )
+from vllm.utils.system_utils import unique_filepath
 from ..utils import create_new_process_for_each_test, flat_product
 
 
