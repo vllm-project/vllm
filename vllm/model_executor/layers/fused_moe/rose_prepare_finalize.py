@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 
-import rose
 import torch
+from rose.kernels.all_to_all import AllToAllKernel
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -54,7 +54,7 @@ def rose_hidden_dim_scale(
 class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
-        a2a: rose.kernels.all_to_all.AllToAllKernel,
+        a2a: AllToAllKernel,
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
