@@ -118,8 +118,8 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
       if (activation_kind == ActivationKind::SwiGLUOAI) {  // SwiGLUOAI
         auto g_part = y13.narrow(/*dim=*/1, /*start=*/0, /*length=*/I);
         auto u_part = y13.narrow(/*dim=*/1, /*start=*/I, /*length=*/I);
-        constexpr double kAlpha = 1.702;                   // GPT-OSS default
-        constexpr double kLimit = 7.0;                     // GPT-OSS default
+        constexpr double kAlpha = 1.702;  // GPT-OSS default
+        constexpr double kLimit = 7.0;    // GPT-OSS default
         auto gate_c = at::clamp_max(g_part, kLimit);
         auto up_c = at::clamp(u_part, -kLimit, kLimit);
         auto glu = gate_c.mul(at::sigmoid(gate_c.mul(kAlpha)));
