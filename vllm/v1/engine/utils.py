@@ -125,9 +125,10 @@ class CoreEngineProcManager:
             identity = generate_identity_group(
                 "core_engine_proc_manager", "client_guard", "report", 1
             )[0]
-            zmq_addr = (
-                f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
-                f"{vllm_config.fault_tolerance_config.fault_report_port}"
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.fault_report_port,
             )
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
@@ -869,10 +870,10 @@ def launch_core_engines(
         addresses.engine_core_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
         )
-
-        addresses.fault_report_addr = (
-            f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
-            f"{vllm_config.fault_tolerance_config.fault_report_port}"
+        addresses.fault_report_addr = get_engine_client_zmq_addr(
+            local_only=False,
+            host=vllm_config.parallel_config.data_parallel_master_ip,
+            port=vllm_config.fault_tolerance_config.fault_report_port,
         )
         addresses.client_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
