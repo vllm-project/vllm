@@ -8,6 +8,8 @@ import time
 from types import TracebackType
 from typing import Any
 
+from multi_turn.bench_utils import Color
+
 
 def convert_to_pytorch_benchmark_format(
     args: argparse.Namespace, metrics: dict[str, list], extra_info: dict[str, Any]
@@ -75,6 +77,15 @@ def write_to_json(filename: str, records: list) -> None:
         )
 
 
+def throughput_change(test_elpased_time: float, baseline_elpased_time: float) -> str:
+    """
+    Generates throughput change between test and baseline elapsed time
+    with proper colors.
+    """
+    color = Color.GREEN if test_elpased_time < baseline_elpased_time else Color.RED
+    return f"{color}{baseline_elpased_time / test_elpased_time * 100 - 100:.2f}%\033[0m"
+
+
 # Collect time and generate time metrics
 #
 # Example Usage:
@@ -104,8 +115,11 @@ class TimeCollector:
         else:
             self._max = max(self._max, v)
 
+    def avg_v(self) -> float:
+        return self._sum * 1.0 / self.cnt / self.scale
+
     def avg(self) -> float | str:
-        return self._sum * 1.0 / self.cnt / self.scale if self.cnt > 0 else "N/A"
+        return self.avg_v() if self.cnt > 0 else "N/A"
 
     def max(self) -> float | str:
         return self._max / self.scale if self._max else "N/A"
