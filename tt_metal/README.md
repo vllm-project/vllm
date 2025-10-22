@@ -124,7 +124,7 @@ MESH_DEVICE=N300 python examples/offline_inference_tt.py --model "meta-llama/Lla
 > - To run the 11B Llama-3.2 model on QuietBox, set `MESH_DEVICE=T3K` and `--max_seqs_in_batch 32`.
 > - To run the 90B Llama-3.2 model, set `MESH_DEVICE=T3K`, `--model "meta-llama/Llama-3.2-90B-Vision-Instruct"` and `--max_seqs_in_batch 4`.
 > - To run the 32B Qwen-2.5-VL model, set `MESH_DEVICE=T3K`, `--model "Qwen/Qwen2.5-VL-32B"` and `--max_seqs_in_batch 32`.
-> - To run the 72B Qwen-2.5-VL model, set `MESH_DEVICE=T3K`, `--model "Qwen/Qwen2.5-VL-72B"`, `--max_seqs_in_batch 32`, and `--override_tt_config '{"trace_region_size": 28467200}'`.
+> - To run the 72B Qwen-2.5-VL model, set `MESH_DEVICE=T3K`, `--model "Qwen/Qwen2.5-VL-72B"`, `--max_seqs_in_batch 32`, `--max_model_len 2048`, and `--override_tt_config '{"trace_region_size": 28467200}'`. Note that this model currently is limited to 2048 tokens per user with batch size 32 to avoid OOM error on T3K.
 > - To run the 27B gemma-3 model, set `MESH_DEVICE=T3K --model "google/gemma-3-27b-it" --max_seqs_in_batch 32 --override_tt_config '{"l1_small_size": 768, "fabric_config": "FABRIC_1D"} --multi_modal --multi_image --mm_processor_kwargs '{"use_fast": true, "do_convert_rgb": true}'`.
 
 ## Running the server example
