@@ -9,6 +9,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import is_rocm_aiter_rmsnorm_enabled
@@ -481,3 +482,72 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                 [AiterRMSGroupQuantFP8Pattern, AiterFusedAddRMSGroupQuantPattern]
             )
         return self.hash_source(self, *fusion_patterns)
+
+
+if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    from .matcher_utils import MatcherAiterFusedMulAdd
+
+    class AiterMulAddFusionPattern:
+        def __init__(self):
+            config = get_current_vllm_config()
+            self.model_dtype = (
+                config.model_config.dtype if config.model_config else None
+            )
+            self.enabled = current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+            self.fused_mul_add_matcher = MatcherAiterFusedMulAdd()
+
+        def register(self, pm_pass: PatternMatcherPass):
+            if not self.enabled:
+                return
+
+            def pattern(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+                mul_add = self.fused_mul_add_matcher.forward_native(x, a, b)
+                return mul_add
+
+            def replacement(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+                # AITER's fused_mul_add requires that a either be a
+                # scalar or have the same number of elements as x.
+                if a.numel() == x.numel() or a.numel() == 1:
+                    return self.fused_mul_add_matcher.forward_custom(x, a, b)
+                else:
+                    return self.fused_mul_add_matcher.forward_native(x, a, b)
+
+            pm.register_replacement(
+                pattern,
+                replacement,
+                self.fused_mul_add_matcher.inputs(),
+                pm.fwd_only,
+                pm_pass,
+            )
+
+
+class MulAddFusionPass(VllmPatternMatcherPass):
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig):
+        super().__init__(config)
+
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="mul_add_fusion_pass"
+        )
+
+        if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+            AiterMulAddFusionPattern().register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph):
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug(
+            "Replaced %s mul+add patterns with fused_mul_add", self.matched_count
+        )
+
+    def uuid(self) -> Any:
+        fusion_patterns = []
+        if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+            fusion_patterns.append(AiterMulAddFusionPattern)
+        return self.hash_source(
+            self,
+            *fusion_patterns,
+        )
