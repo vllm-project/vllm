@@ -803,7 +803,6 @@ def reorder_batch_to_split_decodes_and_prefills(
     # NOTE for now we loosely use "decode" to mean requests where attention is
     #  likely memory-bound and "prefill" to mean requests where attention is 
     #  likely compute-bound, 
-    # TODO(lucas): figure out a better naming here
     num_reqs = len(input_batch.req_ids)
     num_scheduled_tokens_np = np.array(
         [scheduler_output.num_scheduled_tokens[req_id] for req_id in input_batch.req_ids])
