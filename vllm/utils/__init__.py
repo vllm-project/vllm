@@ -11,7 +11,6 @@ import json
 import multiprocessing
 import os
 import signal
-import subprocess
 import sys
 import tempfile
 import textwrap
@@ -195,90 +194,6 @@ def init_cached_hf_modules() -> None:
     from transformers.dynamic_module_utils import init_hf_modules
 
     init_hf_modules()
-
-
-@cache
-def find_library(lib_name: str) -> str:
-    """
-    Find the library file in the system.
-    `lib_name` is full filename, with both prefix and suffix.
-    This function resolves `lib_name` to the full path of the library.
-    """
-    # Adapted from https://github.com/openai/triton/blob/main/third_party/nvidia/backend/driver.py#L19 # noqa
-    # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
-    # `/sbin/ldconfig` should exist in all Linux systems.
-    # `/sbin/ldconfig` searches the library in the system
-    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
-    # each line looks like the following:
-    # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
-    locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
-    # `LD_LIBRARY_PATH` searches the library in the user-defined paths
-    env_ld_library_path = envs.LD_LIBRARY_PATH
-    if not locs and env_ld_library_path:
-        locs = [
-            os.path.join(dir, lib_name)
-            for dir in env_ld_library_path.split(":")
-            if os.path.exists(os.path.join(dir, lib_name))
-        ]
-    if not locs:
-        raise ValueError(f"Cannot find {lib_name} in the system.")
-    return locs[0]
-
-
-def find_nccl_library() -> str:
-    """
-    We either use the library file specified by the `VLLM_NCCL_SO_PATH`
-    environment variable, or we find the library file brought by PyTorch.
-    After importing `torch`, `libnccl.so.2` or `librccl.so.1` can be
-    found by `ctypes` automatically.
-    """
-    so_file = envs.VLLM_NCCL_SO_PATH
-
-    # manually load the nccl library
-    if so_file:
-        logger.info(
-            "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s", so_file
-        )
-    else:
-        if torch.version.cuda is not None:
-            so_file = "libnccl.so.2"
-        elif torch.version.hip is not None:
-            so_file = "librccl.so.1"
-        else:
-            raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.debug_once("Found nccl from library %s", so_file)
-    return so_file
-
-
-def find_nccl_include_paths() -> list[str] | None:
-    """
-    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
-    environment variable, or we find the library file brought by
-    nvidia-nccl-cuXX. load_inline by default uses
-    torch.utils.cpp_extension.include_paths
-    """
-    paths: list[str] = []
-    inc = envs.VLLM_NCCL_INCLUDE_PATH
-    if inc and os.path.isdir(inc):
-        paths.append(inc)
-
-    try:
-        spec = importlib.util.find_spec("nvidia.nccl")
-        if spec and getattr(spec, "submodule_search_locations", None):
-            for loc in spec.submodule_search_locations:
-                inc_dir = os.path.join(loc, "include")
-                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
-                    paths.append(inc_dir)
-    except Exception:
-        pass
-
-    seen = set()
-    out: list[str] = []
-    for p in paths:
-        if p and p not in seen:
-            out.append(p)
-            seen.add(p)
-    return out or None
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
