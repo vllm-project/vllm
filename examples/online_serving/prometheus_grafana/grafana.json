@@ -852,9 +852,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "vllm:gpu_cache_usage_perc{model_name=\"$model_name\"}",
+          "expr": "vllm:kv_cache_usage_perc{model_name=\"$model_name\"}",
           "instant": false,
-          "legendFormat": "GPU Cache Usage",
+          "legendFormat": "KV Cache Usage",
           "range": true,
           "refId": "A"
         }
