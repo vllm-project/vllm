@@ -100,7 +100,14 @@ try:
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(output, IntermediateTensors):
+            # TODO: the model runner should use torchax to wrap the JaxIntermediateTensor
+            from tpu_inference.models.jax.jax_intermediate_tensor import (
+                JaxIntermediateTensors,
+            )
+
+            if isinstance(output, IntermediateTensors) or isinstance(
+                output, JaxIntermediateTensors
+            ):
                 output = scheduler_output, output
             elif not get_pp_group().is_last_rank:
                 # Case where there are no scheduled requests
