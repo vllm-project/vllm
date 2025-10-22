@@ -372,6 +372,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
         {"tiny": "TitanML/tiny-mixtral"},
     ),
+    "MotifForCausalLM": _HfExamplesInfo(
+        "Motif-Technologies/Motif-2-12.7B-Base",
+        trust_remote_code=True,
+    ),
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
