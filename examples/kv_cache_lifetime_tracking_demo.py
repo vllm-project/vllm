@@ -128,16 +128,20 @@ def demonstrate_lifetime_stats():
     # Show how the metric would appear in Prometheus
     print("\nPrometheus Metric Information:")
     print("Metric Names:")
-    print("  - vllm:kv_cache_total_lifetime_seconds (Counter)")
-    print("  - vllm:kv_cache_total_blocks_freed (Counter)")
+    print("  - vllm:kv_cache_block_lifetime_seconds (Histogram)")
     print(
-        "Description: Cumulative totals used to derive average KV cache "
-        "lifetime in Prometheus"
+        "Description: Histogram capturing individual KV cache block "
+        "lifetimes; Prometheus also exposes _sum and _count for averages"
     )
     print("Labels: model_name, engine")
     print("\nExample PromQL to derive average lifetime:")
-    print("  rate(vllm:kv_cache_total_lifetime_seconds[5m]) /")
-    print("  rate(vllm:kv_cache_total_blocks_freed[5m])")
+    print("  rate(vllm:kv_cache_block_lifetime_seconds_sum[5m]) /")
+    print("  rate(vllm:kv_cache_block_lifetime_seconds_count[5m])")
+    print("\nExample PromQL for percentile:")
+    print(
+        "  histogram_quantile(0.9, rate("
+        "vllm:kv_cache_block_lifetime_seconds_bucket[5m]))"
+    )
 
     print("\n" + "=" * 60)
     print("Demonstration completed successfully!")
