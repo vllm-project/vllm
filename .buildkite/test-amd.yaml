@@ -577,6 +577,22 @@ steps:
   commands:
   - bash scripts/run-benchmarks.sh
 
+- label: ROCM LM Eval Large Models
+  mirror_hardwares: [amdproduction]
+  agent_pool: mi325_8
+  num_gpus: 8
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+    # GPU diagnostics
+  - echo '=== GPU Diagnostics ==='
+  - rocm-smi --showid
+  - printenv HIP_VISIBLE_DEVICES
+  - python3 -c 'import torch; print(torch.cuda.device_count())'
+  - ls -la /dev/dri/
+  - echo '=== End GPU Diagnostics ==='
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-mi300.txt --tp-size=8
+
 - label: Benchmarks CLI Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
