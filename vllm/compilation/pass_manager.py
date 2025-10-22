@@ -21,7 +21,7 @@ if current_platform.is_cuda_alike():
 if current_platform.is_rocm():
     from .rocm_aiter_rmsnorm_fusion import (
         RMSNormAiterQuantFusionPass,
-        is_rocm_aiter_rmsnorm_enabled,
+        is_rocm_aiter_enabled,
     )
 
 if current_platform.is_cuda():
@@ -109,7 +109,7 @@ class PostGradPassManager(CustomGraphPass):
                 self.passes += [AllReduceFusionPass(config)]
 
             if self.pass_config.enable_fusion:
-                if is_rocm_aiter_rmsnorm_enabled():
+                if is_rocm_aiter_enabled():
                     self.passes += [RMSNormAiterQuantFusionPass(config)]
                 self.passes += [RMSNormQuantFusionPass(config)]
                 self.passes += [ActivationQuantFusionPass(config)]
