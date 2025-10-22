@@ -669,7 +669,6 @@ def runai_safetensors_weights_iterator(
         streamer.stream_files(
             hf_weights_files,
             device=get_device(),
-            s3_credentials=None,
             is_distributed=is_distributed,
         )
         total_tensors = sum(
