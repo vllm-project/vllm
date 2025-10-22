@@ -96,7 +96,7 @@ class ImageEncoderViT(nn.Module):
             rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
             window_size (int): Window size for window attention blocks.
             global_attn_indexes (list): Indexes for blocks using global attention.
-        """
+        """  # noqa: E501
         super().__init__()
         self.img_size = img_size
 
@@ -191,7 +191,8 @@ class ImageEncoderViT(nn.Module):
 
 
 class Block(nn.Module):
-    """Transformer blocks with support of window attention and residual propagation blocks"""
+    """Transformer blocks with support of window attention and residual propagation
+    blocks"""
 
     def __init__(
         self,
@@ -220,7 +221,7 @@ class Block(nn.Module):
                 use global attention.
             input_size (tuple(int, int) or None): Input resolution for calculating the relative
                 positional parameter size.
-        """
+        """  # noqa: E501
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = RelPosAttention(
@@ -279,7 +280,7 @@ class RelPosAttention(nn.Module):
             rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
             input_size (tuple(int, int) or None): Input resolution for calculating the relative
                 positional parameter size.
-        """
+        """  # noqa: E501
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -355,7 +356,7 @@ def window_partition(
     Returns:
         windows: windows after partition with [B * num_windows, window_size, window_size, C].
         (Hp, Wp): padded height and width before partition
-    """
+    """  # noqa: E501
     B, H, W, C = x.shape
 
     pad_h = (window_size - H % window_size) % window_size
@@ -387,7 +388,7 @@ def window_unpartition(
 
     Returns:
         x: unpartitioned sequences with [B, H, W, C].
-    """
+    """  # noqa: E501
     Hp, Wp = pad_hw
     H, W = hw
     B = windows.shape[0] // (Hp * Wp // window_size // window_size)
@@ -449,7 +450,7 @@ def add_decomposed_rel_pos(
 ) -> torch.Tensor:
     """
     Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
-    https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py   # noqa B950
+    https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py
     Args:
         q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).
         rel_pos_h (Tensor): relative position embeddings (Lh, C) for height axis.
@@ -459,7 +460,7 @@ def add_decomposed_rel_pos(
 
     Returns:
         attn (Tensor): attention map with added relative positional embeddings.
-    """
+    """  # noqa: E501
     q_h, q_w = q_size
     k_h, k_w = k_size
     Rh = get_rel_pos(q_h, k_h, rel_pos_h)
