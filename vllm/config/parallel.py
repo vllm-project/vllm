@@ -61,6 +61,23 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
+    num_wait_worker_iterations: int = 0
+    """
+    Number of iterations to wait before applying a redistribution plan
+    """
+
+    enable_async: bool = False
+    """
+    A gate to trigger asynchronous expert load rebalancing and weight transfer
+    """
+
+    expert_mapper_policy_type: int = 0
+    """
+    Determine using which expert mapping strategy
+
+    0: GreedyExpertUpdate
+    1: BipartiteExpertUpdate
+    """
 
 @config
 @dataclass

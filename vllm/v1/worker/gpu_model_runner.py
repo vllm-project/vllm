@@ -2411,7 +2411,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 if self.parallel_config.eplb_config.enable_async:
-                    self.eplb_state.step_before_forward()
+                    self.eplb_state.step_before_forward(self.get_model())
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
