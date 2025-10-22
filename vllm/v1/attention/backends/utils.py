@@ -96,7 +96,7 @@ class ReorderSpec:
     Case 2: decode_threshold=3, split_extend=True,
       query_len: [3,  1,  2,  2,  7, 15, 10, 5, 8]
       seq_len:   [8,  9,  8, 10, 10, 20, 10, 5, 8]
-                 └────── dec ──────┘ └─ext─┘ └pre┘
+                 └──── dec ────┘ └── ext ──┘ └pre┘
       → Reordered as [decode, extend_prefill, pure_prefill].
 
     Case 3 (Future/TODO):
