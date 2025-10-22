@@ -420,7 +420,7 @@ class ModelConfig:
     def __post_init__(
         self,
         # Multimodal config init vars
-        limit_mm_per_prompt: dict[str, int] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
@@ -445,7 +445,7 @@ class ModelConfig:
         # doesn't affect the user process. However, without a consistent seed,
         # different tensor parallel workers would sample different tokens,
         # leading to inconsistent results.
-        if envs.VLLM_USE_V1 and self.seed is None:
+        if self.seed is None:
             self.seed = 0
             if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
                 logger.warning(
@@ -1750,6 +1750,24 @@ class ModelConfig:
         )
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
+    def is_model_moe(
+        self,
+    ) -> bool:
+        """
+        Parse model configuration to determine if it is MOE.
+        """
+        return self.get_num_experts() > 1
+
+    def is_quantized(self) -> bool:
+        """
+        Check if a PretrainedConfig is quantized.
+
+        Returns:
+            True if model is quantized.
+            False otherwise.
+        """
+        return getattr(self.hf_config, "quantization_config", None) is not None
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
