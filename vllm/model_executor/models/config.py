@@ -415,7 +415,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 return a * b // gcd(a, b)
 
             base_chunk_size = (
-                user_mamba_block_size or model_config.get_mamba_chunk_size()
+                user_mamba_block_size 
+                or model_config.get_mamba_chunk_size()
             )
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 

@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, SkipValidation, field_validator
+from pydantic import Field, SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -90,7 +90,7 @@ class CacheConfig:
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-    mamba_block_size: int | None = None
+    mamba_block_size: int | None = Field(default=None, gt=0, multiple_of=256)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled."""
     mamba_cache_dtype: MambaDType = "auto"
@@ -184,3 +184,11 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
+
+    @model_validator(mode="after")
+    def validate_mamba_block_size(self) -> "CacheConfig":
+        if self.mamba_block_size is not None and not self.enable_prefix_caching:
+            raise ValueError(
+                "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self

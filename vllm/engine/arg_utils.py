@@ -54,12 +54,7 @@ from vllm.config import (
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.cache import (
-    BlockSize,
-    CacheDType,
-    MambaDType,
-    PrefixCachingHashAlgo,
-)
+from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
 from vllm.config.device import Device
 from vllm.config.model import (
     ConvertOption,
@@ -1351,14 +1346,6 @@ class EngineArgs:
             f"tp_size={self.tensor_parallel_size} must be divisible by"
             f"dcp_size={self.decode_context_parallel_size}."
         )
-
-        # Validate mamba_block_size
-        assert self.mamba_block_size is None or self.enable_prefix_caching, (
-            "--mamba-block-size requires --enable-prefix-caching"
-        )
-        assert self.mamba_block_size is None or (
-            self.mamba_block_size > 0 and self.mamba_block_size % 256 == 0
-        ), f"--mamba-block-size must be a multiple of 256, got {self.mamba_block_size}"
 
         cache_config = CacheConfig(
             block_size=self.block_size,
