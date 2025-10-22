@@ -1662,10 +1662,14 @@ class Scheduler(SchedulerInterface):
         if not total_failed_requests:
             return set()
 
-        # evict invalid blocks from the prefix cache to prevent future
-        # requests from reusing corrupted data. this must happen regardless
-        # of retry policy to prevent cache pollution race conditions.
-        self.kv_cache_manager.evict_blocks(invalid_block_ids)
+        # invalidate cached blocks by eviction to prevent poisoning
+        # NOTE: this naturally excludes async requests, as they have no
+        # hash in the block table at this point
+        cached_invalid_blocks = self.kv_cache_manager.get_cached_block_ids(
+            invalid_block_ids
+        )
+        if cached_invalid_blocks:
+            self.kv_cache_manager.evict_blocks(cached_invalid_blocks)
 
         if should_fail:
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
