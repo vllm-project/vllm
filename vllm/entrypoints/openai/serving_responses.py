@@ -50,6 +50,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -1227,7 +1228,9 @@ class OpenAIServingResponses(OpenAIServing):
                         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                     )
                     yield _increment_sequence_number_and_return(
-                        StreamingResponsesResponse.model_validate_json(error_data)
+                        TypeAdapter(StreamingResponsesResponse).validate_json(
+                            error_data
+                        )
                     )
                     return
                 if reasoning_parser:
@@ -1533,7 +1536,7 @@ class OpenAIServingResponses(OpenAIServing):
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
                 yield _increment_sequence_number_and_return(
-                    StreamingResponsesResponse.model_validate_json(error_data)
+                    TypeAdapter(StreamingResponsesResponse).validate_json(error_data)
                 )
                 return
 
