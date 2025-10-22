@@ -55,6 +55,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
+    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
 )
@@ -447,7 +448,13 @@ class NemotronHModel(nn.Module):
 
 
 class NemotronHForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    SupportsMambaPrefixCaching,
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
