@@ -348,7 +348,7 @@ def _get_tool_schema_defs(
     return all_defs
 
 
-def _get_json_schema_from_choice_required(
+def _get_json_schema_from_tools(
     tools: list[Tool | ChatCompletionToolsParam],
 ) -> dict:
     json_schema = {
@@ -394,7 +394,7 @@ def get_json_schema_from_tool(
         return tool_map[tool_name].function.parameters
 
     if tool_choice == "required":
-        return _get_json_schema_from_choice_required(tools)
+        return _get_json_schema_from_tools(tools)
 
     return None
 
