@@ -87,22 +87,6 @@ class XPUPlatform(Platform):
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        """
-        Check if the kv_cache_dtype is supported.
-        XPU only support fp8 kv cache with triton backend.
-        """
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN"
-        ):
-            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
-
-        return False
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
