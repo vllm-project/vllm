@@ -5,7 +5,7 @@ import contextlib
 import datetime
 import enum
 import getpass
-import importlib
+import importlib.util
 import inspect
 import json
 import multiprocessing
