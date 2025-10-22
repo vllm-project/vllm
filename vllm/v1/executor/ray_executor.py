@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict
 
 import cloudpickle
 
@@ -243,8 +243,7 @@ class RayDistributedExecutor(Executor):
             ip = item.ip
             return 0 if ip == driver_ip else 1, ip_counts[ip], ip
 
-        def sort_by_pp_rank_order(item: RayWorkerMetaData,
-                                   pp_rank_map: Dict[str, int]):
+        def sort_by_pp_rank_order(item: RayWorkerMetaData, pp_rank_map: Dict[str, int]):
             """
             Sort the workers based on the custom pipeline parallel rank order.
             If VLLM_PP_RANK_ORDER is set, use it to determine the rank.
@@ -263,26 +262,32 @@ class RayDistributedExecutor(Executor):
             pp_rank_map: Dict[str, int] = {}
             try:
                 # Format: "ip1,ip2,ip3,..."
-                ips = [ip.strip() for ip in pp_rank_order.split(',')]
+                ips = [ip.strip() for ip in pp_rank_order.split(",")]
                 for idx, ip_addr in enumerate(ips):
                     pp_rank_map[ip_addr] = idx
             except (ValueError, AttributeError) as e:
                 logger.warning(
                     "Failed to parse VLLM_PP_RANK_ORDER='%s': %s. "
-                    "Falling back to default sorting.", pp_rank_order, e)
+                    "Falling back to default sorting.",
+                    pp_rank_order,
+                    e,
+                )
                 sorted_worker_metadata = sorted(
-                    worker_metadata, key=sort_by_driver_then_worker_ip)
+                    worker_metadata, key=sort_by_driver_then_worker_ip
+                    )
             else:
                 logger.info("Using custom PP rank order: %s", pp_rank_map)
                 sorted_worker_metadata = sorted(
                     worker_metadata,
-                    key=lambda item: sort_by_pp_rank_order(item, pp_rank_map))
+                    key=lambda item: sort_by_pp_rank_order(item, pp_rank_map),
+                    )
         else:
             # After sorting, the workers on the same node will be
             # close to each other, and the workers on the driver
             # node will be placed first.
             sorted_worker_metadata = sorted(
-                worker_metadata, key=sort_by_driver_then_worker_ip)
+                worker_metadata, key=sort_by_driver_then_worker_ip
+            )
 
         for i, item in enumerate(sorted_worker_metadata):
             item.adjusted_rank = i

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+from typing import Optional
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -613,8 +614,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #   VLLM_PP_RANK_ORDER="100.88.122.120,100.108.135.70"
     # This makes 100.88.122.120 handle PP rank 0 and 100.108.135.70 handle PP rank 1.
     # If not set, the default behavior sorts by driver node first, then by IP.
-    "VLLM_PP_RANK_ORDER":
-    lambda: os.getenv("VLLM_PP_RANK_ORDER", None),
+    "VLLM_PP_RANK_ORDER": lambda: os.getenv("VLLM_PP_RANK_ORDER", None),
 
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
