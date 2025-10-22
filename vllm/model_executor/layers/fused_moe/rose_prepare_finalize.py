@@ -203,6 +203,8 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: torch.Tensor | None = None
 
+        logger.debug("ROSE dispatch send")
+
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -215,6 +217,8 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_recv=False,
         )
 
+        logger.debug("ROSE dispatch recv")
+
         hook = lambda: self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -226,6 +230,8 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_send=False,
             do_recv=True,
         )
+
+        logger.debug("ROSE dispatch end")
 
         return (
             hook,
@@ -311,6 +317,8 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         topk_ids_u32 = topk_ids.view(dtype=torch.uint32)
 
+        logger.debug("ROSE combine send")
+
         self.a2a.combine(
             out_tokens=output,
             indices=topk_ids_u32,
@@ -321,6 +329,8 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_recv=False,
             # Note: new kernels allow accumulate.
         )
+
+        logger.debug("ROSE combine recv")
 
         return lambda: self.a2a.combine(
             out_tokens=output,
@@ -351,3 +361,4 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             weight_and_reduce_impl,
         )
         receiver()
+        logger.debug("ROSE combine end")
