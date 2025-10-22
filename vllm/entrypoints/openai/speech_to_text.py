@@ -189,7 +189,7 @@ class OpenAISpeechToText(OpenAIServing):
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
-        init_token = self.tokenizer.encode("<|0.00|>")[0]
+        init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
 
