@@ -49,6 +49,7 @@ class PrithviMAE:
             dtype="float16",
             enforce_eager=True,
             model_impl="terratorch",
+            enable_mm_embeds=True,
         )
 
     def run(self, input_data, location_coords):

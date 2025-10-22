@@ -75,6 +75,14 @@ class MultiModalConfig:
         {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512, 
         "height": 512}}
     """
+    enable_mm_embeds: bool = False
+    """If `True`, enables passing multimodal embeddings:
+    for `LLM` class, this refers to tensor inputs under `multi_modal_data`;
+    for the OpenAI-compatible server, this refers to chat messages with content
+    `"type": "*_embeds"`.
+
+    WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!"""
     media_io_kwargs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
