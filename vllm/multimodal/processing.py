@@ -1059,7 +1059,10 @@ class InputProcessingContext:
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
-
+        # Filter dynamic kwargs according to model config
+        if mm_config.mm_processor_dynamic_kwargs:
+            allowed_kwargs = {k: v for k, v in allowed_kwargs.items() if k \
+                              in mm_config.mm_processor_dynamic_kwargs}
         try:
             output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
         except Exception as exc:

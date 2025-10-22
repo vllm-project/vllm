@@ -54,6 +54,22 @@ def _get_processor_factory_fn(processor_cls: type | tuple[type, ...]):
     return processor_cls
 
 
+@lru_cache
+def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls) -> set[str]:
+    dynamic_kwargs: set[str] = set()
+    if kwargs_cls is None:
+        return dynamic_kwargs
+    # get kwargs annotations in processor
+    # merge text_kwargs / images_kwargs / videos_kwargs / audio_kwargs
+    kwargs_type_annotations = getattr(kwargs_cls, "__annotations__", {})
+    for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
+        if kw_type in kwargs_type_annotations:
+            kw_annotations = kwargs_type_annotations[kw_type].__annotations__
+            for kw_name in kw_annotations:
+                dynamic_kwargs.add(kw_name)
+    return dynamic_kwargs
+
+
 def _merge_mm_kwargs(
     model_config: "ModelConfig",
     processor_cls: type | tuple[type, ...],
@@ -70,7 +86,18 @@ def _merge_mm_kwargs(
         requires_kw_only=False,
         allow_var_kwargs=True,
     )
-    if mm_config.mm_processor_dynamic_kwargs is not None:
+    kwargs_cls = getattr(processor_cls, "ProcessingKwargs", None)
+    if kwargs_cls is None:
+        try:
+            from transformers.processing_utils import ProcessingKwargs
+            kwargs_cls = ProcessingKwargs
+        except Exception:
+            kwargs_cls = None
+    if mm_config.mm_processor_dynamic_kwargs is None:
+        mm_config.mm_processor_dynamic_kwargs = \
+            _collect_dynamic_keys_from_processing_kwargs(kwargs_cls)
+    # Dynamic-wins: filter out dynamic (call-time) keys from constructor kwargs
+    if mm_config.mm_processor_dynamic_kwargs:
         allowed_kwargs = {
             k: v
             for k, v in allowed_kwargs.items()
