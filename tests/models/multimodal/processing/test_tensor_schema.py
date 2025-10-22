@@ -48,6 +48,7 @@ ARCH_NEEDS_EXTRAS = [
     "Idefics3ForConditionalGeneration",
     "LlavaForConditionalGeneration",
     "MiniCPMV",
+    "PaliGemmaForConditionalGeneration",
 ]
 REPO_ID_TO_SKIP = {
     "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
