@@ -298,7 +298,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config.mamba_block_size = model_config.max_model_len
 
         if cache_config.enable_prefix_caching:
-            # Check if model supports prefix caching with mamba layers
             if model_config.supports_mamba_prefix_caching:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
