@@ -14,7 +14,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 def server():  # noqa: F811
     args = [
         "--max-model-len",
-        "8192",
+        "2048",
         "--enforce-eager",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
@@ -37,7 +37,7 @@ async def client(server):
 async def test_simple_messages(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
-        max_tokens=8192,
+        max_tokens=1024,
         messages=[{"role": "user", "content": "how are you!"}],
     )
     assert resp.stop_reason == "end_turn"
@@ -50,7 +50,7 @@ async def test_simple_messages(client: anthropic.AsyncAnthropic):
 async def test_system_message(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
-        max_tokens=8192,
+        max_tokens=1024,
         system="you are a helpful assistant",
         messages=[{"role": "user", "content": "how are you!"}],
     )
@@ -64,7 +64,7 @@ async def test_system_message(client: anthropic.AsyncAnthropic):
 async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
-        max_tokens=8192,
+        max_tokens=1024,
         messages=[{"role": "user", "content": "how are you!"}],
         stream=True,
     )
@@ -77,7 +77,7 @@ async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
 async def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
-        max_tokens=8192,
+        max_tokens=1024,
         messages=[
             {"role": "user", "content": "What's the weather like in New York today?"}
         ],
@@ -109,7 +109,7 @@ async def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
     async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
         resp = await client.messages.create(
             model="claude-3-7-sonnet-latest",
-            max_tokens=8192,
+            max_tokens=1024,
             messages=[
                 {
                     "role": "user",
