@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import json
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any, Final, cast
 
 import torch
 from fastapi import Request
-from typing_extensions import override
+from fastapi.responses import Response
+from typing_extensions import assert_never, override
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
+    EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -28,7 +29,6 @@ from vllm.entrypoints.openai.serving_engine import (
     TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.utils import encoding_pooling_output
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
@@ -39,8 +39,15 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.utils.asyncio import merge_async_iterators
-from vllm.utils.collections import chunk_list
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.collection_utils import chunk_list
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
+    encode_pooling_bytes,
+    encode_pooling_output,
+)
 
 logger = init_logger(__name__)
 
@@ -68,12 +75,6 @@ class EmbeddingMixin(OpenAIServing):
     ) -> ErrorResponse | None:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
-            if ctx.request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
-                return self.create_error_response(
-                    f"embed_dtype={ctx.request.embed_dtype!r} is not supported. "
-                    f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
-                )
-
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             tokenizer = await self.engine_client.get_tokenizer()
@@ -121,36 +122,70 @@ class EmbeddingMixin(OpenAIServing):
     def _build_response(
         self,
         ctx: ServeContext,
-    ) -> EmbeddingResponse | ErrorResponse:
-        items: list[EmbeddingResponseData] = []
-        num_prompt_tokens = 0
-
+    ) -> EmbeddingResponse | Response | ErrorResponse:
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
-        for idx, final_res in enumerate(final_res_batch_checked):
-            item = EmbeddingResponseData(
-                index=idx,
-                embedding=encoding_pooling_output(
-                    final_res, ctx.request.encoding_format, ctx.request.embed_dtype
-                ),
+        encoding_format: EncodingFormat = ctx.request.encoding_format
+        embed_dtype: EmbedDType = ctx.request.embed_dtype
+        endianness: Endianness = ctx.request.endianness
+
+        def encode_float_base64():
+            items: list[EmbeddingResponseData] = []
+            num_prompt_tokens = 0
+
+            for idx, final_res in enumerate(final_res_batch_checked):
+                item = EmbeddingResponseData(
+                    index=idx,
+                    embedding=encode_pooling_output(
+                        final_res,
+                        encoding_format=encoding_format,
+                        embed_dtype=embed_dtype,
+                        endianness=endianness,
+                    ),
+                )
+                prompt_token_ids = final_res.prompt_token_ids
+
+                items.append(item)
+                num_prompt_tokens += len(prompt_token_ids)
+
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                total_tokens=num_prompt_tokens,
             )
-            prompt_token_ids = final_res.prompt_token_ids
 
-            items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
+            return EmbeddingResponse(
+                id=ctx.request_id,
+                created=ctx.created_time,
+                model=ctx.model_name,
+                data=items,
+                usage=usage,
+            )
 
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
+        def encode_bytes():
+            body, items, usage = encode_pooling_bytes(
+                pooling_outputs=final_res_batch_checked,
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+            )
 
-        return EmbeddingResponse(
-            id=ctx.request_id,
-            created=ctx.created_time,
-            model=ctx.model_name,
-            data=items,
-            usage=usage,
-        )
+            metadata = {
+                "id": ctx.request_id,
+                "created": ctx.created_time,
+                "model": ctx.model_name,
+                "data": items,
+                "usage": usage,
+            }
+            return EmbeddingBytesResponse(
+                body=body,
+                metadata=json.dumps(metadata),
+            )
+
+        if encoding_format == "float" or encoding_format == "base64":
+            return encode_float_base64()
+        elif encoding_format == "bytes":
+            return encode_bytes()
+        else:
+            assert_never(encoding_format)
 
     def _get_max_position_embeddings(self) -> int:
         """Get the model's effective maximum sequence length for chunking."""

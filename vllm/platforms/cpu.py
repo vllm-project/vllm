@@ -151,7 +151,7 @@ class CpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         import vllm.envs as envs
-        from vllm.utils import GiB_bytes
+        from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
         if kv_cache_space is None:
@@ -296,6 +296,9 @@ class CpuPlatform(Platform):
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
+        # Disable multi-stream for shared experts as no Stream on CPU
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
 
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")
