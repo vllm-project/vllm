@@ -377,14 +377,13 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     transfer.
 
     When async KV loading has invalid blocks and retry_policy is 'recompute':
-    1. Blocks are allocated but not cached yet (no hash)
-    2. evict_blocks() is called but is a no-op (blocks not cached)
-    3. When async transfer completes, only valid blocks should be cached
-    4. Invalid blocks should never enter the prefix cache
+    1. Blocks are allocated but not cached yet
+    2. When async transfer completes, only valid blocks should be cached
+    3. Invalid blocks should never enter the prefix cache
 
-    This test verifies END-TO-END that the eviction call on uncached async
-    blocks doesn't matter because the failed_recving_kv_req_ids protection
-    ensures only valid blocks are cached when the transfer completes.
+    This test verifies correctness, the failed_recving_kv_req_ids protection
+    ensures only valid blocks are cached when the transfer completes, and we
+    only evict blocks from cache that are already hashed in the block table.
     """
     from unittest.mock import patch
 
@@ -541,8 +540,3 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
-
-    # note: after schedule(), the invalid block may now have a hash because the
-    # scheduler recomputed it from scratch. This is correct - the invalid async
-    # transfer data was never cached (only 800 tokens were cached), and now
-    # the scheduler is recomputing those tokens with valid data.
