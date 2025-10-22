@@ -8,7 +8,6 @@ from packaging import version
 
 from vllm import envs
 from vllm.config.model import LogprobsMode
-from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 
@@ -34,8 +33,10 @@ class TopKTopPSampler(nn.Module):
         ):
             if envs.VLLM_USE_FLASHINFER_SAMPLER:
                 # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
-                if is_global_first_rank():
-                    logger.info_once("Using FlashInfer for top-p & top-k sampling.")
+                logger.info_once(
+                    "Using FlashInfer for top-p & top-k sampling.",
+                    scope="global",
+                )
                 self.forward = self.forward_cuda
             else:
                 logger.debug_once(

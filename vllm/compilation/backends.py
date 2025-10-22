@@ -22,7 +22,6 @@ from vllm.compilation.partition_rules import (
     resolve_defined_ops,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -243,13 +242,17 @@ class CompilerManager:
             self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
-            if graph_index == 0 and is_local_first_rank():
+            if graph_index == 0:
                 # adds some info logging for the first graph
                 if runtime_shape is None:
-                    logger.info("Cache the graph for dynamic shape for later use")
+                    logger.info_once(
+                        "Cache the graph for dynamic shape for later use", scope="local"
+                    )
                 else:
-                    logger.info(
-                        "Cache the graph of shape %s for later use", str(runtime_shape)
+                    logger.info_once(
+                        "Cache the graph of shape %s for later use",
+                        str(runtime_shape),
+                        scope="local",
                     )
             if runtime_shape is None:
                 logger.debug(
@@ -604,14 +607,12 @@ class VllmBackend:
 
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
 
-        if is_local_first_rank():
-            if disable_cache:
-                logger.info_once("vLLM's torch.compile cache is disabled.")
-            else:
-                logger.info_once(
-                    "Using cache directory: %s for vLLM's torch.compile",
-                    local_cache_dir,
-                )
+        logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
+        logger.info_once(
+            "Using cache directory: %s for vLLM's torch.compile",
+            local_cache_dir,
+            scope="local",
+        )
 
         self.compiler_manager.initialize_cache(
             local_cache_dir, disable_cache, self.prefix
@@ -623,8 +624,9 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.time() - torch_compile_start_time
-        if is_local_first_rank():
-            logger.debug("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        logger.debug_once(
+            "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
+        )
         self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
@@ -676,7 +678,9 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
-            logger.debug("Computation graph saved to %s", graph_path)
+            logger.debug_once(
+                "Computation graph saved to %s", graph_path, scope="local"
+            )
 
         self._called = True
 
