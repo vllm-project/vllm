@@ -362,6 +362,65 @@ class TestMultiConnectorStats:
         # Known connector should be reconstructed
         assert "NixlConnector" in stats.data
 
+    def test_build_kv_connector_stats_with_already_instantiated_objects(self):
+        """Test that already-instantiated stats objects are preserved (same process)."""
+        # This simulates the in-process case where stats are not serialized
+        nixl_stats = NixlKVConnectorStats(
+            data={
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
+            }
+        )
+        mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
+
+        data_with_objects = {
+            "NixlConnector": nixl_stats,
+            "MockConnector": mock_stats,
+        }
+
+        stats = MultiConnector.build_kv_connector_stats(data=data_with_objects)
+
+        assert stats is not None
+        assert isinstance(stats, MultiKVConnectorStats)
+        assert len(stats.data) == 2
+        # Verify objects are preserved as-is
+        assert stats.data["NixlConnector"] is nixl_stats
+        assert stats.data["MockConnector"] is mock_stats
+
+    def test_build_kv_connector_stats_with_mixed_objects_and_dicts(self):
+        """Test handling mixed already-instantiated and serialized stats."""
+        # This can happen during transition or partial serialization
+        nixl_stats = NixlKVConnectorStats(
+            data={
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
+            }
+        )
+
+        mixed_data = {
+            "NixlConnector": nixl_stats,  # Already instantiated
+            "MockConnector": {"data": {"mock_field": [1, 2, 3]}},  # Serialized
+        }
+
+        stats = MultiConnector.build_kv_connector_stats(data=mixed_data)
+
+        assert stats is not None
+        assert isinstance(stats, MultiKVConnectorStats)
+        assert len(stats.data) == 2
+        # Instantiated object preserved
+        assert stats.data["NixlConnector"] is nixl_stats
+        # Serialized object reconstructed
+        assert isinstance(stats.data["MockConnector"], MockConnectorStats)
+        assert stats.data["MockConnector"].data == {"mock_field": [1, 2, 3]}
+
     def test_build_kv_connector_stats_skips_connectors_without_custom_stats(self):
         """Test that connectors without custom stats (return None) are skipped."""
         # SharedStorageConnector doesn't override build_kv_connector_stats,
