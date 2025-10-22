@@ -137,6 +137,12 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
+        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
+            logger.warning_once(
+                "QK Norm + RoPE fusion enabled but the current platform is not "
+                "CUDA-alike. The fusion will be disabled."
+            )
+            self.enable_qk_norm_rope_fusion = False
 
 
 @config
@@ -549,7 +555,7 @@ class CompilationConfig:
             self.pass_config = PassConfig(**self.pass_config)
 
         if self.pass_config.enable_qk_norm_rope_fusion:
-            self.custom_ops.append("+rms_norm")
+            # self.custom_ops.append("+rms_norm")
             self.custom_ops.append("+rotary_embedding")
 
         if (

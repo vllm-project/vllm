@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pattern-based fusion pass for Q/K RMSNorm + RoPE -> fused_qk_norm_rope."""
 
-import operator
+from collections.abc import Callable
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -11,29 +11,21 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.attention import Attention
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .fusion import empty_bf16, empty_i64
 from .inductor_pass import enable_fake_mode
+from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 
-
-# Ops used in the pattern (assume kernels are built and available)
-RMS_OP = torch.ops._C.rms_norm.default
-ROPE_OPS: list[torch._ops.OpOverload] = [
-    torch.ops._C.rotary_embedding.default,
-    # torch.ops.vllm.flashinfer_rotary_embedding.default,
-]
 FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
 SPLIT_SIZES_OP = torch.ops.aten.split_with_sizes.default
 RESHAPE_OP = torch.ops.aten.reshape.default
-EMPTY_LIKE_OP = torch.ops.aten.empty_like.default
-VIEW_OP = torch.ops.aten.view.default
-CONTIGUOUS_OP = torch.ops.aten.contiguous.default
 
 
 class QkNormRopePattern:
@@ -60,20 +52,45 @@ class QkNormRopePattern:
 
     def __init__(
         self,
-        layer: Attention,
+        head_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
         eps: float,
-        rope_op: torch._ops.OpOverload,
         is_neox: bool,
+        rope_flashinfer: bool = False,
     ) -> None:
-        self.layer = layer
-        self.num_heads = layer.num_heads
-        self.num_kv_heads = layer.num_kv_heads
-        self.head_dim = layer.head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        self.rope_op = rope_op
+        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.is_neox = is_neox
+        self.rope_matcher = MatcherRotaryEmbedding(
+            is_neox=is_neox, 
+            head_size=self.head_dim, 
+            num_heads=self.num_heads, 
+            num_kv_heads=self.num_kv_heads,
+            use_flashinfer=rope_flashinfer
+        )
+
+    @staticmethod
+    def wrap_trace_fn(trace_fn, *process_fx_fns: Callable[[fx.GraphModule], None]):
+        def wrapped(*args, **kwargs):
+            gm = trace_fn(*args, **kwargs)
+            for process_fx in process_fx_fns:
+                process_fx(gm)
+
+            return gm
+
+        return wrapped
+
+    @staticmethod
+    def fx_view_to_reshape(gm: torch.fx.GraphModule):
+        from torch._inductor.fx_passes.post_grad import view_to_reshape
+
+        view_to_reshape(gm)
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
@@ -84,68 +101,27 @@ class QkNormRopePattern:
             cos_sin_cache: torch.Tensor,
         ):
             # split qkv -> q,k,v
-            # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            split_tuple = SPLIT_SIZES_OP(
-                qkv, [self.q_size, self.kv_size, self.kv_size], -1
-            )
-            q = operator.getitem(split_tuple, 0)
-            k = operator.getitem(split_tuple, 1)
-            v = operator.getitem(split_tuple, 2)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-            # Q path: view -> (optional contiguous) -> RMS -> view back to q.shape
-            # q_by_head=q.view(*q.shape[:-1],q.shape[-1]//self.head_dim,self.head_dim)
-            # q_out = torch.empty_like(q_by_head)
-            # q_by_head_contiguous = q_by_head.contiguous()
-            q_by_head = VIEW_OP(
-                q, (*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            # Q path: view -> RMS -> view back to q.shape
+            q_by_head = RESHAPE_OP(
+                q, [*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim]
             )
-            q_out = EMPTY_LIKE_OP(q_by_head)
-            q_by_head_contiguous = CONTIGUOUS_OP(q_by_head)
+            q_normed_by_head = self.rmsnorm_matcher(q_by_head, q_weight)
+            q_flat = RESHAPE_OP(q_normed_by_head, q.shape)
 
-            qn = auto_functionalized(
-                RMS_OP,
-                result=q_out,
-                input=q_by_head_contiguous,
-                weight=q_weight,
-                epsilon=self.eps,
+            # K path: view -> RMS -> view back to k.shape
+            k_by_head = RESHAPE_OP(
+                k, [*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim]
             )
-            q_normed_by_head = qn[1]
-
-            # q_flat = q_normed_by_head.view(q.shape)
-            q_flat = VIEW_OP(q_normed_by_head, q.shape)
-
-            # K path: view -> (optional contiguous) -> RMS -> view back to k.shape
-            # k_by_head=k.view(*k.shape[:-1],k.shape[-1]//self.head_dim,self.head_dim)
-            # k_out = torch.empty_like(k_by_head)
-            # k_by_head_contiguous = k_by_head.contiguous()
-            k_by_head = VIEW_OP(
-                k, (*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-            )
-            k_out = EMPTY_LIKE_OP(k_by_head)
-            k_by_head_contiguous = CONTIGUOUS_OP(k_by_head)
-            kn = auto_functionalized(
-                RMS_OP,
-                result=k_out,
-                input=k_by_head_contiguous,
-                weight=k_weight,
-                epsilon=self.eps,
-            )
-            k_normed_by_head = kn[1]
-
-            # k_flat = k_normed_by_head.view(k.shape)
-            k_flat = VIEW_OP(k_normed_by_head, k.shape)
+            k_normed_by_head = self.rmsnorm_matcher(k_by_head, k_weight)
+            k_flat = RESHAPE_OP(k_normed_by_head, k.shape)
 
             # RoPE: apply to flattened q/k
-            rope = auto_functionalized(
-                self.rope_op,
-                positions=positions,
-                query=q_flat,
-                key=k_flat,
-                head_size=self.head_dim,
-                cos_sin_cache=cos_sin_cache,
-                is_neox=self.is_neox,
+            q_rope, k_rope = self.rope_matcher(
+                positions, q_flat, k_flat, cos_sin_cache
             )
-            return rope[1], rope[2], v
+            return q_rope, k_rope, v
 
         def replacement(
             qkv: torch.Tensor,
@@ -154,10 +130,7 @@ class QkNormRopePattern:
             k_weight: torch.Tensor,
             cos_sin_cache: torch.Tensor,
         ):
-            # Flatten positions to 1D as expected by fused op
-            pos_flat = RESHAPE_OP(positions, [-1])
-
-            # Run fused op (mutates qkv)
+            # Run fused qk_norm_rope op
             result = auto_functionalized(
                 FUSED_QK_ROPE_OP,
                 qkv=qkv,
@@ -170,19 +143,15 @@ class QkNormRopePattern:
                 k_weight=k_weight,
                 cos_sin_cache=cos_sin_cache,
                 is_neox=self.is_neox,
-                position_ids=pos_flat,
+                position_ids=positions.view(-1),
             )
             result_qkv = result[1]
 
             # Split back to q,k,v and return
-            split_tuple = SPLIT_SIZES_OP(
-                result_qkv, [self.q_size, self.kv_size, self.kv_size], -1
+            return result_qkv.split(
+                [self.q_size, self.kv_size, self.kv_size], dim=-1
             )
-            return (
-                operator.getitem(split_tuple, 0),
-                operator.getitem(split_tuple, 1),
-                operator.getitem(split_tuple, 2),
-            )
+
 
         # Sample inputs to help pattern tracing
         T = 5
@@ -199,25 +168,14 @@ class QkNormRopePattern:
             cos_sin_cache,
         ]
 
-        # # Register variants across rope ops and with/without contiguous()
-        # # Ensure view ops are canonicalized to reshape in the traced pattern
-        # def wrap_trace_fn(process_fx, trace_fn):
-        #     def wrapped(*args, **kwargs):
-        #         return process_fx(trace_fn(*args, **kwargs))
-
-        #     return wrapped
-
-        # def fx_view_to_reshape(gm: torch.fx.GraphModule):
-        #     from torch._inductor.fx_passes.post_grad import view_to_reshape
-
-        #     view_to_reshape(gm)
-        #     return gm
-
         pm.register_replacement(
             pattern,
             replacement,
             inputs,
-            pm.fwd_only,
+            QkNormRopePattern.wrap_trace_fn(
+                pm.fwd_only,
+                QkNormRopePattern.fx_view_to_reshape,
+            ),
             pm_pass,
         )
 
@@ -237,32 +195,36 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             return
 
         # Register a pattern per attention layer, as sizes differ by shard
-        attn_layers = get_layers_from_vllm_config(config, Attention)
+        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(config, Attention)
         if len(attn_layers) == 0:
             logger.warning(
                 "QK Norm+RoPE fusion enabled, but no Attention layers were discovered."
             )
             return
-        layer_name, layer = next(iter(attn_layers.items()))
 
+        # only use one layer to get meta (such as head_dim) for QkNormRopePattern
+        _, layer = next(iter(attn_layers.items()))
         for epsilon in [1e-5, 1e-6]:
             for neox in [True, False]:
-                for rope_op in ROPE_OPS:
-                    try:
+                if RotaryEmbedding.enabled():
+                    for rope_flashinfer in [True, False]:
                         QkNormRopePattern(
-                            layer=layer,
+                            head_dim=layer.head_size,
+                            num_heads=layer.num_heads,
+                            num_kv_heads=layer.num_kv_heads,
                             eps=epsilon,
-                            rope_op=rope_op,
                             is_neox=neox,
+                            rope_flashinfer=rope_flashinfer,
                         ).register(self.patterns)
-                    except Exception as e:
-                        logger.debug(
-                            "Skipping QkNormRopePattern register with eps=%s "
-                            "is_neox=%s: %s",
-                            epsilon,
-                            neox,
-                            e,
-                        )
+                else:
+                    QkNormRopePattern(
+                        head_dim=layer.head_size,
+                        num_heads=layer.num_heads,
+                        num_kv_heads=layer.num_kv_heads,
+                        eps=epsilon,
+                        is_neox=neox,
+                    ).register(self.patterns)
+
 
         # Dump patterns for debugging if enabled
         self.dump_patterns(config, self.patterns)
