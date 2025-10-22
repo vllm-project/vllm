@@ -99,12 +99,6 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    send_delta_data: bool = False
-    """Private API. If used, scheduler sends delta data to
-    workers instead of an entire data. It should be enabled only
-    when SPMD worker architecture is enabled. I.e.,
-    VLLM_USE_RAY_SPMD_WORKER=1"""
-
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:\n
     - "fcfs" means first come first served, i.e. requests are handled in order
