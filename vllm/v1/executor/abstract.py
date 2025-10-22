@@ -18,6 +18,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 
 FailureCallback = Callable[[], None]
 
@@ -100,7 +101,7 @@ class Executor(ExecutorBase):
     ) -> list[Any]:
         raise NotImplementedError
 
-    def get_kv_connector_handshake_metadata(self) -> list[dict[int, dict[int, dict]]]:
+    def get_kv_connector_handshake_metadata(self) -> list[dict[int, KVConnectorHandshakeMetadata]]:
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     def execute_model(

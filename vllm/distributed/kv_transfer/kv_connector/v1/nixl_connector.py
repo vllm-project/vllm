@@ -216,7 +216,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, dict[int, dict]]) -> None:
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
@@ -346,25 +346,27 @@ class NixlConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, dict[int, dict]]) -> None:
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
         Args:
             metadata (dict): the handshake metadata to set.
         """
-        encoded_data: dict[int, dict[int, bytes]] = {}
-        for dp_rank, tp_metadata in metadata.items():
-            encoded_data[dp_rank] = {}
-            for tp_rank, rank_metadata in tp_metadata.items():
-                encoder = msgspec.msgpack.Encoder()
-                encoded_data[dp_rank][tp_rank] = encoder.encode(rank_metadata)
-                logger.debug(
-                    "Dp rank %d, Tp rank %d: encoded NixlAgentMetadata size: %s bytes",
-                    dp_rank,
-                    tp_rank,
-                    str(len(encoded_data[dp_rank][tp_rank])),
+        encoded_data: dict[int, bytes] = {}
+        encoder = msgspec.msgpack.Encoder()
+        for tp_rank, rank_metadata in metadata.items():
+            if not isinstance(rank_metadata, NixlAgentMetadata):
+                raise ValueError(
+                    "NixlConnectorScheduler expects NixlAgentMetadata for "
+                    "handshake metadata."
                 )
+            encoded_data[tp_rank] = encoder.encode(rank_metadata)
+            logger.debug(
+                "Tp rank %d: encoded NixlAgentMetadata size: %s bytes",
+                tp_rank,
+                str(len(encoded_data[tp_rank])),
+            )
         self._encoded_xfer_handshake_metadata = encoded_data
 
         # Only start the listener when we have metadata to serve.
@@ -386,7 +388,7 @@ class NixlConnectorScheduler:
 
     @staticmethod
     def _nixl_handshake_listener(
-        encoded_data: dict[int, dict[int, Any]],
+        encoded_data: dict[int, Any],
         ready_event: threading.Event,
         stop_event: threading.Event,
         port: int,
@@ -410,16 +412,15 @@ class NixlConnectorScheduler:
                         break
                     continue
                 # Decode the message which contains (GET_META_MSG, rank)
-                msg, target_dp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
+                msg, target_tp_rank = msgspec.msgpack.decode(msg)
                 logger.debug(
-                    "Received message for dp rank %s tp rank %s",
-                    target_dp_rank,
+                    "Received message for tp rank %s",
                     target_tp_rank,
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
                 sock.send_multipart(
-                    (identity, b"", encoded_data[target_dp_rank][target_tp_rank])
+                    (identity, b"", encoded_data[target_tp_rank])
                 )
 
     def get_num_new_matched_tokens(
@@ -880,16 +881,13 @@ class NixlConnectorWorker:
         p_remote_rank = self.kv_topo.get_target_remote_rank(remote_tp_size)
         path = make_zmq_path("tcp", host, port)
         logger.debug(
-            "Querying metadata on path: %s at remote tp rank %s", path, p_remote_tp_rank
+            "Querying metadata on path: %s at remote tp rank %s", path, p_remote_rank
         )
-        # [WIP] gluo: using dp_rank 0 data (standard for disaggregated prefill-decode)
-        # is sufficient?
-        p_remote_dp_rank = 0
 
         # Send query for the request.
         with zmq_ctx(zmq.REQ, path) as sock:
             msg = msgspec.msgpack.encode(
-                (GET_META_MSG, p_remote_dp_rank, p_remote_tp_rank)
+                (GET_META_MSG, p_remote_rank)
             )
             # Set receive timeout to 5 seconds to avoid hanging on dead server
             sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
@@ -912,7 +910,7 @@ class NixlConnectorWorker:
 
             # Register Remote agent.
             remote_agent_name = self.add_remote_agent(
-                metadata, p_remote_tp_rank, remote_tp_size
+                metadata, p_remote_rank, remote_tp_size
             )
             setup_agent_time = time.perf_counter()
             logger.debug(
@@ -921,7 +919,7 @@ class NixlConnectorWorker:
             )
 
         # Remote rank -> agent name.
-        return {p_remote_tp_rank: remote_agent_name}
+        return {p_remote_rank: remote_agent_name}
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """

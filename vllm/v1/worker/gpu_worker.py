@@ -332,17 +332,13 @@ class Worker(WorkerBase):
             return None
 
         connector = get_kv_transfer_group()
+        # Return None for connectors that don't need to exchange handshake
+        # metadata across workers.
         if (metadata := connector.get_handshake_metadata()) is None:
-            logger.warning(
-                "KV connector metadata is not available. "
-                "This may happen if the KV connector is not initialized "
-                "or the worker is not part of a disaggregated KV cache setup."
-            )
             return None
 
         tp_rank = get_tp_group().rank_in_group
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
-        return {dp_rank: {tp_rank: metadata}}
+        return {tp_rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

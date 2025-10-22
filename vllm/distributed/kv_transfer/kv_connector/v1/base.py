@@ -453,11 +453,11 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, dict[int, dict]]) -> None:
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
         """
         Set the KV connector handshake metadata for this connector.
 
         Args:
-            metadata (dict): the handshake metadata to set.
+            metadata (KVConnectorHandshakeMetadata): the handshake metadata to set.
         """
         return None

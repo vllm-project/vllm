@@ -182,16 +182,12 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {dp_rank: {tp_rank: metadata}}
+                # Each dict already has structure {tp_rank: metadata}
                 # Merge all worker dicts into a single dict
-                content: dict[int, dict[int, dict[int, Any]]] = {}
+                content: dict[int, Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
-                        # Deep merge nested dictionaries instead of overwrite
-                        for dp_rank, tp_dict in worker_dict.items():
-                            if dp_rank not in content:
-                                content[dp_rank] = {}
-                            content[dp_rank].update(tp_dict)
+                        content.update(worker_dict)
                 kv_connector.set_xfer_handshake_metadata(content)
 
         # Setup batch queue for pipeline parallelism.

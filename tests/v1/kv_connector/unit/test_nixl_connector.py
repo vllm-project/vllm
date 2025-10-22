@@ -284,7 +284,7 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
-def test_kv_transfer_metadata(dist_init):
+def test_kv_transfer_handshake(dist_init):
     """Unit test for basic NixlConnector interface functionality."""
 
     # Test setup, we creates a scheduler that contains a NixlConnector
@@ -315,9 +315,9 @@ def test_kv_transfer_metadata(dist_init):
 
     # Simulate EngineCore initialization that would
     # gather connector metadata from all workers, the scheduler connector
-    # expects metadata to be in Dict[int, Dict[int, KVConnectorHandshakeMetadata]],
+    # expects metadata to be in dict[int, KVConnectorHandshakeMetadata],
     # where the first key is the dp_rank, the second key is the tp_rank.
-    metadata = {0: {0: prefill_connector.get_handshake_metadata()}}
+    metadata = {0: prefill_connector.get_handshake_metadata()}
     scheduler_connector = scheduler.get_kv_connector()
     scheduler_connector.set_xfer_handshake_metadata(metadata)
 
