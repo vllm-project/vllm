@@ -86,8 +86,14 @@ class KVConnectorOutput:
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
     # IDs of externally computed KV blocks that failed to load.
-    # Requests referencing these blocks should be rescheduled to recompute them.
+    # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
+    # Configuration describing how many finished sending/receiving
+    # notifications should be expected for each request. This allows
+    # handshake-based connectors like Nixl to update the KVOutputAggregator.
+    # It captures a static setup info and should almost always remain constant
+    # for a given connector after discovery. Default value entails no change.
+    expected_finished_count: int = 0
 
     def is_empty(self):
         return (

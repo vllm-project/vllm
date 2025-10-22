@@ -703,7 +703,7 @@ def test_kv_connector_stats_aggregation():
 
     # Create KVOutputAggregator for 3 workers (simulating TP=3), same thing
     # done in MultiprocExecutor.execute_model
-    aggregator = KVOutputAggregator(world_size=3)
+    aggregator = KVOutputAggregator(expected_finished_count=3)
 
     # Create stats for multiple workers with different transfer patterns
     worker1_stats = NixlKVConnectorStats()
@@ -768,7 +768,7 @@ def test_multi_kv_connector_stats_aggregation():
     KVOutputAggregator (used by MultiprocExecutor).
     """
 
-    aggregator = KVOutputAggregator(world_size=3)
+    aggregator = KVOutputAggregator(expected_finished_count=3)
 
     from dataclasses import dataclass
 
