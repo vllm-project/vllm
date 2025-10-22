@@ -357,10 +357,6 @@ def test_compressed_tensors_fp8(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_kv_cache_dtype_supported("fp8", None),
-    reason="FP8 KV cache is not supported on this device.",
-)
-@pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
 def test_compressed_tensors_kv_cache(vllm_runner):
