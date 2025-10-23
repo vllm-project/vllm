@@ -396,3 +396,16 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
 
     _PROFILER_FUNC = func
     return func(name)
+
+
+def tensor_data(tensor: torch.Tensor) -> memoryview:
+    """Get the raw data of a tensor as a uint8 memoryview, useful for
+    serializing and hashing.
+
+    Args:
+        tensor: The input tensor.
+
+    Returns:
+        A memoryview of the tensor data as uint8.
+    """
+    return tensor.flatten().contiguous().view(torch.uint8).numpy().data
