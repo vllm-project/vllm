@@ -33,29 +33,44 @@ Currently, there are no pre-built ROCm wheels.
     - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
     - [PyTorch](https://pytorch.org/)
 
-    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
+    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm7.0.2_ubuntu24.04_py3.12_pytorch_release_2.8.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
 
-    Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
+    Alternatively, you can install PyTorch via PIP. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
     ```bash
     # Install PyTorch
-    pip uninstall torch -y
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
+    pip uninstall torch torchvision torchaudio -y
+    pip3 install --no-cache-dir --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+    ```
+    Also you are able to install PyTorch from source code [PyTorch for ROCm](https://github.com/ROCm/pytorch.git). Example:
+
+    ```bash
+    pip uninstall torch torchvision torchaudio -y
+    git clone https://github.com/ROCm/pytorch.git pytorch
+    cd pytorch && git checkout 1c57644d && \
+    pip install -r requirements.txt && git submodule update --init --recursive \
+    python3 tools/amd_build/build_amd.py \
+    CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
+    pip install dist/*.whl
+    git clone https://github.com/pytorch/vision.git vision
+    cd vision && git checkout v0.23.0 && python3 setup.py bdist_wheel --dist-dir=dist
+    pip install --force-reinstall --no-deps dist/*.whl
     ```
 
-1. Install [Triton for ROCm](https://github.com/triton-lang/triton)
 
-    Install ROCm's Triton (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
+1. Install [Triton for ROCm](https://github.com/ROCm/triton.git)
+
+    Install Triton by following the instructions
 
     ```bash
     python3 -m pip install ninja cmake wheel pybind11
-    pip uninstall -y triton
-    git clone https://github.com/triton-lang/triton.git
+    pip uninstall -y triton pytorch-triton-rocm
+    git clone https://github.com/ROCm/triton.git
     cd triton
-    git checkout e5be006
+    git checkout 57c693b6
     if [ ! -f setup.py ]; then cd python; fi
-    python3 setup.py install
-    cd ../..
+    python3 setup.py bdist_wheel --dist-dir=dist
+    pip install --force-reinstall --no-deps dist/*.whl
     ```
 
     !!! note
@@ -71,10 +86,10 @@ Currently, there are no pre-built ROCm wheels.
     ```bash
     git clone https://github.com/Dao-AILab/flash-attention.git
     cd flash-attention
-    git checkout 1a7f4dfa
+    git checkout 0e60e394
     git submodule update --init
-    GPU_ARCHS="gfx90a" python3 setup.py install
-    cd ..
+    GPU_ARCHS=$(rocminfo | grep -m1 -oE 'gfx[0-9]+[a-z]*') python3 setup.py bdist_wheel --dist-dir=dist
+    pip install --force-reinstall --no-deps dist/*.whl
     ```
 
     !!! note
@@ -86,15 +101,15 @@ Currently, there are no pre-built ROCm wheels.
     python3 -m pip uninstall -y aiter
     git clone --recursive https://github.com/ROCm/aiter.git
     cd aiter
-    git checkout $AITER_BRANCH_OR_COMMIT
+    git checkout eef23c7f
     git submodule sync; git submodule update --init --recursive
-    python3 setup.py develop
+    pip install pyyaml
+    PREBUILD_KERNELS=1 GPU_ARCHS=$(rocminfo | grep -m1 -oE 'gfx[0-9]+[a-z]*') python3 setup.py bdist_wheel --dist-dir=dist
+    pip install --force-reinstall --no-deps  dist/*.whl
     ```
 
-    !!! note
-        You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
 
-4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
+4. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
 
     ??? console "Commands"
 
@@ -111,10 +126,11 @@ Currently, there are no pre-built ROCm wheels.
             setuptools_scm
         pip install "numpy<2"
         pip install -r requirements/rocm.txt
+        python3 setup.py clean --all
 
-        # Build vLLM for MI210/MI250/MI300.
-        export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-        python3 setup.py develop
+        # Build vLLM for current ROCm platform.
+        PYTORCH_ROCM_ARCH=$(rocminfo | grep -m1 -oE 'gfx[0-9]+[a-z]*') python3 setup.py bdist_wheel --dist-dir=dist
+        pip install --force-reinstall --no-deps dist/*.whl
         ```
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
