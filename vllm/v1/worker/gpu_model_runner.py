@@ -3982,7 +3982,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
             attention_backend_maps.append(attn_backends[0])
-            attention_backend_set.union(attn_backends[1])
+            attention_backend_set.update(attn_backends[1])
 
         # Resolve cudagraph_mode before actually initialize metadata_builders
         self._check_and_update_cudagraph_mode(attention_backend_set)
@@ -4003,13 +4003,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_mode.
         """
         min_cg_support = AttentionCGSupport.ALWAYS
-        min_cg_builder_name = None
+        min_cg_backend_name = None
 
         for attn_backend in attention_backends:
             builder_cls = attn_backend.get_builder_cls()
             if builder_cls.cudagraph_support.value < min_cg_support.value:
                 min_cg_support = builder_cls.cudagraph_support
-                min_cg_builder_name = builder_cls.__name__
+                min_cg_backend_name = attn_backend.__name__
         # Flexible resolve the cudagraph mode
         cudagraph_mode = self.compilation_config.cudagraph_mode
         # check cudagraph for mixed batch is supported
@@ -4019,7 +4019,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ):
             msg = (
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
-                f"with {min_cg_builder_name} backend (support: "
+                f"with {min_cg_backend_name} backend (support: "
                 f"{min_cg_support})"
             )
             if min_cg_support == AttentionCGSupport.NEVER:
@@ -4050,7 +4050,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ):
             msg = (
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
-                f"with {min_cg_builder_name} backend (support: "
+                f"with {min_cg_backend_name} backend (support: "
                 f"{min_cg_support})"
             )
             if self.compilation_config.mode == CompilationMode.VLLM_COMPILE and (
@@ -4084,7 +4084,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             msg = (
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
                 f" with spec-decode for attention backend "
-                f"{min_cg_builder_name} (support: {min_cg_support})"
+                f"{min_cg_backend_name} (support: {min_cg_support})"
             )
             if self.compilation_config.splitting_ops_contain_attention():
                 msg += "; setting cudagraph_mode=PIECEWISE"
@@ -4106,7 +4106,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ):
             raise ValueError(
                 f"CUDAGraphMode.{cudagraph_mode.name} is not "
-                f"supported with {min_cg_builder_name} backend ("
+                f"supported with {min_cg_backend_name} backend ("
                 f"support:{min_cg_support}) "
                 "; please try cudagraph_mode=PIECEWISE, "
                 "and make sure compilation mode is VLLM_COMPILE"
