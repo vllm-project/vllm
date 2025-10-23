@@ -2113,6 +2113,10 @@ def _get_and_verify_max_len(
             if rope_type == "yarn":
                 derived_max_model_len = rope_scaling["original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
+        elif rope_type == "longrope":
+            # For LongRoPE, we default to the original max to avoid performance
+            # degradation for shorter sequences.
+            derived_max_model_len = rope_scaling["original_max_position_embeddings"]
 
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
