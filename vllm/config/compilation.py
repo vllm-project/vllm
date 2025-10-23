@@ -112,6 +112,14 @@ class PassConfig:
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
+    enable_triton_dist_fusion: bool = False
+    """Whether to enable Triton-distributed GEMM+AllReduce fusion."""
+    triton_dist_max_seq_len: int = 8192
+    """Maximum sequence length for Triton-distributed context allocation."""
+    triton_dist_use_ll_kernel: bool = False
+    """Use low-latency cooperative kernel variant for Triton-distributed."""
+    triton_dist_num_comm_sms: int = 16
+    """Number of SMs to dedicate to communication for Triton-distributed."""
 
     # TODO(luka) better pass enabling system.
 
