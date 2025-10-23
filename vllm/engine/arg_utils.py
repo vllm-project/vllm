@@ -1730,6 +1730,15 @@ class EngineArgs:
 
         return True
 
+    @staticmethod
+    def _get_is_causal(hf_config, architecture: str) -> bool:
+        """Get is_causal value from config or infer from architecture."""
+        if hasattr(hf_config, "is_causal"):
+            return hf_config.is_causal
+        # Encoder-only models use bidirectional attention
+        encoder_only = {"SiglipModel"}
+        return architecture not in encoder_only
+
     def _set_default_args(
         self, usage_context: UsageContext, model_config: ModelConfig
     ) -> None:
@@ -1750,7 +1759,9 @@ class EngineArgs:
                     self.enable_prefix_caching = True
         else:
             pooling_type = model_config.pooler_config.pooling_type
-            is_causal = getattr(model_config.hf_config, "is_causal", True)
+            is_causal = self._get_is_causal(
+                model_config.hf_config, model_config.architecture
+            )
             incremental_prefill_supported = (
                 pooling_type is not None
                 and pooling_type.lower() == "last"
