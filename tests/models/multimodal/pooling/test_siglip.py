@@ -31,14 +31,9 @@ def _run_test(
     *,
     dtype: str,
 ) -> None:
-    kwargs = {
-        "runner": "pooling",
-        "dtype": dtype,
-        "enforce_eager": True,
-        "max_model_len": 64,
-    }
-
-    with vllm_runner(model, **kwargs) as vllm_model:
+    with vllm_runner(
+        model, runner="pooling", dtype=dtype, enforce_eager=True, max_model_len=64
+    ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
     with hf_runner(model, dtype=dtype, auto_cls=SiglipModel) as hf_model:
