@@ -16,6 +16,7 @@ from .olmo3_reasoning_parser import Olmo3ReasoningParser
 from .qwen3_reasoning_parser import Qwen3ReasoningParser
 from .seedoss_reasoning_parser import SeedOSSReasoningParser
 from .step3_reasoning_parser import Step3ReasoningParser
+from .minimax_m2_reasoning_parser import MiniMaxM2ReasoningParser
 
 __all__ = [
     "ReasoningParser",
@@ -34,4 +35,5 @@ __all__ = [
     "Step3ReasoningParser",
     "GptOssReasoningParser",
     "SeedOSSReasoningParser",
+    "MiniMaxM2ReasoningParser",
 ]
