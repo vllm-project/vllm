@@ -583,6 +583,7 @@ class EmbeddingMixin(OpenAIServing):
                             request_id=aggregator["request_id"],
                             prompt_token_ids=original_token_ids,
                             outputs=pooling_output_data,
+                            num_cached_tokens=0,
                             finished=True,
                         )
 
