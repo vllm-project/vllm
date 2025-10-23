@@ -13,12 +13,14 @@ from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesMod
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
+from vllm.model_executor.model_loader.remote_instance_loader import (
+    RemoteInstanceModelLoader,
+)
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
 from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
 from vllm.model_executor.model_loader.tensorizer_loader import TensorizerLoader
-from vllm.model_executor.model_loader.remote_instance_loader import RemoteInstanceModelLoader
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name,
     get_model_architecture,

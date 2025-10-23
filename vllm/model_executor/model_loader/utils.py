@@ -116,10 +116,9 @@ def process_weights_after_loading(
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
 
+
 def process_weights_after_loading_quant(
-    model: nn.Module, 
-    model_config: ModelConfig,
-    target_device: torch.device
+    model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
     # to avoid circular dependency
     from vllm.model_executor.model_loader.online_quantization import (
@@ -139,9 +138,9 @@ def process_weights_after_loading_quant(
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
 
+
 def process_weights_after_loading_mla(
-    model: nn.Module, 
-    model_config: ModelConfig
+    model: nn.Module, model_config: ModelConfig
 ) -> None:
     # Initialize post-load attention weights for both Attention and MLA.
     # NOTE: Happens after other modules so we can easily decompress weights.

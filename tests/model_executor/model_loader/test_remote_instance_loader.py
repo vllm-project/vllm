@@ -19,7 +19,6 @@ Note: This test is marked as skip because it requires:
 - Network communication between servers
 """
 
-import os
 from http import HTTPStatus
 
 import pytest
@@ -49,12 +48,12 @@ def llama_3p2_1b_files():
 def test_remote_instance_loader_end_to_end(llama_3p2_1b_files, num_gpus_available):
     """
     End-to-end test for the remote instance loader.
-    
+
     This test simulates the manual testing procedure:
     1. Start a seed server (source of weights)
     2. Start a client server (loads weights from seed server)
     3. Compare outputs from both servers
-    
+
     Note: This test is marked as skip because it requires:
     - Multiple GPUs (at least 8 GPUs for 2x2 TP/PP configuration for both seed and client instances)
     - Coordinated seed and client servers
@@ -63,7 +62,9 @@ def test_remote_instance_loader_end_to_end(llama_3p2_1b_files, num_gpus_availabl
     """
     # Need at least 8 GPUs (4 for seed instance + 4 for client instance)
     if num_gpus_available < 8:
-        pytest.skip("Not enough GPUs for 2x2 TP/PP configuration for both seed and client instances (requires 8 GPUs)")
+        pytest.skip(
+            "Not enough GPUs for 2x2 TP/PP configuration for both seed and client instances (requires 8 GPUs)"
+        )
 
     input_dir = llama_3p2_1b_files
     seed_port = 12346
@@ -72,20 +73,26 @@ def test_remote_instance_loader_end_to_end(llama_3p2_1b_files, num_gpus_availabl
 
     # Server arguments for both seed and client instances
     common_args = [
-        "--tensor-parallel-size", "2",
-        "--pipeline-parallel-size", "2",
-        "--gpu-memory-utilization", str(gpu_memory_utilization),
-        "--max-model-len", "1024",
+        "--tensor-parallel-size",
+        "2",
+        "--pipeline-parallel-size",
+        "2",
+        "--gpu-memory-utilization",
+        str(gpu_memory_utilization),
+        "--max-model-len",
+        "1024",
         "--enforce-eager",
     ]
 
     # Run seed server (source of weights)
     seed_args = [
-        "--host", "127.0.0.1",
-        "--port", str(seed_port),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(seed_port),
         *common_args,
     ]
-    
+
     with RemoteOpenAIServer(input_dir, seed_args, auto_port=False) as seed_server:
         # Check if seed server is running
         response = requests.get(seed_server.url_for("health"))
@@ -100,15 +107,20 @@ def test_remote_instance_loader_end_to_end(llama_3p2_1b_files, num_gpus_availabl
             "REMOTE_INSTANCE_PORTS": "[50000,50001,50002,50003]",
             "CUDA_VISIBLE_DEVICES": "4,5,6,7",  # Use different GPUs for client
         }
-        
+
         client_args = [
-            "--host", "127.0.0.1",
-            "--port", str(client_port),
-            "--load-format", "remote_instance",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(client_port),
+            "--load-format",
+            "remote_instance",
             *common_args,
         ]
-        
-        with RemoteOpenAIServer(input_dir, client_args, env_dict=client_env_dict, auto_port=False) as client_server:
+
+        with RemoteOpenAIServer(
+            input_dir, client_args, env_dict=client_env_dict, auto_port=False
+        ) as client_server:
             # Check if client server is running
             response = requests.get(client_server.url_for("health"))
             assert response.status_code == HTTPStatus.OK

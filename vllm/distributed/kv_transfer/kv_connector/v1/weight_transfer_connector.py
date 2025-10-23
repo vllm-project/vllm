@@ -1,32 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional, Union
-from vllm.forward_context import ForwardContext
+from abc import ABC
+from datetime import timedelta
+from typing import Any
+
 import torch
-from datetime import timedelta
-from datetime import timedelta
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
+    Store,
     _new_process_group_helper,
     _world,
     default_pg_timeout,
     rendezvous,
-    Store
 )
-from abc import ABC
+
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 class WeightTransferConnector(ABC):
     def __init__(self, url: str):
         self.url = url
         self.closed = False
         self._model_update_group = None
-        
+
     def build_group(
         self,
         gpu_id: int = -1,
@@ -35,9 +37,9 @@ class WeightTransferConnector(ABC):
         group_rank: int = 1,
         world_size: int = 2,
     ):
-        assert (
-            gpu_id != -1 and client_rank != -1
-        ), "gpu_id and tp_rank must be specified for RemoteInstanceConnector. "
+        assert gpu_id != -1 and client_rank != -1, (
+            "gpu_id and tp_rank must be specified for RemoteInstanceConnector. "
+        )
 
         self.device_id = torch.device("cuda", gpu_id)
         master_address, master_port = self.url.split(":")
@@ -65,12 +67,12 @@ class WeightTransferConnector(ABC):
             message = f"Failed to initialize custom process group: {e}."
             logger.error(message)
             return False, message
-    
+
     def close(self):
         if self.closed:
             return
         self.closed = True
-        if self._model_update_group is not None:  
+        if self._model_update_group is not None:
             torch.distributed.distributed_c10d.destroy_process_group(
                 self._model_update_group
             )
@@ -83,10 +85,10 @@ class WeightTransferConnector(ABC):
 
     def __del__(self):
         self.close()
-    
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         return
-    
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
 
@@ -97,28 +99,29 @@ class WeightTransferConnector(ABC):
         attn_metadata: "AttentionMetadata",
         **kwargs: Any,
     ) -> None:
-        return 
-    
+        return
+
     def wait_for_save(self):
         return
+
 
 # Copy from pytorch and OpenRLHF to allow creating multiple main groups.
 # https://github.com/pytorch/pytorch/blob/main/torch/distributed/distributed_c10d.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/utils/distributed_util.py
 def init_custom_process_group(
-    backend: Optional[str] = None,
-    init_method: Optional[str] = None,
-    timeout: Optional[timedelta] = None,
+    backend: str | None = None,
+    init_method: str | None = None,
+    timeout: timedelta | None = None,
     world_size: int = -1,
     rank: int = -1,
-    store: Optional[Store] = None,
+    store: Store | None = None,
     group_name: str = "",
-    pg_options: Optional[Any] = None,
-    device_id: Optional[Union[torch.device, int]] = None,
+    pg_options: Any | None = None,
+    device_id: torch.device | int | None = None,
 ):
-    assert (store is None) or (
-        init_method is None
-    ), "Cannot specify both init_method and store."
+    assert (store is None) or (init_method is None), (
+        "Cannot specify both init_method and store."
+    )
 
     if store is not None:
         assert world_size > 0, "world_size must be positive if using store"
