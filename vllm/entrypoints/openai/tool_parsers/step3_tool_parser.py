@@ -51,6 +51,7 @@ class Step3ToolParser(ToolParser):
         self.tool_block_finished = False
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             request.skip_special_tokens = False
         return request

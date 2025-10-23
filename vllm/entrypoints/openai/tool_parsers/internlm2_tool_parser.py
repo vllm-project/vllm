@@ -35,6 +35,7 @@ class Internlm2ToolParser(ToolParser):
         self.position = 0
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # do not skip special tokens because internlm use the special
             # tokens to indicate the start and end of the tool calls

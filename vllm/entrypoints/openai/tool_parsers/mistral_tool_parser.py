@@ -94,6 +94,7 @@ class MistralToolParser(ToolParser):
             )
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        super().adjust_request(request)
         if (
             not isinstance(self.model_tokenizer, MistralTokenizer)
             and request.tools

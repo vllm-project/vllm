@@ -811,8 +811,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 self.structured_outputs = StructuredOutputsParams(**kwargs)
 
         response_format = self.response_format
-        json_schema_from_tool = self._get_json_schema_from_tool()
-        if response_format is not None or json_schema_from_tool is not None:
+        if response_format is not None:
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if self.structured_outputs is None:
@@ -837,10 +836,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     )
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
                     self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
-
-            # Set structured output params for tool calling
-            if json_schema_from_tool is not None:
-                self.structured_outputs.json = json_schema_from_tool
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -880,72 +875,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
-
-    def _get_json_schema_from_tool(self) -> str | dict | None:
-        # user has chosen to not use any tool
-        if self.tool_choice == "none" or self.tools is None:
-            return None
-
-        # user has chosen to use a named tool
-        if type(self.tool_choice) is ChatCompletionNamedToolChoiceParam:
-            tool_name = self.tool_choice.function.name
-            tools = {tool.function.name: tool.function for tool in self.tools}
-            if tool_name not in tools:
-                raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-            tool = tools[tool_name]
-            return tool.parameters
-
-        if self.tool_choice == "required":
-            # Pydantic schema generation cannot be used since the JSON schema
-            # has to be constructed for a specific instantiation of a tool list
-            # so that parameters of a function are correctly generated
-            # based on the chosen function name
-            def get_tool_schema(tool: ChatCompletionToolsParam) -> dict:
-                return {
-                    "properties": {
-                        "name": {"type": "string", "enum": [tool.function.name]},
-                        # parameters are always generated as '{}' in the final
-                        # output if they are missing from the request
-                        # (i.e. are None or '{}') so the schema is
-                        # updated to produce an empty object in that case
-                        "parameters": tool.function.parameters
-                        if tool.function.parameters
-                        else {"type": "object", "properties": {}},
-                    },
-                    "required": ["name", "parameters"],
-                }
-
-            def get_tool_schema_defs(tools: list[ChatCompletionToolsParam]) -> dict:
-                all_defs = dict[str, dict[str, Any]]()
-                for tool in tools:
-                    if tool.function.parameters is None:
-                        continue
-                    defs = tool.function.parameters.pop("$defs", {})
-                    for def_name, def_schema in defs.items():
-                        if def_name in all_defs and all_defs[def_name] != def_schema:
-                            raise ValueError(
-                                f"Tool definition '{def_name}' has "
-                                "multiple schemas, which is not "
-                                "supported."
-                            )
-                        else:
-                            all_defs[def_name] = def_schema
-                return all_defs
-
-            json_schema = {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "anyOf": [get_tool_schema(tool) for tool in self.tools],
-                },
-            }
-            json_schema_defs = get_tool_schema_defs(self.tools)
-            if json_schema_defs:
-                json_schema["$defs"] = json_schema_defs
-            return json_schema
-
-        return None
 
     @model_validator(mode="before")
     @classmethod
