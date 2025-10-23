@@ -108,7 +108,9 @@ def _test_processing_correctness(
         hf_overrides=model_info.hf_overrides,
         # Ensure that the cache can fit all of the data
         mm_processor_cache_gb=2048,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
