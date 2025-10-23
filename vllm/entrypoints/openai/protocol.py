@@ -2733,7 +2733,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     def to_streaming_params(
         self,
     ) -> StreamingParams:  # stream_options not defined in transcription request
-        return None
+        return StreamingParams()
 
 
     @model_validator(mode="before")
