@@ -481,6 +481,30 @@ class GptOssModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+    @staticmethod
+    def _maybe_reorder_gate_up_to_halves(t: torch.Tensor, axis: int) -> torch.Tensor:
+        """
+        If size along `axis` is even, treat it as interleaved [g0,u0,g1,u1,...]
+        and reorder to halves [g0,g1,...,u0,u1,...]. Always returns contiguous.
+        """
+        if axis < 0:
+            axis += t.ndim
+        size = t.shape[axis]
+        if size % 2 != 0:
+            return t.contiguous()
+
+        # Work on the last dim to build a simple permutation, then move back.
+        moved = axis != t.ndim - 1
+        if moved:
+            t = t.movedim(axis, -1)
+        shape = t.shape
+        # Reshape to (..., size/2, 2) to separate gate and up projections.
+        t = t.reshape(shape[:-1] + (shape[-1] // 2, 2))
+        # Concatenate halves: (..., size/2) and (..., size/2) -> (..., size).
+        t = torch.cat([t[..., 0], t[..., 1]], dim=-1)
+        t = t.movedim(-1, axis).contiguous() if moved else t.contiguous()
+        return t
+
     def _load_weights_other(
         self,
         ep_rank_start: int,
@@ -523,6 +547,9 @@ class GptOssModel(nn.Module):
                     narrow_weight = weight[:, :, 2 * tp_rank_start : 2 * tp_rank_end]
 
                 narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
+                narrow_weight = self._maybe_reorder_gate_up_to_halves(
+                    narrow_weight, axis=1
+                )
                 param = params_dict[name]
 
                 param.copy_(narrow_weight)
@@ -547,6 +574,9 @@ class GptOssModel(nn.Module):
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
+                narrow_weight = self._maybe_reorder_gate_up_to_halves(
+                    narrow_weight.contiguous(), axis=-1
+                )
 
                 param = params_dict[name]
                 param.copy_(narrow_weight)
