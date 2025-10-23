@@ -165,11 +165,8 @@ class RotaryEmbedding(CustomOp):
                 self.rotary_dim,
                 self.is_neox_style,
             )
-        else:
-            # ops.rotary_embedding() is an in-place operation
-            # that updates the query and key tensors.
-            self.forward_cuda(positions, query, key)
-        return query, key
+            return query, key
+        return self.forward_cuda(positions, query, key)
 
     def forward_xpu(
         self,
