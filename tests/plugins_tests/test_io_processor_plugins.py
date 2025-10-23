@@ -37,6 +37,7 @@ def server():
         "prithvi_to_tiff",
         "--model-impl",
         "terratorch",
+        "--enable-mm-embeds",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
