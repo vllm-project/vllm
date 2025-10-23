@@ -278,6 +278,7 @@ class Scheduler(SchedulerInterface):
                         token_budget += num_scheduled_tokens[preempted_req.request_id]
                         req_to_new_blocks.pop(preempted_req.request_id)
                         num_scheduled_tokens.pop(preempted_req.request_id)
+                        req_index -= 1
                 else:
                     preempted_req = self.running.pop()
 
