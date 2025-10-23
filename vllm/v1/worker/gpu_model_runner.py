@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -780,7 +781,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, ()
+                req_id, []
             )
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
@@ -791,7 +792,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ] = spec_token_ids
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
-                self.input_batch.spec_token_ids[req_index] = spec_token_ids
+
+            # When speculative decoding is used with structured output,
+            # the scheduler can drop draft tokens that do not
+            # conform to the schema. This can result in
+            # scheduler_output.scheduled_spec_decode_tokens being empty,
+            # even when speculative decoding is enabled.
+            self.input_batch.spec_token_ids[req_index] = spec_token_ids
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -1728,20 +1735,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
         ):
+            curr_group_outputs = []
+
+            # EVS-related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
-            # processing multimodal data.This solves the issue with scheduler
+            # processing multimodal data. This solves the issue with scheduler
             # putting too many video samples into a single batch. Scheduler
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
-            curr_group_outputs = []
-
-            if self.is_multimodal_pruning_enabled and modality == "video":
-                micro_batch_size = 1
-                for i in range(0, num_items, micro_batch_size):
-                    micro_batch_mm_inputs = dict(
-                        (k, v[i : i + micro_batch_size])
-                        for k, v in mm_kwargs_group.items()
+            # TODO(ywang96): Fix memory profiling to take EVS into account and
+            # remove this hack.
+            if (
+                self.is_multimodal_pruning_enabled
+                and modality == "video"
+                and num_items > 1
+            ):
+                for video_mm_kwargs_item in filter(
+                    lambda item: item.modality == "video", mm_kwargs
+                ):
+                    _, _, micro_batch_mm_inputs = next(
+                        group_mm_kwargs_by_modality(
+                            [video_mm_kwargs_item],
+                            device=self.device,
+                            pin_memory=self.pin_memory,
+                            merge_by_field_config=model.merge_by_field_config,
+                        )
                     )
 
                     micro_batch_outputs = model.get_multimodal_embeddings(
@@ -2463,7 +2482,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_scheduled_tokens == self.input_batch.num_reqs * max_query_len
             )
             batch_descriptor = BatchDescriptor(
-                num_tokens=num_input_tokens, uniform_decode=uniform_decode
+                num_tokens=num_input_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
             )
             cudagraph_runtime_mode, batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(batch_descriptor, use_cascade_attn)
@@ -3187,6 +3208,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_profile: bool = False,
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
+        activate_lora: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3209,6 +3231,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
+            activate_lora: If False, dummy_run is performed without LoRAs.
         """
         assert (
             cudagraph_runtime_mode is None
@@ -3358,7 +3381,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(
-            self.lora_config, num_scheduled_tokens, remove_lora
+            self.lora_config, num_scheduled_tokens, activate_lora, remove_lora
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_after_padding <= self.max_num_tokens
@@ -3405,6 +3428,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     BatchDescriptor(
                         num_tokens=num_tokens_after_padding,
                         uniform_decode=uniform_decode,
+                        has_lora=activate_lora and self.lora_config is not None,
                     )
                 )
                 if not is_profile
@@ -3458,7 +3482,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
-                use_cudagraphs = cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                use_cudagraphs = (
+                    cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                    and not self.speculative_config.enforce_eager
+                )
                 self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
 
         # This is necessary to avoid blocking DP.
@@ -3763,10 +3790,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
             cudagraph_mode = self.compilation_config.cudagraph_mode
             assert cudagraph_mode is not None
+
+            if self.lora_config:
+                if self.compilation_config.cudagraph_specialize_lora:
+                    lora_cases = [True, False]
+                else:
+                    lora_cases = [True]
+            else:
+                lora_cases = [False]
+
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
-                compilation_cases = list(reversed(self.cudagraph_batch_sizes))
+                compilation_cases = list(
+                    product(reversed(self.cudagraph_batch_sizes), lora_cases)
+                )
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -3787,7 +3825,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for x in self.cudagraph_batch_sizes
                     if max_num_tokens >= x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = list(reversed(decode_cudagraph_batch_sizes))
+                compilation_cases_decode = list(
+                    product(reversed(decode_cudagraph_batch_sizes), lora_cases)
+                )
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
@@ -3817,7 +3857,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _capture_cudagraphs(
         self,
-        compilation_cases: list[int],
+        compilation_cases: list[tuple[int, bool]],
         cudagraph_runtime_mode: CUDAGraphMode,
         uniform_decode: bool,
     ):
@@ -3838,7 +3878,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens in compilation_cases:
+        for num_tokens, activate_lora in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -3869,6 +3909,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     allow_microbatching=allow_microbatching,
                     skip_eplb=True,
                     remove_lora=False,
+                    activate_lora=activate_lora,
                 )
             self._dummy_run(
                 num_tokens,
@@ -3877,6 +3918,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 allow_microbatching=allow_microbatching,
                 skip_eplb=True,
                 remove_lora=False,
+                activate_lora=activate_lora,
             )
         self.maybe_remove_all_loras(self.lora_config)
 

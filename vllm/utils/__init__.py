@@ -5,15 +5,12 @@ import contextlib
 import datetime
 import enum
 import getpass
-import importlib
+import importlib.util
 import inspect
-import ipaddress
 import json
 import multiprocessing
 import os
 import signal
-import socket
-import subprocess
 import sys
 import tempfile
 import textwrap
@@ -33,50 +30,47 @@ from argparse import (
 from collections import defaultdict
 from collections.abc import (
     Callable,
-    Iterator,
     Sequence,
 )
 from concurrent.futures.process import ProcessPoolExecutor
 from functools import cache, partial, wraps
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO, TypeVar
-from urllib.parse import urlparse
-from uuid import uuid4
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import cloudpickle
 import psutil
 import regex as re
-import setproctitle
 import torch
 import yaml
-import zmq
-import zmq.asyncio
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
 
-_DEPRECATED_PROFILING = {"cprofile", "cprofile_context"}
+_DEPRECATED_MAPPINGS = {
+    "cprofile": "profiling",
+    "cprofile_context": "profiling",
+    "get_open_port": "network_utils",
+}
 
 
 def __getattr__(name: str) -> Any:  # noqa: D401 - short deprecation docstring
-    """Module-level getattr to handle deprecated profiling utilities."""
-    if name in _DEPRECATED_PROFILING:
+    """Module-level getattr to handle deprecated utilities."""
+    if name in _DEPRECATED_MAPPINGS:
+        submodule_name = _DEPRECATED_MAPPINGS[name]
         warnings.warn(
             f"vllm.utils.{name} is deprecated and will be removed in a future version. "
-            f"Use vllm.utils.profiling.{name} instead.",
+            f"Use vllm.utils.{submodule_name}.{name} instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        import vllm.utils.profiling as _prof
-
-        return getattr(_prof, name)
+        module = __import__(f"vllm.utils.{submodule_name}", fromlist=[submodule_name])
+        return getattr(module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
     # expose deprecated names in dir() for better UX/tab-completion
-    return sorted(list(globals().keys()) + list(_DEPRECATED_PROFILING))
+    return sorted(list(globals().keys()) + list(_DEPRECATED_MAPPINGS.keys()))
 
 
 if TYPE_CHECKING:
@@ -149,209 +143,6 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
-    for sock in sockets:
-        if sock is not None:
-            sock.close(linger=0)
-
-
-def get_ip() -> str:
-    host_ip = envs.VLLM_HOST_IP
-    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
-        logger.warning(
-            "The environment variable HOST_IP is deprecated and ignored, as"
-            " it is often used by Docker and other software to"
-            " interact with the container's network stack. Please "
-            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
-            " to communicate with each other."
-        )
-    if host_ip:
-        return host_ip
-
-    # IP is not set, try to get it from the network interface
-
-    # try ipv4
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
-        return s.getsockname()[0]
-    except Exception:
-        pass
-
-    # try ipv6
-    try:
-        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        # Google's public DNS server, see
-        # https://developers.google.com/speed/public-dns/docs/using#addresses
-        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
-        return s.getsockname()[0]
-    except Exception:
-        pass
-
-    warnings.warn(
-        "Failed to get the IP address, using 0.0.0.0 by default."
-        "The value can be set by the environment variable"
-        " VLLM_HOST_IP or HOST_IP.",
-        stacklevel=2,
-    )
-    return "0.0.0.0"
-
-
-def test_loopback_bind(address, family):
-    try:
-        s = socket.socket(family, socket.SOCK_DGRAM)
-        s.bind((address, 0))  # Port 0 = auto assign
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
-def get_loopback_ip() -> str:
-    loopback_ip = envs.VLLM_LOOPBACK_IP
-    if loopback_ip:
-        return loopback_ip
-
-    # VLLM_LOOPBACK_IP is not set, try to get it based on network interface
-
-    if test_loopback_bind("127.0.0.1", socket.AF_INET):
-        return "127.0.0.1"
-    elif test_loopback_bind("::1", socket.AF_INET6):
-        return "::1"
-    else:
-        raise RuntimeError(
-            "Neither 127.0.0.1 nor ::1 are bound to a local interface. "
-            "Set the VLLM_LOOPBACK_IP environment variable explicitly."
-        )
-
-
-def is_valid_ipv6_address(address: str) -> bool:
-    try:
-        ipaddress.IPv6Address(address)
-        return True
-    except ValueError:
-        return False
-
-
-def split_host_port(host_port: str) -> tuple[str, int]:
-    # ipv6
-    if host_port.startswith("["):
-        host, port = host_port.rsplit("]", 1)
-        host = host[1:]
-        port = port.split(":")[1]
-        return host, int(port)
-    else:
-        host, port = host_port.split(":")
-        return host, int(port)
-
-
-def join_host_port(host: str, port: int) -> str:
-    if is_valid_ipv6_address(host):
-        return f"[{host}]:{port}"
-    else:
-        return f"{host}:{port}"
-
-
-def get_distributed_init_method(ip: str, port: int) -> str:
-    return get_tcp_uri(ip, port)
-
-
-def get_tcp_uri(ip: str, port: int) -> str:
-    if is_valid_ipv6_address(ip):
-        return f"tcp://[{ip}]:{port}"
-    else:
-        return f"tcp://{ip}:{port}"
-
-
-def get_open_zmq_ipc_path() -> str:
-    base_rpc_path = envs.VLLM_RPC_BASE_PATH
-    return f"ipc://{base_rpc_path}/{uuid4()}"
-
-
-def get_open_zmq_inproc_path() -> str:
-    return f"inproc://{uuid4()}"
-
-
-def get_open_port() -> int:
-    """
-    Get an open port for the vLLM process to listen on.
-    An edge case to handle, is when we run data parallel,
-    we need to avoid ports that are potentially used by
-    the data parallel master process.
-    Right now we reserve 10 ports for the data parallel master
-    process. Currently it uses 2 ports.
-    """
-    if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_master_port = envs.VLLM_DP_MASTER_PORT
-        reserved_port_range = range(dp_master_port, dp_master_port + 10)
-        while True:
-            candidate_port = _get_open_port()
-            if candidate_port not in reserved_port_range:
-                return candidate_port
-    return _get_open_port()
-
-
-def get_open_ports_list(count: int = 5) -> list[int]:
-    """Get a list of open ports."""
-    ports = set[int]()
-    while len(ports) < count:
-        ports.add(get_open_port())
-    return list(ports)
-
-
-def _get_open_port() -> int:
-    port = envs.VLLM_PORT
-    if port is not None:
-        while True:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("", port))
-                    return port
-            except OSError:
-                port += 1  # Increment port number if already in use
-                logger.info("Port %d is already in use, trying port %d", port - 1, port)
-    # try ipv4
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
-    except OSError:
-        # try ipv6
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
-
-
-def find_process_using_port(port: int) -> psutil.Process | None:
-    # TODO: We can not check for running processes with network
-    # port on macOS. Therefore, we can not have a full graceful shutdown
-    # of vLLM. For now, let's not look for processes in this case.
-    # Ref: https://www.florianreinhard.de/accessdenied-in-psutil/
-    if sys.platform.startswith("darwin"):
-        return None
-
-    our_pid = os.getpid()
-    for conn in psutil.net_connections():
-        if conn.laddr.port == port and (conn.pid is not None and conn.pid != our_pid):
-            try:
-                return psutil.Process(conn.pid)
-            except psutil.NoSuchProcess:
-                return None
-    return None
-
-
-def update_environment_variables(envs: dict[str, str]):
-    for k, v in envs.items():
-        if k in os.environ and os.environ[k] != v:
-            logger.warning(
-                "Overwriting environment variable %s from '%s' to '%s'",
-                k,
-                os.environ[k],
-                v,
-            )
-        os.environ[k] = v
-
-
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
@@ -403,90 +194,6 @@ def init_cached_hf_modules() -> None:
     from transformers.dynamic_module_utils import init_hf_modules
 
     init_hf_modules()
-
-
-@cache
-def find_library(lib_name: str) -> str:
-    """
-    Find the library file in the system.
-    `lib_name` is full filename, with both prefix and suffix.
-    This function resolves `lib_name` to the full path of the library.
-    """
-    # Adapted from https://github.com/openai/triton/blob/main/third_party/nvidia/backend/driver.py#L19 # noqa
-    # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
-    # `/sbin/ldconfig` should exist in all Linux systems.
-    # `/sbin/ldconfig` searches the library in the system
-    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
-    # each line looks like the following:
-    # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
-    locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
-    # `LD_LIBRARY_PATH` searches the library in the user-defined paths
-    env_ld_library_path = envs.LD_LIBRARY_PATH
-    if not locs and env_ld_library_path:
-        locs = [
-            os.path.join(dir, lib_name)
-            for dir in env_ld_library_path.split(":")
-            if os.path.exists(os.path.join(dir, lib_name))
-        ]
-    if not locs:
-        raise ValueError(f"Cannot find {lib_name} in the system.")
-    return locs[0]
-
-
-def find_nccl_library() -> str:
-    """
-    We either use the library file specified by the `VLLM_NCCL_SO_PATH`
-    environment variable, or we find the library file brought by PyTorch.
-    After importing `torch`, `libnccl.so.2` or `librccl.so.1` can be
-    found by `ctypes` automatically.
-    """
-    so_file = envs.VLLM_NCCL_SO_PATH
-
-    # manually load the nccl library
-    if so_file:
-        logger.info(
-            "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s", so_file
-        )
-    else:
-        if torch.version.cuda is not None:
-            so_file = "libnccl.so.2"
-        elif torch.version.hip is not None:
-            so_file = "librccl.so.1"
-        else:
-            raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.debug_once("Found nccl from library %s", so_file)
-    return so_file
-
-
-def find_nccl_include_paths() -> list[str] | None:
-    """
-    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
-    environment variable, or we find the library file brought by
-    nvidia-nccl-cuXX. load_inline by default uses
-    torch.utils.cpp_extension.include_paths
-    """
-    paths: list[str] = []
-    inc = envs.VLLM_NCCL_INCLUDE_PATH
-    if inc and os.path.isdir(inc):
-        paths.append(inc)
-
-    try:
-        spec = importlib.util.find_spec("nvidia.nccl")
-        if spec and getattr(spec, "submodule_search_locations", None):
-            for loc in spec.submodule_search_locations:
-                inc_dir = os.path.join(loc, "include")
-                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
-                    paths.append(inc_dir)
-    except Exception:
-        pass
-
-    seen = set()
-    out: list[str] = []
-    for p in paths:
-        if p and p not in seen:
-            out.append(p)
-            seen.add(p)
-    return out or None
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
@@ -1119,122 +826,6 @@ def get_exception_traceback():
     return err_str
 
 
-def split_zmq_path(path: str) -> tuple[str, str, str]:
-    """Split a zmq path into its parts."""
-    parsed = urlparse(path)
-    if not parsed.scheme:
-        raise ValueError(f"Invalid zmq path: {path}")
-
-    scheme = parsed.scheme
-    host = parsed.hostname or ""
-    port = str(parsed.port or "")
-
-    if scheme == "tcp" and not all((host, port)):
-        # The host and port fields are required for tcp
-        raise ValueError(f"Invalid zmq path: {path}")
-
-    if scheme != "tcp" and port:
-        # port only makes sense with tcp
-        raise ValueError(f"Invalid zmq path: {path}")
-
-    return scheme, host, port
-
-
-def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
-    """Make a ZMQ path from its parts.
-
-    Args:
-        scheme: The ZMQ transport scheme (e.g. tcp, ipc, inproc).
-        host: The host - can be an IPv4 address, IPv6 address, or hostname.
-        port: Optional port number, only used for TCP sockets.
-
-    Returns:
-        A properly formatted ZMQ path string.
-    """
-    if port is None:
-        return f"{scheme}://{host}"
-    if is_valid_ipv6_address(host):
-        return f"{scheme}://[{host}]:{port}"
-    return f"{scheme}://{host}:{port}"
-
-
-# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
-def make_zmq_socket(
-    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
-    path: str,
-    socket_type: Any,
-    bind: bool | None = None,
-    identity: bytes | None = None,
-    linger: int | None = None,
-) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
-    """Make a ZMQ socket with the proper bind/connect semantics."""
-
-    mem = psutil.virtual_memory()
-    socket = ctx.socket(socket_type)
-
-    # Calculate buffer size based on system memory
-    total_mem = mem.total / 1024**3
-    available_mem = mem.available / 1024**3
-    # For systems with substantial memory (>32GB total, >16GB available):
-    # - Set a large 0.5GB buffer to improve throughput
-    # For systems with less memory:
-    # - Use system default (-1) to avoid excessive memory consumption
-    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
-
-    if bind is None:
-        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
-
-    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
-        socket.setsockopt(zmq.RCVHWM, 0)
-        socket.setsockopt(zmq.RCVBUF, buf_size)
-
-    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
-        socket.setsockopt(zmq.SNDHWM, 0)
-        socket.setsockopt(zmq.SNDBUF, buf_size)
-
-    if identity is not None:
-        socket.setsockopt(zmq.IDENTITY, identity)
-
-    if linger is not None:
-        socket.setsockopt(zmq.LINGER, linger)
-
-    if socket_type == zmq.XPUB:
-        socket.setsockopt(zmq.XPUB_VERBOSE, True)
-
-    # Determine if the path is a TCP socket with an IPv6 address.
-    # Enable IPv6 on the zmq socket if so.
-    scheme, host, _ = split_zmq_path(path)
-    if scheme == "tcp" and is_valid_ipv6_address(host):
-        socket.setsockopt(zmq.IPV6, 1)
-
-    if bind:
-        socket.bind(path)
-    else:
-        socket.connect(path)
-
-    return socket
-
-
-@contextlib.contextmanager
-def zmq_socket_ctx(
-    path: str,
-    socket_type: Any,
-    bind: bool | None = None,
-    linger: int = 0,
-    identity: bytes | None = None,
-) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
-    ctx = zmq.Context()  # type: ignore[attr-defined]
-    try:
-        yield make_zmq_socket(ctx, path, socket_type, bind=bind, identity=identity)
-    except KeyboardInterrupt:
-        logger.debug("Got Keyboard Interrupt.")
-
-    finally:
-        ctx.destroy(linger=linger)
-
-
 def _maybe_force_spawn():
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
@@ -1432,9 +1023,6 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
     return cls
 
 
-## moved to vllm.utils.profiling (imported at module top)
-
-
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
     cfg = model_config.hf_text_config
@@ -1458,9 +1046,6 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
             )
         )
     )
-
-
-## moved to vllm.utils.hashing
 
 
 @cache
@@ -1503,72 +1088,6 @@ def has_tilelang() -> bool:
     return _has_module("tilelang")
 
 
-def set_process_title(
-    name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
-) -> None:
-    """
-    Set the current process title to a specific name with an
-    optional suffix.
-
-    Args:
-        name: The title to assign to the current process.
-        suffix: An optional suffix to append to the base name.
-        prefix: A prefix to prepend to the front separated by `::`.
-    """
-    if suffix:
-        name = f"{name}_{suffix}"
-    setproctitle.setproctitle(f"{prefix}::{name}")
-
-
-def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
-    """Prepend each output line with process-specific prefix"""
-
-    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
-    file_write = file.write
-
-    def write_with_prefix(s: str):
-        if not s:
-            return
-        if file.start_new_line:  # type: ignore[attr-defined]
-            file_write(prefix)
-        idx = 0
-        while (next_idx := s.find("\n", idx)) != -1:
-            next_idx += 1
-            file_write(s[idx:next_idx])
-            if next_idx == len(s):
-                file.start_new_line = True  # type: ignore[attr-defined]
-                return
-            file_write(prefix)
-            idx = next_idx
-        file_write(s[idx:])
-        file.start_new_line = False  # type: ignore[attr-defined]
-
-    file.start_new_line = True  # type: ignore[attr-defined]
-    file.write = write_with_prefix  # type: ignore[method-assign]
-
-
-def decorate_logs(process_name: str | None = None) -> None:
-    """
-    Adds a process-specific prefix to each line of output written to stdout and
-    stderr.
-
-    This function is intended to be called before initializing the api_server,
-    engine_core, or worker classes, so that all subsequent output from the
-    process is prefixed with the process name and PID. This helps distinguish
-    log output from different processes in multi-process environments.
-
-    Args:
-        process_name: Optional; the name of the process to use in the prefix.
-            If not provided, the current process name from the multiprocessing
-            context is used.
-    """
-    if process_name is None:
-        process_name = get_mp_context().current_process().name
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
-
-
 def length_from_prompt_token_ids_or_embeds(
     prompt_token_ids: list[int] | None,
     prompt_embeds: torch.Tensor | None,
@@ -1591,36 +1110,3 @@ def length_from_prompt_token_ids_or_embeds(
                 f" prompt_embeds={prompt_embeds_len}"
             )
         return prompt_token_len
-
-
-@contextlib.contextmanager
-def set_env_var(key, value):
-    old = os.environ.get(key)
-    os.environ[key] = value
-    try:
-        yield
-    finally:
-        if old is None:
-            del os.environ[key]
-        else:
-            os.environ[key] = old
-
-
-def unique_filepath(fn: Callable[[int], Path]) -> Path:
-    """
-    unique_filepath returns a unique path by trying
-    to include an integer in increasing order.
-
-    fn should be a callable that returns a path that
-    includes the passed int at a fixed location.
-
-    Note: This function has a TOCTOU race condition.
-    Caller should use atomic operations (e.g., open with 'x' mode)
-    when creating the file to ensure thread safety.
-    """
-    i = 0
-    while True:
-        p = fn(i)
-        if not p.exists():
-            return p
-        i += 1

@@ -10,10 +10,8 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import (
-    get_open_port,
-    update_environment_variables,
-)
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import multi_gpu_test
