@@ -83,7 +83,7 @@ class SiglipImagePixelInputs(TensorSchema):
 _POOLING_TYPE_TO_STRATEGY: dict[str, VisionFeatureSelectStrategyStr] = {
     "MEAN": "full",
     "ALL": "full",
-    "LAST": "full",
+    "LAST": "class",
 }
 
 
@@ -669,7 +669,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         )
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len = hidden_state.shape[:2]
+        batch_size = hidden_state.size(0)
 
         probe = self.probe.expand(batch_size, -1, -1)
 
@@ -682,8 +682,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
 
         pooled = hidden_state[:, 0]
 
-        # prepare for pooling
-        return pooled.unsqueeze(1).expand(-1, seq_len, -1)
+        return pooled.unsqueeze(1)
 
 
 class SiglipVisionTransformer(nn.Module):
@@ -763,16 +762,20 @@ class SiglipVisionTransformer(nn.Module):
             return_all_hidden_states=select_layers is not None,
         )
 
-        # Handle post-norm (if applicable) and stacks feature layers if needed
+        if self.post_layernorm is not None:
+            encoder_outputs = self.post_layernorm(encoder_outputs)
+
+        if self.use_head:
+            encoder_outputs = self.head(encoder_outputs)
+
+        # stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
             encoder_outputs,
-            self.post_layernorm,
+            None,
             select_layers=select_layers,
             max_possible_layers=self.config.num_hidden_layers,
             feature_select_strategy=feature_select_strategy,
         )
-        if self.use_head:
-            encoder_outputs = self.head(encoder_outputs)
 
         return encoder_outputs
 
