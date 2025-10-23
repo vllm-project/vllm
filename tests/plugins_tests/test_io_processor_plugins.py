@@ -100,6 +100,7 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
         model_name,
         runner="pooling",
         skip_tokenizer_init=True,
+        enable_mm_embeds=True,
         trust_remote_code=True,
         enforce_eager=True,
         # Limit the maximum number of parallel requests
