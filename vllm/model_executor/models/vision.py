@@ -544,3 +544,12 @@ def get_llm_pos_ids_for_vision(
     llm_pos_ids_list.append(_llm_pos_ids + start_idx)
     llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
     return llm_pos_ids
+
+
+def conv3d_to_linear_weight(conv3d_weight: torch.Tensor) -> torch.Tensor:
+    """
+    Reshape Conv3D weight to Linear weight. Only work when kernel_size==stride.
+    """
+    out_channels, in_channels, kt, kh, kw = conv3d_weight.shape
+    linear_weight = conv3d_weight.reshape(out_channels, in_channels * kt * kh * kw)
+    return linear_weight
