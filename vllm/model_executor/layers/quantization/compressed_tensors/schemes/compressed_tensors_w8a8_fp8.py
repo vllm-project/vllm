@@ -150,19 +150,19 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 layer.weight, layer.weight_scale, getattr(layer, "input_scale", None)
             )
 
-            from vllm._aiter_ops import use_swizzle_gemm
+            from vllm._aiter_ops import can_shuffle
 
-            use_swizzle_gemm = use_swizzle_gemm(*weight.shape, dtype=weight.dtype)
+            layout = (16, 16)
+            use_swizzle_gemm = can_shuffle(*weight.shape, layout=layout)
             self.use_aiter_and_is_supported = (
                 self.use_aiter_and_is_supported and use_swizzle_gemm
             )
-
             if self.use_aiter_and_is_supported:
                 from aiter.ops.shuffle import shuffle_weight
 
                 # keep the weight as (N, K)
                 weight = Parameter(
-                    shuffle_weight(weight, layout=(16, 16)), requires_grad=False
+                    shuffle_weight(weight, layout=layout), requires_grad=False
                 )
             else:
                 # keep the weight as (K, N)

@@ -103,16 +103,32 @@ class QuarkW8A8Fp8(QuarkScheme):
                 weight_scale = layer.weight_scale.data
             if self.act_quant_group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
+
+            from vllm._aiter_ops import can_shuffle
+
+            layout = (16, 16)
+            use_swizzle_gemm = can_shuffle(*weight.shape, layout=layout)
+            self.use_aiter_and_is_supported = (
+                self.use_aiter_and_is_supported and use_swizzle_gemm
+            )
             if self.use_aiter_and_is_supported:
                 from aiter.ops.shuffle import shuffle_weight
 
                 # keep the weight as (N, K)
                 layer.weight = Parameter(
-                    shuffle_weight(weight, layout=(16, 16)), requires_grad=False
+                    shuffle_weight(weight, layout=layout), requires_grad=False
                 )
             else:
                 # keep the weight as (K, N)
                 layer.weight = Parameter(weight.t(), requires_grad=False)
+
+            if current_platform.is_rocm():
+                self.fp8_linear = Fp8LinearOp(
+                    act_quant_static=self.is_static_input_scheme,
+                    act_quant_group_shape=self.act_quant_group_shape,
+                    pad_output=not use_swizzle_gemm,
+                )
+
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 

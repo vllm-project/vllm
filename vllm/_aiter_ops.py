@@ -6,13 +6,10 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
-def use_swizzle_gemm(n: int, k: int, dtype: torch.dtype) -> bool:
-    multiple_of: int = 64
-
-    if dtype == current_platform.fp8_dtype():
-        multiple_of = 128
-
-    return n % multiple_of == 0 and k % multiple_of == 0
+def can_shuffle(n: int, k: int, layout: tuple[int, int]) -> bool:
+    IN, IK = layout
+    BK = IK * 2
+    return (n % IN == 0) and (k % BK == 0)
 
 
 def rocm_aiter_per_tensor_quant_impl(
