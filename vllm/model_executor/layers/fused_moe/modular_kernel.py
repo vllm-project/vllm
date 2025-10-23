@@ -10,6 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
@@ -743,6 +744,41 @@ class FusedMoEModularKernel(torch.nn.Module):
             local_num_experts,
             expert_tokens_meta,
         )
+
+        # For modular kernels that use "mk.FusedMoEModularKernel.Standard" format
+        # we may not see the worst case during profiling in the DP+EP case due to
+        # random token routing. Force allocating the worst case.
+        is_profile_run = get_forward_context().attn_metadata is None
+        if is_profile_run and self.fused_experts.supports_chunking():
+            (
+                max_workspace13_shape,
+                max_workspace2_shape,
+                max_fused_out_shape,
+            ) = self.fused_experts.workspace_shapes(
+                envs.VLLM_FUSED_MOE_CHUNK_SIZE,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                None,  # Pass None to avoid using sampled token counts
+            )
+            max_workspace13_spec = WorkspaceSpec(
+                shape=max_workspace13_shape,
+                dtype=workspace_dtype,
+                name="moe.workspace13",
+            )
+            max_workspace2_spec = WorkspaceSpec(
+                shape=max_workspace2_shape,
+                dtype=workspace_dtype,
+                name="moe.workspace2",
+            )
+            max_fused_out_spec = WorkspaceSpec(
+                shape=max_fused_out_shape, dtype=out_dtype, name="moe.fused_out"
+            )
+            current_workspace_manager().reserve_simultaneous(
+                max_workspace13_spec, max_workspace2_spec, max_fused_out_spec
+            )
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.

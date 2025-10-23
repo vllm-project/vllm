@@ -515,6 +515,20 @@ def sparse_attn_indexer(
     attn_metadata = get_forward_context().attn_metadata
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # Reserve workspace memory for the actual run.
+        k_fp8_spec = WorkspaceSpec(
+            shape=(total_seq_lens, head_dim),
+            dtype=torch.float8_e4m3fn,
+            name="sparse_attn_indexer.k_fp8",
+        )
+        k_scale_spec = WorkspaceSpec(
+            shape=(total_seq_lens, 4),
+            dtype=torch.uint8,
+            name="sparse_attn_indexer.k_scale",
+        )
+
+        current_workspace_manager().reserve_simultaneous(k_fp8_spec, k_scale_spec)
+
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
