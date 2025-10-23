@@ -48,6 +48,7 @@ ARCH_NEEDS_EXTRAS = [
     "Idefics3ForConditionalGeneration",
     "LlavaForConditionalGeneration",
     "MiniCPMV",
+    "PaliGemmaForConditionalGeneration",
 ]
 REPO_ID_TO_SKIP = {
     "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
@@ -217,7 +218,9 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=hf_overrides_fn,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )

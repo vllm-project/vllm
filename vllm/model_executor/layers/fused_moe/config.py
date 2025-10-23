@@ -14,8 +14,9 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.utils import cdiv, has_triton_kernels
+from vllm.utils import cdiv
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
@@ -517,6 +518,26 @@ def mxfp4_w4a16_moe_quant_config(
     )
 
 
+def mxfp4_mxfp8_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc("mxfp8"),
+        _a2=FusedMoEQuantDesc("mxfp8"),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+    )
+
+
 def ocp_mx_moe_quant_config(
     quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
@@ -801,6 +822,8 @@ class FusedMoEConfig:
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
     has_bias: bool = False
+
+    is_act_and_mul: bool = True
 
     def __post_init__(self):
         if self.dp_size > 1:

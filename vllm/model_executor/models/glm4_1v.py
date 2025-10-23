@@ -36,9 +36,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from packaging.version import Version
 from transformers import BatchFeature
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor,
@@ -247,6 +245,7 @@ class Glm4vVisionAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -287,6 +286,7 @@ class Glm4vVisionAttention(nn.Module):
         self.attn_backend = get_vit_attn_backend(
             head_size=self.hidden_size_per_attention_head,
             dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         self.use_upstream_fa = False
 
@@ -294,6 +294,7 @@ class Glm4vVisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
@@ -417,6 +418,7 @@ class Glm4vVisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -430,6 +432,7 @@ class Glm4vVisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.mlp = Glm4vVisionMLP(
             dim,
@@ -696,6 +699,7 @@ class Glm4vVisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
 
@@ -731,6 +735,7 @@ class Glm4vVisionTransformer(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=self.use_data_parallel,
+                    attn_backend_override=attn_backend_override,
                 )
                 for layer_idx in range(depth)
             ]
@@ -759,7 +764,9 @@ class Glm4vVisionTransformer(nn.Module):
         )
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
             torch.get_default_dtype()
@@ -1261,14 +1268,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
 
-                # backward compatibility for Transformers 4.55
                 unuse_metadata = ["do_sample_frames"]
-                if (
-                    not hasattr(VideoMetadata, "frames_indices")
-                    and "frames_indices" in metadata
-                ):
-                    unuse_metadata.append("frames_indices")
-
                 video_mm_data["video_metadata"] = [
                     [
                         VideoMetadata(
@@ -1287,24 +1287,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_kwargs=video_mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                if not video_mm_kwargs["do_sample_frames"] and Version(
-                    TRANSFORMERS_VERSION
-                ) < Version("4.56.0"):
-                    # Transformers v4.55 has incorrect timestamps issue for
-                    # skip sampling. We construct the placeholder manually to
-                    # get placeholders with correct timestamps.
-                    placeholder = self.info._construct_video_placeholder(
-                        video_array,
-                        metadata,
-                        video_outputs["video_grid_thw"].squeeze(0),
-                    )
-                    video_placeholder = processor.tokenizer.decode(placeholder)
-                else:
-                    input_ids = video_outputs.pop("input_ids")
-                    input_ids[input_ids == processor.image_token_id] = (
-                        processor.video_token_id
-                    )
-                    video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
+                input_ids = video_outputs.pop("input_ids")
+                input_ids[input_ids == processor.image_token_id] = (
+                    processor.video_token_id
+                )
+                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
@@ -1437,12 +1424,18 @@ class Glm4vForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.visual = Glm4vVisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-5),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
             use_data_parallel=self.use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
 
         if config.model_type == "glm4v":
