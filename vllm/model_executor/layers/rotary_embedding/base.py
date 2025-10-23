@@ -168,7 +168,8 @@ class RotaryEmbedding(CustomOp):
         else:
             # ops.rotary_embedding() is an in-place operation
             # that updates the query and key tensors.
-            self.forward_cuda(positions, query, key)
+            # FIXME: self.forward_cuda is not a in-place operation in eager mode.
+            return self.forward_cuda(positions, query, key)
         return query, key
 
     def forward_xpu(
