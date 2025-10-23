@@ -105,17 +105,15 @@ def can_initialize(
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-        extra_args = {}
-        if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
-            extra_args["enable_mm_embeds"] = True
-
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
             revision=model_info.revision,
             enforce_eager=model_info.enforce_eager,
-            skip_tokenizer_init=model_info.skip_tokenizer_init,
+            skip_tokenizer_init=model_info.require_embed_inputs,
+            enable_prompt_embeds=model_info.require_embed_inputs,
+            enable_mm_embeds=model_info.require_embed_inputs,
             dtype=model_info.dtype,
             speculative_config={
                 "model": model_info.speculative_model,
@@ -133,7 +131,6 @@ def can_initialize(
             else "vllm",
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs,
-            **extra_args,
         )
 
 

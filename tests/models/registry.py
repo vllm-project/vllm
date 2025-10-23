@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import pytest
-import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
@@ -48,9 +47,10 @@ class _HfExamplesInfo:
     The reason for the minimum/maximum version requirement.
     """
 
-    skip_tokenizer_init: bool = False
+    require_embed_inputs: bool = False
     """
-    If true, skip initialization of tokenizer and detokenizer. 
+    If `True`, enables prompt and multi-modal embedding inputs while
+    disabling tokenization.
     """
 
     dtype: ModelDType = "auto"
@@ -465,18 +465,17 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"),
     "PrithviGeoSpatialMAE": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
-        dtype=torch.float16,
+        dtype="float16",
         enforce_eager=True,
-        skip_tokenizer_init=True,
-        # This is to avoid the model
-        # going OOM in CI
+        require_embed_inputs=True,
+        # This is to avoid the model going OOM in CI
         max_num_seqs=32,
     ),
     "Terratorch": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
-        dtype=torch.float16,
+        dtype="float16",
         enforce_eager=True,
-        skip_tokenizer_init=True,
+        require_embed_inputs=True,
         # This is to avoid the model going OOM in CI
         max_num_seqs=32,
     ),
@@ -620,6 +619,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B",
+        is_available_online=False,
     ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
