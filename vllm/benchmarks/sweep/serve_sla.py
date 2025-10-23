@@ -401,7 +401,8 @@ class SweepServeSLAArgs(SweepServeArgs):
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
-        base_args = super().from_cli_args(args)
+        # NOTE: Don't use super() as `from_cli_args` calls `cls()`
+        base_args = SweepServeArgs.from_cli_args(args)
 
         if args.sla_params:
             sla_params = SLASweep.read_json(args.sla_params)
