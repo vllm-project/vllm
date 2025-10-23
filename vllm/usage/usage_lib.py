@@ -218,7 +218,7 @@ class UsageMessage:
             )
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
-        if current_platform.is_tpu():
+        if current_platform.is_tpu():  # noqa: SIM102
             if (not self._report_tpu_inference_usage()) and (
                 not self._report_torch_xla_usage()
             ):
