@@ -329,3 +329,39 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=linger)
+
+
+def recv_msg(socket: zmq.Socket | zmq.asyncio.Socket) -> tuple[None | str, None | str]:
+    """
+    Receive messages from socket in blocking mode
+
+    This function will block until a message is received
+
+    Returns:
+        Tuple (sender_identity, message), both string types
+        Returns (None, None) if error occurs
+    """
+    try:
+        # Use blocking receive - will wait until a message arrives
+        parts = socket.recv_multipart()
+
+        # Verify message format
+        assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
+
+        identity_bytes, empty_frame, message_bytes = parts
+
+        # Verify empty frame
+        assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+
+        # Convert to string
+        sender_identity = identity_bytes.decode("utf-8")
+        message = message_bytes.decode("utf-8")
+
+        return (sender_identity, message)
+
+    except (zmq.ZMQError, UnicodeDecodeError) as e:
+        logger.error("receive message failed: %s", e)
+        return (None, None)
+    except Exception as e:
+        logger.error("Unexpected error occurred while receiving message: %s", e)
+        return (None, None)

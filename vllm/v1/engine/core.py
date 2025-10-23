@@ -307,6 +307,14 @@ class EngineCoreGuard(threading.Thread):  # changed
         msg = {"engine_index": self.engine_index, "success": success}
         self._send_msg(self.client_cmd_socket, msg, serialize=True)
 
+    def shutdown(self):
+        if self.fault_report_socket is not None:
+            self.fault_report_socket.close()
+        if self.client_cmd_socket is not None:
+            self.client_cmd_socket.close()
+        if self.worker_cmd_socket is not None:
+            self.worker_cmd_socket.close()
+
 
 def busy_loop_wrapper(busy_loop_func):
     """
@@ -1371,6 +1379,11 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    def shutdown(self):
+        super().shutdown()
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.engine_core_guard.shutdown()
 
 
 class DPEngineCoreProc(EngineCoreProc):
