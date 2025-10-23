@@ -32,11 +32,9 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(
     model="meta-llama/Llama-3.1-8B",
     tensor_parallel_size=2,
-    # pipeline_parallel_size=2,
+    pipeline_parallel_size=2,
     distributed_executor_backend="external_launcher",
     max_model_len=32768,
-    enforce_eager=True,
-    async_scheduling=True,
     seed=1,
 )
 
