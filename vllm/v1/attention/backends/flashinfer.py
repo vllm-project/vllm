@@ -480,6 +480,28 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         return self._cascade_wrapper
 
+    def _get_pcp_custom_mask(
+        self,
+        qo_indptr_cpu: torch.Tensor,
+        q_pos: torch.Tensor,
+        kv_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        max_q_lens = int(q_pos.max().item()) + 1
+        max_kv_lens = int(kv_lens.max().item())
+        mask = torch.ones(
+            max_q_lens,
+            max_kv_lens,
+            dtype=torch.bool,
+            device=q_pos.device,
+        ).tril()
+        custom_mask_lst = [
+            mask[q_pos[q_pos_start_loc:q_pos_end_loc], :kv_len].flatten()
+                for kv_len, q_pos_start_loc, q_pos_end_loc in 
+                    zip(kv_lens, qo_indptr_cpu[:-1], qo_indptr_cpu[1:])
+        ]
+        custom_mask = torch.cat(custom_mask_lst)
+        return custom_mask
+
     def build(
         self,
         common_prefix_len: int,
@@ -705,27 +727,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         ]
                         kv_indptr_cpu = qo_indptr_cpu * self.pcp_world_size
                         # init custom mask for head-tail query order
-                        q_pos = torch.from_numpy(
-                            common_attn_metadata.query_positions[prefill_start:]
-                        ).long()
-                        kv_lens = (
-                            prefill_num_computed_tokens_cpu
-                            + kv_indptr_cpu[1:]
-                            - kv_indptr_cpu[:-1]
+                        custom_mask = self._get_pcp_custom_mask(
+                            qo_indptr_cpu=qo_indptr_cpu,
+                            q_pos=torch.from_numpy(
+                                common_attn_metadata.query_positions[prefill_start:]
+                            ).long().to(self.device),
+                            kv_lens=(
+                                prefill_num_computed_tokens_cpu
+                                + kv_indptr_cpu[1:]
+                                - kv_indptr_cpu[:-1]
+                            ).to(self.device),
                         )
-                        max_q_lens = int(q_pos.max().item()) + 1
-                        max_kv_lens = int(kv_lens.max().item())
-                        mask = torch.ones(
-                            max_q_lens, max_kv_lens, dtype=torch.bool
-                        ).tril()
-                        selected_rows = torch.index_select(mask, 0, q_pos)
-                        col_indices = torch.arange(max_kv_lens).expand(
-                            q_pos.size(0), -1
-                        )
-                        valid_mask = col_indices < torch.repeat_interleave(
-                            kv_lens, qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]
-                        ).unsqueeze(1)
-                        custom_mask = selected_rows[valid_mask].to(self.device)
 
                         attn_metadata.prefill_wrapper.plan(
                             qo_indptr_cpu.to(self.device),
