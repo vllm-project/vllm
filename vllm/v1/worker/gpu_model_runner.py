@@ -1182,26 +1182,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-        # NOTE(qcs): we need compute slotmapping for all kv
-        # instead of sliced sequences
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-        _, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
-        positions_np = np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices],
-            arange,
-        )
-        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
-
-        num_scheduled_tokens, positions_cp = self._update_tokens_for_pcp(
-            num_scheduled_tokens
-        )
-        # update total_num_scheduled_tokens
-        total_num_scheduled_tokens = sum(num_scheduled_tokens)
-        total_num_pcp_pads = sum(self.num_pcp_pads_cpu[:num_reqs])
-        max_num_scheduled_tokens = max(num_scheduled_tokens)
+        max_num_scheduled_tokens = max(tokens)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -1213,11 +1195,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
+        np.add(
+            self.input_batch.num_computed_tokens_cpu[req_indices],
+            arange,
+            out=positions_np,
+        )
+
+        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+        self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
+
         if self.pcp_world_size > 1:
-            assert positions_cp is not None
+            num_scheduled_tokens, pcp_positions = self._update_tokens_for_pcp(
+                num_scheduled_tokens
+            )
+            assert pcp_positions is not None
+
+            # Re-update after PCP split sequences.
+            total_num_scheduled_tokens = sum(num_scheduled_tokens)
+            total_num_pcp_pads = sum(self.num_pcp_pads_cpu[:num_reqs])
+            max_num_scheduled_tokens = max(num_scheduled_tokens)
+
+            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+            cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            positions_np = self.positions.np[:total_num_scheduled_tokens]
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
-                positions_cp[:total_num_scheduled_tokens],
+                pcp_positions[:total_num_scheduled_tokens],
                 out=positions_np,
             )
 
