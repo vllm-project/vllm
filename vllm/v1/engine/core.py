@@ -855,6 +855,7 @@ class EngineCoreProc(EngineCore):
                     client_cmd_addr=addresses.client_cmd_addr,
                     worker_cmd_addr=addresses.engine_core_cmd_addr,
                     guard_identity=engine_core_guard_ids[self.engine_index],
+                    tp_size=vllm_config.parallel_config.tensor_parallel_size,
                 )
                 self.engine_core_guard.start()
                 vllm_config.fault_tolerance_config.engine_core_cmd_addr = (
