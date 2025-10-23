@@ -30,6 +30,10 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils import (
+    deserialize_method_call,
+    run_method,
+)
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.network_utils import make_zmq_socket
@@ -54,9 +58,13 @@ if TYPE_CHECKING:
 
 
 class WorkerGuard:
-    def __init__(self, tp_rank: int, worker_cmd_addr: str):
+    def __init__(self, vllm_config: VllmConfig):
         zmq_ctx = zmq.Context()
-        identity = tp_rank.to_bytes(length=4, byteorder='little')
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.tp_rank = get_tp_group().rank
+        self.pp_rank = get_pp_group().rank
+        identity = f"{self.tp_rank}_{self.pp_rank}".encode()
+        worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
         self.cmd_socket = make_zmq_socket(
             ctx=zmq_ctx,
             path=worker_cmd_addr,
@@ -66,31 +74,75 @@ class WorkerGuard:
         )
         Thread(target=self.run, daemon=True, name="WorkerGuardCmdReceiver").start()
 
+    def _recv_cmd(self) -> tuple[bool, None | str]:
+        """
+        Receives engine core guard commands in blocking mode via ZMQ.
+        Returns (False, None) on format error, or exception.
+        Message must follow DEALER format: [empty frame, content].
+
+        Args:
+            N/A
+        Returns:
+            (Whether reception succeeded, decoded message string/None)
+        """
+        try:
+            # DEALER message format: [empty frame, message content]
+            parts = self.cmd_socket.recv_multipart()
+
+            # Validate message format
+            assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
+
+            empty_frame, message_bytes = parts
+
+            # Validate empty frame
+            assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+
+            # Decode message content
+            message = message_bytes.decode("utf-8")
+            return (True, message)
+
+        except (zmq.ZMQError, UnicodeDecodeError) as e:
+            logger.error("error occurred while receiving message: %s", e)
+            return (False, None)
+        except Exception as e:
+            logger.error("Unexpected error occurred while receiving message: %s", e)
+            return (False, None)
+
     def run(self):
         """Run the message receiving loop and handle control commands"""
         while True:
-            try:
-                # Use blocking receive - will wait until a message arrives
-                parts = self.cmd_socket.recv_multipart()
+            # Use blocking receive - will wait until a message arrives
+            has_msg, cmd_str = self._recv_cmd()
+            if has_msg:
+                method, method_params = deserialize_method_call(cmd_str)
+                logger.info(
+                    "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s] Executing command: %s",
+                    self.dp_rank,
+                    self.tp_rank,
+                    self.pp_rank,
+                    method,
+                )
+                try:
+                    run_method(self, method, args=(), kwargs=method_params)
+                    logger.info(
+                        "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s]"
+                        " Command succeeded: %s",
+                        self.dp_rank,
+                        self.tp_rank,
+                        self.pp_rank,
+                        method,
+                    )
 
-                # Verify message format
-                assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
-
-                identity_bytes, empty_frame, message_bytes = parts
-
-                # Verify empty frame
-                assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
-
-                # Convert to string
-                message = message_bytes.decode("utf-8")
-
-                if message == "stop worker execution":
-                    self.pause()
-
-            except (zmq.ZMQError, UnicodeDecodeError) as e:
-                logger.error("receive message failed: %s", e)
-            except Exception as e:
-                logger.error("Unexpected error occurred while receiving message: %s", e)
+                except Exception as e:
+                    logger.error(
+                        "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s]"
+                        " Error executing method %s: %s",
+                        self.dp_rank,
+                        self.tp_rank,
+                        self.pp_rank,
+                        method,
+                        e,
+                    )
 
     def pause(self):
         pass
@@ -156,10 +208,7 @@ class Worker(WorkerBase):
             self.profiler = None
 
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            self.worker_guard = WorkerGuard(
-                get_tp_group().rank,
-                vllm_config.fault_tolerance_config.engine_core_cmd_addr,
-            )
+            self.worker_guard = WorkerGuard(vllm_config)
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
