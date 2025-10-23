@@ -33,6 +33,7 @@ from vllm.utils.network_utils import (
     get_open_port,
     get_open_zmq_inproc_path,
     make_zmq_socket,
+    recv_msg,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -344,6 +345,85 @@ class InprocClient(EngineCoreClient):
         return False
 
 
+class ClientGuard:
+    def __init__(
+        self,
+        fault_receiver_addr: str,
+        cmd_addr: str,
+        engine_registry: dict[int, bytes],
+        engine_exception_q: asyncio.Queue[FaultInfo],
+        engine_exception_q_lock: asyncio.Lock,
+    ):
+        self.engine_registry = engine_registry
+        self.zmq_ctx = zmq.Context()
+        self.fault_receiver_socket = make_zmq_socket(
+            ctx=self.zmq_ctx,
+            path=fault_receiver_addr,
+            socket_type=zmq.ROUTER,
+            bind=True,
+        )
+        self.cmd_socket = make_zmq_socket(
+            ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
+        )
+
+        self.engine_exception_q: asyncio.Queue[FaultInfo] = engine_exception_q
+
+        self.engine_exception_q_lock = engine_exception_q_lock
+
+        self.fault_handler = FaultHandler(
+            self.cmd_socket,
+            self.engine_registry,
+            self.engine_exception_q,
+            self.engine_exception_q_lock,
+        )
+
+        self.client_guard_dead = False
+        Thread(
+            target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
+        ).start()
+
+    async def handle_fault(self, instruction: str, timeout: int) -> bool:
+        """
+        Executes fault tolerance measures based on the fault tolerance instructions
+         received from the api_server.
+
+        This method processes the fault tolerance commands/instructions passed by the
+        api_server, then implements corresponding fault tolerance strategies or actions
+        to handle system anomalies, ensuring stable operation or graceful degradation
+        of the relevant components.
+        """
+        return await run_method(
+            self.fault_handler, "handle_fault", args=(instruction, timeout), kwargs={}
+        )
+
+    def fault_receiver(self):
+        """
+        Continuously listens for exception/error information sent from the engine_core.
+
+        This method maintains a persistent listening state to capture and process
+        fault-related data, exceptions, or error notifications emitted by the
+        engine_core component. It is designed to run continuously to ensure no critical
+        error information from the engine core is missed.
+        """
+        while True:
+            sender_identity, message = recv_msg(self.fault_receiver_socket)
+            if self.client_guard_dead:
+                logger.info("client guard dead, stop receiving fault")
+                break
+            assert message is not None, (
+                "message should not be None at fault tolerance scenario"
+            )
+            # TODO Asynchronous issuance of pause commands and design of engine
+            #  core status
+            self.engine_exception_q.put_nowait(FaultInfo.from_json(message))
+
+    def shutdown_guard(self):
+        self.client_guard_dead = True
+        self.fault_receiver_socket.close()
+        self.cmd_socket.close()
+        self.zmq_ctx.term()
+
+
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
@@ -362,6 +442,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
+    client_guard: ClientGuard | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -375,6 +456,8 @@ class BackgroundResources:
             self.engine_manager.close()
         if self.coordinator is not None:
             self.coordinator.close()
+        if self.client_guard is not None:
+            self.client_guard.shutdown_guard()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
@@ -427,117 +510,6 @@ class BackgroundResources:
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
             raise EngineDeadError()
-
-
-class ClientGuard:
-    def __init__(
-        self,
-        fault_receiver_addr: str,
-        cmd_addr: str,
-        engine_registry: dict[int, bytes],
-        engine_exception_q: asyncio.Queue[FaultInfo],
-        engine_exception_q_lock: asyncio.Lock,
-    ):
-        self.engine_registry = engine_registry
-        self.zmq_ctx = zmq.Context()
-        self.fault_receiver_socket = make_zmq_socket(
-            ctx=self.zmq_ctx,
-            path=fault_receiver_addr,
-            socket_type=zmq.ROUTER,
-            bind=True,
-        )
-        self.cmd_socket = make_zmq_socket(
-            ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
-        )
-
-        self.engine_exception_q: asyncio.Queue[FaultInfo] = engine_exception_q
-
-        self.engine_exception_q_lock = engine_exception_q_lock
-
-        self.fault_handler = FaultHandler(
-            self.cmd_socket,
-            self.engine_registry,
-            self.engine_exception_q,
-            self.engine_exception_q_lock,
-        )
-
-        Thread(
-            target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
-        ).start()
-
-    def recv_msg(
-        self, socket: zmq.Socket | zmq.asyncio.Socket
-    ) -> tuple[None | str, None | str]:
-        """
-        Receive messages from socket in blocking mode
-
-        This function will block until a message is received
-
-        Returns:
-            Tuple (sender_identity, message), both string types
-            Returns (None, None) if error occurs
-        """
-        try:
-            # Use blocking receive - will wait until a message arrives
-            parts = socket.recv_multipart()
-
-            # Verify message format
-            assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
-
-            identity_bytes, empty_frame, message_bytes = parts
-
-            # Verify empty frame
-            assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
-
-            # Convert to string
-            sender_identity = identity_bytes.decode("utf-8")
-            message = message_bytes.decode("utf-8")
-
-            return (sender_identity, message)
-
-        except (zmq.ZMQError, UnicodeDecodeError) as e:
-            logger.error("receive message failed: %s", e)
-            return (None, None)
-        except Exception as e:
-            logger.error("Unexpected error occurred while receiving message: %s", e)
-            return (None, None)
-
-    async def handle_fault(self, instruction: str, timeout: int) -> bool:
-        """
-        Executes fault tolerance measures based on the fault tolerance instructions
-         received from the api_server.
-
-        This method processes the fault tolerance commands/instructions passed by the
-        api_server, then implements corresponding fault tolerance strategies or actions
-        to handle system anomalies, ensuring stable operation or graceful degradation
-        of the relevant components.
-        """
-        return await run_method(
-            self.fault_handler, "handle_fault", args=(instruction, timeout), kwargs={}
-        )
-
-    def fault_receiver(self):
-        """
-        Continuously listens for exception/error information sent from the engine_core.
-
-        This method maintains a persistent listening state to capture and process
-        fault-related data, exceptions, or error notifications emitted by the
-        engine_core component. It is designed to run continuously to ensure no critical
-        error information from the engine core is missed.
-        """
-        while True:
-            sender_identity, message = self.recv_msg(self.fault_receiver_socket)
-            assert message is not None, (
-                "message should not be None at fault tolerance scenario"
-            )
-            # TODO Asynchronous issuance of pause commands and design of engine
-            #  core status
-            self.engine_exception_q.put_nowait(FaultInfo.from_json(message))
-
-    def shutdown_guard(self):
-        self.fault_receiver_socket.close()
-        self.cmd_socket.close()
-        self.zmq_ctx.term()
 
 
 class MPClient(EngineCoreClient):
@@ -684,6 +656,7 @@ class MPClient(EngineCoreClient):
                     self.engine_exception_q,
                     self.engine_exception_q_lock,
                 )
+                self.resources.client_guard = self.client_guard
             success = True
         finally:
             if not success:

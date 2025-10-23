@@ -29,6 +29,7 @@ from vllm.utils import (
 from vllm.utils.network_utils import (
     get_open_zmq_ipc_path,
     make_zmq_socket,
+    recv_msg,
     zmq_socket_ctx,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -1223,15 +1224,16 @@ class FaultHandler:
         unhealthy_engine_list = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
         )
-        engine_indexes = [engine_index for engine_index in self.client_cmd_registry]
+        engine_identities = [identity for identity in self.client_cmd_registry.values()]
 
         if instruction == "pause":
             for unhealthy_engine in unhealthy_engine_list:
-                engine_indexes.remove(int(unhealthy_engine.engine_id))
+                engine_identities.remove(
+                    self.client_cmd_registry[int(unhealthy_engine.engine_id)]
+                )
 
         kwargs = {"timeout": timeout}
-        for engine_index in engine_indexes:
-            identity = self.client_cmd_registry.get(engine_index)
+        for identity in engine_identities:
             serialized_instruction = serialize_method_call(instruction, **kwargs)
             self.cmd_socket.send_multipart(
                 [identity, b"", serialized_instruction.encode("utf-8")]
@@ -1240,25 +1242,22 @@ class FaultHandler:
         poller = zmq.Poller()
         poller.register(self.cmd_socket, zmq.POLLIN)
 
-        while engine_indexes:
+        while engine_identities:
             socks = dict(poller.poll(timeout))
             if self.cmd_socket not in socks:
                 logger.error(
                     "Timeout while waiting for responses from engines: %s",
-                    engine_indexes,
+                    engine_identities,
                 )
                 return False
             try:
-                parts = self.cmd_socket.recv_multipart()
-                if len(parts) != 3:
-                    logger.error("Malformed response: %s", parts)
-                    return False
-                identity, _, response = parts
-                response_dict = json.loads(response.decode("utf-8"))
+                identity, response = recv_msg(self.cmd_socket)
+                if identity.encode("utf-8") in engine_identities:
+                    engine_identities.remove(identity.encode("utf-8"))
+                assert response is not None
+                response_dict = json.loads(response)
                 engine_id = response_dict.get("engine_index")
                 success = response_dict.get("success", False)
-                if engine_id in engine_indexes:
-                    engine_indexes.remove(int(engine_id))
                 if not success:
                     logger.error(
                         "Engine %s reported failure: %s",
