@@ -66,6 +66,8 @@ def run_benchmark(
 ):
     benchmark_cmd = [
         *bench_overrides.apply_to_cmd(bench_cmd),
+        "--percentile-metrics",
+        "ttft,tpot,itl,e2el",
         "--save-result",
         "--result-dir",
         str(output_path.parent),
