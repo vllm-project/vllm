@@ -600,14 +600,20 @@ class FusedMoE(CustomOp):
             # Avoid circular import
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptFp8MoEMethod,
+                ModelOptNvFp4FusedMoE,
             )
 
             if not isinstance(
-                self.quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
+                self.quant_method,
+                (
+                    UnquantizedFusedMoEMethod,
+                    ModelOptFp8MoEMethod,
+                    ModelOptNvFp4FusedMoE,
+                ),
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
-                    "and ModelOpt FP8 moe for now"
+                    ", FP8 and modelopt FP4 checkpoints"
                 )
             if not current_platform.is_cuda():
                 raise NotImplementedError(
@@ -1277,7 +1283,7 @@ class FusedMoE(CustomOp):
                     self._load_combined_w13_weight_scale(
                         shard_dim=shard_dim,
                         loaded_weight=loaded_weight,
-                        param=param,
+                        param=param[expert_id],
                         tp_rank=self.tp_rank,
                     )
                     return True if return_success else None
