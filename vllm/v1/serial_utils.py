@@ -3,6 +3,7 @@
 
 import dataclasses
 import importlib
+import json
 import pickle
 from collections.abc import Callable, Sequence
 from inspect import isclass
@@ -429,3 +430,44 @@ class MsgpackDecoder:
                 return cloudpickle.loads(data)
 
         raise NotImplementedError(f"Extension type code {code} is not supported")
+
+
+def deserialize_method_call(json_str: str) -> tuple[str, dict[str, Any]]:
+    """
+    Deserialize an encoded method call.
+
+    Args:
+        json_str (str): JSON string representing a serialized method call.
+
+    Returns:
+        tuple[str, dict[str, Any]]:
+            - method (str): The method name.
+            - params (dict): A dictionary of method parameters.
+
+    Raises:
+        ValueError: If the JSON is invalid or does not contain a 'method' field.
+    """
+    try:
+        payload = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse method JSON: %s", json_str)
+        raise ValueError(f"Invalid JSON: {e}") from e
+
+    method = payload.get("method")
+    if not method:
+        logger.error("Missing 'method' field in JSON: %s", json_str)
+        raise ValueError("JSON must include a 'method' field")
+
+    params = {k: v for k, v in payload.items() if k != "method"}
+    return method, params
+
+
+def serialize_method_call(method: str, **params: Any) -> str:
+    """
+    Serialize a method invocation into a JSON string.
+    Examples:
+        >>> serialize_method_call("retry")
+        '{"method": "resume"}'
+    """
+    payload = {"method": method, **params}
+    return json.dumps(payload)

@@ -27,11 +27,6 @@ class FaultToleranceConfig:
     time, the original error is raised.
     """
 
-    fault_report_addr: str = "127.0.0.1"
-    """
-    The address to use for fault reporting.
-    """
-
     fault_report_port: int = 22866
     """
     The port to use for fault reporting.
