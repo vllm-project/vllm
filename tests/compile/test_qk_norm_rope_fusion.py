@@ -105,7 +105,7 @@ class QKNormRoPETestModel(torch.nn.Module):
 
 
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-@pytest.mark.parametrize("is_neox", [True])
+@pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -138,7 +138,6 @@ def test_qk_norm_rope_fusion(
                 enable_qk_norm_rope_fusion=True,
                 enable_noop=True,
             ),
-            debug_dump_path="/mnt/data/nas/zhr/test/log/tmp/vllm_compile_dump",
         ),
     )
 
