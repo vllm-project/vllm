@@ -134,7 +134,7 @@ def main():
         ]
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
-    ic(len(prompts))
+    ic(len(prompts), prompts)
 
     # manually specify the speculative token tree
     if args.spec_token_tree is not None:
@@ -235,19 +235,18 @@ def main():
         finish_reasons = [output.outputs[0].finish_reason for output in outputs]
         return Counter(finish_reasons)
     finish_reason_counts = get_finish_reason_counts(outputs)
-    ic(finish_reason_counts)
+    print(f"Finish Reasons: {finish_reason_counts}")
 
     # print the generated text
     if args.print_output:
         for i, output in enumerate(outputs):
-            # print("-" * 50)
-            print(f"prompt: {output.prompt}")
-            print(f"generated text: {output.outputs[0].text}")
-            # print("-" * 50)
+            prompt = tokenizer.decode(output.prompt_token_ids, skip_special_tokens=True)
+            print("-" * 50)
             print(f"Output {i}:")
-            print(f"  Finish reason: {output.outputs[0].finish_reason}")
-            print(f"  Text: {output.outputs[0].text[:100]}...")  # First 100 chars
-            print()
+            print(f"Finish reason: {output.outputs[0].finish_reason}")
+            print(f"Prompt: {prompt}")
+            print(f"Generated Text: {output.outputs[0].text}...")
+            print("-" * 50 + '\n')
 
     try:
         metrics = llm.get_metrics()
