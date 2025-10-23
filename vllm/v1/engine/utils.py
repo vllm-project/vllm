@@ -1243,7 +1243,7 @@ class FaultHandler:
         poller.register(self.cmd_socket, zmq.POLLIN)
 
         while engine_identities:
-            socks = dict(poller.poll(timeout))
+            socks = dict(poller.poll(timeout * 1000))
             if self.cmd_socket not in socks:
                 logger.error(
                     "Timeout while waiting for responses from engines: %s",
