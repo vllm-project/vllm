@@ -776,6 +776,13 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
+- label: LM Eval Small Models on H100 # 65min 
+  timeout_in_minutes: 90
+  source_file_dependencies:
+  - vllm/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-h100.txt --tp-size=1
+
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
   source_file_dependencies:
