@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -82,6 +83,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
 
     def __init__(
         self,
