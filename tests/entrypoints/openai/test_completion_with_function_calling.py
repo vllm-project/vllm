@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
+import json
 
+import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
