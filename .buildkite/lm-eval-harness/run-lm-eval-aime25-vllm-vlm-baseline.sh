@@ -40,7 +40,7 @@ done
 lm_eval --model vllm \
   --model_args "pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,trust_remote_code" \
   --tasks aime25 \
-  --batch_size 1 \
+  --batch_size auto \
   --apply_chat_template \
   --limit "$LIMIT" \
   --gen_kwargs temperature=1.0,top_p=1.0,top_k=0
