@@ -320,9 +320,10 @@ class CoreEngineActorManager:
 
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
-            zmq_addr = (
-                f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
-                f"{vllm_config.fault_tolerance_config.fault_report_port}"
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.fault_report_port,
             )
             identity = generate_identity_group(
                 "core_engine_actor_manager", "clinet_guard", "report", 1
