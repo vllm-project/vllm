@@ -166,13 +166,6 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("prefill_max_num_batched_tokens", mode="wrap")
-    @classmethod
-    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
-        if value is None:
-            return value
-        return handler(value)
-
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         if self.max_model_len is None:
             self.max_model_len = 8192
