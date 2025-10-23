@@ -673,7 +673,9 @@ class MixtureOfExperts(Protocol):
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
-    return isinstance(model, MixtureOfExperts)
+    return (
+        isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
+    )
 
 
 @runtime_checkable
