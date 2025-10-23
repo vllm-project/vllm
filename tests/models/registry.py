@@ -213,7 +213,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereForAI/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
-    "CwmForCausalLM": _HfExamplesInfo("facebook/cwm"),
+    "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
     "DeciLMForCausalLM": _HfExamplesInfo(
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
@@ -460,7 +460,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
-    "BertSpladeSparseEmbeddingModel": _HfExamplesInfo("naver/splade-v3"),
+    "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
+        "naver/splade-v3",
+        hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
+    ),
     # [Multimodal]
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
