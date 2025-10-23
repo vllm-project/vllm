@@ -32,6 +32,11 @@ class FaultToleranceConfig:
     The port to use for fault reporting.
     """
 
+    engine_core_cmd_addr: str = ""
+    """
+    The ZMQ address to use for cmd between engine_core_guard and worker_guard.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
