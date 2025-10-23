@@ -4,9 +4,7 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from collections import deque
 from dataclasses import dataclass, field, fields, make_dataclass
-from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -49,85 +47,6 @@ PAD_SLOT_ID = -1
 
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
-
-
-class QueryLenSupport(Enum):
-    """Defines the level of query length support for an attention backend's
-    decode pipeline.
-
-    - SINGLE_ONLY: Decode pipeline only supports single-token queries
-                   (query_len=1)
-    - UNIFORM: Decode pipeline supports uniform multi-token queries
-               (all requests must have same query_len > 1)
-    - VARLEN: Decode pipeline supports variable-length queries
-              (mixed query lengths in same batch)
-    """
-
-    SINGLE_ONLY = "single_only"
-    UNIFORM = "uniform"
-    VARLEN = "varlen"
-
-
-@dataclass
-class ReorderSpec:
-    """
-    Defines how the model runner reorders requests within a batch for attention
-    backends that distinguish between prefill, extend, and decode phases.
-
-    Core controls
-    - decode_threshold: Query lengths ≤ this value are treated as decode. If
-    None, no reorder will be applied.
-    - split_extend: If True, split prefill into [extend_prefill, pure_prefill].
-    - decode_query_len_support:
-        - SINGLE_ONLY: single-token only (no spec decode)
-        - UNIFORM: uniform multi-token queries (spec decode, equal lengths)
-        - VARLEN: variable-length queries (spec decode, mixed lengths)
-
-    Example input
-      query_len: [7, 10,  3,  1,  2,  5,  2, 15]
-      seq_len:   [10, 10,  8,  9,  8,  5, 10, 20]
-
-    Case 1: decode_threshold=3
-      query_len: [3,  1,  2,  2,  7, 10,  5, 15]
-      seq_len:   [8,  9,  8, 10, 10, 10,  5, 20]
-                 └──── dec ────┘└──── pre ─────┘
-      → Reordered as [decode, prefill].
-
-    Case 2: decode_threshold=3, split_extend=True,
-      query_len: [3,  1,  2,  2,  7, 15, 10, 5, 8]
-      seq_len:   [8,  9,  8, 10, 10, 20, 10, 5, 8]
-                 └──── dec ────┘ └── ext ──┘ └pre┘
-      → Reordered as [decode, extend_prefill, pure_prefill].
-
-    Case 3 (Future/TODO):
-        decode_threshold=3, split_extend=True, query_len_support=UNIFORM
-      (Move the most common ≤ decode_threshold to the front to form the largest
-       *uniform* decode region. Here, the uniform decode region is the two q_len=2’s.)
-      query_len: [2,  2,  3,  1,  7, 15, 10,  5]
-      seq_len:   [8, 10,  8,  9, 10, 20, 10,  5]
-                 └u dec┘ └─dec─┘└──── pre ─────┘
-      → Reordered as [uniform-decode(2s), decode, prefill].
-    """
-
-    decode_threshold: int | None = None
-    """The threshold for reordering the batch into decode and prefill 
-    requests. If `decode_threshold` is not None, prefill and 
-    decode request will be reordered according to this value. query 
-    length <= threshold will be considered as decode"""
-
-    split_extend: bool = False
-    """Whether to further split the prefill requests into pure prefill 
-    (query_len == context_len) and extend prefill (query length < context_len)
-    in a single batch. Once this flag is set, the request will be reordered to 
-    [decode:extend_prefill:pure_prefill]"""
-
-    decode_query_len_support: QueryLenSupport = QueryLenSupport.SINGLE_ONLY
-    """Defines the level of query length support for this backend.
-    - SINGLE_ONLY: Only single-token queries (no spec decode support)
-    - UNIFORM: Supports uniform multi-token queries (spec decode with uniform lengths)
-    - VARLEN: Supports variable-length queries (spec decode with mixed lengths)
-    If set to UNIFORM or VARLEN, this will increase `decode_threshold` when
-    speculative decoding is enabled."""
 
 
 @dataclass
@@ -326,10 +245,10 @@ class AttentionCGSupport(enum.Enum):
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
-    # Attention backend's reorder spec which controls if and
-    # how to reorder the request before actually execute the
-    # model (default: no reorder)
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(None)
+    # Does this backend/builder reorder the batch?
+    # If not, set this to None. Otherwise set it to the query
+    # length that will be pulled into the front of the batch.
+    reorder_batch_threshold: int | None = None
 
     @abstractmethod
     def __init__(
@@ -344,21 +263,21 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
 
-    def _init_decode_threshold(
-        self, decode_threshold: int = 1, supports_spec_as_decode: bool = False
+    def _init_reorder_batch_threshold(
+        self, reorder_batch_threshold: int = 1, supports_spec_as_decode: bool = False
     ) -> None:
-        self.reorder_spec.decode_threshold = decode_threshold
-        if self.reorder_spec.decode_threshold is not None and supports_spec_as_decode:
+        self.reorder_batch_threshold = reorder_batch_threshold
+        if self.reorder_batch_threshold is not None and supports_spec_as_decode:
             # If the backend supports spec-as-decode kernels, then we can set
-            # the decode_threshold based on the number of speculative
+            # the reorder_batch_threshold based on the number of speculative
             # tokens from the config.
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                self.reorder_spec.decode_threshold = max(
-                    self.reorder_spec.decode_threshold,
+                self.reorder_batch_threshold = max(
+                    self.reorder_batch_threshold,
                     1 + speculative_config.num_speculative_tokens,
                 )
 
@@ -429,10 +348,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         dcp_world_size: int,
     ) -> bool:
         return False
-
-    @classmethod
-    def reset_reorder_spec(cls, reorder_sepc):
-        cls.reorder_spec = reorder_sepc
 
 
 @functools.lru_cache
@@ -939,109 +854,6 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
-def reorder_batch_to_split_decodes_prefills_and_extends(
-    input_batch: "InputBatch",
-    scheduler_output: "SchedulerOutput",
-    decode_threshold: int = 1,
-) -> bool:
-    """
-    Reorders the batch to split into prefill, extend
-    and decode requests; places all requests in the order of
-    [decodes:extend:prefill].
-
-    Returns:
-        True if the batch was modified, False otherwise.
-    """
-
-    decodes = []
-    prefills = []
-    extends = []
-
-    for i, req_id in enumerate(input_batch.req_ids):
-        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        if num_tokens <= decode_threshold:
-            decodes.append(i)
-        elif input_batch.num_computed_tokens_cpu[i] > 0:
-            extends.append(i)
-        else:
-            prefills.append(i)
-
-    num_decodes = len(decodes)
-    num_extends = len(extends)
-    # We define the reorder matrix here to help on the request reorder
-    # reorder_matrix[(i, j)] means the id the the requests that suppose
-    # to be in zone i but actually spot on zone j
-    # The decode, extend and prefill are separated into 3
-    # different zone here, 0 for decode, 1 for extend and 2 for
-    # prefill
-    reorder_matrix: dict[tuple[int, int], deque[int]] = {
-        (i, j): deque() for i in range(3) for j in range(3) if i != j
-    }
-
-    # collect mismatch
-
-    def target_idx(idx):
-        if idx < num_decodes:
-            # decode as zone 0
-            return 0
-        elif idx < num_decodes + num_extends:
-            # extend as zone 1
-            return 1
-        else:
-            # prefill as zone 2
-            return 2
-
-    def fill_reorder_matrix(request_lists, reorder_sequence):
-        for idx, seq in enumerate(reorder_sequence):
-            request_list = request_lists[idx]
-            for req_idx in request_list:
-                req_target_id = target_idx(req_idx)
-                if seq != req_target_id:
-                    reorder_matrix[(seq, req_target_id)].append(req_idx)
-
-    def direct_zone_swap(i, j):
-        assert i != j
-        modified_batch = False
-        while reorder_matrix[(i, j)] and reorder_matrix[(j, i)]:
-            swap_req1 = reorder_matrix[(i, j)].pop()
-            swap_req2 = reorder_matrix[(j, i)].pop()
-            input_batch.swap_states(swap_req1, swap_req2)
-            modified_batch = True
-
-        return modified_batch
-
-    # in order 1,2,3, out order 3, 1, 2
-    def indirect_zone_swap(zone_list):
-        assert len(zone_list) == 3
-        modified_batch = False
-        while (
-            reorder_matrix[zone_list[0]]
-            and reorder_matrix[zone_list[1]]
-            and reorder_matrix[zone_list[2]]
-        ):
-            swap_req1 = reorder_matrix[zone_list[0]].pop()
-            swap_req2 = reorder_matrix[zone_list[1]].pop()
-            swap_req3 = reorder_matrix[zone_list[2]].pop()
-
-            input_batch.swap_states(swap_req1, swap_req2)
-            input_batch.swap_states(swap_req2, swap_req3)
-            modified_batch = True
-        return modified_batch
-
-    fill_reorder_matrix([decodes, extends, prefills], [0, 1, 2])
-
-    modified_batch = False
-    # do directly swap for
-    modified_batch |= direct_zone_swap(0, 1)  # decode <--> extend
-    modified_batch |= direct_zone_swap(0, 2)  # decode <--> prefill
-    modified_batch |= direct_zone_swap(1, 2)  # extend <--> prefill
-
-    modified_batch |= indirect_zone_swap(((0, 1), (1, 2), (2, 0)))
-    modified_batch |= indirect_zone_swap(((2, 1), (0, 2), (1, 0)))
-
-    return modified_batch
-
-
 def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
@@ -1054,50 +866,47 @@ def reorder_batch_to_split_decodes_and_prefills(
     Returns:
         True if the batch was modified, False otherwise.
     """
-    # We now want to reorder the batch so that the "decode" requests are at
-    # the front and the "prefill" requests are at the back using the least
-    # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
-    # requests where attention is likely memory-bound and "prefill" to mean
-    # requests where attention is likely compute-bound, TODO(lucas): figure out
-    # a better naming here)
-    decodes = []
-    prefills = []
-    num_decode_tokens = 0
-    num_prefill_tokens = 0
+    # We now want to reorder the batch into decode → extend → prefill order
+    # where:
+    #   decode: request with num_scheduled_tokens <= decode_threshold
+    #   extend: non-decode request with existing context
+    #   prefill: non-decode request with no existing context
+    # NOTE for now we loosely use "decode" to mean requests where attention is
+    #  likely memory-bound and "prefill" to mean requests where attention is
+    #  likely compute-bound,
+    num_reqs = len(input_batch.req_ids)
+    num_scheduled_tokens_np = np.array(
+        [
+            scheduler_output.num_scheduled_tokens[req_id]
+            for req_id in input_batch.req_ids
+        ]
+    )
 
-    for i, req_id in enumerate(input_batch.req_ids):
-        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        if num_tokens <= decode_threshold:
-            decodes.append(i)
-            num_decode_tokens += num_tokens
-        else:
-            prefills.append(i)
-            num_prefill_tokens += num_tokens
+    num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
-    # We hope that this is fairly minimal since decodes
-    # should be around for a number of iterations so hopefully they are
-    # relatively stationary (and new request are generally appended to the
-    # persistent batch so already should be at the back)
-    # To achieve this we loop over the decodes in descending order and
-    # the prefills in ascending order. We swap decodes from the  "back"
-    # i.e. past where the last decode should be in the reodorered with
-    # prefills from the front of the batch.
-    # `decodes` and `prefills` are already in ascending order just based on
-    # the above loop
-    num_decodes = len(decodes)
-    num_prefills = len(prefills)
+    is_decode = num_scheduled_tokens_np <= decode_threshold
+    is_extend = (~is_decode) & (num_computed_tokens_np > num_scheduled_tokens_np)
+    is_prefill = (~is_decode) & (num_computed_tokens_np == num_scheduled_tokens_np)
+
+    # Desired order: decode → extend → prefill
+    order_key = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
+    order_key[is_extend] = 1
+    order_key[is_prefill] = 2
+
+    # get a permutation of the indices that sorts the order_key, basically this means if
+    # we reordered the batch like request[perm] we'd be in the desired order
+    perm = np.argsort(order_key, kind="stable")
+    # old_idx -> new_pos
+    dest = np.empty_like(perm)
+    dest[perm] = np.arange(num_reqs)
+
     modified_batch = False
-
-    for i in range(1, min(num_decodes, num_prefills) + 1):
-        # If the decode is at the "back" of the batch, i, we can swap it
-        # with the prefill closest to the front of the batch
-        decode_idx = decodes[num_decodes - i]
-        if decode_idx < num_decodes:
-            break
-
-        input_batch.swap_states(prefills[i - 1], decode_idx)
-        modified_batch = True
-
+    for i in range(num_reqs):
+        while dest[i] != i:
+            j = dest[i]  # destination index for the element currently at i
+            input_batch.swap_states(i, j)
+            dest[i], dest[j] = dest[j], dest[i]
+            modified_batch = True
     return modified_batch
 
 
