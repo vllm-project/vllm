@@ -38,7 +38,7 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    prefill_max_num_batched_tokens: int = Field(default=None)
+    prefill_max_num_batched_tokens: int = Field(init=False)
     """Prefill maximum number of tokens to be processed in a single iteration.
 
     This config is used when there are no decoding requests."""
