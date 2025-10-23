@@ -18,10 +18,8 @@ from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
-import ray
 import zmq
 import zmq.asyncio
-
 from ray.util.state import get_actor
 
 from vllm.config import VllmConfig

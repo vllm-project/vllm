@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import multiprocessing
 import os
 import uuid
 import weakref
@@ -197,8 +198,8 @@ class CoreEngineProcManager:
 
     def start_engine_core_monitor(self):
         sentinels = [proc.sentinel for proc in self.processes]
-        while self.processes is not None:
-            died = connection.wait(sentinels)
+        while self.processes:
+            died = multiprocessing.connection.wait(sentinels)
             for sentinel in died:
                 died_proc = next(
                     proc for proc in self.processes if proc.sentinel == sentinel
