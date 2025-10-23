@@ -444,7 +444,8 @@ steps:
   - vllm/config/compilation.py
   - vllm/compilation
   commands:
-    - pytest -v -s v1/cudagraph/*
+    - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
+    - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
 
 - label: Kernels Core Operation Test # 48min
   timeout_in_minutes: 75
