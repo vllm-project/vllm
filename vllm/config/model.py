@@ -2116,7 +2116,9 @@ def _get_and_verify_max_len(
         elif rope_type == "longrope":
             # For LongRoPE, we default to the original max to avoid performance
             # degradation for shorter sequences.
-            derived_max_model_len = rope_scaling["original_max_position_embeddings"]
+            derived_max_model_len = getattr(
+                hf_config, "original_max_position_embeddings", derived_max_model_len
+            )
 
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
