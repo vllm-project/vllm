@@ -271,7 +271,7 @@ class CudaPlatformBase(Platform):
                 _Backend.XFORMERS,
             }:
                 raise ValueError(
-                    "Selected attention backend is incompatible with MLA models. "
+                    f"Attention backend {selected_backend} incompatible with MLA. "
                     "Please use one of the MLA backends: FLASHINFER_MLA, CUTLASS_MLA, "
                     "FLASHMLA, FLASH_ATTN_MLA, or TRITON_MLA. Alternatively, set "
                     "VLLM_MLA_DISABLE=1 to disable MLA for this model."
