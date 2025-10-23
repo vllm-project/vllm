@@ -11,6 +11,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
+
+logger = init_logger(__name__)
 
 
 class GPTQConfig(QuantizationConfig):
@@ -91,9 +94,9 @@ class GPTQConfig(QuantizationConfig):
                 f"supported for GPTQ, but got {self.weight_bits} bits."
             )
         # Somehow gptq_gemm 4-bit is buggy, maybe fix it in the future.
-        # Currently we can disable it since gptq_marlin will be used by default.
+        # For now, show a warning, since gptq_marlin will be used by default.
         if self.weight_bits == 4:
-            raise ValueError(
+            logger.warning_once(
                 "Currently, the 4-bit gptq_gemm kernel for GPTQ is buggy. "
                 "Please switch to gptq_marlin or gptq_bitblas."
             )
