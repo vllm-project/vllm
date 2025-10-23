@@ -165,9 +165,10 @@ async def async_request_openai_completions(
         "max_tokens": request_func_input.output_len,
         "logprobs": request_func_input.logprobs,
         "stream": True,
-        "stream_options": {
-            "include_usage": True,
-        },
+        # NOTE(woosuk): Disabled for PD.
+        # "stream_options": {
+        #     "include_usage": True,
+        # },
     }
     _update_payload_common(payload, request_func_input)
 
