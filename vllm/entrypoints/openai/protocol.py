@@ -1691,8 +1691,24 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
 
-PoolingCompletionRequest = EmbeddingCompletionRequest
-PoolingChatRequest = EmbeddingChatRequest
+
+class PoolingCompletionRequest(EmbeddingCompletionRequest):
+    task: str | None = None
+
+    def to_pooling_params(self):
+        params = super().to_pooling_params()
+        params.task = self.task
+        return params
+
+
+class PoolingChatRequest(EmbeddingChatRequest):
+    task: str | None = None
+
+    def to_pooling_params(self):
+        params = super().to_pooling_params()
+        params.task = self.task
+        return params
+
 
 T = TypeVar("T")
 
