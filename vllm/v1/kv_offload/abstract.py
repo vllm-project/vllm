@@ -71,6 +71,7 @@ class OffloadingEvent:
 
 
 class OffloadingManager(ABC):
+    @abstractmethod
     def __init__(self, backend: "Backend", enable_events: bool = False):
         """
         Initialize the OffloadingManager.

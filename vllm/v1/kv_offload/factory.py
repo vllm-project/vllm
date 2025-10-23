@@ -61,7 +61,9 @@ class OffloadingManagerFactory:
     def register_manager(
         cls, policy_name: str, module_path: str, class_name: str
     ) -> None:
-        """Register an eviction policy manager with lazy-loading module and class name."""
+        """
+        Register an eviction policy manager with lazy-loading module and class name.
+        """
         if policy_name in cls._registry:
             raise ValueError(f"Policy '{policy_name}' is already registered.")
 
