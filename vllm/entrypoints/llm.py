@@ -1026,7 +1026,6 @@ class LLM:
 
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
-            assert self.io_processor is not None
             io_processor_prompt = True
             if self.io_processor is None:
                 raise ValueError(

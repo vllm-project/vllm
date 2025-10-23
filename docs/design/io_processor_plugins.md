@@ -64,9 +64,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def validate_or_generate_params(
         self, params: SamplingParams | PoolingParams | None = None
     ) -> SamplingParams | PoolingParams:
-        if params:
-            return params
-        return PoolingParams()
+        return params or PoolingParams()
 
     @abstractmethod
     def output_to_response(
