@@ -5,6 +5,8 @@ import json
 import pathlib
 import itertools
 
+from tqdm import tqdm
+
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -75,6 +77,31 @@ def get_custom_mm_prompts(num_prompts):
 
     return [[{"role": "user", "content": prompt}] for prompt in prompts[:num_prompts]]
 
+def multiturn_inference(llm, sampling_params, num_prompts):
+    from datasets import load_dataset
+    ds = load_dataset("philschmid/mt-bench", split="train")
+
+    outputs = []
+    total_samples = min(sum([len(data["turns"]) for data in ds]), num_prompts if num_prompts is not None else float('inf'))
+    print(f'Running on {total_samples} samples.')
+
+    for i, data in tqdm(enumerate(ds), total=total_samples):
+        if i >= total_samples: break
+        messages = [
+            {"role": "system",
+            "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+        ]
+        for i in range(len(data["turns"])):
+            qs = data["turns"][i]
+            messages.append({"role": "user", "content": qs})
+            output = llm.chat(messages, sampling_params=sampling_params, use_tqdm=False)[0]
+            outputs.append(output)
+            messages.append({
+                "role": "assistant",
+                "content": output.outputs[0].text
+            })
+    return outputs
+
 
 def parse_args():
     parser = FlexibleArgumentParser()
@@ -124,17 +151,17 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     args.custom_skip_chat_template = True
 
-    if not args.custom_mm_prompts:
-        prompts = get_samples(args, tokenizer)
-        # add_special_tokens is False to avoid adding bos twice
-        # when using chat templates
-        prompt_ids = [
-            tokenizer.encode(prompt.prompt, add_special_tokens=False)
-            for prompt in prompts
-        ]
-    else:
-        prompts = get_custom_mm_prompts(args.num_prompts)
-    ic(len(prompts), prompts)
+
+    # if not args.custom_mm_prompts:
+    #     prompts = get_samples(args, tokenizer)
+    #     # add_special_tokens is False to avoid adding bos twice
+    #     # when using chat templates
+    #     prompt_ids = [
+    #         tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    #         for prompt in prompts
+    #     ]
+    # else:
+    #     prompts = get_custom_mm_prompts(args.num_prompts)
 
     # manually specify the speculative token tree
     if args.spec_token_tree is not None:
@@ -221,13 +248,17 @@ def main():
     ic(scheduler_config.max_num_seqs, scheduler_config.max_num_batched_tokens, scheduler_config.max_model_len)
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
-    if not args.custom_mm_prompts:
-        outputs = llm.generate(
-            [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
-            sampling_params=sampling_params,
-        )
-    else:
-        outputs = llm.chat(prompts, sampling_params=sampling_params)
+    # if not args.custom_mm_prompts:
+    #     outputs = llm.generate(
+    #         [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
+    #         sampling_params=sampling_params,
+    #     )
+    # else:
+    #     outputs = llm.chat(prompts, sampling_params=sampling_params)
+
+    # perform multi-turn inference with max-num-seqs=1
+    assert args.max_num_seqs == 1
+    outputs = multiturn_inference(llm, sampling_params, args.num_prompts)
 
     # import Counter in the function b/c vllm has a seperate Counter object
     def get_finish_reason_counts(outputs):
@@ -240,7 +271,6 @@ def main():
     # print the generated text
     if args.print_output:
         for i, output in enumerate(outputs):
-            ic(output)
             prompt = tokenizer.decode(output.prompt_token_ids)
             print("*" * 150)
             print(f"Output {i}:")
