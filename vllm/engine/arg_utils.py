@@ -1743,16 +1743,6 @@ class EngineArgs:
         if model_config.runner_type != "pooling":
             self.enable_chunked_prefill = True
 
-            # TODO: When prefix caching supports prompt embeds inputs, this
-            # check can be removed.
-            if self.enable_prompt_embeds and self.enable_prefix_caching is not False:
-                logger.warning(
-                    "--enable-prompt-embeds and --enable-prefix-caching "
-                    "are not supported together in V1. Prefix caching has "
-                    "been disabled."
-                )
-                self.enable_prefix_caching = False
-
             if self.enable_prefix_caching is None:
                 # Disable prefix caching default for hybrid models
                 # since the feature is still experimental.
