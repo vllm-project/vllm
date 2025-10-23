@@ -30,15 +30,14 @@ from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import (
-    decorate_logs,
     deserialize_method_call,
     run_method,
-    set_process_title,
 )
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -456,9 +455,7 @@ class EngineCore:
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(
-                self.scheduler.connector.get_finished_count()  # type: ignore
-            )
+            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
