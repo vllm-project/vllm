@@ -90,9 +90,10 @@ class CacheConfig:
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-    mamba_block_size: int | None = Field(default=None, gt=0, multiple_of=256)
+    mamba_block_size: int | None = Field(default=None, gt=0, multiple_of=8)
     """Size of a contiguous cache block in number of tokens for mamba cache.
-    Can be set only when prefix caching is enabled."""
+    Can be set only when prefix caching is enabled.
+    Value must be a multiple of 8 to align with causal_conv1d kernel."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
