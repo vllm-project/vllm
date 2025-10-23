@@ -49,16 +49,13 @@ SAMPLE_PROMPTS_MM = [
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image;base64,{encode_image_base64(image_1)}"
-                        }
+                        },
                     },
-                    {
-                        "type": "text",
-                        "text": "What's in this image?"
-                    }
-                ]
+                    {"type": "text", "text": "What's in this image?"},
+                ],
             }
         ],
-        "description": "Single image query"
+        "description": "Single image query",
     },
     {
         "messages": [
@@ -69,44 +66,33 @@ SAMPLE_PROMPTS_MM = [
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image;base64,{encode_image_base64(image_2)}"
-                        }
+                        },
                     },
                     {
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image;base64,{encode_image_base64(image_1)}"
-                        }
+                        },
                     },
-                    {
-                        "type": "text",
-                        "text": "Describe these 2 images in detail."
-                    }
-                ]
+                    {"type": "text", "text": "Describe these 2 images in detail."},
+                ],
             }
         ],
-        "description": "2 images with detailed query"
+        "description": "2 images with detailed query",
     },
 ]
 
 # Text-only prompts for mixed testing
 SAMPLE_PROMPTS_TEXT = [
     {
-        "messages": [
-            {
-                "role": "user",
-                "content": "What is the capital of France?"
-            }
-        ],
-        "description": "Simple text-only query"
+        "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        "description": "Simple text-only query",
     },
     {
         "messages": [
-            {
-                "role": "user",
-                "content": "Explain quantum computing in simple terms."
-            }
+            {"role": "user", "content": "Explain quantum computing in simple terms."}
         ],
-        "description": "Text-only explanation request"
+        "description": "Text-only explanation request",
     },
 ]
 
@@ -157,7 +143,7 @@ def run_chat_completion(
         Generated text content
     """
     client = openai.OpenAI(api_key="EMPTY", base_url=base_url)
-    
+
     completion = client.chat.completions.create(
         model=model_name,
         messages=messages,
@@ -165,7 +151,7 @@ def run_chat_completion(
         temperature=0.0,
         seed=42,
     )
-    
+
     return completion.choices[0].message.content
 
 
@@ -193,7 +179,7 @@ def main():
         "--mode",
         type=str,
         default="baseline",
-        choices=["baseline","baseline_pd", "disagg"],
+        choices=["baseline", "baseline_pd", "disagg"],
         help="Mode: baseline/baseline_pd (saves outputs) or disagg (compares outputs)",
     )
 
@@ -235,9 +221,7 @@ def main():
 
     # Check if server is ready
     if not check_vllm_server(health_check_url):
-        raise RuntimeError(
-            f"vLLM server at {args.service_url} is not ready!"
-        )
+        raise RuntimeError(f"vLLM server at {args.service_url} is not ready!")
 
     # Select prompts to use
     if args.use_mm_prompts:
@@ -250,17 +234,19 @@ def main():
     # Run completions
     service_url = f"{args.service_url}/v1"
     output_strs = {}
-    
+
     for i, prompt_data in enumerate(test_prompts):
-        print(f"\nRunning prompt {i+1}/{len(test_prompts)}: {prompt_data['description']}")
-        
+        print(
+            f"\nRunning prompt {i + 1}/{len(test_prompts)}: {prompt_data['description']}"
+        )
+
         output_str = run_chat_completion(
             base_url=service_url,
             model_name=args.model_name,
             messages=prompt_data["messages"],
             max_tokens=MAX_OUTPUT_LEN,
         )
-        
+
         # Use description as key for comparison
         key = prompt_data["description"]
         output_strs[key] = output_str
@@ -289,16 +275,16 @@ def main():
 
         # Verify outputs match
         print("\nComparing disagg outputs with baseline...")
-        assert isinstance(baseline_outputs, dict), \
-            "Baseline outputs should be a dict"
-        assert len(baseline_outputs) == len(output_strs), \
-            f"Length mismatch: baseline has {len(baseline_outputs)}, " \
+        assert isinstance(baseline_outputs, dict), "Baseline outputs should be a dict"
+        assert len(baseline_outputs) == len(output_strs), (
+            f"Length mismatch: baseline has {len(baseline_outputs)}, "
             f"disagg has {len(output_strs)}"
+        )
 
         all_match = True
         for key, baseline_output in baseline_outputs.items():
             assert key in output_strs, f"{key} not in disagg outputs"
-            
+
             disagg_output = output_strs[key]
             if baseline_output == disagg_output:
                 print(f"✓ {key}: MATCH")
@@ -307,11 +293,10 @@ def main():
                 print(f"  Baseline: {baseline_output}")
                 print(f"  Disagg:   {disagg_output}")
                 all_match = False
-        
+
         assert all_match, "Disagg outputs do not match baseline!"
         print("\n✅ All outputs match! Test PASSED")
 
 
 if __name__ == "__main__":
     main()
-
