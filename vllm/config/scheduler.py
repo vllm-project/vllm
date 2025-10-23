@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from collections.abc import Callable
 from dataclasses import InitVar, field
 from typing import Any, Literal
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
