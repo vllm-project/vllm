@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+import importlib
+import inspect
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 from transformers import (
     AutoFeatureExtractor,
@@ -12,7 +14,7 @@ from transformers import (
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
-from transformers.processing_utils import ProcessorMixin
+from transformers.processing_utils import ProcessingKwargs, ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
@@ -183,13 +185,41 @@ def cached_processor_from_config(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    return cached_get_processor(
+    processor = cached_get_processor(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
+    # Extract kwargs from processorkwargs, including those model specific ones
+    dynamic_kwargs = get_processorkwargs_from_processor(processor)
+    mm_config = model_config.get_multimodal_config()
+    mm_config.mm_processor_dynamic_kwargs = (
+        dynamic_kwargs | mm_config.mm_processor_dynamic_kwargs
+        if mm_config.mm_processor_dynamic_kwargs else dynamic_kwargs
+    )
+    return processor
+
+
+def get_processorkwargs_from_processor(processor: ProcessorMixin) -> set[str]:
+    try:
+        call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
+        # if the processor has explicit kwargs annotation, use it
+        if call_kwargs is not None:
+            processor_kwargs = get_args(call_kwargs)[0].__annotations__.keys()
+            return set(processor_kwargs)
+        # otherwise, try to get from ProcessingKwargs
+        else:
+            module_name = type(processor).__module__
+            mod = importlib.import_module(module_name)
+
+            for _, obj in inspect.getmembers(mod, inspect.isclass):
+                if issubclass(obj, ProcessingKwargs) and obj is not ProcessingKwargs:
+                    return _collect_dynamic_keys_from_processing_kwargs(obj)
+            return set()
+    except Exception as e:
+        return set()
 
 
 def get_feature_extractor(
