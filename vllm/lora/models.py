@@ -13,7 +13,7 @@ from torch import nn
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
+from vllm.lora.layers import BaseLayerWithLoRA, FusedMoEWithLoRA, LoRAMapping
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
@@ -23,15 +23,14 @@ from vllm.lora.utils import (
     get_supported_lora_modules,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
+    process_packed_modules_mapping,
     replace_submodule,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
-from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.utils import is_pin_memory_available
 from vllm.utils.cache import LRUCache
 
@@ -58,18 +57,6 @@ def get_lora_id():
     global _GLOBAL_LORA_ID
     _GLOBAL_LORA_ID += 1
     return _GLOBAL_LORA_ID
-
-
-def is_moe_model(model: nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers and warns the user."""
-    if any(isinstance(module, FusedMoE) for module in model.modules()):
-        logger.warning_once(
-            "For MoE models, vLLM currently does not support fused MoE LoRA "
-            "inference. Please ensure that the loaded LoRA model does not "
-            "contain expert weights."
-        )
-        return True
-    return False
 
 
 class LoRAModel:
@@ -229,9 +216,19 @@ class LoRAModel:
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
-                part_name = module_name.split(".")[-1]
-                if part_name not in expected_lora_modules:
+                # Handle FSDP file format where experts.base_layer is the
+                # gate_up_proj and experts is the down_proj
+                if "base_layer" in lora_module:
+                    continue
+                # Case for expert lora weights
+                if ".experts" in module_name:
+                    if not any(
+                        module_name.endswith(ele) for ele in expected_lora_modules
+                    ):
+                        unexpected_modules.append(module_name)
+                elif module_name.split(".")[-1] not in expected_lora_modules:
                     unexpected_modules.append(module_name)
+
             if unexpected_modules:
                 raise ValueError(
                     f"While loading {lora_dir}, expected"
@@ -371,7 +368,7 @@ class LoRAModelManager:
         assert self.supported_lora_modules, "No supported LoRA modules found in"
         f" {self.model.__class__.__name__}."
 
-        self.packed_modules_mapping = get_packed_modules_mapping(self.model)
+        self.packed_modules_mapping = process_packed_modules_mapping(self.model)
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
@@ -380,7 +377,6 @@ class LoRAModelManager:
             and hasattr(self.model, "get_mm_mapping")
         )
         self.is_pooling_model = is_pooling_model(self.model)
-        self.is_moe_model = is_moe_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
@@ -430,7 +426,50 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
-                module_lora.optimize()
+                # Note (gnovack) - If MOE lora weights are not split into
+                # num_experts chunks, we split them here
+                if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
+                    module_lora.lora_a
+                ):
+                    # Handle FSDP file format where experts.base_layer is the
+                    # gate_up_proj and experts is the down_proj
+                    gate_up_proj_lora = self._get_lora_layer_weights(
+                        lora_model, module_name + ".base_layer"
+                    )
+
+                    assert gate_up_proj_lora is not None
+                    assert module_lora is not None
+
+                    down_proj_lora = module_lora
+                    num_experts = module_lora.lora_a.shape[0] // module_lora.rank
+
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+
+                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
+                        num_experts, dim=-1
+                    )
+                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
+                        num_experts, dim=-1
+                    )
+
+                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
+
+                    lora_a = []
+                    lora_b = []
+                    for i in range(num_experts):
+                        lora_a.append(gate_proj_a[i])
+                        lora_a.append(down_proj_a[i])
+                        lora_a.append(up_proj_a[i])
+
+                        lora_b.append(gate_proj_b[i])
+                        lora_b.append(down_proj_b[i])
+                        lora_b.append(up_proj_b[i])
+
+                    module_lora.lora_a = lora_a
+                    module_lora.lora_b = lora_b
+
                 module.set_lora(
                     index,
                     module_lora.lora_a,
@@ -486,6 +525,7 @@ class LoRAModelManager:
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
                 continue
+
             if not self._match_target_modules(module_name):
                 continue
             # A temporary approach for multimodal models to support LoRA
@@ -549,7 +589,10 @@ class LoRAModelManager:
             new_module.set_mapping(self.punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
-        assert isinstance(module, BaseLayerWithLoRA)
+        assert isinstance(module, BaseLayerWithLoRA), (
+            f"Module {module_name} must be a BaseLayerWithLoRA instance,"
+        )
+        f" got {type(module)}"
         self.modules[module_name] = module
 
     def create_dummy_lora(

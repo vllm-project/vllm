@@ -222,6 +222,7 @@ def _test_processing_correctness(
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
     "ovis": False,
     "ovis2_5": False,
+    "paligemma": False,
     "ultravox": False,
     "whisper": False,
 }
@@ -326,12 +327,15 @@ def _test_processing_correctness_one(
     [
         "rhymes-ai/Aria",
         "CohereForAI/aya-vision-8b",
+        "Open-Bee/Bee-8B-RL",
         "Salesforce/blip2-opt-2.7b",
         "facebook/chameleon-7b",
         "CohereLabs/command-a-vision-07-2025",
         "deepseek-ai/deepseek-vl2-tiny",
+        "deepseek-ai/DeepSeek-OCR",
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         "adept/fuyu-8b",
+        "google/gemma-3-4b-it",
         "google/gemma-3n-E2B-it",
         "zai-org/glm-4v-9b",
         "zai-org/GLM-4.1V-9B-Thinking",
@@ -368,6 +372,8 @@ def _test_processing_correctness_one(
         "AIDC-AI/Ovis1.6-Llama3.2-3B",
         "AIDC-AI/Ovis2-1B",
         "AIDC-AI/Ovis2.5-2B",
+        "google/paligemma-3b-mix-224",
+        "google/paligemma2-3b-ft-docci-448",
         "microsoft/Phi-3.5-vision-instruct",
         "microsoft/Phi-4-multimodal-instruct",
         "mistralai/Pixtral-12B-2409",

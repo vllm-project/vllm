@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def set_random_seed(seed: int) -> None:

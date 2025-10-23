@@ -12,7 +12,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
 
@@ -198,7 +198,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)
-        else CompilationConfig(level=compile_config)
+        else CompilationConfig(mode=compile_config)
     )
 
     prompts = [

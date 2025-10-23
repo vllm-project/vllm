@@ -157,11 +157,9 @@ def test_models_distributed(
             and distributed_executor_backend == "ray"
             and attention_backend == ""
             and test_suite == "L4"
+            and enable_prompt_embeds
         ):  # noqa
-            if enable_prompt_embeds:
-                pytest.skip("enable_prompt_embeds does not work with ray compiled dag.")
-            monkeypatch_context.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
-            monkeypatch_context.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
+            pytest.skip("enable_prompt_embeds does not work with ray compiled dag.")
 
         if attention_backend:
             monkeypatch_context.setenv(

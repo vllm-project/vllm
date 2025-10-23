@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     GroupShape,
 )
 from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 from ..utils import has_module_attribute, multi_gpu_test
 from .backend import TestBackend

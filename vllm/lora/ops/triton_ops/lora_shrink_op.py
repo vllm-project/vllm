@@ -12,7 +12,7 @@ import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -168,6 +168,8 @@ def _lora_shrink(
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
     assert lora_token_start_loc.size(0) == lora_ids.size(0) + 1
+
+    output_tensor.zero_()
 
     (lora_ptr_tensor, lora_strides_d0, lora_strides_d1, lora_strides_d2) = (
         _get_lora_a_ptr(lora_a_weights, inputs.device)

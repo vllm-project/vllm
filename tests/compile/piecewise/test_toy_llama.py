@@ -27,7 +27,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from .. import silly_attention  # noqa: F401
@@ -355,13 +355,13 @@ def test_toy_llama(
     )
 
     compile_config_no_compile = CompilationConfig(
-        level=CompilationMode.NONE,
+        mode=CompilationMode.NONE,
         cudagraph_mode=CUDAGraphMode.NONE,
         backend="eager",
     )
 
     compile_config_no_split = CompilationConfig(
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         use_inductor_graph_partition=use_inductor_graph_partition,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         backend=backend,

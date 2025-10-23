@@ -18,7 +18,6 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -49,8 +48,9 @@ from vllm.transformers_utils.configs.deepseek_vl2 import (
 )
 from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
@@ -101,9 +101,10 @@ class MlpProjector(nn.Module):
         super().__init__()
 
         self.cfg = cfg
+        self.projector_type = cfg.projector_type
         assert not cfg.token_pooling, "Token pooling is not supported currently."
 
-        if cfg.projector_type == "downsample_mlp_gelu":
+        if self.projector_type == "downsample_mlp_gelu":
             mlp_depth = cfg.depth
             mlp_ratio = cfg.mlp_ratio
             modules = [
@@ -120,7 +121,8 @@ class MlpProjector(nn.Module):
             modules.append(nn.GELU())
             modules.append(nn.Linear(cfg.n_embed * mlp_ratio, cfg.n_embed))
             modules = nn.Sequential(*modules)
-
+        elif self.projector_type == "linear":
+            modules = nn.Linear(cfg.input_dim, cfg.n_embed)
         else:
             raise NotImplementedError(
                 f"Unsupported projector type: {cfg.projector_type}"
@@ -130,24 +132,25 @@ class MlpProjector(nn.Module):
 
     def forward(self, x):
         bs, hw, input_dim = x.shape
-        h = w = int((hw) ** 0.5)
-        """compute padding"""
-        if h % self.cfg.downsample_ratio:
-            pad = self.cfg.downsample_ratio - h % self.cfg.downsample_ratio
-        else:
-            pad = 0
-        x = x.reshape(bs, h, w, input_dim)
-        if pad > 0:
-            x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
-        """4 to 1 concat"""
-        x = x.permute(0, 3, 1, 2)  # B, C, H, W
-        x = F.unfold(
-            x,
-            kernel_size=self.cfg.downsample_ratio,
-            stride=self.cfg.downsample_ratio,
-            padding=0,
-        )  # B, C*4, HW // 4
-        x = x.permute(0, 2, 1)
+        if self.projector_type == "downsample_mlp_gelu":
+            h = w = int((hw) ** 0.5)
+            """compute padding"""
+            if h % self.cfg.downsample_ratio:
+                pad = self.cfg.downsample_ratio - h % self.cfg.downsample_ratio
+            else:
+                pad = 0
+            x = x.reshape(bs, h, w, input_dim)
+            if pad > 0:
+                x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
+            """4 to 1 concat"""
+            x = x.permute(0, 3, 1, 2)  # B, C, H, W
+            x = F.unfold(
+                x,
+                kernel_size=self.cfg.downsample_ratio,
+                stride=self.cfg.downsample_ratio,
+                padding=0,
+            )  # B, C*4, HW // 4
+            x = x.permute(0, 2, 1)
 
         return self.layers(x)
 

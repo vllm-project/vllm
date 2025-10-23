@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, round_up
+from vllm.utils import cdiv, round_up
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -480,12 +481,9 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 
-        # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
-        #   "auto")
+        # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
-            "fp8"
-        ):
+        if cache_config.cache_dtype.startswith("fp8"):
             cache_config.cache_dtype = "fp8_ds_mla"
             logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
         if cache_config.cache_dtype == "bfloat16":

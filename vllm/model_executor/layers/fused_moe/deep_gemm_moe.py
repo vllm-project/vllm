@@ -26,12 +26,12 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
 )
-from vllm.utils.functools import run_once
+from vllm.utils.func_utils import run_once
+from vllm.utils.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
 

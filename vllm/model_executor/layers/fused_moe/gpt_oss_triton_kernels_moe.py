@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils import has_triton_kernels
+from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
