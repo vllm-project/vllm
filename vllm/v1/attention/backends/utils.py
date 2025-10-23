@@ -1027,4 +1027,4 @@ def get_dcp_local_seq_lens(
         dcp_kv_cache_interleave_size,
     )
     dcp_local_seq_lens = base + remainder
-    return dcp_local_seq_lens
+    return dcp_local_seq_lens.squeeze(1)
