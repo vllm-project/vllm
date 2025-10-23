@@ -175,7 +175,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.cuda.Event()
+        self.async_copy_ready_event = torch.Event()
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -374,10 +374,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.async_output_copy_stream: torch.cuda.Stream | None = None
         # cuda event to synchronize use of reused CPU tensors between steps
         # when async scheduling is enabled.
-        self.prepare_inputs_event: torch.cuda.Event | None = None
+        self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
-            self.prepare_inputs_event = torch.cuda.Event()
+            self.prepare_inputs_event = torch.Event()
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -495,7 +495,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
-        self.transfer_event = torch.cuda.Event()
+        self.transfer_event = torch.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_model_len, 1),
             dtype=torch.int64,
