@@ -277,7 +277,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         prompt: EngineCoreRequest | PromptType,
         params: SamplingParams | PoolingParams,
-        streaming_params: Optional[StreamingParams] = None,
+        streaming_params: StreamingParams | None = None,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,

@@ -234,7 +234,7 @@ AnyResponseFormat: TypeAlias = (
 class StreamOptions(OpenAIBaseModel):
     include_usage: bool | None = True
     continuous_usage_stats: bool | None = False
-    stream_n: Optional[int] = 1
+    stream_n: int | None = 1
 
 
 class FunctionDefinition(OpenAIBaseModel):

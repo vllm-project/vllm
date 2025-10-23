@@ -37,7 +37,7 @@ class RequestOutputCollector:
 
     def __init__(self,
                  output_kind: RequestOutputKind,
-                 streaming_params: Optional[StreamingParams] = None):
+                 streaming_params: StreamingParams | None = None):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()

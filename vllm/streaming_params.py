@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Streaming parameters for token streaming during text generation."""
-from typing import Optional, Annotated
+from typing import Annotated
 
 import msgspec
 
