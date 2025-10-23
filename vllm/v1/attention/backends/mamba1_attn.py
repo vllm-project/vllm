@@ -75,6 +75,8 @@ class Mamba1AttentionMetadataBuilder(
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
 
+        # TODO(@Josephasafg) Mamba1 and Mamba2 have a lot of code in common here.
+        # We should consolidate this code
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
