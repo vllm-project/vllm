@@ -75,10 +75,6 @@ class Scheduler(SchedulerInterface):
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
-        self.enable_kv_cache_events = (
-            self.kv_events_config is not None
-            and self.kv_events_config.enable_kv_cache_events
-        )
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -171,7 +167,7 @@ class Scheduler(SchedulerInterface):
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
-            enable_kv_cache_events=self.enable_kv_cache_events,
+            enable_kv_cache_events=self.kv_event_publisher is not None,
             dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -662,6 +658,7 @@ class Scheduler(SchedulerInterface):
 
         # publish collected KV cache events
         if events:
+            assert self.kv_event_publisher is not None
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 

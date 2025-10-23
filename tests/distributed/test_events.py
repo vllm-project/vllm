@@ -9,7 +9,6 @@ import pytest
 from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
-    NullEventPublisher,
 )
 
 DP_RANK = 0
@@ -190,16 +189,6 @@ def test_high_volume(publisher, subscriber):
     assert sorted(seqs) == seqs, "Sequence numbers should be in order"
 
 
-def test_null_publisher():
-    """Test that NullEventPublisher can be used without errors"""
-    publisher = NullEventPublisher(DP_RANK)
-
-    # This should not raise any errors
-    batch = create_test_events(5)
-    publisher.publish(batch)
-    publisher.shutdown()
-
-
 def test_data_parallel_rank_tagging(publisher_config):
     """Test that events are properly tagged with their data parallel rank"""
 
@@ -272,8 +261,7 @@ def test_event_publisher_factory():
 
     # test config is None
     publisher = EventPublisherFactory.create(None, DP_RANK)
-    assert isinstance(publisher, NullEventPublisher)
-    publisher.shutdown()
+    assert publisher is None
 
     # test disable kv cache events
     config = KVEventsConfig(
@@ -282,8 +270,7 @@ def test_event_publisher_factory():
         endpoint="tcp://localhost:5557",
     )
     publisher = EventPublisherFactory.create(config, DP_RANK)
-    assert isinstance(publisher, NullEventPublisher)
-    publisher.shutdown()
+    assert publisher is None
 
     # test zmq publisher
     config = KVEventsConfig(
@@ -296,20 +283,19 @@ def test_event_publisher_factory():
     publisher.shutdown()
 
     # test unknown publisher
-    config = KVEventsConfig(
-        enable_kv_cache_events=True,
-        publisher="unknown_publisher",
-        endpoint="tcp://localhost:5557",
-    )
-    with pytest.raises(ValueError, match="Unknown event publisher 'unknown_publisher'"):
-        EventPublisherFactory.create(config, DP_RANK)
+    with pytest.raises(ValueError, match="Input should be 'null' or 'zmq'"):
+        KVEventsConfig(
+            enable_kv_cache_events=True,
+            publisher="unknown_publisher",
+            endpoint="tcp://localhost:5557",
+        )
 
     # test publisher not specified
     config = KVEventsConfig(
         enable_kv_cache_events=True,
-        # publisher not specified, should default to "null"
+        # publisher not specified, should default to "zmq"
         endpoint="tcp://localhost:5557",
     )
     publisher = EventPublisherFactory.create(config, DP_RANK)
-    assert isinstance(publisher, NullEventPublisher)
+    assert isinstance(publisher, ZmqEventPublisher)
     publisher.shutdown()

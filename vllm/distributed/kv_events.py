@@ -99,16 +99,6 @@ class EventPublisher(ABC):
         """Shutdown the publisher."""
 
 
-class NullEventPublisher(EventPublisher):
-    """No-op implementation (default when disabled)."""
-
-    def publish(self, events) -> None:
-        return
-
-    def shutdown(self) -> None:
-        return
-
-
 class ZmqEventPublisher(EventPublisher):
     """Reliable PUB/ROUTER publisher with an in-memory replay buffer.
 
@@ -338,7 +328,6 @@ class ZmqEventPublisher(EventPublisher):
 
 class EventPublisherFactory:
     _registry: dict[str, Callable[..., EventPublisher]] = {
-        "null": NullEventPublisher,
         "zmq": ZmqEventPublisher,
     }
 
@@ -351,10 +340,13 @@ class EventPublisherFactory:
     @classmethod
     def create(
         cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
-    ) -> EventPublisher:
+    ) -> EventPublisher | None:
         """Create publisher from a config mapping."""
-        if config is None or config.publisher == "null":
-            return NullEventPublisher()
+        if (config is None
+            or not config.enable_kv_cache_events
+            or config.publisher == "null"
+        ):
+            return None
 
         config_dict = asdict(config)
 
