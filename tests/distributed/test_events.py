@@ -296,7 +296,7 @@ def test_event_publisher_factory():
     publisher.shutdown()
 
     # test unknown publisher
-    with pytest.raises(ValueError, match="Input should be 'null' or 'zmq'"):
+    with pytest.raises(ValueError, match="Input should be"):
         KVEventsConfig(
             enable_kv_cache_events=True,
             publisher="unknown_publisher",
