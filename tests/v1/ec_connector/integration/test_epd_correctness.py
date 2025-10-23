@@ -39,7 +39,7 @@ MAX_OUTPUT_LEN = 256
 image_1 = ImageAsset("stop_sign").pil_image.resize((1280, 720))
 image_2 = ImageAsset("cherry_blossom").pil_image.resize((1280, 720))
 
-SAMPLE_PROMPTS_MM = [
+SAMPLE_PROMPTS_MM: list[dict] = [
     {
         "messages": [
             {
@@ -83,7 +83,7 @@ SAMPLE_PROMPTS_MM = [
 ]
 
 # Text-only prompts for mixed testing
-SAMPLE_PROMPTS_TEXT = [
+SAMPLE_PROMPTS_TEXT: list[dict] = [
     {
         "messages": [{"role": "user", "content": "What is the capital of France?"}],
         "description": "Simple text-only query",
@@ -237,7 +237,9 @@ def main():
 
     for i, prompt_data in enumerate(test_prompts):
         print(
-            f"\nRunning prompt {i + 1}/{len(test_prompts)}: {prompt_data['description']}"
+            f"\nRunning prompt {i + 1}/{len(test_prompts)}: {
+                prompt_data['description']
+            }"
         )
 
         output_str = run_chat_completion(

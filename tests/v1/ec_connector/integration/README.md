@@ -86,6 +86,7 @@ EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" ./tests/v1/ec_connector/integration/ru
 ### Multimodal Prompts (--use_mm_prompts)
 
 Tests encoder cache transfer:
+
 - Single image query
 - Multiple images in one request
 - Mixed image and text
@@ -94,19 +95,22 @@ Tests encoder cache transfer:
 ### Text-Only Prompts (default)
 
 Quick sanity check:
+
 - Simple text queries
 - Text-only explanations
 - Verifies proxy routing works
 
 ## Expected Behavior
 
-### ✅ Test Passes When:
+### ✅ Test Passes When
+
 - All disagg outputs match baseline outputs exactly
 - No errors during instance startup
 - Encoder cache is properly saved and loaded
 - Proxy correctly routes requests
 
-### ❌ Test Fails When:
+### ❌ Test Fails When
+
 - Outputs differ between baseline and disagg
 - Server startup fails
 - Encoder cache not found (should fallback to local execution)
@@ -123,14 +127,14 @@ Quick sanity check:
 ## Requirements
 
 - Multiple GPUs (3 for 1E+1P+1D, 2 for 1E+1PD, 1 for baseline)
-    - 1E+1P+1D is runnable with 2 GPU by assign E and P on the same GPU now. 
+    - 1E+1P+1D is runnable with 2 GPU by assign E and P on the same GPU now.
 - Multimodal model (e.g., Qwen2.5-VL-3B-Instruct)
 - Internet access (for accessing vllm test images)
-    - 
 
 ## Debugging
 
 ### Check Logs
+
 Logs and baseline output are saved in `/tmp/` by default.
 Can be customized by changing the environment variables.
 
@@ -163,5 +167,3 @@ python test_epd_correctness.py \
     --mode disagg \
     --baseline_file test_output.txt
 ```
-
-
