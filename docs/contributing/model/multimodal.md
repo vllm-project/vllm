@@ -507,7 +507,7 @@ return a schema of the tensors outputted by the HF processor that are related to
     ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supports
+        Our [actual code](../../../vllm/model_executor/models/llava.py) additionally supports
         pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
 
 === "With postprocessing: Fuyu"
@@ -569,7 +569,7 @@ return a schema of the tensors outputted by the HF processor that are related to
         ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/fuyu.py) has special handling
+        Our [actual code](../../../vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
 
     !!! note
@@ -828,8 +828,8 @@ Some HF processors directly insert feature tokens without replacing anything in 
 
 Examples:
 
-- BLIP-2 (insert at start of prompt): <gh-file:vllm/model_executor/models/blip2.py>
-- Molmo (insert after `<|endoftext|>` token): <gh-file:vllm/model_executor/models/molmo.py>
+- BLIP-2 (insert at start of prompt): [vllm/model_executor/models/blip2.py](../../../vllm/model_executor/models/blip2.py)
+- Molmo (insert after `<|endoftext|>` token): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Handling prompt updates unrelated to multi-modal data
 
@@ -837,9 +837,9 @@ Examples:
 
 Examples:
 
-- Chameleon (appends `sep_token`): <gh-file:vllm/model_executor/models/chameleon.py>
-- Fuyu (appends `boa_token`): <gh-file:vllm/model_executor/models/fuyu.py>
-- Molmo (applies chat template which is not defined elsewhere): <gh-file:vllm/model_executor/models/molmo.py>
+- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
+- Fuyu (appends `boa_token`): [vllm/model_executor/models/fuyu.py](../../../vllm/model_executor/models/fuyu.py)
+- Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Custom HF processor
 
@@ -847,6 +847,6 @@ Some models don't define an HF processor class on HF Hub. In that case, you can 
 
 Examples:
 
-- DeepSeek-VL2: <gh-file:vllm/model_executor/models/deepseek_vl2.py>
-- InternVL: <gh-file:vllm/model_executor/models/internvl.py>
-- Qwen-VL: <gh-file:vllm/model_executor/models/qwen_vl.py>
+- DeepSeek-VL2: [vllm/model_executor/models/deepseek_vl2.py](../../../vllm/model_executor/models/deepseek_vl2.py)
+- InternVL: [vllm/model_executor/models/internvl.py](../../../vllm/model_executor/models/internvl.py)
+- Qwen-VL: [vllm/model_executor/models/qwen_vl.py](../../../vllm/model_executor/models/qwen_vl.py)

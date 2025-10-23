@@ -247,6 +247,7 @@ _MULTIMODAL_MODELS = {
         "aya_vision",
         "AyaVisionForConditionalGeneration",
     ),
+    "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": (
         "chameleon",
@@ -257,6 +258,7 @@ _MULTIMODAL_MODELS = {
         "Cohere2VisionForConditionalGeneration",
     ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
+    "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
     "Ernie4_5_VLMoeForConditionalGeneration": (
         "ernie45_vl",
@@ -298,6 +300,10 @@ _MULTIMODAL_MODELS = {
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
+    "LightOnOCRForConditionalGeneration": (
+        "lightonocr",
+        "LightOnOCRForConditionalGeneration",
+    ),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
@@ -401,32 +407,44 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
-    "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+    "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
+    # Text generation models
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
-    "TransformersMoEForCausalLM": ("transformers_moe", "TransformersMoEForCausalLM"),  # noqa: E501
-    "TransformersMoEForMultimodalLM": (
-        "transformers_moe",
-        "TransformersMoEForMultimodalLM",
+    "TransformersMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    # Multimodal models
+    "TransformersMultiModalForCausalLM": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
     ),
-    "TransformersEmbeddingModel": (
-        "transformers_pooling",
-        "TransformersEmbeddingModel",
+    "TransformersMultiModalMoEForCausalLM": (
+        "transformers",
+        "TransformersMultiModalMoEForCausalLM",
     ),
+    # Embedding models
+    "TransformersEmbeddingModel": ("transformers", "TransformersEmbeddingModel"),
+    "TransformersMoEEmbeddingModel": ("transformers", "TransformersMoEEmbeddingModel"),
+    "TransformersMultiModalEmbeddingModel": (
+        "transformers",
+        "TransformersMultiModalEmbeddingModel",
+    ),
+    # Sequence classification models
     "TransformersForSequenceClassification": (
-        "transformers_pooling",
+        "transformers",
         "TransformersForSequenceClassification",
     ),
     "TransformersMoEForSequenceClassification": (
-        "transformers_pooling",
+        "transformers",
         "TransformersMoEForSequenceClassification",
     ),
-    "TransformersMoEEmbeddingModel": (
-        "transformers_pooling",
-        "TransformersMoEEmbeddingModel",
+    "TransformersMultiModalForSequenceClassification": (
+        "transformers",
+        "TransformersMultiModalForSequenceClassification",
     ),
 }
 
@@ -581,7 +599,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             # file not changed, use cached _ModelInfo properties
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
-            logger.exception(
+            logger.debug(
                 ("Cached model info for class %s.%s error. "),
                 self.module_name,
                 self.class_name,

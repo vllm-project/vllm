@@ -16,15 +16,19 @@ To input multi-modal data, follow this schema in [vllm.inputs.EmbedsPrompt][]:
 
 You can pass prompt embeddings from Hugging Face Transformers models to the  `'prompt_embeds'` field of the prompt embedding dictionary, as shown in the following examples:
 
-<gh-file:examples/offline_inference/prompt_embed_inference.py>
+[examples/offline_inference/prompt_embed_inference.py](../../examples/offline_inference/prompt_embed_inference.py)
 
 ## Online Serving
 
-Our OpenAI-compatible server accepts prompt embeddings inputs via the [Completions API](https://platform.openai.com/docs/api-reference/completions). Prompt embeddings inputs are added via a new `'prompt_embeds'` key in the JSON package.
+Our OpenAI-compatible server accepts prompt embeddings inputs via the [Completions API](https://platform.openai.com/docs/api-reference/completions). Prompt embeddings inputs are added via a new `'prompt_embeds'` key in the JSON package and are enabled by the `--enable-prompt-embeds` flag in `vllm serve`.
 
 When a mixture of `'prompt_embeds'` and `'prompt'` inputs are provided in a single request, the prompt embeds are always returned first.
 
 Prompt embeddings are passed in as base64 encoded torch tensors.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
 
 ### Transformers Inputs via OpenAI Client
 
@@ -37,4 +41,4 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --runner generate \
 
 Then, you can use the OpenAI client as follows:
 
-<gh-file:examples/online_serving/prompt_embed_inference_with_openai_client.py>
+[examples/online_serving/prompt_embed_inference_with_openai_client.py](../../examples/online_serving/prompt_embed_inference_with_openai_client.py)

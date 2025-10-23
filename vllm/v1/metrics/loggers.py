@@ -12,6 +12,7 @@ from prometheus_client import Counter, Gauge, Histogram
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
 from vllm.logger import init_logger
+from vllm.plugins import load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -56,6 +57,23 @@ class StatLoggerBase(ABC):
         pass
 
 
+def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
+    factories: list[StatLoggerFactory] = []
+
+    for name, plugin_class in load_plugins_by_group("vllm.stat_logger_plugins").items():
+        if not isinstance(plugin_class, type) or not issubclass(
+            plugin_class, StatLoggerBase
+        ):
+            raise TypeError(
+                f"Stat logger plugin {name!r} must be a subclass of "
+                f"StatLoggerBase (got {plugin_class!r})."
+            )
+
+        factories.append(plugin_class)
+
+    return factories
+
+
 class AggregateStatLoggerBase(StatLoggerBase):
     """Abstract base class for loggers that
     aggregate across multiple DP engines."""
@@ -75,6 +93,7 @@ class LoggingStatLogger(StatLoggerBase):
         # Caching metrics. This cannot be reset.
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = CachingMetrics()
+        self.connector_prefix_caching_metrics = CachingMetrics()
         self.mm_caching_metrics = CachingMetrics()
 
         self.spec_decoding_logging = SpecDecodingLogging()
@@ -121,6 +140,11 @@ class LoggingStatLogger(StatLoggerBase):
 
         if scheduler_stats is not None:
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
+
+            if scheduler_stats.connector_prefix_cache_stats is not None:
+                self.connector_prefix_caching_metrics.observe(
+                    scheduler_stats.connector_prefix_cache_stats
+                )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_logging.observe(scheduler_stats.spec_decoding_stats)
@@ -174,6 +198,9 @@ class LoggingStatLogger(StatLoggerBase):
             self.last_scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         ]
+        if not self.connector_prefix_caching_metrics.empty:
+            log_parts.append("External prefix cache hit rate: %.1f%%")
+            log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
@@ -437,6 +464,34 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_prefix_cache_hits = make_per_engine(
             counter_prefix_cache_hits, engine_indexes, model_name
+        )
+
+        #
+        # External - KV connector prefix cache
+        #
+
+        counter_connector_prefix_cache_queries = self._counter_cls(
+            name="vllm:external_prefix_cache_queries",
+            documentation=(
+                "External prefix cache queries from KV connector "
+                "cross-instance cache sharing, in terms of number of queried tokens."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_connector_prefix_cache_queries = make_per_engine(
+            counter_connector_prefix_cache_queries, engine_indexes, model_name
+        )
+
+        counter_connector_prefix_cache_hits = self._counter_cls(
+            name="vllm:external_prefix_cache_hits",
+            documentation=(
+                "External prefix cache hits from KV connector "
+                "cross-instance cache sharing, in terms of number of cached tokens."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_connector_prefix_cache_hits = make_per_engine(
+            counter_connector_prefix_cache_hits, engine_indexes, model_name
         )
 
         #
@@ -864,6 +919,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
             )
+
+            if scheduler_stats.connector_prefix_cache_stats is not None:
+                self.counter_connector_prefix_cache_queries[engine_idx].inc(
+                    scheduler_stats.connector_prefix_cache_stats.queries
+                )
+                self.counter_connector_prefix_cache_hits[engine_idx].inc(
+                    scheduler_stats.connector_prefix_cache_stats.hits
+                )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
