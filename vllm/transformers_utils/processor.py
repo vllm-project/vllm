@@ -181,55 +181,51 @@ def get_processor(
 
 cached_get_processor = lru_cache(get_processor)
 
+def cached_get_processor_without_dynamic_kwargs(
+    processor_name: str,
+    *args: Any,
+    revision: str | None = None,
+    trust_remote_code: bool = False,
+    processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
+    **kwargs: Any,
+) -> _P:
+    
+    # Step 1: use default kwargs to get a temporary processor instance
+    processor = cached_get_processor(
+        processor_name,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        processor_cls=processor_cls,
+    )
+
+    # Step 2: use temporary processor collect dynamic keys
+    dynamic_keys = get_processorkwargs_from_processor(processor)
+
+    # Step 3: use dynamic_keys filter kwargs
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k not in dynamic_keys}
+
+    # Step 4: use filtered kwargs to get final processor instance
+    final_processor = cached_get_processor(
+        processor_name,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        processor_cls=processor_cls,
+        **filtered_kwargs,
+    )
+
+    return final_processor
 
 def cached_processor_from_config(
     model_config: "ModelConfig",
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    processor = cached_get_processor(
+    return cached_get_processor_without_dynamic_kwargs(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
-    )
-    # After processor instantiation, refine cached dynamic keys
-    try:
-        info = _update_cache_from_instance(model_config, processor_cls, processor)
-        mm_config = model_config.get_multimodal_config()
-
-        mm_config.mm_processor_dynamic_kwargs = (
-            mm_config.mm_processor_dynamic_kwargs | info.dynamic_keys
-            if mm_config.mm_processor_dynamic_kwargs
-            else info.dynamic_keys
-        )
-
-    except Exception:
-        # Best-effort; should never break processor loading.
-        pass
-    return processor
-
-
-@dataclass(frozen=True)
-class _ResolvedProcessorInfo:
-    processor_type: type
-    dynamic_keys: set[str]
-
-
-# Cache key is (model_id, revision, trust_remote_code, processor_cls_identity)
-_PROC_CLASS_CACHE: dict[tuple, _ResolvedProcessorInfo] = {}
-
-
-def _proc_resolution_key(
-    model_config: "ModelConfig",
-    processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
-) -> tuple:
-    return (
-        model_config.model,
-        model_config.revision,
-        bool(model_config.trust_remote_code),
-        getattr(processor_cls, "__name__", str(processor_cls)),
     )
 
 
@@ -256,34 +252,6 @@ def get_processorkwargs_from_processor(processor: _P) -> set[str]:
             return processor_kwargs
     except Exception:
         return set()
-
-
-def _update_cache_from_instance(
-    model_config: "ModelConfig",
-    processor_cls: type[_P] | tuple[type[_P], ...],
-    processor: ProcessorMixin,
-) -> _ResolvedProcessorInfo:
-    """
-    After instantiation (e.g., via AutoProcessor), record the concrete class
-    and its dynamic keys to the cache keyed by (config, processor_cls identity).
-    """
-    key = _proc_resolution_key(model_config, processor_cls)
-    # Extract kwargs from processorkwargs, including those model specific ones
-    dynamic_kwargs = get_processorkwargs_from_processor(processor)
-    info = _ResolvedProcessorInfo(
-        processor_type=type(processor), dynamic_keys=dynamic_kwargs
-    )
-    _PROC_CLASS_CACHE[key] = info
-    return info
-
-
-def _get_cached_dynamic_keys(
-    model_config: "ModelConfig",
-    processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
-) -> set[str] | None:
-    key = _proc_resolution_key(model_config, processor_cls)
-    info = _PROC_CLASS_CACHE.get(key)
-    return set(info.dynamic_keys) if info is not None else None
 
 
 def get_feature_extractor(
