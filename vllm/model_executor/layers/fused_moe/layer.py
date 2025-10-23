@@ -1088,7 +1088,7 @@ class FusedMoE(CustomOp):
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
-        if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
+        if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM or current_platform.is_tpu():
             logger.info_once("Disabling MoE shared_experts stream")
             self.shared_experts_stream = None
         else:
