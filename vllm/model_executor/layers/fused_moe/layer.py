@@ -55,9 +55,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, has_deep_ep, has_pplx, round_up
+from vllm.utils import cdiv, round_up
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
@@ -1085,6 +1086,17 @@ class FusedMoE(CustomOp):
         n_shared_experts: int | None = None,
     ):
         super().__init__()
+
+        # Allow disabling of the separate shared experts stream for
+        # debug purposes.
+        # TODO: Remove this after more extensive testings with TP/DP
+        # and other execution modes
+        if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
+            logger.info_once("Disabling MoE shared_experts cuda stream")
+            self.shared_experts_stream = None
+        else:
+            self.shared_experts_stream = torch.cuda.Stream()
+
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -1355,6 +1367,10 @@ class FusedMoE(CustomOp):
         return None
 
     @property
+    def gate(self) -> torch.nn.Module | None:
+        return None
+
+    @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
 
@@ -1411,6 +1427,11 @@ class FusedMoE(CustomOp):
             or self.moe_parallel_config.use_deepep_ll_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         )
+
+    @property
+    def is_internal_router(self) -> bool:
+        # By default, router/gate is called before FusedMoE forward pass
+        return False
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
@@ -2193,6 +2214,7 @@ class FusedMoE(CustomOp):
         self,
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
+        has_separate_shared_experts: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
@@ -2241,11 +2263,23 @@ class FusedMoE(CustomOp):
 
             # If there are shared experts but we are not using a modular kernel,
             # the shared experts must be called here
-            if (
-                not isinstance(self.quant_method.fused_experts, FusedMoEModularKernel)
-                and self.shared_experts is not None
-            ):
-                shared_output = self.shared_experts(staged_hidden_states)
+            if has_separate_shared_experts:
+                assert self.shared_experts is not None
+
+                if self.shared_experts_stream is not None:
+                    # For chunked, we start the shared experts stream here
+                    # (Note that no concurrency with the router/gate)
+                    self.shared_experts_stream.wait_stream(current_stream())
+
+                    with torch.cuda.stream(self.shared_experts_stream):
+                        # Note that staged_hidden_states clone() is necessary
+                        # here to avoid conflict with the main stream
+                        shared_output = self.shared_experts(
+                            staged_hidden_states.clone()
+                        )
+                else:
+                    shared_output = self.shared_experts(staged_hidden_states)
+
             else:
                 shared_output = None
 
@@ -2274,9 +2308,14 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            if shared_output is not None:
+            if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
                 assert self.shared_experts is not None
+
+                # Here we finish the shared experts stream
+                if self.shared_experts_stream is not None:
+                    current_stream().wait_stream(self.shared_experts_stream)
+
                 final_hidden_states = (
                     shared_output,
                     final_hidden_states,
@@ -2346,8 +2385,33 @@ class FusedMoE(CustomOp):
 
         self.ensure_moe_quant_config()
 
-        if self.use_dp_chunking:
-            return self.forward_impl_chunked(hidden_states, router_logits)
+        has_separate_shared_experts = (
+            not isinstance(self.quant_method.fused_experts, FusedMoEModularKernel)
+            and self.shared_experts is not None
+        )
+
+        use_chunked_impl = self.use_dp_chunking
+
+        if (
+            has_separate_shared_experts
+            and not use_chunked_impl
+            and self.shared_experts_stream is not None
+        ):
+            # Start the separate shared experts stream here since we want
+            # to run in parallel with the router/gate (next op below)
+            self.shared_experts_stream.wait_stream(current_stream())
+
+        # If router/gate provided, then apply it here.
+        # (Note: This code runs only when "overlapped mode" is on to allow
+        #        parallel execution of shared experts with the FusedMoE via
+        #        separate cuda stream)
+        if self.gate is not None:
+            router_logits, _ = self.gate(hidden_states)
+
+        if use_chunked_impl:
+            return self.forward_impl_chunked(
+                hidden_states, router_logits, has_separate_shared_experts
+            )
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1 and not self.quant_method.using_modular_kernel
@@ -2355,11 +2419,17 @@ class FusedMoE(CustomOp):
 
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here
-        if (
-            not isinstance(self.quant_method.fused_experts, FusedMoEModularKernel)
-            and self.shared_experts is not None
-        ):
-            shared_output = self.shared_experts(hidden_states)
+        if has_separate_shared_experts:
+            assert self.shared_experts is not None
+
+            if self.shared_experts_stream is not None:
+                # Run shared experts in parallel on a separate stream
+                with torch.cuda.stream(self.shared_experts_stream):
+                    # Note that hidden_states clone() is necessary here to avoid
+                    # conflict with the main stream
+                    shared_output = self.shared_experts(hidden_states.clone())
+            else:
+                shared_output = self.shared_experts(hidden_states)
         else:
             shared_output = None
 
@@ -2402,9 +2472,14 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            if shared_output is not None:
+            if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
                 assert self.shared_experts is not None
+
+                # Wait for the parallel shared experts stream to finish here
+                if self.shared_experts_stream is not None:
+                    current_stream().wait_stream(self.shared_experts_stream)
+
                 final_hidden_states = (
                     shared_output,
                     final_hidden_states,
