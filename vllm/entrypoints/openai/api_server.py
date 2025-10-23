@@ -1011,7 +1011,7 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("Unpinning all pinned KV blocks ...")
         count = await engine_client(raw_request).unpin_all_pinned_prefixes()
         return JSONResponse(content={"unpinned": int(count)})
-      
+
     @router.post("/reset_mm_cache")
     async def reset_mm_cache(raw_request: Request):
         """
