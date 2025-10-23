@@ -18,9 +18,9 @@ from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
-import ray
 import zmq
 import zmq.asyncio
+from ray.util.state import get_actor
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -696,19 +696,14 @@ class MPClient(EngineCoreClient):
             return
 
         def monitor_actors():
+            all_actors = (
+                engine_manager.local_engine_actors + engine_manager.remote_engine_actors
+            )
+            if not all_actors:
+                return
             while True:
-                all_actors = (
-                    engine_manager.local_engine_actors
-                    + engine_manager.remote_engine_actors
-                )
-
-                if not all_actors:
-                    return
-
-                for i, actor in enumerate(all_actors):
+                for actor in all_actors:
                     actor_id = actor._actor_id.hex()
-                    actor_info = ray.state.actors(actor_id)
-                    actor_state = actor_info.get("State", "UNKNOWN")
                     if actor in engine_manager.local_engine_actors:
                         actor_index = engine_manager.local_engine_actors.index(actor)
                     elif actor in engine_manager.remote_engine_actors:
@@ -719,14 +714,15 @@ class MPClient(EngineCoreClient):
                         logger.error("Unknown actor (ID: %s)", actor_id)
                         continue
 
-                    if actor_state == "DEAD":
+                    actor_info = get_actor(actor_id)
+                    if actor_info.state == "DEAD":
                         fault_info = FaultInfo(
                             type="engine_actor dead",
-                            message=f"Engine core actor id {actor_id} "
-                            f"(status: {actor_state}).",
+                            message=str(actor_info.death_cause),
                             engine_id=str(actor_index),
                             additional_info=None,
                         )
+                        all_actors.remove(actor)
                         engine_manager.engine_down_socket.send_multipart(
                             [b"", fault_info.serialize().encode("utf-8")]
                         )

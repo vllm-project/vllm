@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import multiprocessing
 import os
 import uuid
 import weakref
@@ -24,7 +25,6 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import (
     get_mp_context,
-    serialize_method_call,
 )
 from vllm.utils.network_utils import (
     get_open_zmq_ipc_path,
@@ -35,6 +35,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor import Executor
+from vllm.v1.serial_utils import serialize_method_call
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -126,9 +127,10 @@ class CoreEngineProcManager:
             identity = generate_identity_group(
                 "core_engine_proc_manager", "client_guard", "report", 1
             )[0]
-            zmq_addr = (
-                f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
-                f"{vllm_config.fault_tolerance_config.fault_report_port}"
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.fault_report_port,
             )
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
@@ -195,33 +197,33 @@ class CoreEngineProcManager:
         """Shutdown all procs."""
         self._finalizer()
 
-    def join_first(self):
-        """Wait for any process to exit."""
-        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            sentinels = [proc.sentinel for proc in self.processes]
-            while self.processes is not None:
-                died = connection.wait(sentinels)
-                for sentinel in died:
-                    died_proc = next(
-                        proc for proc in self.processes if proc.sentinel == sentinel
-                    )
-                    fault_info = FaultInfo(
-                        type="engine_core dead",
-                        message=f"Engine core proc {died_proc.pid} "
-                        f"(PID: {died_proc.name}) died unexpectedly.",
-                        engine_id=died_proc.name[-1],
-                        additional_info=None,
-                    )
-                    self.engine_down_socket.send_multipart(
-                        [b"", fault_info.serialize().encode("utf-8")]
-                    )
+    def start_engine_core_monitor(self):
+        sentinels = [proc.sentinel for proc in self.processes]
+        while self.processes:
+            died = multiprocessing.connection.wait(sentinels)
+            for sentinel in died:
+                died_proc = next(
+                    proc for proc in self.processes if proc.sentinel == sentinel
+                )
+                fault_info = FaultInfo(
+                    type="engine_core dead",
+                    message=f"Engine core proc {died_proc.pid} "
+                    f"(PID: {died_proc.name}) died unexpectedly.",
+                    engine_id=died_proc.name[-1],
+                    additional_info=None,
+                )
+                self.engine_down_socket.send_multipart(
+                    [b"", fault_info.serialize().encode("utf-8")]
+                )
+                if isinstance(sentinel, int) and sentinel in sentinels:
+                    sentinels.remove(sentinel)
+                logger.error(
+                    "Engine core proc %s died unexpectedly",
+                    died_proc,
+                )
 
-                    logger.error(
-                        "Engine core proc %s died unexpectedly",
-                        died_proc,
-                    )
-        else:
-            connection.wait(proc.sentinel for proc in self.processes)
+    def join_first(self):
+        connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -321,15 +323,19 @@ class CoreEngineActorManager:
 
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
-            num_identity = 1
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.fault_report_port,
+            )
             identity = generate_identity_group(
-                "core_engine_actor_manager", "clinet_guard", "report", num_identity
+                "core_engine_actor_manager", "clinet_guard", "report", 1
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
-                path=vllm_config.fault_tolerance_config.fault_report_addr,
+                path=zmq_addr,
                 socket_type=zmq.DEALER,
-                bind=True,
+                bind=False,
                 identity=identity,
             )
 
@@ -870,10 +876,10 @@ def launch_core_engines(
         addresses.engine_core_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
         )
-
-        addresses.fault_report_addr = (
-            f"tcp://{vllm_config.fault_tolerance_config.fault_report_addr}:"
-            f"{vllm_config.fault_tolerance_config.fault_report_port}"
+        addresses.fault_report_addr = get_engine_client_zmq_addr(
+            local_only=False,
+            host=vllm_config.parallel_config.data_parallel_master_ip,
+            port=vllm_config.fault_tolerance_config.fault_report_port,
         )
         addresses.client_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
