@@ -33,6 +33,7 @@ from vllm.utils import (
     decorate_logs,
     deserialize_method_call,
     run_method,
+    serialize_method_call,
     set_process_title,
 )
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
@@ -101,6 +102,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         fault_report_addr: str,
         guard_identity: bytes,
         tp_size: int,
+        pp_size: int,
     ):
         super().__init__(daemon=True)
         self.engine_index = engine_index
@@ -109,6 +111,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.busy_loop_active = busy_loop_active
         self.engine_input_q = engine_input_q
         self.tp_size = tp_size
+        self.pp_size = pp_size
 
         ctx = zmq.Context()
         # Client <-> EngineCoreGuard sockets
@@ -231,12 +234,15 @@ class EngineCoreGuard(threading.Thread):  # changed
             logger.error("Unexpected error occurred while receiving message: %s", e)
             return (False, None)
 
-    def _stop_worker_execution(self, tp_size: int):
-        for tp_rank in range(tp_size):
-            identity = tp_rank.to_bytes(length=4, byteorder='little')
-            self.worker_cmd_socket.send_multipart(
-                [identity, b"", b"stop worker execution"]
-            )
+    def _stop_worker_execution(self):
+        for tp_rank in range(self.tp_size):
+            for pp_rank in range(self.pp_size):
+                identity = f"{tp_rank}_{pp_rank}".encode()
+                kwargs = {}
+                serialized_stop_worker = serialize_method_call("pause", **kwargs)
+                self.worker_cmd_socket.send_multipart(
+                    [identity, b"", serialized_stop_worker.encode("utf-8")]
+                )
 
     def _report_client_exception(self, exception: Exception) -> None:
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
@@ -279,7 +285,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             # Put a sentinel (empty request) to unblock the busy loop
             # if it's blocked on input_queue.get()
             self.engine_input_q.put(None)
-            self._stop_worker_execution(self.tp_size)
+            self._stop_worker_execution()
             try:
                 # Wait for engine to acknowledge the pause via fault_signal_q
                 exception = self.fault_signal_q.get(timeout=timeout)
@@ -856,6 +862,7 @@ class EngineCoreProc(EngineCore):
                     worker_cmd_addr=addresses.engine_core_cmd_addr,
                     guard_identity=engine_core_guard_ids[self.engine_index],
                     tp_size=vllm_config.parallel_config.tensor_parallel_size,
+                    pp_size=vllm_config.parallel_config.pipeline_parallel_size,
                 )
                 self.engine_core_guard.start()
                 vllm_config.fault_tolerance_config.engine_core_cmd_addr = (
