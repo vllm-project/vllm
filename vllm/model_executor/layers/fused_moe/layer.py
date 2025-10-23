@@ -1089,10 +1089,10 @@ class FusedMoE(CustomOp):
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
-            logger.info_once("Disabling MoE shared_experts cuda stream")
+            logger.info_once("Disabling MoE shared_experts stream")
             self.shared_experts_stream = None
         else:
-            self.shared_experts_stream = torch.cuda.Stream()
+            self.shared_experts_stream = current_platform.Stream()
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -2246,7 +2246,7 @@ class FusedMoE(CustomOp):
                     # (Note that no concurrency with the router/gate)
                     self.shared_experts_stream.wait_stream(current_stream())
 
-                    with torch.cuda.stream(self.shared_experts_stream):
+                    with current_platform.stream(self.shared_experts_stream):
                         # Note that staged_hidden_states clone() is necessary
                         # here to avoid conflict with the main stream
                         shared_output = self.shared_experts(
@@ -2379,7 +2379,7 @@ class FusedMoE(CustomOp):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the FusedMoE via
-        #        separate cuda stream)
+        #        separate stream)
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
 
@@ -2399,7 +2399,7 @@ class FusedMoE(CustomOp):
 
             if self.shared_experts_stream is not None:
                 # Run shared experts in parallel on a separate stream
-                with torch.cuda.stream(self.shared_experts_stream):
+                with current_platform.stream(self.shared_experts_stream):
                     # Note that hidden_states clone() is necessary here to avoid
                     # conflict with the main stream
                     shared_output = self.shared_experts(hidden_states.clone())
