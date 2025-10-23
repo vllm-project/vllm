@@ -252,11 +252,10 @@ def test_resolve_operator_overload():
         "use_cudagraph",
         "expected_max_size",
     ),
-    # expected_max_size == -1 implies assertion error
     [
         (None, None, 1, False, 2048, True, 512),
         ([1, 2, 4], 4, 1, False, 2048, True, 4),
-        ([1, 2, 4], 8, 1, False, 2048, True, -1),  # failed for inconsistent settings
+        ([1, 2, 4], 8, 1, False, 2048, True, RuntimeError),
         ([1, 256], None, 1, False, 2048, 256),
         ([], None, 1, False, 2048, False, 0),
         (None, 0, 1, False, 2048, False, 0),
@@ -266,9 +265,9 @@ def test_resolve_operator_overload():
         ([1, 2, 4, 15], None, 2, True, 2048, True, 4),  # filtered out 15 due to SP
         ([1, 2, 4, 15], None, 1, False, 8, True, 4),  # limited by the max_tokens
         # the list should contain at least 1 element when use cudagraph
-        ([], None, 1, False, 2048, True, -1),
+        ([], None, 1, False, 2048, True, RuntimeError),
         # the max capturing size should be >= 1 when use cudagraph
-        (None, 0, 1, False, 2048, True, -1),
+        (None, 0, 1, False, 2048, True, RuntimeError),
     ],
 )
 def test_cudagraph_sizes_post_init(
@@ -281,8 +280,8 @@ def test_cudagraph_sizes_post_init(
     expected_max_size,
 ):
     ctx = nullcontext()
-    if expected_max_size == -1:
-        ctx = pytest.raises(RuntimeError)
+    if isinstance(expected_max_size, Exception):
+        ctx = pytest.raises(expected_max_size)
 
     cudagraph_mode = CUDAGraphMode.PIECEWISE if use_cudagraph else CUDAGraphMode.NONE
     with ctx:

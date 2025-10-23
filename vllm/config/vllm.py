@@ -751,7 +751,7 @@ class VllmConfig:
                 cudagraph_capture_sizes[-1] if cudagraph_capture_sizes else 0
             )
             if (
-                self.compilation_config.max_cudagraph_capture_size
+                self.compilation_config.max_cudagraph_capture_size is not None
                 and self.compilation_config.max_cudagraph_capture_size != valid_max_size
             ):
                 # this assertion take effect only when both two flags are user-specified
