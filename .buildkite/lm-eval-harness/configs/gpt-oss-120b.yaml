@@ -3,7 +3,7 @@ trust_remote_code: true
 tasks:
 - name: "aime25"
   metrics:
-  - name: "exact_match"
+  - name: "exact_match,custom-extract"
     value: 0.80
 limit: 250
 num_fewshot: 0
