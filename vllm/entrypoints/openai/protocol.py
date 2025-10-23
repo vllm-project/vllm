@@ -2233,13 +2233,13 @@ class ResponsesResponse(OpenAIBaseModel):
     # NOTE: openAI harmony doesn't serialize TextContent properly,
     # TODO: this fixes for TextContent, but need to verify for tools etc
     # https://github.com/openai/harmony/issues/78
-    @field_serializer("output_messages", when_used="json")
+    @field_serializer("output_messages")
     def serialize_output_messages(self, msgs, _info):
         return serialize_messages(msgs)
 
     # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
     # https://github.com/openai/harmony/issues/78
-    @field_serializer("input_messages", when_used="json")
+    @field_serializer("input_messages")
     def serialize_input_messages(self, msgs, _info):
         return serialize_messages(msgs)
 
