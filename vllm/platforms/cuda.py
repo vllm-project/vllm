@@ -46,7 +46,9 @@ def _get_backend_priorities(
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.attention.backends.registry import _Backend
 
-    if device_capability == DeviceCapability(10, 0):
+    if device_capability >= DeviceCapability(10, 0) and (
+        device_capability < DeviceCapability(11, 0)
+    ):
         return {
             # non-MLA backends
             _Backend.FLASHINFER: 0,
@@ -220,7 +222,7 @@ class CudaPlatformBase(Platform):
         invalid_reasons = {}
         from vllm.attention.backends.registry import _Backend, backend_to_class
 
-        backend_priorities = _get_backend_priorities()
+        backend_priorities = _get_backend_priorities(device_capability)
         for backend in _Backend:
             if backend not in backend_priorities:
                 continue
