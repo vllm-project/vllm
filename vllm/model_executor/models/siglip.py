@@ -83,7 +83,7 @@ class SiglipImagePixelInputs(TensorSchema):
 _POOLING_TYPE_TO_STRATEGY: dict[str, VisionFeatureSelectStrategyStr] = {
     "MEAN": "full",
     "ALL": "full",
-    "LAST": "class",
+    "CLS": "class",
 }
 
 
@@ -956,8 +956,8 @@ class SiglipTextEmbeddings(nn.Module):
         return embeddings
 
 
-# Assume EOS token corresponds to LAST token in text model
-@default_pooling_type("LAST")
+# Assume EOS token corresponds to CLS token in text model
+@default_pooling_type("CLS")
 @MULTIMODAL_REGISTRY.register_processor(
     SiglipMultiModalProcessor,
     info=SiglipProcessingInfo,
@@ -1031,7 +1031,10 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
         )
-        return self.text_model.head(last_hidden_state)
+        text_features = self.text_model.head(last_hidden_state)
+        # Flip to extract CLS token (first token after reversal) for pooling
+        text_features = text_features.flip(0)
+        return text_features
 
     def get_image_features(
         self,
