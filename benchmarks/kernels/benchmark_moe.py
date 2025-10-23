@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import inspect
 import json
 import os
 import time
@@ -9,7 +10,6 @@ from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
 from typing import Any, TypedDict
-import inspect
 
 import ray
 import torch
@@ -568,54 +568,58 @@ def _get_config_dtype_str_compatible(
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    **kwargs
+    **kwargs,
 ) -> str | None:
     """Multi-level import fallback for _get_config_dtype_str function."""
     try:
         from vllm.model_executor.layers.fused_moe.config import (
-            _get_config_dtype_str as _original_func
+            _get_config_dtype_str as _original_func,
         )
+
         return _original_func(
             dtype,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
-            **kwargs
+            **kwargs,
         )
     except ImportError:
         try:
             from vllm.model_executor.layers.fused_moe import (
-                _get_config_dtype_str as _original_func
+                _get_config_dtype_str as _original_func,
             )
+
             return _original_func(
                 dtype,
                 use_fp8_w8a8=use_fp8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
-                **kwargs
+                **kwargs,
             )
         except ImportError:
             try:
                 from vllm.model_executor.layers.fused_moe.layer import (
-                    _get_config_dtype_str as _original_func
+                    _get_config_dtype_str as _original_func,
                 )
+
                 return _original_func(
                     dtype,
                     use_fp8_w8a8=use_fp8_w8a8,
                     use_int8_w8a16=use_int8_w8a16,
                     use_int4_w4a16=use_int4_w4a16,
-                    **kwargs
+                    **kwargs,
                 )
             except ImportError:
                 try:
                     from vllm.model_executor.layers.fused_moe import FusedMoE
-                    if hasattr(FusedMoE, '_get_config_dtype_str'):
-                        return getattr(FusedMoE, '_get_config_dtype_str')(
+
+                    if hasattr(FusedMoE, "_get_config_dtype_str"):
+                        return FusedMoE._get_config_dtype_str(
                             dtype,
                             use_fp8_w8a8=use_fp8_w8a8,
                             use_int8_w8a16=use_int8_w8a16,
                             use_int4_w4a16=use_int4_w4a16,
-                            **kwargs
+                            **kwargs,
                         )
                 except ImportError:
                     pass
@@ -632,35 +636,35 @@ def _get_config_dtype_str_compatible(
                     return "float32"
                 return None
 
+
 def make_quant_config_compatible(
     quant_dtype, w1_scale, w2_scale, a1_scale, a2_scale, block_quant_shape
 ):
     """Compatible wrapper for FusedMoEQuantConfig.make() across vLLM versions."""
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
     if quant_dtype is None:
         return None
     param_combinations = [
         {
-            'quant_dtype': quant_dtype,
-            'w1_scale': w1_scale,
-            'w2_scale': w2_scale,
-            'a1_scale': a1_scale,
-            'a2_scale': a2_scale,
-            'block_quant_shape': block_quant_shape,
+            "quant_dtype": quant_dtype,
+            "w1_scale": w1_scale,
+            "w2_scale": w2_scale,
+            "a1_scale": a1_scale,
+            "a2_scale": a2_scale,
+            "block_quant_shape": block_quant_shape,
         },
         {
-            'quant_dtype': quant_dtype,
-            'w1_scale': w1_scale,
-            'w2_scale': w2_scale,
-            'a1_scale': a1_scale,
-            'a2_scale': a2_scale,
+            "quant_dtype": quant_dtype,
+            "w1_scale": w1_scale,
+            "w2_scale": w2_scale,
+            "a1_scale": a1_scale,
+            "a2_scale": a2_scale,
         },
         {
-            'dtype': quant_dtype,
-            'w1_scale': w1_scale,
-            'w2_scale': w2_scale,
-            'a1_scale': a1_scale,
-            'a2_scale': a2_scale,
+            "dtype": quant_dtype,
+            "w1_scale": w1_scale,
+            "w2_scale": w2_scale,
+            "a1_scale": a1_scale,
+            "a2_scale": a2_scale,
         },
     ]
     for params in param_combinations:
@@ -672,6 +676,7 @@ def make_quant_config_compatible(
     raise TypeError(
         "Unable to create FusedMoEQuantConfig with any known parameter combination."
     )
+
 
 def fused_experts_compatible(
     x,
@@ -685,13 +690,15 @@ def fused_experts_compatible(
 ):
     """Compatible wrapper for fused_experts function."""
     from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+
     sig = inspect.signature(fused_experts)
-    kwargs = {'inplace': inplace}
-    if 'quant_config' in sig.parameters:
-        kwargs['quant_config'] = quant_config
-    if 'allow_deep_gemm' in sig.parameters:
-        kwargs['allow_deep_gemm'] = allow_deep_gemm
+    kwargs = {"inplace": inplace}
+    if "quant_config" in sig.parameters:
+        kwargs["quant_config"] = quant_config
+    if "allow_deep_gemm" in sig.parameters:
+        kwargs["allow_deep_gemm"] = allow_deep_gemm
     return fused_experts(x, w1, w2, topk_weights, topk_ids, **kwargs)
+
 
 def main(args: argparse.Namespace):
     print(args)
