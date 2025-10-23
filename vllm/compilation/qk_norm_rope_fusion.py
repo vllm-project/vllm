@@ -186,7 +186,15 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         )
 
         if not current_platform.is_cuda_alike():
-            logger.debug("QK Norm+RoPE fusion not enabled: unsupported platform")
+            logger.warning_once("QK Norm+RoPE fusion not enabled: unsupported platform")
+            return
+
+        # TODO: only bfloat16 is supported now, we may need to support float16
+        dtype = config.model_config.dtype
+        if dtype not in (torch.bfloat16,):
+            logger.warning_once(
+                "QK Norm+RoPE fusion not enabled: unsupported dtype %s", dtype
+            )
             return
 
         # Register a pattern per attention layer, as sizes differ by shard
@@ -194,7 +202,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             config, Attention
         )
         if len(attn_layers) == 0:
-            logger.warning(
+            logger.warning_once(
                 "QK Norm+RoPE fusion enabled, but no Attention layers were discovered."
             )
             return
