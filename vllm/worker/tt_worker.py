@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import dataclasses
 import math
 import os
@@ -429,6 +430,9 @@ def get_num_available_blocks_tt(vllm_config: VllmConfig) -> int:
           and is_wormhole):
         # Qwen2.5-VL-72B on WH T3K
         max_tokens_all_users = 65536
+    elif "gpt-oss" in model_config.model:
+        # gpt-oss on Galaxy and T3K
+        max_tokens_all_users = 1024
     else:
         # Note: includes num vision tokens for multi-modal
         max_tokens_all_users = 131072
@@ -565,9 +569,19 @@ def get_mesh_grid(dp_rank=0):
     }
     mesh_device_env = os.environ.get("MESH_DEVICE")
     if mesh_device_env is not None:
-        assert mesh_device_env in mesh_grid_dict, (
-            f"Invalid MESH_DEVICE: {mesh_device_env}")
-        mesh_grid = mesh_grid_dict[mesh_device_env]
+        try:
+            # Try to parse as a literal tuple first
+            parsed_value = ast.literal_eval(mesh_device_env)
+            if isinstance(parsed_value, tuple) and len(parsed_value) == 2:
+                logger.debug("MESH_DEVICE is a tuple", mesh_device_env)
+                mesh_grid = parsed_value
+            else:
+                raise ValueError("Not a valid tuple")
+        except (ValueError, SyntaxError):
+            # If parsing fails, treat as a string key for mesh_grid_dict
+            assert mesh_device_env in mesh_grid_dict, (
+                f"Invalid MESH_DEVICE: {mesh_device_env}")
+            mesh_grid = mesh_grid_dict[mesh_device_env]
     else:
         assert dp_rank == 0, (
             "MESH_DEVICE must be set when running with data_parallel_size > 1")

@@ -76,6 +76,12 @@ def register_tt_models():
         "models.tt_transformers.tt.generator_vllm:Gemma3ForConditionalGeneration",
     )
 
+    # GPT-OSS
+    ModelRegistry.register_model(
+        "TTGptOssForCausalLM",
+        "models.tt_transformers.tt.generator_vllm:GptOssForCausalLM",
+    )
+
 
 register_tt_models()  # Import and register models from tt-metal
 
@@ -260,6 +266,8 @@ def check_tt_model_supported(model):
         "mistralai/Mistral-7B-Instruct-v0.3",
         "google/gemma-3-4b-it",
         "google/gemma-3-27b-it",
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
     ]
     assert model in supported_models, f"Invalid model: {model}"
 
