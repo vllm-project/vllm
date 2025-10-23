@@ -337,8 +337,8 @@ class TestMultiConnectorStats:
         # Verify data is preserved
         assert stats.data["MockConnector"].data == {"mock_field": [1, 2, 3]}
 
-    def test_build_kv_connector_stats_skips_unknown_connector(self):
-        """Test that unknown connectors are skipped with a warning."""
+    def test_build_kv_connector_stats_raises_error_for_unknown_connector(self):
+        """Test that unknown connectors raise an error."""
         serialized_data = {
             "UnknownConnector": {"data": {"some_field": [1, 2, 3]}},
             "NixlConnector": {
@@ -353,14 +353,10 @@ class TestMultiConnectorStats:
             },
         }
 
-        stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
-
-        assert stats is not None
-        assert isinstance(stats, MultiKVConnectorStats)
-        # Unknown connector should be skipped
-        assert "UnknownConnector" not in stats.data
-        # Known connector should be reconstructed
-        assert "NixlConnector" in stats.data
+        with pytest.raises(
+            ValueError, match="Connector 'UnknownConnector' is not registered."
+        ):
+            MultiConnector.build_kv_connector_stats(data=serialized_data)
 
     def test_build_kv_connector_stats_with_already_instantiated_objects(self):
         """Test that already-instantiated stats objects are preserved (same process)."""

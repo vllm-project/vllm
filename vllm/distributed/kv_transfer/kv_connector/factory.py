@@ -69,17 +69,19 @@ class KVConnectorFactory:
     @classmethod
     def get_connector_class_by_name(
         cls, connector_name: str
-    ) -> type[KVConnectorBaseType] | None:
+    ) -> type[KVConnectorBaseType]:
         """Get a registered connector class by name.
+
+        Raises ValueError if the connector is not registered.
 
         Args:
             connector_name: Name of the registered connector.
 
         Returns:
-            The connector class if found, None otherwise.
+            The connector class.
         """
         if connector_name not in cls._registry:
-            return None
+            raise ValueError(f"Connector '{connector_name}' is not registered.")
         return cls._registry[connector_name]()
 
     @classmethod

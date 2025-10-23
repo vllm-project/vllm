@@ -344,12 +344,6 @@ class MultiConnector(KVConnectorBase_V1):
             connector_cls = KVConnectorFactory.get_connector_class_by_name(
                 connector_name
             )
-            if connector_cls is None:
-                logger.warning(
-                    "Unknown connector '%s' in stats data, skipping reconstruction",
-                    connector_name,
-                )
-                continue
 
             # stats_value is the serialized dataclass which contains {'data': {...}}
             # We need to extract the inner 'data' field to avoid double-nesting
@@ -359,10 +353,9 @@ class MultiConnector(KVConnectorBase_V1):
             inner_data = stats_value["data"]
 
             # Use the connector's build_kv_connector_stats to reconstruct
-            reconstructed_stats = connector_cls.build_kv_connector_stats(
+            if reconstructed_stats := connector_cls.build_kv_connector_stats(
                 data=inner_data
-            )
-            if reconstructed_stats is not None:
+            ):
                 reconstructed_data[connector_name] = reconstructed_stats
 
         return MultiKVConnectorStats(data=reconstructed_data)
