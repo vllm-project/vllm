@@ -509,6 +509,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         )
 
+        # device_id = self.device.index
+
+        # def cb(_device, _alloc, _device_alloc, _device_free):
+        #     torch.cuda.memory._dump_snapshot(f"/tmp/vllm_oom_{device_id}.pickle")
+
+        # torch.cuda.memory._record_memory_history(max_entries=100_000)
+        # torch._C._cuda_attach_out_of_memory_observer(cb)
+
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
             self.mm_budget.reset_cache()
