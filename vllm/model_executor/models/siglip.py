@@ -6,7 +6,7 @@ within a vision language model."""
 import math
 from collections.abc import Iterable, Mapping
 from functools import cached_property
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 from torch import nn
@@ -109,7 +109,7 @@ class SiglipProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(SiglipProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
     def get_num_image_tokens(
@@ -152,7 +152,7 @@ class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -182,12 +182,12 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
 
     def apply(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        tokenization_kwargs: Mapping[str, object] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         if prompt and mm_data:
             raise ValueError(
@@ -373,7 +373,7 @@ class SiglipVisionEmbeddings(nn.Module):
 class SiglipAttention(nn.Module):
     def __init__(
         self,
-        config: Union[SiglipVisionConfig, SiglipTextConfig],
+        config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
@@ -449,7 +449,7 @@ class SiglipAttention(nn.Module):
 class SiglipMLP(nn.Module):
     def __init__(
         self,
-        config: Union[SiglipVisionConfig, SiglipTextConfig],
+        config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -489,7 +489,7 @@ class SiglipMLP(nn.Module):
 class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: Union[SiglipVisionConfig, SiglipTextConfig],
+        config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
@@ -532,7 +532,7 @@ class SiglipEncoderLayer(nn.Module):
 class SiglipEncoder(nn.Module):
     def __init__(
         self,
-        config: Union[SiglipVisionConfig, SiglipTextConfig],
+        config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
@@ -581,7 +581,7 @@ class SiglipTextTransformer(nn.Module):
     def __init__(
         self,
         config: SiglipTextConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -606,9 +606,9 @@ class SiglipTextTransformer(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(input_ids, position_ids, inputs_embeds)
 
@@ -944,9 +944,9 @@ class SiglipTextEmbeddings(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.token_embedding(input_ids)
@@ -970,7 +970,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     merge_by_field_config = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
 
@@ -1013,7 +1013,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_embed": Pooler.for_token_embed(pooler_config),
                 "embed": Pooler.for_embed(pooler_config),
             }
         )
@@ -1022,9 +1022,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
     def get_text_features(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         last_hidden_state = self.text_model(
             input_ids=input_ids,
@@ -1039,7 +1039,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def get_image_features(
         self,
         pixel_values: torch.Tensor,
-        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+        feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
             feature_select_strategy = _get_vision_feature_select_strategy(
@@ -1056,7 +1056,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[SiglipImagePixelInputs]:
+    ) -> SiglipImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
             return None
@@ -1079,9 +1079,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         self._is_text_input = (
@@ -1108,10 +1108,10 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
