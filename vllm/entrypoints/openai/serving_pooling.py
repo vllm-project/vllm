@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
+import json
 import time
 from collections.abc import AsyncGenerator
-from typing import Final, Literal, cast
+from typing import Final, cast
 
 import jinja2
-import numpy as np
-import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
@@ -17,10 +15,10 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
     ErrorResponse,
     IOProcessorRequest,
     IOProcessorResponse,
+    PoolingBytesResponse,
     PoolingChatRequest,
     PoolingCompletionRequest,
     PoolingRequest,
@@ -30,30 +28,21 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.utils import encoding_pooling_output
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
-from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.utils import merge_async_iterators
+from vllm.outputs import PoolingRequestOutput
+from vllm.tasks import SupportedTask
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
+    encode_pooling_bytes,
+    encode_pooling_output,
+)
 
 logger = init_logger(__name__)
-
-
-def _get_data(
-    output: PoolingOutput,
-    encoding_format: Literal["float", "base64"],
-) -> list[float] | str:
-    if encoding_format == "float":
-        return output.data.tolist()
-    elif encoding_format == "base64":
-        # Force to use float32 for base64 encoding
-        # to match the OpenAI python client behavior
-        pt_float32 = output.data.to(dtype=torch.float32)
-        pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
-        return base64.b64encode(pooling_bytes).decode("utf-8")
-
-    assert_never(encoding_format)
 
 
 class OpenAIServingPooling(OpenAIServing):
@@ -62,6 +51,7 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
+        supported_tasks: tuple[SupportedTask, ...],
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -75,6 +65,7 @@ class OpenAIServingPooling(OpenAIServing):
             log_error_stack=log_error_stack,
         )
 
+        self.supported_tasks = supported_tasks
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
@@ -83,7 +74,7 @@ class OpenAIServingPooling(OpenAIServing):
         self,
         request: PoolingRequest,
         raw_request: Request | None = None,
-    ) -> PoolingResponse | IOProcessorResponse | ErrorResponse:
+    ) -> PoolingResponse | IOProcessorResponse | PoolingBytesResponse | ErrorResponse:
         """
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
@@ -91,12 +82,6 @@ class OpenAIServingPooling(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        if request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
-            return self.create_error_response(
-                f"embed_dtype={request.embed_dtype!r} is not supported. "
-                f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
-            )
 
         model_name = self.models.model_name()
 
@@ -178,8 +163,17 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             pooling_params = request.to_pooling_params()
 
+            if "token_embed" in self.supported_tasks:
+                pooling_task = "token_embed"
+            elif "token_classify" in self.supported_tasks:
+                pooling_task = "token_classify"
+            else:
+                return self.create_error_response(
+                    f"pooling_task must be one of {self.supported_tasks}."
+                )
+
             try:
-                pooling_params.verify("encode", self.model_config)
+                pooling_params.verify(pooling_task, self.model_config)
             except ValueError as e:
                 return self.create_error_response(str(e))
 
@@ -244,6 +238,7 @@ class OpenAIServingPooling(OpenAIServing):
                 model_name,
                 request.encoding_format,
                 request.embed_dtype,
+                request.endianness,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -259,34 +254,67 @@ class OpenAIServingPooling(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        encoding_format: Literal["float", "base64"],
-        embed_dtype: str,
-    ) -> PoolingResponse:
-        items: list[PoolingResponseData] = []
-        num_prompt_tokens = 0
+        encoding_format: EncodingFormat,
+        embed_dtype: EmbedDType,
+        endianness: Endianness,
+    ) -> PoolingResponse | PoolingBytesResponse:
+        def encode_float_base64():
+            items: list[PoolingResponseData] = []
+            num_prompt_tokens = 0
 
-        for idx, final_res in enumerate(final_res_batch):
-            item = PoolingResponseData(
-                index=idx,
-                data=encoding_pooling_output(final_res, encoding_format, embed_dtype),
+            for idx, final_res in enumerate(final_res_batch):
+                item = PoolingResponseData(
+                    index=idx,
+                    data=encode_pooling_output(
+                        final_res,
+                        encoding_format=encoding_format,
+                        embed_dtype=embed_dtype,
+                        endianness=endianness,
+                    ),
+                )
+                prompt_token_ids = final_res.prompt_token_ids
+
+                items.append(item)
+                num_prompt_tokens += len(prompt_token_ids)
+
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                total_tokens=num_prompt_tokens,
             )
-            prompt_token_ids = final_res.prompt_token_ids
 
-            items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
+            return PoolingResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                data=items,
+                usage=usage,
+            )
 
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
+        def encode_bytes():
+            body, items, usage = encode_pooling_bytes(
+                pooling_outputs=final_res_batch,
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+            )
 
-        return PoolingResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            data=items,
-            usage=usage,
-        )
+            metadata = {
+                "id": request_id,
+                "created": created_time,
+                "model": model_name,
+                "data": items,
+                "usage": usage,
+            }
+            return PoolingBytesResponse(
+                body=body,
+                metadata=json.dumps(metadata),
+            )
+
+        if encoding_format == "float" or encoding_format == "base64":
+            return encode_float_base64()
+        elif encoding_format == "bytes":
+            return encode_bytes()
+        else:
+            assert_never(encoding_format)
 
     def _build_render_config(self, request: PoolingCompletionRequest) -> RenderConfig:
         return RenderConfig(

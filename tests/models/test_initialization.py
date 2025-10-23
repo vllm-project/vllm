@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
@@ -37,7 +37,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "JinaVLForRanking",
     "InternVLChatModel",
     "InternLM2ForRewardModel",
-    "TransformersForMultimodalLM",
+    "TransformersMultiModalForCausalLM",
     "PrithviGeoSpatialMAE",
     "UltravoxModel",
     "DeepSeekMTPModel",
@@ -88,13 +88,15 @@ def can_initialize(
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 
+    if model_arch == "MiniMaxVL01ForConditionalGeneration":
+        pytest.skip(
+            "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
+        )
+
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
     ):
-        if model_info.v0_only:
-            # NOTE(woosuk): skip the test for V0-only models
-            return
         if model_arch == "GptOssForCausalLM":
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
@@ -102,6 +104,11 @@ def can_initialize(
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+        extra_args = {}
+        if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+            extra_args["enable_mm_embeds"] = True
+
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
@@ -126,14 +133,13 @@ def can_initialize(
             else "vllm",
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs,
+            **extra_args,
         )
 
 
 @pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
 def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     """Test initializing small subset of supported models"""
-    if model_arch == "Lfm2ForCausalLM":
-        pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
@@ -144,8 +150,6 @@ def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.Monkey
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
-    if model_arch == "Lfm2ForCausalLM":
-        pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 

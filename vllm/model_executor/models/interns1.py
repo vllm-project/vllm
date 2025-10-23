@@ -182,7 +182,10 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         hf_processor = self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
         hf_processor.video_processor = cached_video_processor_from_config(
-            self.ctx.model_config, processor_cls=InternVLVideoProcessor, **kwargs
+            self.ctx.model_config,
+            processor_cls=InternVLVideoProcessor,
+            size=hf_processor.image_processor.size,
+            **kwargs,
         )
         return hf_processor
 
@@ -753,12 +756,12 @@ class InternS1ForConditionalGeneration(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_vision_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_vision_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_vision_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 

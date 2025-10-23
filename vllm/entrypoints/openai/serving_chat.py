@@ -70,7 +70,7 @@ from vllm.transformers_utils.tokenizers import (
     truncate_tool_call_ids,
     validate_request_params,
 )
-from vllm.utils import as_list
+from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 
@@ -563,14 +563,15 @@ class OpenAIServingChat(OpenAIServing):
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
-        elif request.tool_choice == "required":
-            all_previous_token_ids = None
         else:
             all_previous_token_ids = None
 
         try:
             if self.reasoning_parser:
-                reasoning_parser = self.reasoning_parser(tokenizer)
+                reasoning_parser = self.reasoning_parser(
+                    tokenizer,
+                    chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
             data = self.create_streaming_error_response(str(e))
@@ -877,29 +878,56 @@ class OpenAIServingChat(OpenAIServing):
                         previous_text = previous_texts[i]
                         current_text = previous_text + delta_text
                         fn_name_returned = function_name_returned[i]
+                        output_token_ids = as_list(output.token_ids)
 
-                        if self.reasoning_parser:
-                            _, content = reasoning_parser.extract_reasoning_content(
-                                current_text, request
-                            )
-                        else:
-                            content = current_text
-                        delta_message, function_name_returned[i] = (
-                            self.extract_tool_call_required_streaming(
-                                previous_text=previous_text,
-                                current_text=content,
-                                delta_text=delta_text,
-                                function_name_returned=fn_name_returned,
-                                tool_call_idx=history_tool_call_cnt,
-                            )
-                        )
                         if (
-                            delta_message
-                            and delta_message.tool_calls
-                            and delta_message.tool_calls[0].id is not None
+                            self.reasoning_parser is not None
+                            and not reasoning_end_arr[i]
+                            and res.prompt_token_ids
+                            and reasoning_parser.is_reasoning_end(res.prompt_token_ids)
                         ):
-                            history_tool_call_cnt += 1
-                            tools_streamed[i] = True
+                            reasoning_end_arr[i] = True
+
+                        if self.reasoning_parser and not reasoning_end_arr[i]:
+                            delta_message = (
+                                reasoning_parser.extract_reasoning_content_streaming(
+                                    previous_text,
+                                    current_text,
+                                    delta_text,
+                                    previous_token_ids,
+                                    current_token_ids,
+                                    output_token_ids,
+                                )
+                            )
+                            if reasoning_parser.is_reasoning_end(output_token_ids):
+                                reasoning_end_arr[i] = True
+                                if delta_message and delta_message.content:
+                                    current_text = delta_message.content
+                                    delta_message.content = None
+                                else:
+                                    # reasoning ended
+                                    current_text = ""
+
+                        else:
+                            # either finished reasoning or no reasoning at all
+                            content = current_text
+
+                            delta_message, function_name_returned[i] = (
+                                self.extract_tool_call_required_streaming(
+                                    previous_text=previous_text,
+                                    current_text=content,
+                                    delta_text=delta_text,
+                                    function_name_returned=fn_name_returned,
+                                    tool_call_idx=history_tool_call_cnt,
+                                )
+                            )
+                            if (
+                                delta_message
+                                and delta_message.tool_calls
+                                and delta_message.tool_calls[0].id is not None
+                            ):
+                                history_tool_call_cnt += 1
+                                tools_streamed[i] = True
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
@@ -1335,7 +1363,10 @@ class OpenAIServingChat(OpenAIServing):
 
             if self.reasoning_parser:
                 try:
-                    reasoning_parser = self.reasoning_parser(tokenizer)
+                    reasoning_parser = self.reasoning_parser(
+                        tokenizer,
+                        chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                    )
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")
                     return self.create_error_response(str(e))

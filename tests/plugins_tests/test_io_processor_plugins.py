@@ -38,6 +38,7 @@ def server():
         "prithvi_to_tiff",
         "--model-impl",
         "terratorch",
+        "--enable-mm-embeds",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -93,12 +94,13 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
         out_data_format="b64_json",
     )
 
-    pooling_params = PoolingParams(task="encode", softmax=False)
+    pooling_params = PoolingParams(activation=False)
 
     with vllm_runner(
         model_name,
         runner="pooling",
         skip_tokenizer_init=True,
+        enable_mm_embeds=True,
         trust_remote_code=True,
         enforce_eager=True,
         # Limit the maximum number of parallel requests
@@ -108,8 +110,7 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
         io_processor_plugin="prithvi_to_tiff",
     ) as llm_runner:
         pooler_output = llm_runner.get_llm().encode(
-            img_prompt,
-            pooling_params=pooling_params,
+            img_prompt, pooling_params=pooling_params, pooling_task="token_classify"
         )
     output = pooler_output[0].outputs
 

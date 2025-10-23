@@ -73,6 +73,19 @@ def phi3v_model_config_mm_interleaved():
     )
 
 
+@pytest.fixture(scope="function")
+def phi3v_model_config_image_embeds():
+    return ModelConfig(
+        PHI3V_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+        enable_mm_embeds=True,
+    )
+
+
 @pytest.fixture(scope="module")
 def phi3v_tokenizer():
     return get_tokenizer(PHI3V_MODEL_ID)
@@ -799,7 +812,7 @@ def test_parse_chat_messages_empty_pil_image_with_uuid(
 
 
 def test_parse_chat_messages_empty_image_embeds_with_uuid(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -813,7 +826,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -832,7 +845,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
 
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -846,7 +859,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -1810,6 +1823,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         "unsed_kwargs_2": "abc",
         # should not appear
         "chat_template": "{% Hello world! %}",
+        "tokenize": True,
         # used by tokenizer
         "continue_final_message": True,
         "tools": tools,
@@ -1846,10 +1860,21 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         tools=tools,
         model_config=model_config,
     )
+    with pytest.raises(
+        ValueError, match="Found unexpected chat template kwargs from request"
+    ):
+        # should raise error if `chat_template_kwargs` contains
+        # `chat_template` or `tokenize`
+        resolve_chat_template_kwargs(
+            tokenizer,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     resolved_chat_template_kwargs = resolve_chat_template_kwargs(
         tokenizer,
         chat_template=chat_template,
         chat_template_kwargs=chat_template_kwargs,
+        raise_on_unexpected=False,
     )
     assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
 
