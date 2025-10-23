@@ -411,20 +411,16 @@ class DeepseekOCRProcessor(ProcessorMixin):
         images_seq_mask = images_seq_mask[:-1]
 
         if len(images_list) == 0:
-            pixel_values = torch.zeros((1, 3, self.base_size, self.base_size))
-            images_spatial_crop = torch.zeros((1, 1), dtype=torch.long)
-            images_crop = torch.zeros(
-                (1, 3, self.image_size, self.image_size)
-            ).unsqueeze(0)
+            pixel_values = torch.zeros((0, 3, self.base_size, self.base_size))
+            images_spatial_crop = torch.zeros((0, 2), dtype=torch.long)
+            images_crop = torch.zeros((0, 3, self.image_size, self.image_size))
         else:
             pixel_values = torch.stack(images_list, dim=0)
             images_spatial_crop = torch.tensor(images_spatial_crop, dtype=torch.long)
             if images_crop_list:
-                images_crop = torch.stack(images_crop_list, dim=0).unsqueeze(0)
+                images_crop = torch.stack(images_crop_list, dim=0)
             else:
-                images_crop = torch.zeros(
-                    (1, 3, self.image_size, self.image_size)
-                ).unsqueeze(0)
+                images_crop = torch.zeros((0, 3, self.image_size, self.image_size))
 
         input_ids = input_ids.unsqueeze(0)
 

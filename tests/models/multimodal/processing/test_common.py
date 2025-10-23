@@ -332,6 +332,7 @@ def _test_processing_correctness_one(
         "facebook/chameleon-7b",
         "CohereLabs/command-a-vision-07-2025",
         "deepseek-ai/deepseek-vl2-tiny",
+        "deepseek-ai/DeepSeek-OCR",
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         "adept/fuyu-8b",
         "google/gemma-3-4b-it",
