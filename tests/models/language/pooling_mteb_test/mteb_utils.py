@@ -315,6 +315,9 @@ def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):
             mteb_tasks,
             prediction_folder=prediction_folder,
             show_progress_bar=False,
+            # don't save results for test runs
+            cache=None,
+            overwrite_strategy="always",
         )
 
         second_stage_tasks = []
@@ -330,6 +333,7 @@ def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):
             cross_encoder,
             second_stage_tasks,
             show_progress_bar=False,
+            cache=None,
         )
         main_score = results[0].scores["test"][0]["main_score"]
     return main_score
