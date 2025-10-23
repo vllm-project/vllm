@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, cached_tokenizer_from_config
-from vllm.utils import ClassRegistry
+from vllm.utils.collection_utils import ClassRegistry
 
 from .cache import BaseMultiModalProcessorCache
 from .processing import (
@@ -307,7 +307,7 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by ``model_config``.
+        The model is identified by `model_config`.
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
@@ -340,7 +340,7 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by ``model_config``.
+        The model is identified by `model_config`.
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)

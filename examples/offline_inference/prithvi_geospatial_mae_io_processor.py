@@ -38,9 +38,10 @@ def main():
         max_num_seqs=32,
         io_processor_plugin="prithvi_to_tiff",
         model_impl="terratorch",
+        enable_mm_embeds=True,
     )
 
-    pooling_params = PoolingParams(task="encode", softmax=False)
+    pooling_params = PoolingParams(task="token_classify", activation=False)
     pooler_output = llm.encode(
         img_prompt,
         pooling_params=pooling_params,

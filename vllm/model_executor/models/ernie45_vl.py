@@ -164,6 +164,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -196,6 +197,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         self.attn_backend = get_vit_attn_backend(
             head_size=self.hidden_size_per_attention_head,
             dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
 
         self.use_upstream_fa = False
@@ -367,6 +369,7 @@ class Ernie4_5_VisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
 
@@ -382,6 +385,7 @@ class Ernie4_5_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            attn_backend_override=attn_backend_override,
         )
 
         self.mlp = Ernie4_5_VisionMLP(
@@ -458,6 +462,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         patch_size = vision_config.patch_size
@@ -493,6 +498,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
+                    attn_backend_override=attn_backend_override,
                 )
                 for layer_idx in range(depth)
             ]
@@ -504,7 +510,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
             torch.get_default_dtype()
@@ -1089,7 +1097,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         pixel_values = (
             rescale_factor * pixel_values.to(torch.float32) - image_mean_tensor
         ) / image_std_tensor
-        pixel_values = pixel_values.to(hf_config.torch_dtype)
+        pixel_values = pixel_values.to(hf_config.dtype)
         return pixel_values
 
     def _call_hf_processor(
@@ -1327,11 +1335,17 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.vision_model = Ernie4_5_VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "vision_model"),
+            attn_backend_override=attn_backend_override,
         )
 
         self.language_model = Ernie4_5_VLMoeForCausalLM(
@@ -1390,9 +1404,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         else:
             self.visual_token_mask = None
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,

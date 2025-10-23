@@ -12,7 +12,9 @@ from typing import Any, NewType, TypeAlias
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256_cbor
+from vllm.utils import cdiv
+from vllm.utils.hashing import sha256_cbor
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -26,17 +28,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 # BlockHash represents the hash of a single KV-cache block used for
-# prefix caching.  Treating it as a distinct type from ``bytes`` helps
+# prefix caching.  Treating it as a distinct type from `bytes` helps
 # catch accidental misuse when passing around raw byte strings.
 BlockHash = NewType("BlockHash", bytes)
 
-# ``BlockHashWithGroupId`` combines a ``BlockHash`` with its KV cache group ID.
+# `BlockHashWithGroupId` combines a `BlockHash` with its KV cache group ID.
 # It is represented as raw bytes for compactness and efficiency. The helper
-# functions below pack/unpack the ``BlockHash`` and group id into/from the key.
+# functions below pack/unpack the `BlockHash` and group id into/from the key.
 BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 
 # ExternalBlockHash is used for reproducible prefix-cache block hashing.
-# It's a union of ``bytes`` and ``int`` to keep backward compatibility
+# It's a union of `bytes` and `int` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
 ExternalBlockHash: TypeAlias = bytes | int
 
@@ -44,7 +46,7 @@ ExternalBlockHash: TypeAlias = bytes | int
 def make_block_hash_with_group_id(
     block_hash: BlockHash, group_id: int
 ) -> BlockHashWithGroupId:
-    """Pack a ``BlockHash`` and group id into a ``BlockHashWithGroupId``.
+    """Pack a `BlockHash` and group id into a `BlockHashWithGroupId`.
 
     The group id is encoded using 4 bytes in big-endian order and appended to
     the block hash bytes.  This representation avoids creating tuples while
@@ -54,12 +56,12 @@ def make_block_hash_with_group_id(
 
 
 def get_block_hash(key: BlockHashWithGroupId) -> BlockHash:
-    """Extract the ``BlockHash`` from a ``BlockHashWithGroupId``."""
+    """Extract the `BlockHash` from a `BlockHashWithGroupId`."""
     return BlockHash(key[:-4])
 
 
 def get_group_id(key: BlockHashWithGroupId) -> int:
-    """Extract the group id from a ``BlockHashWithGroupId``."""
+    """Extract the group id from a `BlockHashWithGroupId`."""
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
@@ -371,7 +373,7 @@ def need_extra_keys(request: Request) -> bool:
     """
 
     # Multimodal requests need to include the MM hash.
-    # LoRA requests need to include the LoRA ID.
+    # LoRA requests need to include the LoRA name.
     # Request with provided cache salt need to include the salt.
     return (
         bool(request.mm_features)
@@ -444,26 +446,26 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA id of the request if it is a LoRA request. Return empty
+        Return LoRA name of the request if it is a LoRA request. Return empty
         list otherwise.
     """
     if not request.lora_request:
         return []
-    return [request.lora_request.lora_int_id]
+    return [request.lora_request.lora_name]
 
 
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
-    the multi-modal inputs and request specific metadata (e.g., LoRA ID).
+    the multi-modal inputs and request specific metadata (e.g., LoRA name).
 
     Args:
         request: The request object.
@@ -478,7 +480,7 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
+    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
     cache_salt_keys: list[str] = (
         [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
     )
