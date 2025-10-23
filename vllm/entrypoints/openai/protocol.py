@@ -1750,11 +1750,6 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     if the served model does not use priority scheduling.
     """
     data: T
-    """
-    When using plugins IOProcessor plugins, the actual input is processed
-    by the plugin itself. Hence, we use a generic type for the request data
-    """
-    activation: bool = False
 
     encoding_format: EncodingFormat = "float"
     embed_dtype: EmbedDType = Field(
@@ -1775,7 +1770,7 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     )
 
     def to_pooling_params(self):
-        return PoolingParams(task="token_classify", activation=self.activation)
+        return PoolingParams()
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
