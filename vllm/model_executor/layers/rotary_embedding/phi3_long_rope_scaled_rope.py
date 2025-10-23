@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 import math
 
 import torch
@@ -8,6 +9,8 @@ import torch.nn as nn
 from vllm.config import get_current_vllm_config
 
 from .common import rotate_neox
+
+logger = logging.getLogger(__name__)
 
 
 class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
@@ -50,6 +53,16 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         # sequences cross this threshold during generation
         max_model_len = get_current_vllm_config().model_config.max_model_len
         self.use_long_rope = max_model_len > original_max_position_embeddings
+        if self.use_long_rope:
+            logger.warning(
+                "Using LongRoPE scaling factors. This enables longer "
+                "contexts (%d tokens vs original %d tokens) at the cost of "
+                "some performance degradation for shorter sequences. If "
+                "this is not desired, set `max_model_len` to be at most %d.",
+                max_position_embeddings,
+                original_max_position_embeddings,
+                original_max_position_embeddings,
+            )
 
         scale = self.max_position_embeddings / self.original_max_position_embeddings
         if scale <= 1.0:
