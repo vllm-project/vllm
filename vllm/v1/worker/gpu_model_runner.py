@@ -72,13 +72,13 @@ from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (
     cdiv,
     check_use_alibi,
-    is_pin_memory_available,
     length_from_prompt_token_ids_or_embeds,
     round_up,
 )
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
