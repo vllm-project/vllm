@@ -4,7 +4,7 @@
 import importlib
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
 from transformers import (
     AutoFeatureExtractor,
@@ -63,7 +63,7 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
         return dynamic_kwargs
     # get kwargs annotations in processor
     # merge text_kwargs / images_kwargs / videos_kwargs / audio_kwargs
-    kwargs_type_annotations = getattr(kwargs_cls, "__annotations__", {})
+    kwargs_type_annotations = get_type_hints(kwargs_cls)
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
             kw_annotations = kwargs_type_annotations[kw_type].__annotations__
