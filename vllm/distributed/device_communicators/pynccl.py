@@ -108,7 +108,9 @@ class PyNcclCommunicator:
         if self.rank == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
-            logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
+            logger.info_once(
+                "vLLM is using nccl==%s", self.nccl.ncclGetVersion(), scope="local"
+            )
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()

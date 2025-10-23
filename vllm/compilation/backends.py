@@ -276,12 +276,17 @@ class CompilerManager:
             elapsed = now - compilation_start_time
             compilation_config.compilation_time += elapsed
             if runtime_shape is None:
-                logger.info("Compiling a graph for dynamic shape takes %.2f s", elapsed)
+                logger.info_once(
+                    "Compiling a graph for dynamic shape takes %.2f s",
+                    elapsed,
+                    scope="local",
+                )
             else:
-                logger.info(
+                logger.info_once(
                     "Compiling a graph for shape %s takes %.2f s",
                     runtime_shape,
                     elapsed,
+                    scope="local",
                 )
 
         return compiled_graph

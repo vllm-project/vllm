@@ -234,9 +234,10 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(
+        logger.info_once(
             ("init engine (profile, create kv cache, warmup model) took %.2f seconds"),
             elapsed,
+            scope="local",
         )
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
