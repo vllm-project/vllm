@@ -1316,6 +1316,75 @@ class NixlConnectorWorker:
                 )
                 cache.index_copy_(0, indices, permuted_blocks)
 
+    def blocksize_post_process(self, block_ids: list[int]):
+        def _process_local_gt_remote(blocks_to_update):
+            n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
+            remote_block_size = int(block_size * self.block_size_ratio)
+            n_blocks = int(1 / self.block_size_ratio)
+            # actual permute is to convert
+            # for local blocksize > remote blocksize
+            # ex: local blocksize = 16 tokens, remote blocksize = 4 tokens
+            # local block0 = remote [block0, 1, 2, 3]
+            # remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
+            # local is  |h0-b0..................|h1-b0..................|...
+            # permute is to:
+            # 1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
+            # 2. permute => (H, nblocks, remoteN, D)
+            # 3. flatten => (H, nblocks, remoteN)
+            permuted_blocks = (
+                blocks_to_update.reshape(
+                    -1, n_blocks, n_kv_heads, remote_block_size, head_size
+                )
+                .permute(0, 2, 1, 3, 4)
+                .flatten(2, 3)
+            )
+            return permuted_blocks
+
+        def _process_local_lt_remote(blocks_to_update):
+            n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
+            remote_block_size = int(block_size * self.block_size_ratio)
+            n_blocks = int(1 / self.block_size_ratio)
+            # actual permute is to convert
+            # for local blocksize > remote blocksize
+            # ex: local blocksize = 16 tokens, remote blocksize = 4 tokens
+            # local block0 = remote [block0, 1, 2, 3]
+            # remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
+            # local is  |h0-b0..................|h1-b0..................|...
+            # permute is to:
+            # 1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
+            # 2. permute => (H, nblocks, remoteN, D)
+            # 3. flatten => (H, nblocks, remoteN)
+            permuted_blocks = (
+                blocks_to_update.reshape(
+                    -1, n_blocks, n_kv_heads, remote_block_size, head_size
+                )
+                .permute(0, 2, 1, 3, 4)
+                .flatten(2, 3)
+            )
+            return permuted_blocks
+
+        split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
+        sample_cache = list(self.device_kv_caches.values())[0][0]
+        indices = torch.tensor(block_ids, device=sample_cache.device)
+        fn = (
+            _process_local_gt_remote
+            if self.block_size_ratio < 1
+            else _process_local_lt_remote
+        )
+
+        for _, cache_or_caches in self.device_kv_caches.items():
+            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            for cache in cache_list:
+                blocks_to_update = cache.index_select(0, indices)
+                # because kv_cache is always using original layout NHD as virtual shape
+                # while stride can be either HND / NHD at initialization.
+                # we need to firstly get physical view of the tensor
+                cache.index_copy_(
+                    0,
+                    indices,
+                    fn(blocks_to_update.permute(0, 2, 1, 3)).permute(0, 2, 1, 3),
+                )
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
@@ -1339,10 +1408,17 @@ class NixlConnectorWorker:
             )
 
         # clean up metadata for completed requests
+        block_ids_for_blocksize_post_process = []
         for req_id in done_recving:
+            meta = self._recving_metadata.pop(req_id)
             if self.use_host_buffer:
-                meta = self._recving_metadata.pop(req_id)
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            # post processing for heteroblocksize
+            if self.block_size_ratio < 1 and self.kv_cache_layout == "HND":
+                block_ids_for_blocksize_post_process += meta.local_block_ids
+        if len(block_ids_for_blocksize_post_process) > 0:
+            self.blocksize_post_process(block_ids_for_blocksize_post_process)
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
