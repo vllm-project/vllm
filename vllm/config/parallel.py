@@ -71,13 +71,14 @@ class EPLBConfig:
     A gate to trigger asynchronous expert load rebalancing and weight transfer
     """
 
-    expert_mapper_policy_type: int = 0
+    expert_mapper_policy_type: Literal["greedy", "bipartite"] = "greedy"
     """
     Determine using which expert mapping strategy
 
-    0: GreedyExpertUpdate
-    1: BipartiteExpertUpdate
+    "greedy": GreedyExpertUpdate
+    "bipartite": BipartiteExpertUpdate
     """
+
 
 @config
 @dataclass

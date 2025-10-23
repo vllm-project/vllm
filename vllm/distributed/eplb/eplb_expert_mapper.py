@@ -1,13 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import networkx as nx
 import numpy as np
 import torch
-import networkx as nx
+
+
+from typing import Dict, List
 
 class ComposeExpertUpdate:
     def __init__(self, updated_expert_maps, current_expert_maps):
         self.updated_org = updated_expert_maps
         self.current_org = current_expert_maps
         # Internal views used by subclasses (torch or numpy)
-        self.updated, self.current = self._prepare_internal(updated_expert_maps, current_expert_maps)
+        self.updated, self.current = self._prepare_internal(
+            updated_expert_maps, current_expert_maps
+        )
         self.num_layers = self.current.shape[0]
         self.num_ranks = self.current.shape[1]
         self.num_experts = self.current.shape[2]
@@ -19,7 +26,9 @@ class ComposeExpertUpdate:
     def _is_equal(self, updated_layer, current_layer):
         raise NotImplementedError
 
-    def _plan_transfers(self, layer_id, updated_layer, current_layer, send_dict, recv_dict):
+    def _plan_transfers(
+        self, layer_id, updated_layer, current_layer, send_dict, recv_dict
+    ):
         raise NotImplementedError
 
     def _map_to_yield(self, layer_id):
@@ -30,10 +39,11 @@ class ComposeExpertUpdate:
             updated_layer = self.updated[layer_id]
             current_layer = self.current[layer_id]
 
-            expert_send_info_this_layer = {}
-            expert_recv_info_this_layer = {}
+            expert_send_info_this_layer: Dict[int, List[int]] = {}
+            expert_recv_info_this_layer: Dict[int, List[int]] = {}
 
-            # Guard Clause: if there is no expert weight update, avoid subsequent processing
+            # Guard Clause: if there is no expert weight update,
+            # avoid subsequent processing.
             if self._is_equal(updated_layer, current_layer):
                 yield (
                     expert_send_info_this_layer,
@@ -44,8 +54,11 @@ class ComposeExpertUpdate:
 
             # Main planning
             self._plan_transfers(
-                layer_id, updated_layer, current_layer,
-                expert_send_info_this_layer, expert_recv_info_this_layer
+                layer_id,
+                updated_layer,
+                current_layer,
+                expert_send_info_this_layer,
+                expert_recv_info_this_layer,
             )
 
             # Final yield
@@ -71,7 +84,9 @@ class BipartiteExpertUpdate(ComposeExpertUpdate):
     def _map_to_yield(self, layer_id):
         return self.updated_org[layer_id]
 
-    def _plan_transfers(self, layer_id, updated_layer, current_layer, send_dict, recv_dict):
+    def _plan_transfers(
+        self, layer_id, updated_layer, current_layer, send_dict, recv_dict
+    ):
         # Parse expert_ids each rank needs to receive from other ranks
         dst_rank_indices, experts_to_recv = np.where(
             (current_layer == -1) & (updated_layer != -1)
@@ -82,7 +97,9 @@ class BipartiteExpertUpdate(ComposeExpertUpdate):
         for idx in range(len(dst_rank_indices)):
             expert_id = experts_to_recv[idx].item()
             if expert_id not in src_ranks_set:
-                src_ranks_set[expert_id] = np.where(current_layer[:, expert_id] != -1)[0]
+                src_ranks_set[expert_id] = np.where(
+                    current_layer[:, expert_id] != -1
+                )[0]
 
         # Loop until all experts are scheduled
         while len(dst_rank_indices) > 0:
@@ -132,7 +149,9 @@ class BipartiteExpertUpdate(ComposeExpertUpdate):
                     recv_dict[dst_rank].append((src_rank, expert_id_int))
 
                     remove_index = np.where(
-                        np.logical_and(dst_rank_indices == dst_rank, experts_to_recv == expert_id)
+                        np.logical_and(
+                            dst_rank_indices == dst_rank, experts_to_recv == expert_id
+                        )
                     )
 
                     # update
@@ -155,7 +174,9 @@ class GreedyExpertUpdate(ComposeExpertUpdate):
     def _is_equal(self, updated_layer, current_layer):
         return torch.equal(updated_layer, current_layer)
 
-    def _plan_transfers(self, layer_id, updated_layer, current_layer, send_dict, recv_dict):
+    def _plan_transfers(
+        self, layer_id, updated_layer, current_layer, send_dict, recv_dict
+    ):
         # Parse expert_ids each rank needs to receive from other ranks
         dst_rank_indices, experts_to_recv = torch.where(
             (current_layer == -1) & (updated_layer != -1)
@@ -171,11 +192,16 @@ class GreedyExpertUpdate(ComposeExpertUpdate):
             if dst_rank_id not in recv_dict:
                 recv_dict[dst_rank_id] = []
 
-            # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
+            # if expert_id are not sent out from any npu,
+            # it will be copied from one npu holding this expert.
             if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
-                candidate_src_rank_indices = torch.where(current_layer[:, expert_id] != -1)[0]
+                candidate_src_rank_indices = torch.where(
+                    current_layer[:, expert_id] != -1
+                )[0]
             else:
-                candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
+                candidate_src_rank_indices = src_rank_indices[
+                    experts_to_send == expert_id
+                ]
 
             src_rank_id = candidate_src_rank_indices[0].item()
             if src_rank_id not in send_dict:

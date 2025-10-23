@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
-import torch
-import torch.distributed as dist
 import random
 from contextlib import suppress
 from multiprocessing import Queue
-from typing import Any, Callable, Optional, List
+from typing import Callable
+from queue import Empty
+
+import torch
+import torch.distributed as dist
 
 from vllm.logger import init_logger
+
 from .eplb_expert_mapper import BipartiteExpertUpdate, GreedyExpertUpdate
+from .eplb_state import RebalanceTaskArgs, ExpertMapperArgs
 
 logger = init_logger(__name__)
 
@@ -34,13 +38,13 @@ class EPLBProcess:
         self._num_wait_worker_iterations = num_wait_worker_iterations
 
         # Process management related
-        self._process: Optional[mp.Process] = None
-        self._input_queue: Optional[Queue] = None
-        self._result_queue: Optional[Queue] = None
-        self._exception_queue: Optional[Queue] = None
+        self._process: mp.Process | None = None
+        self._input_queue: Queue | None = None
+        self._result_queue: Queue | None = None
+        self._exception_queue: Queue | None = None
         self._step_counter = 0
-        self._result: Optional[tuple] = None
-        self._args: Optional[tuple] = None
+        self._result: tuple | None = None
+        self._args: tuple | None = None
         self._is_running = False
         self._has_pending_task = False
         self._is_post_processing = False
@@ -58,17 +62,16 @@ class EPLBProcess:
             self._exception_queue = Queue()
 
             # Start the process
-            self._process = mp.Process(target=self._worker_loop,
-                                       name="EPLBProcess",
-                                       args=(self._input_queue,
-                                             self._result_queue,
-                                             self._exception_queue))
+            self._process = mp.Process(
+                target=self._worker_loop,
+                name="EPLBProcess",
+                args=(self._input_queue, self._result_queue, self._exception_queue)
+            )
             self._process.start()
             self._is_running = True
             logger.debug("EPLB background process started")
 
         except Exception as e:
-            logger.error("Failed to start EPLB background process: {}", str(e))
             self.cleanup()
             raise
 
@@ -83,10 +86,8 @@ class EPLBProcess:
         layer_ids = []
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
 
-            send_info_this_rank = send_info[
-                self.rank_id] if self.rank_id in send_info else []
-            recv_info_this_rank = recv_info[
-                self.rank_id] if self.rank_id in recv_info else []
+            send_info_this_rank = send_info.get(self.rank_id, [])
+            recv_info_this_rank = recv_info.get(self.rank_id, [])
             send_all.append(send_info_this_rank)
             recv_all.append(recv_info_this_rank)
 
@@ -101,28 +102,34 @@ class EPLBProcess:
 
     def generate_log2phy_map(self, expert_map):
         """
-        Generates a logical-to-physical expert mapping for all ranks based on an initial
-        expert distribution map. This map indicates which physical expert slot (on which rank)
-        corresponds to a given logical expert. It handles cases where an expert might
-        not be present on all ranks and fills in missing entries by replicating existing ones.
+        Generates a logical-to-physical expert mapping for all ranks based on an
+        initial expert distribution map. This map indicates which physical expert
+        slot (on which rank) corresponds to a given logical expert. It handles cases
+        where an expert might not be present on all ranks and fills in missing
+        entries by replicating existing ones.
 
         Args:
             expert_map: A 2D tensor of shape [num_ranks, num_global_experts].
-                        `expert_map[r, g]` contains the local physical ID of global expert `g`
-                        on rank `r`, or -1 if global expert `g` is not on rank `r`.
+                        `expert_map[r, g]` contains the local physical ID of global
+                        expert `g` on rank `r`, or -1 if global expert `g` is not
+                        on rank `r`.
 
         Returns:
             A 2D tensor `log2phy_map` of shape [num_ranks, num_global_experts].
             `log2phy_map[r, g]` will contain the *global physical ID* of the expert
             that rank `r` should use for logical expert `g`.
-            A global physical ID is `rank_id * num_local_experts + local_physical_expert_id`.
+            A global physical ID is
+            `rank_id * num_local_experts + local_physical_expert_id`.
         """
         num_local_experts = expert_map.max() + 1
         log2phy_map = expert_map.clone()
         num_ranks, num_global_expert = log2phy_map.shape
 
-        row_indices = torch.arange(num_ranks).view(-1, 1).expand(num_ranks,
-                      num_global_expert) * num_local_experts
+        row_indices = (
+            torch.arange(num_ranks).view(-1, 1).expand(
+                num_ranks, num_global_expert
+            ) * num_local_experts
+        )
         log2phy_map[log2phy_map != -1] += row_indices[log2phy_map != -1]
 
         for idx in range(num_global_expert):
@@ -134,48 +141,66 @@ class EPLBProcess:
                 log2phy_map[negative_rank_idx, idx] = torch.full(
                     (num_ranks - 1,),
                     log2phy_map[positive_rank_idx, idx].item(),
-                    dtype=log2phy_map.dtype)
+                    dtype=log2phy_map.dtype,
+                )
             else:
                 random_list = [
                     random.choice(log2phy_map[positive_rank_idx, idx])
                     for _ in range(num_ranks - num_rank_holding_expert)
                 ]
-                log2phy_map[negative_rank_idx, idx] = torch.tensor(random_list,
-                                                      dtype=log2phy_map.dtype)
+                log2phy_map[negative_rank_idx, idx] = torch.tensor(
+                    random_list, dtype=log2phy_map.dtype
+                )
         return log2phy_map
 
-    def _worker_loop(self, input_queue: Queue, output_queue: Queue,
-                     exception_queue: Queue) -> None:
+    def _worker_loop(
+        self, input_queue: Queue, output_queue: Queue, exception_queue: Queue
+    ) -> None:
         """Subprocess worker loop that processes tasks continuously"""
         try:
             while True:
                 # Get arguments from input queue
                 try:
                     args, expert_mapper_args = input_queue.get(timeout=1.0)
-                    if args is None or expert_mapper_args is None:  # Sentinel value to stop the process
+                    # Sentinel value to stop the process
+                    if args is None or expert_mapper_args is None:
                         break
 
                     # Execute target function
                     result = self.target_func(*args)
 
                     new_physical_to_logical_map = result[0]
-                    policy_type = expert_mapper_args[1]
+                    policy_type = expert_mapper_args.policy_type
                     # Generate migration information
-                    new_deployment = new_physical_to_logical_map.reshape(expert_mapper_args[0], args[4], -1)
-                    old_deployment = expert_mapper_args[2].reshape(expert_mapper_args[0], args[4], -1)
-                    if policy_type == 1:
-                        update_info = BipartiteExpertUpdate(new_deployment, old_deployment).generate()
-                    elif policy_type == 0:
-                        update_info = GreedyExpertUpdate(new_deployment, old_deployment).generate()
+                    new_deployment = new_physical_to_logical_map.reshape(
+                        expert_mapper_args.num_moe_layers,
+                        args.num_gpus,
+                        -1,
+                    )
+                    old_deployment = (
+                        expert_mapper_args.phyhsical_to_logical_map.reshape(
+                            expert_mapper_args.num_moe_layers,
+                            args.num_gpus,
+                            -1,
+                    ))
+                    if policy_type == "bipartite":
+                        update_info = BipartiteExpertUpdate(
+                            new_deployment, old_deployment
+                        ).generate()
+                    elif policy_type == "greedy":
+                        update_info = GreedyExpertUpdate(
+                            new_deployment, old_deployment
+                        ).generate()
                     output_queue.put(self.pack_update_info(update_info))
 
-                except mp.queues.Empty:
+                except Empty:
                     # Timeout, check if we should continue
                     continue
                 except Exception as e:
                     output_queue.put(None)
                     if hasattr(e, "add_note"):
                         import traceback
+
                         e.add_note(traceback.format_exc())
                     exception_queue.put(e)
                     logger.exception("Task execution failed in worker process")
@@ -186,7 +211,11 @@ class EPLBProcess:
         finally:
             logger.debug("EPLB worker process exiting")
 
-    def submit_task(self, args: tuple, expert_mapper_args: tuple) -> bool:
+    def submit_task(
+        self,
+        args: RebalanceTaskArgs,
+        expert_mapper_args: ExpertMapperArgs
+    ) -> bool:
         """
         Submit a task to the asynchronous process
 
@@ -220,8 +249,7 @@ class EPLBProcess:
             return True
 
         except Exception as e:
-            logger.error("Failed to submit task to asynchronous process: {}",
-                         str(e))
+            logger.error("Failed to submit task to asynchronous process: %s", str(e))
             return False
 
     def step(self) -> bool:
@@ -240,7 +268,7 @@ class EPLBProcess:
         if self._exception_queue and not self._exception_queue.empty():
             error_msg = self._exception_queue.get()
             self._has_pending_task = False
-            raise RuntimeError("Asynchronous process failed: {}", error_msg)
+            raise RuntimeError(f"Asynchronous process failed: {error_msg}")
 
         # Check if processing conditions are met
         if self._should_process():
@@ -255,9 +283,11 @@ class EPLBProcess:
         if not self._process or not self._result_queue:
             return True
 
-        return (self._step_counter >= self._num_wait_worker_iterations
-                or not self._process.is_alive()
-                or not self._result_queue.empty())
+        return (
+            self._step_counter >= self._num_wait_worker_iterations
+            or not self._process.is_alive()
+            or not self._result_queue.empty()
+        )
 
     def _fetch_result(self) -> None:
         """Retrieve subprocess results"""
@@ -265,15 +295,14 @@ class EPLBProcess:
             self._result = self._result_queue.get()
         else:
             self._result = None
-            logger.warning(
-                "Asynchronous process completed but no result was returned")
+            logger.warning("Asynchronous process completed but no result was returned")
 
     def cleanup(self) -> None:
         """Clean up process resources"""
         # Send sentinel value to stop the process
         if self._input_queue:
             with suppress(Exception):
-                self._input_queue.put(None)
+                self._input_queue.put(None, None)
 
         if self._process:
             if self._process.is_alive():
@@ -281,8 +310,7 @@ class EPLBProcess:
                 self._process.join(timeout=1.0)
             self._process = None
 
-        for q in (self._input_queue, self._result_queue,
-                  self._exception_queue):
+        for q in (self._input_queue, self._result_queue, self._exception_queue):
             if q:
                 with suppress(Exception):
                     q.close()
@@ -314,7 +342,7 @@ class EPLBProcess:
         self._is_post_processing = value
 
     @property
-    def result(self) -> Optional[tuple]:
+    def result(self) -> tuple | None:
         """Return processing results"""
         return self._result
 
