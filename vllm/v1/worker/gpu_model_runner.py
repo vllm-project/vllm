@@ -379,7 +379,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.cuda.Event()
 
-        # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
             self.compilation_config.cudagraph_capture_sizes

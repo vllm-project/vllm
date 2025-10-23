@@ -754,20 +754,21 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size is not None
                 and self.compilation_config.max_cudagraph_capture_size != valid_max_size
             ):
-                # this assertion take effect only when both two flags are user-specified
+                # raise error only when both two flags are user-specified
                 # and they are inconsistent with each other
-                assert self.compilation_config.cudagraph_capture_sizes is None, (
-                    "customized max_cudagraph_capture_size"
-                    f"(={self.compilation_config.max_cudagraph_capture_size}) should be"
-                    " consistent with the max value of cudagraph_capture_sizes"
-                    f"(={valid_max_size})"
-                )
+                if self.compilation_config.cudagraph_capture_sizes is not None:
+                    raise ValueError(
+                        "customized max_cudagraph_capture_size"
+                        f"(={self.compilation_config.max_cudagraph_capture_size}) "
+                        "should be consistent with the max value of "
+                        f"cudagraph_capture_sizes(={valid_max_size})"
+                    )
 
                 logger.warning(
                     "Truncating max_cudagraph_capture_size to %d",
                     valid_max_size,
                 )
-            # set the final max_cudagraph_capture_size
+            # always set the final max_cudagraph_capture_size
             self.compilation_config.max_cudagraph_capture_size = valid_max_size
 
             if self.compilation_config.cudagraph_capture_sizes is not None and len(

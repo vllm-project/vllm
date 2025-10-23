@@ -337,7 +337,7 @@ class CompilationConfig:
         splitting ops write their outputs to input buffers.
 
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.12.0 or v1.0.0. Please use cudagraph_mode=FULL_AND
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=FULL_AND
     _PIECEWISE instead.
     """
     cudagraph_num_of_warmups: int = 0
@@ -363,7 +363,7 @@ class CompilationConfig:
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.12.0 or v1.0.0. Please use cudagraph_mode=
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
     FULL_AND_PIECEWISE instead.
     """
     cudagraph_specialize_lora: bool = True
