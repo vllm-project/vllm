@@ -1025,6 +1025,7 @@ def test_external_prefix_cache_metrics():
     scheduler = create_scheduler(
         enable_prefix_caching=False,
         use_kv_connector=True,
+        disable_hybrid_kv_cache_manager=True,
     )
 
     # Mock connector to simulate a partial external cache hit
