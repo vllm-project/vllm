@@ -17,6 +17,7 @@ from vllm.inputs.data import is_embeds_prompt
 class MockModelConfig:
     max_model_len: int = 100
     encoder_config: dict | None = None
+    enable_prompt_embeds: bool = True
 
 
 class MockTokenizerResult:
