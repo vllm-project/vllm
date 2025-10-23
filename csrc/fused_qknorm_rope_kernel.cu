@@ -188,20 +188,23 @@ __global__ void fusedQKNormRopeKernel(
 
   if constexpr (interleave) {
     // Perform interleaving. Use pre-computed cos/sin values.
-    for (int i = 0; i < numElemsPerThread; i++) {
-      if (i % 2 == 0) {
-        elements2[i] = -elements[i + 1];
-      } else {
-        elements2[i] = elements[i - 1];
-      }
+    for (int i = 0; i < numElemsPerThread / 2; ++i) {
+      int const idx0 = 2 * i;
+      int const idx1 = 2 * i + 1;
 
-      int dim_idx = laneId * numElemsPerThread + i;
-      int half_dim = dim_idx / 2;
-      // Use pre-computed cos/sin from cache with optimized memory access
-      float cos_val = __bfloat162float(VLLM_LDG(cos_ptr + half_dim));
-      float sin_val = __bfloat162float(VLLM_LDG(sin_ptr + half_dim));
+      float const val0 = elements[idx0];
+      float const val1 = elements[idx1];
 
-      elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+      int const dim_idx = laneId * numElemsPerThread + idx0;
+      int const half_dim = dim_idx / 2;
+      float const cos_val = __bfloat162float(VLLM_LDG(cos_ptr + half_dim));
+      float const sin_val = __bfloat162float(VLLM_LDG(sin_ptr + half_dim));
+
+      float const rotated_val0 = val0 * cos_val - val1 * sin_val;
+      float const rotated_val1 = val0 * sin_val + val1 * cos_val;
+  
+      elements[idx0] = rotated_val0;
+      elements[idx1] = rotated_val1;
     }
   } else {
     // Before data exchange with in warp, we need to sync.
@@ -285,6 +288,17 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
     case 128:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
         fusedQKNormRopeKernel<128, INTERLEAVE>
+            <<<gridDim, blockDim, 0, stream>>>(
+                reinterpret_cast<__nv_bfloat16*>(qkv), num_heads_q, num_heads_k,
+                num_heads_v, eps,
+                reinterpret_cast<__nv_bfloat16 const*>(q_weight),
+                reinterpret_cast<__nv_bfloat16 const*>(k_weight), cos_sin_cache,
+                position_ids, num_tokens);
+      });
+      break;
+    case 256:
+      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+        fusedQKNormRopeKernel<256, INTERLEAVE>
             <<<gridDim, blockDim, 0, stream>>>(
                 reinterpret_cast<__nv_bfloat16*>(qkv), num_heads_q, num_heads_k,
                 num_heads_v, eps,
