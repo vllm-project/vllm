@@ -1424,9 +1424,17 @@ class Scheduler(SchedulerInterface):
 
     def reset_connector_cache(self) -> bool:
         if self.connector is None:
-            logger.warning("reset_connector called but no KV connector configured.")
+            logger.warning("reset_connector called but no KV connector is configured.")
             return False
-        return self.connector.reset_cache() is not False
+
+        if self.connector.reset_cache() is False:
+            return False
+
+        if self.log_stats:
+            assert self.connector_prefix_cache_stats is not None
+            self.connector_prefix_cache_stats.reset = True
+
+        return True
 
     def make_stats(
         self,
