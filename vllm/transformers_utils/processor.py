@@ -161,6 +161,32 @@ def get_processor(
 
 cached_get_processor = lru_cache(get_processor)
 
+
+@lru_cache
+def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
+    try:
+        call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
+        # if the processor has explicit kwargs annotation, use it
+        if call_kwargs is not None:
+            processor_kwargs = get_args(call_kwargs)[0].__annotations__.keys()
+            return set(processor_kwargs)
+        # otherwise, try to get from ProcessingKwargs
+        else:
+            module_name = type(processor).__module__
+            mod = importlib.import_module(module_name)
+            # find *ProcessingKwargs in the module
+            processor_kwargs = set()
+            for name, obj in vars(mod).items():
+                if name.endswith("ProcessingKwargs"):
+                    processor_kwargs = (
+                        processor_kwargs
+                        | _collect_dynamic_keys_from_processing_kwargs(obj)
+                    )
+            return processor_kwargs
+    except Exception:
+        return set()
+
+
 def cached_get_processor_without_dynamic_kwargs(
     processor_name: str,
     *args: Any,
@@ -207,31 +233,6 @@ def cached_processor_from_config(
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
-
-
-@lru_cache
-def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
-    try:
-        call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
-        # if the processor has explicit kwargs annotation, use it
-        if call_kwargs is not None:
-            processor_kwargs = get_args(call_kwargs)[0].__annotations__.keys()
-            return set(processor_kwargs)
-        # otherwise, try to get from ProcessingKwargs
-        else:
-            module_name = type(processor).__module__
-            mod = importlib.import_module(module_name)
-            # find *ProcessingKwargs in the module
-            processor_kwargs = set()
-            for name, obj in vars(mod).items():
-                if name.endswith("ProcessingKwargs"):
-                    processor_kwargs = (
-                        processor_kwargs
-                        | _collect_dynamic_keys_from_processing_kwargs(obj)
-                    )
-            return processor_kwargs
-    except Exception:
-        return set()
 
 
 def get_feature_extractor(
