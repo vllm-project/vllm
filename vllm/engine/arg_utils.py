@@ -21,19 +21,24 @@ from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigType, ConvertOption, DetailedTraceModules,
-                         Device, DeviceConfig, DistributedExecutorBackend,
-                         EPLBConfig, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         StructuredOutputsConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs)
-from vllm.config.multimodal import MMCacheType, MultiModalConfig
-from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config import (CacheConfig, CompilationConfig, ConfigType,
+                         DeviceConfig, ECTransferConfig, EPLBConfig,
+                         KVEventsConfig, KVTransferConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         StructuredOutputsConfig, VllmConfig, get_attr_docs)
+from vllm.config.cache import (BlockSize, CacheDType, MambaDType,
+                               PrefixCachingHashAlgo)
+from vllm.config.device import Device
+from vllm.config.model import (ConvertOption, HfOverrides, LogprobsMode,
+                               ModelDType, RunnerOption, TaskOption,
+                               TokenizerMode)
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.observability import DetailedTraceModules
+from vllm.config.parallel import (DistributedExecutorBackend,
+                                  ExpertPlacementStrategy)
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -455,6 +460,8 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
     kv_events_config: Optional[KVEventsConfig] = None
+
+    ec_transfer_config: ECTransferConfig | None = None
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -929,13 +936,15 @@ class EngineArgs:
                                 **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
-        vllm_group.add_argument('--kv-events-config',
+        vllm_group.add_argument("--kv-events-config",
                                 **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument("--ec-transfer-config",
+                                **vllm_kwargs["ec_transfer_config"])
         vllm_group.add_argument("--compilation-config", "-O",
                                 **vllm_kwargs["compilation_config"])
         vllm_group.add_argument("--additional-config",
                                 **vllm_kwargs["additional_config"])
-        vllm_group.add_argument('--structured-outputs-config',
+        vllm_group.add_argument("--structured-outputs-config",
                                 **vllm_kwargs["structured_outputs_config"])
 
         # Other arguments
@@ -1442,6 +1451,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_transfer_config=self.ec_transfer_config,
             additional_config=self.additional_config,
         )
 

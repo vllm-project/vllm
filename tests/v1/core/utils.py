@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
-from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
-                         SchedulerConfig, SpeculativeConfig, VllmConfig)
+from vllm.config import (CacheConfig, ECTransferConfig, KVTransferConfig,
+                         ModelConfig, SchedulerConfig, SpeculativeConfig,
+                         VllmConfig)
 from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
@@ -36,8 +37,11 @@ def create_scheduler(
     num_speculative_tokens: Optional[int] = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
-) -> Union[Scheduler, AsyncScheduler]:
-    '''Create scheduler under test.
+    use_ec_connector: bool = False,
+    ec_role: str | None = None,
+) -> Scheduler | AsyncScheduler:
+    """
+    Create scheduler under test.
 
     Args:
       model: model under test
@@ -49,18 +53,18 @@ def create_scheduler(
 
     Returns:
       {class}`Scheduler` instance
-    '''
+    """
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=max_num_seqs,
-        max_num_batched_tokens=max_num_batched_tokens,
-        max_model_len=max_model_len,
-        long_prefill_token_threshold=long_prefill_token_threshold,
-        disable_chunked_mm_input=disable_chunked_mm_input,
-        enable_chunked_prefill=True,
-        async_scheduling=async_scheduling,
-    )
+        scheduler_config = SchedulerConfig(
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_model_len=max_model_len,
+            long_prefill_token_threshold=long_prefill_token_threshold,
+            disable_chunked_mm_input=disable_chunked_mm_input,
+            enable_chunked_prefill=True,
+            async_scheduling=async_scheduling,
+        )
     model_config = ModelConfig(
         model=model,
         trust_remote_code=True,
@@ -90,12 +94,19 @@ def create_scheduler(
         speculative_config = SpeculativeConfig(
             model="ngram", num_speculative_tokens=num_speculative_tokens)
 
+    ec_transfer_config = (ECTransferConfig(
+        ec_connector="ECSharedStorageConnector",
+        ec_role=ec_role,
+        ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
+    ) if use_ec_connector else None)
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
+        ec_transfer_config=ec_transfer_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -122,7 +133,8 @@ _none_hash_initialized = False
 def create_requests(
     num_requests: int,
     num_tokens: int = 10,
-    mm_positions: Optional[list[list[PlaceholderRange]]] = None,
+    mm_hashes_list: list[list[str]] | None = None,
+    mm_positions: list[list[PlaceholderRange]] | None = None,
     max_tokens: int = 16,
     stop_token_ids: Optional[list[int]] = None,
     prompt_logprobs: Optional[int] = None,
@@ -140,20 +152,47 @@ def create_requests(
                                      stop_token_ids=stop_token_ids,
                                      prompt_logprobs=prompt_logprobs)
     requests = []
+
+    if mm_hashes_list is not None:
+        # NOTE: allow manual input; some mm items can have the same identifier
+        # no. of mm_hashes and mm_positions for each request should be identical
+        assert mm_positions is not None, (
+            "mm_positions must be provided when mm_hashes_list is provided")
+        assert len(mm_hashes_list) == len(mm_positions) == num_requests
+        assert [len(h)
+                for h in mm_hashes_list] == [len(p) for p in mm_positions]
+
+        # Since same identifier would imply they are identical encoder output
+        # Verify mm items with identical identifier are having mm_position.length
+        seen_hashes: dict[str, int] = {}
+
     for i in range(num_requests):
         mm_features = []
-        if mm_positions is not None:
-            mm_position = mm_positions[i]
-            for j, position in enumerate(mm_position):
-                # Dummy hash for each mm item should be unique
-                # since encoder cache tracks entries by hash
+
+        for j, position in enumerate(
+                mm_positions[i] if mm_positions is not None else []):
+            if mm_hashes_list is not None:
+                identifier = mm_hashes_list[i][j]
+
+                # Verify if position length is identical
+                position_length = position.length
+                if identifier in seen_hashes:
+                    assert seen_hashes[identifier] == position_length, (
+                        f"mm_hash '{identifier}' has inconsistent position lengths: "
+                        f"previously {seen_hashes[identifier]}, now {position_length} "
+                        f"at request {i}, position {j}")
+                else:
+                    seen_hashes[identifier] = position_length
+            else:
+                # Unique dummy hash for each mm item
                 identifier = f"hash{i}_{j}"
-                mm_feature = MultiModalFeatureSpec(
-                    data=MultiModalKwargsItem.dummy("dummy_m"),
-                    mm_position=position,
-                    identifier=identifier,
-                    modality="image")
-                mm_features.append(mm_feature)
+            mm_feature = MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy("dummy_m"),
+                mm_position=position,
+                identifier=identifier,
+                modality="image",
+            )
+            mm_features.append(mm_feature)
 
         prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
                             num_tokens)
