@@ -1600,15 +1600,13 @@ class EngineArgs:
         if self.guided_decoding_backend is not None:
             so_config.guided_decoding_backend = self.guided_decoding_backend
         if self.guided_decoding_disable_fallback is not None:
-            so_config.guided_decoding_disable_fallback = (
-                self.guided_decoding_disable_fallback
-            )
+            so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
-            so_config.guided_decoding_disable_any_whitespace = (
+            so_config.disable_any_whitespace = (
                 self.guided_decoding_disable_any_whitespace
             )
         if self.guided_decoding_disable_additional_properties is not None:
-            so_config.guided_decoding_disable_additional_properties = (
+            so_config.disable_additional_properties = (
                 self.guided_decoding_disable_additional_properties
             )
 
