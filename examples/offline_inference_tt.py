@@ -76,6 +76,12 @@ def register_tt_models():
         "models.tt_transformers.tt.generator_vllm:Gemma3ForConditionalGeneration",
     )
 
+    # DeepseekV3
+    ModelRegistry.register_model(
+        "TTDeepseekV3ForCausalLM",
+        "models.demos.deepseek_v3.tt.generator_vllm:DeepseekV3ForCausalLM",
+    )
+
     # GPT-OSS
     ModelRegistry.register_model(
         "TTGptOssForCausalLM",
@@ -268,6 +274,7 @@ def check_tt_model_supported(model):
         "google/gemma-3-27b-it",
         "openai/gpt-oss-20b",
         "openai/gpt-oss-120b",
+        "deepseek-ai/DeepSeek-R1-0528",
     ]
     assert model in supported_models, f"Invalid model: {model}"
 
@@ -324,6 +331,7 @@ def run_inference(
     max_model_len=None,
     max_num_batched_tokens=None,
     data_parallel_size=1,
+    block_size=64,
 ):
     check_tt_model_supported(model)
 
@@ -344,7 +352,7 @@ def run_inference(
     # LLM args
     engine_kw_args = {
         "model": model,
-        "block_size": 64,
+        "block_size": block_size,
         "max_num_seqs": max_seqs_in_batch,
         "max_model_len": max_model_len,
         "disable_log_stats": False,
@@ -701,6 +709,12 @@ if __name__ == "__main__":
         default=1,
         help="Data parallel size",
     )
+    parser.add_argument(
+        "--block_size",
+        type=int,
+        default=64,
+        help="KV cache block size",
+    )
 
     args = parser.parse_args()
 
@@ -724,4 +738,5 @@ if __name__ == "__main__":
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         data_parallel_size=args.data_parallel_size,
+        block_size=args.block_size,
     )
