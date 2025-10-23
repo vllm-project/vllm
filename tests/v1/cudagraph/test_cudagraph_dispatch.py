@@ -160,7 +160,6 @@ class TestCUDAGraphWrapper:
         self.persistent_input_buffer = torch.zeros(1, 10, device="cuda")
         self.input_tensor = torch.randn(1, 10, device="cuda")
 
-    @create_new_process_for_each_test("spawn")
     def test_capture_and_replay(self):
         wrapper = CUDAGraphWrapper(
             self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
@@ -214,7 +213,6 @@ class TestCUDAGraphWrapper:
         eager_output = self.model(self.input_tensor)
         torch.testing.assert_close(eager_output, output2)
 
-    @create_new_process_for_each_test("spawn")
     def test_bypass_on_mode_mismatch(self):
         wrapper = CUDAGraphWrapper(
             self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
@@ -238,7 +236,6 @@ class TestCUDAGraphWrapper:
             mock_forward.assert_called_once()
         assert not wrapper.concrete_cudagraph_entries
 
-    @create_new_process_for_each_test("spawn")
     def test_bypass_on_mode_none(self):
         wrapper = CUDAGraphWrapper(
             self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
