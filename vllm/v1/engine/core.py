@@ -31,7 +31,6 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import (
     decorate_logs,
-    deserialize_method_call,
     run_method,
     serialize_method_call,
     set_process_title,
@@ -70,7 +69,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, deserialize_method_call
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -319,6 +318,14 @@ class EngineCoreGuard(threading.Thread):  # changed
     def _send_execution_result(self, success: bool):
         msg = {"engine_index": self.engine_index, "success": success}
         self._send_msg(self.client_cmd_socket, msg, serialize=True)
+
+    def shutdown(self):
+        if self.fault_report_socket is not None:
+            self.fault_report_socket.close()
+        if self.client_cmd_socket is not None:
+            self.client_cmd_socket.close()
+        if self.worker_cmd_socket is not None:
+            self.worker_cmd_socket.close()
 
 
 def busy_loop_wrapper(busy_loop_func):
@@ -1389,6 +1396,11 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    def shutdown(self):
+        super().shutdown()
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.engine_core_guard.shutdown()
 
 
 class DPEngineCoreProc(EngineCoreProc):

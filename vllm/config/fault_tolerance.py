@@ -19,7 +19,7 @@ class FaultToleranceConfig:
     such as scaling down fault DPEngineCore.
     """
 
-    engine_recovery_timeout: int = 0
+    engine_recovery_timeout: int = 60
     """Timeout (in seconds) to wait for error handling instructions
     before raising an exception. If the EngineCore encounters an
     error, it waits up to this many seconds for instructions on how

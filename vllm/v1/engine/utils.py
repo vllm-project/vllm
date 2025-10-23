@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import multiprocessing
 import os
 import uuid
 import weakref
@@ -24,16 +25,17 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import (
     get_mp_context,
-    serialize_method_call,
 )
 from vllm.utils.network_utils import (
     get_open_zmq_ipc_path,
     make_zmq_socket,
+    recv_msg,
     zmq_socket_ctx,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor import Executor
+from vllm.v1.serial_utils import serialize_method_call
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -195,33 +197,33 @@ class CoreEngineProcManager:
         """Shutdown all procs."""
         self._finalizer()
 
-    def join_first(self):
-        """Wait for any process to exit."""
-        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            sentinels = [proc.sentinel for proc in self.processes]
-            while self.processes is not None:
-                died = connection.wait(sentinels)
-                for sentinel in died:
-                    died_proc = next(
-                        proc for proc in self.processes if proc.sentinel == sentinel
-                    )
-                    fault_info = FaultInfo(
-                        type="engine_core dead",
-                        message=f"Engine core proc {died_proc.pid} "
-                        f"(PID: {died_proc.name}) died unexpectedly.",
-                        engine_id=died_proc.name[-1],
-                        additional_info=None,
-                    )
-                    self.engine_down_socket.send_multipart(
-                        [b"", fault_info.serialize().encode("utf-8")]
-                    )
+    def start_engine_core_monitor(self):
+        sentinels = [proc.sentinel for proc in self.processes]
+        while self.processes:
+            died = multiprocessing.connection.wait(sentinels)
+            for sentinel in died:
+                died_proc = next(
+                    proc for proc in self.processes if proc.sentinel == sentinel
+                )
+                fault_info = FaultInfo(
+                    type="engine_core dead",
+                    message=f"Engine core proc {died_proc.pid} "
+                    f"(PID: {died_proc.name}) died unexpectedly.",
+                    engine_id=died_proc.name[-1],
+                    additional_info=None,
+                )
+                self.engine_down_socket.send_multipart(
+                    [b"", fault_info.serialize().encode("utf-8")]
+                )
+                if isinstance(sentinel, int) and sentinel in sentinels:
+                    sentinels.remove(sentinel)
+                logger.error(
+                    "Engine core proc %s died unexpectedly",
+                    died_proc,
+                )
 
-                    logger.error(
-                        "Engine core proc %s died unexpectedly",
-                        died_proc,
-                    )
-        else:
-            connection.wait(proc.sentinel for proc in self.processes)
+    def join_first(self):
+        connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -321,15 +323,19 @@ class CoreEngineActorManager:
 
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
-            num_identity = 1
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.fault_report_port,
+            )
             identity = generate_identity_group(
-                "core_engine_actor_manager", "clinet_guard", "report", num_identity
+                "core_engine_actor_manager", "clinet_guard", "report", 1
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
-                path=vllm_config.fault_tolerance_config.fault_report_addr,
+                path=zmq_addr,
                 socket_type=zmq.DEALER,
-                bind=True,
+                bind=False,
                 identity=identity,
             )
 
@@ -1224,15 +1230,16 @@ class FaultHandler:
         unhealthy_engine_list = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
         )
-        engine_indexes = [engine_index for engine_index in self.client_cmd_registry]
+        engine_identities = [identity for identity in self.client_cmd_registry.values()]
 
         if instruction == "pause":
             for unhealthy_engine in unhealthy_engine_list:
-                engine_indexes.remove(int(unhealthy_engine.engine_id))
+                engine_identities.remove(
+                    self.client_cmd_registry[int(unhealthy_engine.engine_id)]
+                )
 
         kwargs = {"timeout": timeout}
-        for engine_index in engine_indexes:
-            identity = self.client_cmd_registry.get(engine_index)
+        for identity in engine_identities:
             serialized_instruction = serialize_method_call(instruction, **kwargs)
             self.cmd_socket.send_multipart(
                 [identity, b"", serialized_instruction.encode("utf-8")]
@@ -1241,25 +1248,22 @@ class FaultHandler:
         poller = zmq.Poller()
         poller.register(self.cmd_socket, zmq.POLLIN)
 
-        while engine_indexes:
-            socks = dict(poller.poll(timeout))
+        while engine_identities:
+            socks = dict(poller.poll(timeout * 1000))
             if self.cmd_socket not in socks:
                 logger.error(
                     "Timeout while waiting for responses from engines: %s",
-                    engine_indexes,
+                    engine_identities,
                 )
                 return False
             try:
-                parts = self.cmd_socket.recv_multipart()
-                if len(parts) != 3:
-                    logger.error("Malformed response: %s", parts)
-                    return False
-                identity, _, response = parts
-                response_dict = json.loads(response.decode("utf-8"))
+                identity, response = recv_msg(self.cmd_socket)
+                if identity.encode("utf-8") in engine_identities:
+                    engine_identities.remove(identity.encode("utf-8"))
+                assert response is not None
+                response_dict = json.loads(response)
                 engine_id = response_dict.get("engine_index")
                 success = response_dict.get("success", False)
-                if engine_id in engine_indexes:
-                    engine_indexes.remove(int(engine_id))
                 if not success:
                     logger.error(
                         "Engine %s reported failure: %s",
