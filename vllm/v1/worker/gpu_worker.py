@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 class WorkerGuard:
     def __init__(self, tp_rank: int, worker_cmd_addr: str):
         zmq_ctx = zmq.Context()
-        identity = tp_rank.to_bytes()
+        identity = tp_rank.to_bytes(length=4, byteorder='little')
         self.cmd_socket = make_zmq_socket(
             ctx=zmq_ctx,
             path=worker_cmd_addr,

@@ -233,7 +233,7 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def _stop_worker_execution(self, tp_size: int):
         for tp_rank in range(tp_size):
-            identity = tp_rank.to_bytes()
+            identity = tp_rank.to_bytes(length=4, byteorder='little')
             self.worker_cmd_socket.send_multipart(
                 [identity, b"", b"stop worker execution"]
             )
