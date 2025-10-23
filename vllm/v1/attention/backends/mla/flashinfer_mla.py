@@ -51,8 +51,14 @@ class FlashInferMLABackend(MLACommonBackend):
         return ["auto", "fp8", "fp8_e4m3"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[BlockSize]:
-        return [32, 64]
+    def supports_block_size(cls, block_size: BlockSize | None) -> bool:
+        if block_size is None:
+            return True
+        return (block_size == 32) or (block_size % 64 == 0)
+
+    @classmethod
+    def get_default_block_size(cls) -> BlockSize:
+        return 64
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
