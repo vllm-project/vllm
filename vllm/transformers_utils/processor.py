@@ -66,7 +66,7 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
     kwargs_type_annotations = get_type_hints(kwargs_cls)
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
-            kw_annotations = kwargs_type_annotations[kw_type].__annotations__
+            kw_annotations = get_type_hints(kwargs_type_annotations[kw_type])
             for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
     dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
@@ -168,7 +168,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
         call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
         # if the processor has explicit kwargs annotation, use it
         if call_kwargs is not None:
-            processor_kwargs = get_args(call_kwargs)[0].__annotations__.keys()
+            processor_kwargs = get_type_hints(get_args(call_kwargs)[0]).keys()
             return set(processor_kwargs)
         # otherwise, try to get from ProcessingKwargs
         else:
