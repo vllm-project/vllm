@@ -9,6 +9,8 @@ from vllm.v1.kv_offload.spec import OffloadingSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.abstract import OffloadingManager
+    from vllm.v1.kv_offload.backend import Backend
 
 logger = init_logger(__name__)
 
@@ -50,7 +52,55 @@ class OffloadingSpecFactory:
         return spec_cls(config)
 
 
+class OffloadingManagerFactory:
+    """Factory for creating OffloadingManager instances based on eviction policy."""
+
+    _registry: dict[str, Callable[[], type["OffloadingManager"]]] = {}
+
+    @classmethod
+    def register_manager(
+        cls, policy_name: str, module_path: str, class_name: str
+    ) -> None:
+        """Register an eviction policy manager with lazy-loading module and class name."""
+        if policy_name in cls._registry:
+            raise ValueError(f"Policy '{policy_name}' is already registered.")
+
+        def loader() -> type["OffloadingManager"]:
+            module = importlib.import_module(module_path)
+            return getattr(module, class_name)
+
+        cls._registry[policy_name] = loader
+
+    @classmethod
+    def create_manager(
+        cls,
+        policy_name: str,
+        backend: "Backend",
+        enable_events: bool = False,
+    ) -> "OffloadingManager":
+        """
+        Create an OffloadingManager instance based on the eviction policy name.
+        """
+        if policy_name not in cls._registry:
+            raise ValueError(
+                f"Unknown eviction policy: {policy_name}. "
+                f"Supported policies: {list(cls._registry.keys())}"
+            )
+
+        manager_cls = cls._registry[policy_name]()
+        logger.info("Creating offloading manager with policy: %s", policy_name)
+        return manager_cls(backend=backend, enable_events=enable_events)
+
+
 # Register various specs here.
 OffloadingSpecFactory.register_spec(
     "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu", "CPUOffloadingSpec"
+)
+
+# Register built-in eviction policies here.
+OffloadingManagerFactory.register_manager(
+    "lru", "vllm.v1.kv_offload.lru_manager", "LRUOffloadingManager"
+)
+OffloadingManagerFactory.register_manager(
+    "arc", "vllm.v1.kv_offload.arc_manager", "ARCOffloadingManager"
 )
