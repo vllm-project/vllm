@@ -385,6 +385,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             config["BLOCK_SIZE_N"],
             config["BLOCK_SIZE_K"],
             config["GROUP_SIZE_M"],
-            config["SPLIT_K"] if "SPLIT_K" in config else 1,
+            config.get("SPLIT_K", 1),
             mul_routed_weight,
         )
