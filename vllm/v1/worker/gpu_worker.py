@@ -6,6 +6,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
+from threading import Thread
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -53,9 +54,9 @@ if TYPE_CHECKING:
 
 
 class WorkerGuard:
-    def __init__(self, tp_rank, worker_cmd_addr):
+    def __init__(self, tp_rank: int, worker_cmd_addr: str):
         zmq_ctx = zmq.Context()
-        identity = tp_rank.tobytes().decode("utf8")
+        identity = tp_rank.to_bytes()
         self.cmd_socket = make_zmq_socket(
             ctx=zmq_ctx,
             path=worker_cmd_addr,
@@ -63,8 +64,35 @@ class WorkerGuard:
             bind=False,
             identity=identity,
         )
+        Thread(target=self.run, daemon=True, name="WorkerGuardCmdReceiver").start()
 
     def run(self):
+        """Run the message receiving loop and handle control commands"""
+        while True:
+            try:
+                # Use blocking receive - will wait until a message arrives
+                parts = self.cmd_socket.recv_multipart()
+
+                # Verify message format
+                assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
+
+                identity_bytes, empty_frame, message_bytes = parts
+
+                # Verify empty frame
+                assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+
+                # Convert to string
+                message = message_bytes.decode("utf-8")
+
+                if message == "stop worker execution":
+                    self.pause()
+
+            except (zmq.ZMQError, UnicodeDecodeError) as e:
+                logger.error("receive message failed: %s", e)
+            except Exception as e:
+                logger.error("Unexpected error occurred while receiving message: %s", e)
+
+    def pause(self):
         pass
 
 
@@ -126,6 +154,12 @@ class Worker(WorkerBase):
             )
         else:
             self.profiler = None
+
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.worker_guard = WorkerGuard(
+                get_tp_group().rank,
+                vllm_config.fault_tolerance_config.engine_core_cmd_addr,
+            )
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
