@@ -214,7 +214,8 @@ class CoreEngineProcManager:
                 self.engine_down_socket.send_multipart(
                     [b"", fault_info.serialize().encode("utf-8")]
                 )
-                sentinels.remove(sentinel)
+                idx = sentinels.index(sentinel)
+                sentinels.pop(idx)
                 logger.error(
                     "Engine core proc %s died unexpectedly",
                     died_proc,
