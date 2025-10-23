@@ -31,8 +31,6 @@ from typing import Any
 import torch
 from torch import nn
 
-import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -54,7 +52,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -277,13 +275,6 @@ class Qwen3MoeAttention(nn.Module):
             rope_scaling=rope_scaling,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        # Determine if we can use fused QK norm + RoPE
-        self.use_fused_qk_norm_rope = envs.VLLM_FUSE_QKNORM_AND_ROPE and isinstance(
-            self.rotary_emb, RotaryEmbedding
-        )
-        if self.use_fused_qk_norm_rope:
-            logger.info_once("Using fused QK norm + RoPE kernel for Qwen3MoeAttention")
-
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -303,48 +294,22 @@ class Qwen3MoeAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
-    def apply_qk_norm_rope(self, qkv, positions):
-        if self.use_fused_qk_norm_rope:
-            ops.fused_qk_norm_rope(
-                qkv,
-                self.num_heads,
-                self.num_kv_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                self.q_norm.variance_epsilon,
-                self.q_norm.weight,
-                self.k_norm.weight,
-                self.rotary_emb.cos_sin_cache,
-                self.rotary_emb.is_neox_style,
-                positions.view(-1),
-            )
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        else:
-            # Fallback to non-fused QK Norm & RoPE implementation
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-            q_by_head = q.view(
-                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-            )
-            q_by_head = self.q_norm(q_by_head)
-            q = q_by_head.view(q.shape)
-            k_by_head = k.view(
-                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-            )
-            k_by_head = self.k_norm(k_by_head)
-            k = k_by_head.view(k.shape)
-
-            q, k = self.rotary_emb(positions, q, k)
-
-        return q, k, v
-
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = self.apply_qk_norm_rope(qkv, positions)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # Add qk-norm
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output

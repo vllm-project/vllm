@@ -563,7 +563,6 @@ class CompilationConfig:
             self.pass_config = PassConfig(**self.pass_config)
 
         if self.pass_config.enable_qk_norm_rope_fusion:
-            # self.custom_ops.append("+rms_norm")
             # TODO: rope native forward cann't match properly now.
             self.custom_ops.append("+rotary_embedding")
 

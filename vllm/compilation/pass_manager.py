@@ -93,22 +93,17 @@ class PostGradPassManager(CustomGraphPass):
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
             if self.pass_config.enable_noop:
-                logger.debug("Enabling NoOpEliminationPass")
                 self.passes += [NoOpEliminationPass(config)]
 
             if self.pass_config.enable_sequence_parallelism:
-                logger.debug("Enabling SequenceParallelismPass")
                 self.passes += [SequenceParallelismPass(config)]
                 if self.pass_config.enable_async_tp:
-                    logger.debug("Enabling AsyncTPPass")
                     self.passes += [AsyncTPPass(config)]
 
             if self.pass_config.enable_fi_allreduce_fusion:
-                logger.debug("Enabling AllReduceFusionPass")
                 self.passes += [AllReduceFusionPass(config)]
 
             if self.pass_config.enable_fusion:
-                logger.debug("Enabling RMSNormQuantFusionPass & ActivationQuantFusionPass")
                 self.passes += [RMSNormQuantFusionPass(config)]
                 self.passes += [ActivationQuantFusionPass(config)]
 
@@ -117,10 +112,8 @@ class PostGradPassManager(CustomGraphPass):
                 self.passes += [AttnFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
-                logger.debug("Enabling QKNormRoPEFusionPass")
                 self.passes += [QKNormRoPEFusionPass(config)]
 
-            logger.debug("Enabling PostCleanupPass and FixFunctionalizationPass")
             # needs a functional graph
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
