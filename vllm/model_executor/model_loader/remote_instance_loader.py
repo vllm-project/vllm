@@ -97,11 +97,13 @@ class RemoteInstanceModelLoader(BaseModelLoader):
         start_build_group_tic = time.time()
         # To support tp, pp
         global_rank = _get_rank()
-        client.build_group(
+        success, message = client.build_group(
             gpu_id=torch.cuda.current_device(),
             client_rank=global_rank,
             client_id=self.client_id,
         )
+        if not success:
+            raise RuntimeError(f"Failed to build group for remote instance: {message}")
         # Wait for rank0 to complete trigger()
         get_world_group().barrier()
 
