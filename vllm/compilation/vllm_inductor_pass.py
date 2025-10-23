@@ -114,7 +114,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
-        from vllm.utils import unique_filepath
+        from vllm.utils.system_utils import unique_filepath
 
         file_path = unique_filepath(
             lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py"
@@ -128,7 +128,8 @@ class VllmPatternMatcherPass(VllmInductorPass):
                 f" please add to dump_patterns if there are any errors.\n\n"
                 f"from torch._higher_order_ops.auto_functionalize import "
                 f"auto_functionalized as auto_functionalized\n"
-                f"from torch._inductor.pattern_matcher import *",
+                f"from torch._inductor.pattern_matcher import *\n"
+                f"vllm = torch.ops.vllm",
                 file=f,
             )
 

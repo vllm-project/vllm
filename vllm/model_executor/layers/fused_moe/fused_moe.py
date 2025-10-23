@@ -52,8 +52,8 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Sc
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1074,9 +1074,8 @@ def vllm_topk_softmax(
         topk_indices,
         token_expert_indices,
         gating_output,
+        renormalize,
     )
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights, topk_indices
 
@@ -1113,11 +1112,9 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
-
     topk_func = dispatch_topk_func()
     topk_weights, topk_ids = topk_func(
-        topk_weights, topk_ids, token_expert_indices, gating_output_float, renormalize
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
     return topk_weights, topk_ids, token_expert_indices
@@ -1650,6 +1647,7 @@ def fused_experts(
 
 SILU_NO_MUL: str = activation_without_mul("silu")
 GELU_NO_MUL: str = activation_without_mul("gelu")
+RELU2_NO_MUL: str = activation_without_mul("relu2")
 
 
 def _get_config_quant_dtype(
@@ -1917,7 +1915,8 @@ def fused_experts_impl(
             intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
         elif activation == GELU_NO_MUL:
             intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
-
+        elif activation == RELU2_NO_MUL:
+            intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
@@ -2138,13 +2137,18 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             B_bias=self.w2_bias,
         )
 
-        ops.moe_sum(intermediate_cache3, output)
+        # separate function is required for MoE + LoRA
+        self.moe_sum(intermediate_cache3, output)
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        ops.moe_sum(input, output)
 
 
 def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig,
+    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(quant_config),
+        shared_experts,
     )
