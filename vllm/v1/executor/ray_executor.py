@@ -291,6 +291,8 @@ class RayDistributedExecutor(Executor):
 
         for i, item in enumerate(sorted_worker_metadata):
             item.adjusted_rank = i
+            logger.info("Worker IP %s: created_rank=%d -> adjusted_rank=%d", 
+                       item.ip, item.created_rank, item.adjusted_rank)
         self.workers = [item.worker for item in sorted_worker_metadata]
         rerank_mapping = {
             item.created_rank: item.adjusted_rank for item in sorted_worker_metadata
