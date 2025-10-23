@@ -9,7 +9,7 @@ import pytest
 def enable_batch_invariant_mode():
     """Automatically enable batch invariant kernel overrides for all tests."""
     old_value = os.environ.get("VLLM_BATCH_INVARIANT")
-    os.environ["VLLM_BATCH_INVARIANT"] = "0"
+    os.environ["VLLM_BATCH_INVARIANT"] = "1"
     yield
     # restore original value after test
     if old_value is None:

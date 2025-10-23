@@ -9,16 +9,17 @@ Environment variables:
   - VLLM_TEST_MODEL: served model name (e.g., Qwen/Qwen3-1.7B)
 
 Note:
-  - The server must be started beforehand via `vllm serve ...` and should
-    honor the same sampling params for determinism.
-  - For BS=N, we dispatch requests concurrently to encourage server-side
-    dynamic batching.
+  - The server must be started beforehand via `vllm serve ...`
+  - Example usage:
+    - `export VLLM_ATTENTION_BACKEND="FLASHINFER_MLA"`
+    - `export VLLM_BATCH_INVARIANT=1`
+    - `vllm serve deepseek-ai/DeepSeek-R1 -dp 8  --enable-expert-parallel --port 9256`
+    - `pytest tests/v1/generation/test_online_batch_invariance.py`
 """
 
 import os
 import random
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -41,7 +42,7 @@ def _post_json(
 def _request_completion(
     api_base: str,
     model: str,
-    prompt: str,
+    prompt: Any,
     sp: dict[str, Any],
     timeout: float = 60.0,
     max_retries: int = 3,
@@ -118,27 +119,25 @@ def _compare_bs1_vs_bsn_single_process(
         bs1_tokens_per_prompt.append(list(toks))
         bs1_logprobs_per_prompt.append(list(lps))
 
-    # BS=N: dispatch concurrently to encourage server batching
+    # BS=N
     bsN_tokens_per_prompt: list[list[Any]] = [None] * len(prompts)  # type: ignore[list-item]
     bsN_logprobs_per_prompt: list[list[float] | None] = [None] * len(prompts)
-    with ThreadPoolExecutor(max_workers=min(64, max(1, len(prompts)))) as ex:
-        futures = {
-            ex.submit(_request_completion, api_base, model_name, p, sp_kwargs): i
-            for i, p in enumerate(prompts)
-        }
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            resp = fut.result()
-            if resp is None or not resp.get("choices"):
-                raise AssertionError(f"BS=N empty/failed response for prompt {idx}")
-            choice = resp["choices"][0]
-            toks, lps = _extract_tokens_and_logprobs(choice)
-            if lps is None:
-                raise AssertionError(f"BS=N missing logprobs for prompt {idx}")
-            bsN_tokens_per_prompt[idx] = list(toks)
-            bsN_logprobs_per_prompt[idx] = list(lps)
+    resp = _request_completion(api_base, model_name, prompts, sp_kwargs)
+    if resp is None or not resp.get("choices"):
+        raise AssertionError("BS=N empty/failed batched response")
+    choices = resp.get("choices", [])
+    if len(choices) != len(prompts):
+        raise AssertionError(
+            f"BS=N choices length {len(choices)} != num prompts {len(prompts)}"
+        )
+    for idx, choice in enumerate(choices):
+        toks, lps = _extract_tokens_and_logprobs(choice)
+        if lps is None:
+            raise AssertionError(f"BS=N missing logprobs for prompt {idx}")
+        bsN_tokens_per_prompt[idx] = list(toks)
+        bsN_logprobs_per_prompt[idx] = list(lps)
 
-    # Compare
+    # compare
     for i, (tokens_bs1, tokens_bsN, logprobs_bs1, logprobs_bsN) in enumerate(
         zip(
             bs1_tokens_per_prompt,
@@ -172,11 +171,9 @@ def _compare_bs1_vs_bsn_single_process(
 @skip_unsupported
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN_dp_http():
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
-
     api_base = os.getenv("VLLM_API_BASE", "http://127.0.0.1:9256/v1")
-    model_name = os.getenv("VLLM_TEST_MODEL", "deepseek-ai/DeepSeek-V2-lite")
-    num_prompts = int(os.getenv("VLLM_TEST_NUM_PROMPTS", "32"))
-    prompts_all = [_random_prompt(10, 50) for _ in range(num_prompts)]
+    model_name = os.getenv("VLLM_TEST_MODEL", "deepseek-ai/DeepSeek-R1")
+    prompts_all = [_random_prompt(10, 50) for _ in range(32)]
 
     sp_kwargs: dict[str, Any] = {
         "temperature": 0.6,
