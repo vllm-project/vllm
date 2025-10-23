@@ -49,11 +49,9 @@ class Mamba1AttentionMetadataBuilder(
             query_start_loc.device
         )
 
-        assert self.reorder_spec.decode_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_spec.decode_threshold,
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
             )
         )
 

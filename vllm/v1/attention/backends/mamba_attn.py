@@ -11,7 +11,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    ReorderSpec,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
@@ -19,7 +18,7 @@ M = TypeVar("M")
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
+    reorder_batch_threshold: int = 1
     cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )

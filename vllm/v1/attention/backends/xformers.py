@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import torch
 
@@ -20,7 +20,6 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    ReorderSpec,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -208,7 +207,7 @@ class XFormersAttentionMetadata:
 class XFormersAttentionMetadataBuilder(
     AttentionMetadataBuilder[XFormersAttentionMetadata]
 ):
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -230,11 +229,9 @@ class XFormersAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> XFormersAttentionMetadata:
-        assert self.reorder_spec.decode_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_spec.decode_threshold,
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
             )
         )
 

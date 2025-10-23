@@ -23,11 +23,10 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
-    QueryLenSupport,
-    ReorderSpec,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
 )
@@ -71,9 +70,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(
-        512, decode_query_len_support=QueryLenSupport.UNIFORM
-    )
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    reorder_batch_threshold: int = 512  # process small prefills with decode pathway
     # ^ TODO(matt): tune this
 
     def __init__(

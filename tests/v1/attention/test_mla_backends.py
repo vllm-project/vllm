@@ -352,7 +352,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
-    from vllm.v1.attention.backends.utils import QueryLenSupport
+    from vllm.v1.attention.backends.mla.common import QueryLenSupport
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
@@ -372,7 +372,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         block_size=block_size,
     )
 
-    # For spec decode tests, add a speculative_config to set the decode_threshold
+    # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
         from vllm.config import SpeculativeConfig
 
@@ -460,24 +460,20 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
-                decode_query_len_support = getattr(
-                    builder_cls.reorder_spec,
-                    "decode_query_len_support",
-                    QueryLenSupport.SINGLE_ONLY,
+                query_len_support = getattr(
+                    builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
                 )
-                supports_spec = decode_query_len_support != QueryLenSupport.SINGLE_ONLY
+                supports_spec = query_len_support != QueryLenSupport.SINGLE_ONLY
                 is_decode.append(supports_spec)
             else:
-                threshold = getattr(builder_cls.reorder_spec, "decode_threshold", None)
-                decode_query_len_support = getattr(
-                    builder_cls.reorder_spec,
-                    "decode_query_len_support",
-                    QueryLenSupport.SINGLE_ONLY,
+                threshold = getattr(builder_cls, "reorder_batch_threshold", None)
+                query_len_support = getattr(
+                    builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
                 )
                 within_threshold = q_len <= threshold if threshold else False
                 if (
                     within_threshold
-                    and decode_query_len_support == QueryLenSupport.UNIFORM
+                    and query_len_support == QueryLenSupport.UNIFORM
                     and i > 0
                 ):
                     first_q_len = query_lens[0]

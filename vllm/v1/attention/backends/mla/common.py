@@ -190,6 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import ClassVar, Generic, TypeVar
 
 import torch
@@ -224,13 +225,29 @@ from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    QueryLenSupport,
-    ReorderSpec,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+
+class QueryLenSupport(Enum):
+    """Defines the level of query length support for an attention backend's
+    decode pipeline.
+
+    - SINGLE_ONLY: Decode pipeline only supports single-token queries
+                   (query_len=1)
+    - UNIFORM: Decode pipeline supports uniform multi-token queries
+               (all requests must have same query_len > 1)
+    - VARLEN: Decode pipeline supports variable-length queries
+              (mixed query lengths in same batch)
+    """
+
+    SINGLE_ONLY = "single_only"
+    UNIFORM = "uniform"
+    VARLEN = "varlen"
+
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -465,14 +482,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     understand this class
     """
 
+    # Defines the level of query length support for this backend.
+    # - SINGLE_ONLY: Only single-token queries (no spec decode support)
+    # - UNIFORM: Supports uniform multi-token queries (spec decode with uniform lengths)
+    # - VARLEN: Supports variable-length queries (spec decode with mixed lengths)
+    # If set to UNIFORM or VARLEN, this will increase `reorder_batch_threshold` when
+    # speculative decoding is enabled.
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.SINGLE_ONLY
+
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
-    # Use `decode_query_len_support` (above) to set this automatically
+    # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(
-        1, decode_query_len_support=QueryLenSupport.SINGLE_ONLY
-    )
+    reorder_batch_threshold: int = 1
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -597,19 +620,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=device,
             )
 
-        assert self.reorder_spec.decode_threshold is not None
-        supports_spec_decode = (
-            self.reorder_spec.decode_query_len_support != QueryLenSupport.SINGLE_ONLY
-        )
-        self._init_decode_threshold(
-            self.reorder_spec.decode_threshold, supports_spec_decode
+        supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
+        self._init_reorder_batch_threshold(
+            self.reorder_batch_threshold, supports_spec_decode
         )
 
-        # Validate consistency between decode_query_len_support and decode_threshold
-        if self.reorder_spec.decode_query_len_support == QueryLenSupport.SINGLE_ONLY:
-            assert self.reorder_spec.decode_threshold == 1, (
-                f"decode_threshold must be 1 when decode_query_len_support is "
-                f"SINGLE_ONLY, got {self.reorder_spec.decode_threshold}"
+        # Validate consistency between query_len_support and reorder_batch_threshold
+        if self.query_len_support == QueryLenSupport.SINGLE_ONLY:
+            assert self.reorder_batch_threshold == 1, (
+                f"reorder_batch_threshold must be 1 when query_len_support is "
+                f"SINGLE_ONLY, got {self.reorder_batch_threshold}"
             )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
@@ -712,14 +732,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         Currently, only decode is supported for full cudagraphs with MLA.
         """
         m = common_attn_metadata
-        assert self.reorder_spec.decode_threshold is not None
-        assert m.num_reqs <= (
-            m.num_actual_tokens * self.reorder_spec.decode_threshold
-        ), (
+        assert m.num_reqs <= (m.num_actual_tokens * self.reorder_batch_threshold), (
             "MLA only supports decode-only full CUDAGraph capture. "
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
-        assert m.max_query_len <= self.reorder_spec.decode_threshold  # decode only
+
+        assert m.max_query_len <= self.reorder_batch_threshold  # decode only
 
         return self.build(0, m)
 
@@ -751,14 +769,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         num_computed_tokens_cpu = common_attn_metadata.seq_lens_cpu - query_seq_lens_cpu
 
-        assert self.reorder_spec.decode_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_spec.decode_threshold,
-                require_uniform=(
-                    self.reorder_spec.decode_query_len_support != QueryLenSupport.VARLEN
-                ),
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
             )
         )
 

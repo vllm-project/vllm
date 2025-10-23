@@ -3,7 +3,6 @@
 """Backend for GatedDeltaNet attention."""
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import torch
 
@@ -14,7 +13,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    ReorderSpec,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
@@ -63,7 +61,7 @@ class GDNAttentionMetadata:
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1)
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -82,7 +80,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
-        self._init_decode_threshold(1, self.use_spec_decode)
+        self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
