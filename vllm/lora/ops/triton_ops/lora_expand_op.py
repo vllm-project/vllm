@@ -240,7 +240,7 @@ def _lora_expand(
         # thread blocks simply exit.
         MAX_LORAS,
     )
-
+    use_gdc = supports_pdl(inputs.device)
     _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -270,10 +270,11 @@ def _lora_expand(
         CAST_TYPE,
         NUM_SLICES,
         same_stride,
-        supports_pdl(inputs.device),
+        use_gdc,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
+        launch_pdl=use_gdc,
     )
 
     return

@@ -210,7 +210,7 @@ def _lora_shrink(
         # thread blocks exit early.
         MAX_LORAS,
     )
-
+    use_gdc = supports_pdl(inputs.device)
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -237,10 +237,11 @@ def _lora_shrink(
         EVEN_K,
         SPLIT_K,
         NUM_SLICES,
-        supports_pdl(inputs.device),
+        use_gdc,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
+        launch_pdl=use_gdc,
     )
 
     return
