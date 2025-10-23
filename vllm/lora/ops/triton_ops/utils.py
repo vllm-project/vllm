@@ -154,13 +154,13 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
         gpu_name = gpu_name.replace("-", "_")
 
         config_fname = None
-        if op_type == "shrink":
-            config_fname = f"{gpu_name}_{op_type.upper()}.json"
-        else:
-            assert op_type == "expand"
+        # only expand op needs to consider add_inputs
+        if op_type == "expand":
             config_fname = (
                 f"{gpu_name}_{op_type.upper()}_{str(add_inputs).upper()}.json"
             )
+        else:
+            config_fname = f"{gpu_name}_{op_type.upper()}.json"
 
         config_path = Path(f"{user_defined_config_folder}/{config_fname}")
         if not config_path.exists():
@@ -186,8 +186,17 @@ def get_lora_op_configs(
     rank: int,
     num_slices: int,
     add_inputs: bool | None = None,
+    hidden_size_2: int | None = None,
 ) -> dict[str, int | None]:
-    assert op_type in ["shrink", "expand"]
+    # Add support for fused_moe_lora ops
+    assert op_type in [
+        "shrink",
+        "expand",
+        "fused_moe_lora_gate_up_shrink",
+        "fused_moe_lora_gate_up_expand",
+        "fused_moe_lora_down_shrink",
+        "fused_moe_lora_down_expand",
+    ]
 
     # default config
     default = {}
@@ -201,6 +210,21 @@ def get_lora_op_configs(
             "num_ctas": 1,
             "num_stages": 2,
             "max_nreg": None,
+        }
+    # The default config for fused_moe_lora ops
+    elif op_type in [
+        "fused_moe_lora_gate_up_shrink",
+        "fused_moe_lora_gate_up_expand",
+        "fused_moe_lora_down_shrink",
+        "fused_moe_lora_down_expand",
+    ]:
+        default = {
+            "block_m": 64,
+            "block_n": 64,
+            "block_k": 32,
+            "num_warps": 4,
+            "num_stages": 3,
+            "group_size_m": 8,
         }
     else:
         default = {
@@ -245,6 +269,14 @@ def get_lora_op_configs(
         config_data.get(str(n))
         or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n))]
     )
+
+    # slice by hidden_size_2
+    if hidden_size_2 is not None:
+        n2 = hidden_size_2
+        config_data = (
+            config_data.get(str(n2))
+            or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n2))]
+        )
 
     assert config_data is not None
     return config_data

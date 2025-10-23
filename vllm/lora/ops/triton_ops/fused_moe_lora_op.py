@@ -166,10 +166,18 @@ def _fused_moe_lora(
     num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     max_lora_rank: int,
     top_k_num: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
+    shrink_block_size_m: int,
+    shrink_block_size_n: int,
+    shrink_block_size_k: int,
+    shrink_group_size_m: int,
+    shrink_num_warps: int,
+    shrink_num_stages: int,
+    expand_block_size_m: int,
+    expand_block_size_n: int,
+    expand_block_size_k: int,
+    expand_group_size_m: int,
+    expand_num_warps: int,
+    expand_num_stages: int,
     mul_routed_weight: bool = False,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
@@ -192,11 +200,13 @@ def _fused_moe_lora(
     device = qcurr_hidden_states.device
     num_slices = len(lora_a_stacked)
 
-    config = {
-        "BLOCK_SIZE_M": block_size_m,
-        "BLOCK_SIZE_N": block_size_n,
-        "BLOCK_SIZE_K": block_size_k,
-        "GROUP_SIZE_M": group_size_m,
+    shrink_config = {
+        "BLOCK_SIZE_M": shrink_block_size_m,
+        "BLOCK_SIZE_N": shrink_block_size_n,
+        "BLOCK_SIZE_K": shrink_block_size_k,
+        "GROUP_SIZE_M": shrink_group_size_m,
+        "num_warps": shrink_num_warps,
+        "num_stages": shrink_num_stages,
     }
 
     w1_lora_a_stacked = lora_a_stacked[0]
@@ -262,7 +272,7 @@ def _fused_moe_lora(
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         top_k=1 if mul_routed_weight else top_k_num,
         MUL_ROUTED_WEIGHT=False,
-        **config,
+        **shrink_config,
     )
 
     b_ptr = _get_ptr(lora_b_stacked, device)
@@ -276,6 +286,15 @@ def _fused_moe_lora(
     a_intermediate_cache1 = a_intermediate_cache1.view(
         -1, a_intermediate_cache1.shape[3]
     )
+
+    expand_config = {
+        "BLOCK_SIZE_M": expand_block_size_m,
+        "BLOCK_SIZE_N": expand_block_size_n,
+        "BLOCK_SIZE_K": expand_block_size_k,
+        "GROUP_SIZE_M": expand_group_size_m,
+        "num_warps": expand_num_warps,
+        "num_stages": expand_num_stages,
+    }
 
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -311,7 +330,7 @@ def _fused_moe_lora(
         slice_c_size=b_intermediate_cache1.numel() // num_slices,
         top_k=1,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
-        **config,
+        **expand_config,
     )
     for i in range(num_slices):
         output[:, :, i * N : (i + 1) * N] += b_intermediate_cache1[i]
