@@ -59,20 +59,20 @@ DEFAULT_LOGGING_CONFIG = {
 
 @lru_cache
 def _print_debug_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.debug(msg, *args, stacklevel=2)
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.debug(msg, *args, stacklevel=3)
 
 
 @lru_cache
 def _print_info_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.info(msg, *args, stacklevel=2)
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.info(msg, *args, stacklevel=3)
 
 
 @lru_cache
 def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.warning(msg, *args, stacklevel=2)
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.warning(msg, *args, stacklevel=3)
 
 
 LogScope = Literal["process", "global", "local"]
