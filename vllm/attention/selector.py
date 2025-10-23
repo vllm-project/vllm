@@ -161,7 +161,7 @@ def _cached_get_attn_backend(
         if vllm_config and vllm_config.cache_config:
             new_block_size = backend.get_default_block_size()
             logger.info(
-                "Adjusting kv cache block size from %d to %d for %s backend.",
+                "Adjusting KV cache block size from %d to %d for %s backend.",
                 block_size,
                 new_block_size,
                 backend.get_name(),

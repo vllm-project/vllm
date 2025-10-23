@@ -312,22 +312,27 @@ class CudaPlatformBase(Platform):
             use_sparse,
             device_capability,
         )
-
-        if len(valid_backends_priorities) == 0:
-            reasons_str = (
-                "{"
-                + ", ".join(
-                    f"{backend.name}: [{', '.join(reasons)}]"
-                    for backend, reasons in invalid_reasons.items()
-                )
-                + "}"
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, reasons in invalid_reasons.items()
             )
+            + "}"
+        )
+        config_str = (
+            f"head_size: {head_size}, dtype: {dtype}, "
+            f"kv_cache_dtype: {kv_cache_dtype}, block_size: {block_size}, "
+            f"use_mla: {use_mla}, has_sink: {has_sink}, use_sparse: {use_sparse}"
+        )
+        logger.debug_once(
+            f"Some attention backends are not valid for {cls.device_name} with "
+            f"{config_str}. Reasons: {reasons_str}."
+        )
+        if len(valid_backends_priorities) == 0:
             raise ValueError(
-                f"No valid attention backend from priority list for "
-                f"{cls.device_name} with head_size: {head_size}, "
-                f"dtype: {dtype}, kv_cache_dtype: {kv_cache_dtype}, "
-                f"use_mla: {use_mla}, has_sink: {has_sink}, "
-                f"use_sparse: {use_sparse}. Reasons: {reasons_str}"
+                f"No valid attention backend found for {cls.device_name} "
+                f"with {config_str}. Reasons: {reasons_str}."
             )
 
         # We have found some valid backends. Select the one with the
@@ -342,11 +347,9 @@ class CudaPlatformBase(Platform):
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
         selected_backend_class_str = backend_to_class_str(selected_backend)
-        engine_version = "V1" if use_v1 else "V0"
         logger.info(
-            "Using %s backend on %s engine.",
+            "Using %s backend.",
             selected_backend.name,
-            engine_version,
         )
 
         return selected_backend_class_str
