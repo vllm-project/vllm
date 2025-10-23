@@ -80,6 +80,8 @@ from vllm.entrypoints.openai.protocol import (
     TranslationRequest,
     TranslationResponse,
     UnloadLoRAAdapterRequest,
+    InitWeightsSendGroupForRemoteInstanceReqInput,
+    SendWeightsToRemoteInstanceReqInput,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import ServingClassification
@@ -1259,6 +1261,36 @@ def load_log_config(log_config_file: str | None) -> dict | None:
         )
         return None
 
+@router.post("/init_weights_send_group_for_remote_instance")    
+async def init_weights_send_group_for_remote_instance(    
+    obj: InitWeightsSendGroupForRemoteInstanceReqInput,     
+    request: Request    
+):    
+    results = await request.app.state.engine_client.collective_rpc(    
+        "init_weights_send_group_for_remote_instance",    
+        args=(obj.dict(),),    
+        timeout=30.0    
+    )
+    all_success = all(r["success"] for r in results)  
+    return JSONResponse(
+        content={"success": all_success, "message": "Initialized" if all_success else "Failed"},
+        status_code=200 if all_success else 400
+    )
+
+@router.post("/send_weights_to_remote_instance")  
+async def send_weights_to_remote_instance(  
+    obj: SendWeightsToRemoteInstanceReqInput, request: Request  
+):  
+    results = await request.app.state.engine_client.collective_rpc(  
+        "send_weights_to_remote_instance",  
+        args=(obj.dict(),),
+        timeout=60.0
+    )  
+    all_success = all(r["success"] for r in results)  
+    return JSONResponse(  
+        content={"success": all_success, "message": "Initialized" if all_success else "Failed"},  
+        status_code=200 if all_success else 400  
+    )
 
 class AuthenticationMiddleware:
     """

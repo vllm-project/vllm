@@ -755,6 +755,26 @@ class Worker(WorkerBase):
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
 
+    def init_weights_send_group_for_remote_instance(self, config: dict) -> dict:   
+        from vllm.model_executor.model_loader.remote_instance_loader_utils import init_weights_send_group_for_remote_instance
+        return init_weights_send_group_for_remote_instance(  
+            master_address=config["master_address"],  
+            ports=config["ports"],  
+            group_rank=config["group_rank"],  
+            world_size=config["world_size"],  
+            group_name=config.get("group_name", "weight_send_group"),  
+            backend=config.get("backend", "nccl"),
+        )
+    
+    def send_weights_to_remote_instance(self, config: dict) -> dict:  
+        from vllm.model_executor.model_loader.remote_instance_loader_utils import send_weights_to_remote_instance
+        return send_weights_to_remote_instance(  
+            master_address=config["master_address"],  
+            ports=config["ports"],  
+            group_name=config.get("group_name", "weight_send_group"),
+            tensor_nums=config.get("state_dict", -1),
+            model = self.model_runner.model,
+        )
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,

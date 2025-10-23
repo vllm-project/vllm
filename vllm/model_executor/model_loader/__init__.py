@@ -18,6 +18,7 @@ from vllm.model_executor.model_loader.runai_streamer_loader import (
 )
 from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
 from vllm.model_executor.model_loader.tensorizer_loader import TensorizerLoader
+from vllm.model_executor.model_loader.remote_instance_loader import RemoteInstanceModelLoader
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name,
     get_model_architecture,
@@ -42,6 +43,7 @@ LoadFormats = Literal[
     "safetensors",
     "sharded_state",
     "tensorizer",
+    "remote_instance",
 ]
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
@@ -57,6 +59,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "safetensors": DefaultModelLoader,
     "sharded_state": ShardedStateLoader,
     "tensorizer": TensorizerLoader,
+    "remote_instance": RemoteInstanceModelLoader,
 }
 
 
