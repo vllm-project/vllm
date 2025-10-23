@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 from dataclasses import dataclass
 from functools import lru_cache
-import importlib
-import inspect
 from typing import TYPE_CHECKING, Any, cast, get_args
 
 from transformers import (
@@ -202,7 +201,8 @@ def cached_processor_from_config(
 
         mm_config.mm_processor_dynamic_kwargs = (
             mm_config.mm_processor_dynamic_kwargs | info.dynamic_keys
-            if mm_config.mm_processor_dynamic_kwargs else info.dynamic_keys
+            if mm_config.mm_processor_dynamic_kwargs
+            else info.dynamic_keys
         )
 
     except Exception:
@@ -221,7 +221,10 @@ class _ResolvedProcessorInfo:
 _PROC_CLASS_CACHE: dict[tuple, _ResolvedProcessorInfo] = {}
 
 
-def _proc_resolution_key(model_config: "ModelConfig", processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin) -> tuple:
+def _proc_resolution_key(
+    model_config: "ModelConfig",
+    processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
+) -> tuple:
     return (
         model_config.model,
         model_config.revision,
@@ -246,16 +249,19 @@ def get_processorkwargs_from_processor(processor: _P) -> set[str]:
             processor_kwargs = set()
             for name, obj in vars(mod).items():
                 if name.endswith("ProcessingKwargs"):
-                    processor_kwargs = processor_kwargs | _collect_dynamic_keys_from_processing_kwargs(obj)
+                    processor_kwargs = (
+                        processor_kwargs
+                        | _collect_dynamic_keys_from_processing_kwargs(obj)
+                    )
             return processor_kwargs
-    except Exception as e:
+    except Exception:
         return set()
 
 
 def _update_cache_from_instance(
-        model_config: "ModelConfig",
-        processor_cls: type[_P] | tuple[type[_P], ...],
-        processor: ProcessorMixin
+    model_config: "ModelConfig",
+    processor_cls: type[_P] | tuple[type[_P], ...],
+    processor: ProcessorMixin,
 ) -> _ResolvedProcessorInfo:
     """
     After instantiation (e.g., via AutoProcessor), record the concrete class
@@ -264,14 +270,16 @@ def _update_cache_from_instance(
     key = _proc_resolution_key(model_config, processor_cls)
     # Extract kwargs from processorkwargs, including those model specific ones
     dynamic_kwargs = get_processorkwargs_from_processor(processor)
-    info = _ResolvedProcessorInfo(processor_type=type(processor), dynamic_keys=dynamic_kwargs)
+    info = _ResolvedProcessorInfo(
+        processor_type=type(processor), dynamic_keys=dynamic_kwargs
+    )
     _PROC_CLASS_CACHE[key] = info
     return info
 
 
 def _get_cached_dynamic_keys(
-        model_config: "ModelConfig",
-        processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin
+    model_config: "ModelConfig",
+    processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
 ) -> set[str] | None:
     key = _proc_resolution_key(model_config, processor_cls)
     info = _PROC_CLASS_CACHE.get(key)
