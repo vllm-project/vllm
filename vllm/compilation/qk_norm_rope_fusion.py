@@ -11,9 +11,9 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.attention import Attention
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
 from .fusion import empty_bf16, empty_i64
@@ -68,11 +68,11 @@ class QkNormRopePattern:
         self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.is_neox = is_neox
         self.rope_matcher = MatcherRotaryEmbedding(
-            is_neox=is_neox, 
-            head_size=self.head_dim, 
-            num_heads=self.num_heads, 
+            is_neox=is_neox,
+            head_size=self.head_dim,
+            num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
-            use_flashinfer=rope_flashinfer
+            use_flashinfer=rope_flashinfer,
         )
 
     @staticmethod
@@ -118,9 +118,7 @@ class QkNormRopePattern:
             k_flat = RESHAPE_OP(k_normed_by_head, k.shape)
 
             # RoPE: apply to flattened q/k
-            q_rope, k_rope = self.rope_matcher(
-                positions, q_flat, k_flat, cos_sin_cache
-            )
+            q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
             return q_rope, k_rope, v
 
         def replacement(
@@ -148,10 +146,7 @@ class QkNormRopePattern:
             result_qkv = result[1]
 
             # Split back to q,k,v and return
-            return result_qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1
-            )
-
+            return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Sample inputs to help pattern tracing
         T = 5
@@ -195,7 +190,9 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             return
 
         # Register a pattern per attention layer, as sizes differ by shard
-        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(config, Attention)
+        attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
+            config, Attention
+        )
         if len(attn_layers) == 0:
             logger.warning(
                 "QK Norm+RoPE fusion enabled, but no Attention layers were discovered."
@@ -224,7 +221,6 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                         eps=epsilon,
                         is_neox=neox,
                     ).register(self.patterns)
-
 
         # Dump patterns for debugging if enabled
         self.dump_patterns(config, self.patterns)

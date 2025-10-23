@@ -9,7 +9,6 @@ from torch._ops import OpOverload
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -19,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
 RMS_OP = torch.ops._C.rms_norm.default
@@ -162,7 +162,7 @@ class MatcherRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
     ) -> torch.Tensor:
         result = torch.empty_like(input)
-        # TODO: spport non-contiguous input for RMSNorm and remove this
+        # TODO: support non-contiguous input for RMSNorm and remove this
         input_contiguous = input.contiguous()
         _, result = auto_functionalized(
             RMS_OP,

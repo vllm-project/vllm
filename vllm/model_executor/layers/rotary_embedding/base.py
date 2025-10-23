@@ -104,8 +104,8 @@ class RotaryEmbedding(CustomOp):
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, head_size)
-        query_rot = query[..., : rotary_dim]
-        query_pass = query[..., rotary_dim :]
+        query_rot = query[..., :rotary_dim]
+        query_pass = query[..., rotary_dim:]
         query_rot = apply_rotary_emb_torch(query_rot, cos, sin, is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
@@ -113,8 +113,8 @@ class RotaryEmbedding(CustomOp):
         if key is not None:
             key_shape = key.shape
             key = key.view(num_tokens, -1, head_size)
-            key_rot = key[..., : rotary_dim]
-            key_pass = key[..., rotary_dim :]
+            key_rot = key[..., :rotary_dim]
+            key_pass = key[..., rotary_dim:]
             key_rot = apply_rotary_emb_torch(key_rot, cos, sin, is_neox_style)
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key

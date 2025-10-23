@@ -563,7 +563,7 @@ class CompilationConfig:
             self.pass_config = PassConfig(**self.pass_config)
 
         if self.pass_config.enable_qk_norm_rope_fusion:
-            # TODO: rope native forward cann't match properly now.
+            # TODO(zhuhaoran): support rope native forward match and remove this.
             self.custom_ops.append("+rotary_embedding")
 
         if (
