@@ -5,13 +5,11 @@ import contextlib
 import datetime
 import enum
 import getpass
-import importlib
 import inspect
 import json
 import multiprocessing
 import os
 import signal
-import subprocess
 import sys
 import tempfile
 import textwrap
@@ -35,13 +33,11 @@ from collections.abc import (
 )
 from concurrent.futures.process import ProcessPoolExecutor
 from functools import cache, partial, wraps
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import cloudpickle
 import psutil
 import regex as re
-import setproctitle
 import torch
 import yaml
 
@@ -146,18 +142,6 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-def update_environment_variables(envs: dict[str, str]):
-    for k, v in envs.items():
-        if k in os.environ and os.environ[k] != v:
-            logger.warning(
-                "Overwriting environment variable %s from '%s' to '%s'",
-                k,
-                os.environ[k],
-                v,
-            )
-        os.environ[k] = v
-
-
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
@@ -209,90 +193,6 @@ def init_cached_hf_modules() -> None:
     from transformers.dynamic_module_utils import init_hf_modules
 
     init_hf_modules()
-
-
-@cache
-def find_library(lib_name: str) -> str:
-    """
-    Find the library file in the system.
-    `lib_name` is full filename, with both prefix and suffix.
-    This function resolves `lib_name` to the full path of the library.
-    """
-    # Adapted from https://github.com/openai/triton/blob/main/third_party/nvidia/backend/driver.py#L19 # noqa
-    # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
-    # `/sbin/ldconfig` should exist in all Linux systems.
-    # `/sbin/ldconfig` searches the library in the system
-    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
-    # each line looks like the following:
-    # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
-    locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
-    # `LD_LIBRARY_PATH` searches the library in the user-defined paths
-    env_ld_library_path = envs.LD_LIBRARY_PATH
-    if not locs and env_ld_library_path:
-        locs = [
-            os.path.join(dir, lib_name)
-            for dir in env_ld_library_path.split(":")
-            if os.path.exists(os.path.join(dir, lib_name))
-        ]
-    if not locs:
-        raise ValueError(f"Cannot find {lib_name} in the system.")
-    return locs[0]
-
-
-def find_nccl_library() -> str:
-    """
-    We either use the library file specified by the `VLLM_NCCL_SO_PATH`
-    environment variable, or we find the library file brought by PyTorch.
-    After importing `torch`, `libnccl.so.2` or `librccl.so.1` can be
-    found by `ctypes` automatically.
-    """
-    so_file = envs.VLLM_NCCL_SO_PATH
-
-    # manually load the nccl library
-    if so_file:
-        logger.info(
-            "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s", so_file
-        )
-    else:
-        if torch.version.cuda is not None:
-            so_file = "libnccl.so.2"
-        elif torch.version.hip is not None:
-            so_file = "librccl.so.1"
-        else:
-            raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.debug_once("Found nccl from library %s", so_file)
-    return so_file
-
-
-def find_nccl_include_paths() -> list[str] | None:
-    """
-    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
-    environment variable, or we find the library file brought by
-    nvidia-nccl-cuXX. load_inline by default uses
-    torch.utils.cpp_extension.include_paths
-    """
-    paths: list[str] = []
-    inc = envs.VLLM_NCCL_INCLUDE_PATH
-    if inc and os.path.isdir(inc):
-        paths.append(inc)
-
-    try:
-        spec = importlib.util.find_spec("nvidia.nccl")
-        if spec and getattr(spec, "submodule_search_locations", None):
-            for loc in spec.submodule_search_locations:
-                inc_dir = os.path.join(loc, "include")
-                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
-                    paths.append(inc_dir)
-    except Exception:
-        pass
-
-    seen = set()
-    out: list[str] = []
-    for p in paths:
-        if p and p not in seen:
-            out.append(p)
-            seen.add(p)
-    return out or None
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
@@ -1147,112 +1047,6 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
     )
 
 
-@cache
-def _has_module(module_name: str) -> bool:
-    """Return True if *module_name* can be found in the current environment.
-
-    The result is cached so that subsequent queries for the same module incur
-    no additional overhead.
-    """
-    return importlib.util.find_spec(module_name) is not None
-
-
-def has_pplx() -> bool:
-    """Whether the optional `pplx_kernels` package is available."""
-
-    return _has_module("pplx_kernels")
-
-
-def has_deep_ep() -> bool:
-    """Whether the optional `deep_ep` package is available."""
-
-    return _has_module("deep_ep")
-
-
-def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-
-    return _has_module("deep_gemm")
-
-
-def has_triton_kernels() -> bool:
-    """Whether the optional `triton_kernels` package is available."""
-
-    return _has_module("triton_kernels")
-
-
-def has_tilelang() -> bool:
-    """Whether the optional `tilelang` package is available."""
-
-    return _has_module("tilelang")
-
-
-def set_process_title(
-    name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
-) -> None:
-    """
-    Set the current process title to a specific name with an
-    optional suffix.
-
-    Args:
-        name: The title to assign to the current process.
-        suffix: An optional suffix to append to the base name.
-        prefix: A prefix to prepend to the front separated by `::`.
-    """
-    if suffix:
-        name = f"{name}_{suffix}"
-    setproctitle.setproctitle(f"{prefix}::{name}")
-
-
-def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
-    """Prepend each output line with process-specific prefix"""
-
-    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
-    file_write = file.write
-
-    def write_with_prefix(s: str):
-        if not s:
-            return
-        if file.start_new_line:  # type: ignore[attr-defined]
-            file_write(prefix)
-        idx = 0
-        while (next_idx := s.find("\n", idx)) != -1:
-            next_idx += 1
-            file_write(s[idx:next_idx])
-            if next_idx == len(s):
-                file.start_new_line = True  # type: ignore[attr-defined]
-                return
-            file_write(prefix)
-            idx = next_idx
-        file_write(s[idx:])
-        file.start_new_line = False  # type: ignore[attr-defined]
-
-    file.start_new_line = True  # type: ignore[attr-defined]
-    file.write = write_with_prefix  # type: ignore[method-assign]
-
-
-def decorate_logs(process_name: str | None = None) -> None:
-    """
-    Adds a process-specific prefix to each line of output written to stdout and
-    stderr.
-
-    This function is intended to be called before initializing the api_server,
-    engine_core, or worker classes, so that all subsequent output from the
-    process is prefixed with the process name and PID. This helps distinguish
-    log output from different processes in multi-process environments.
-
-    Args:
-        process_name: Optional; the name of the process to use in the prefix.
-            If not provided, the current process name from the multiprocessing
-            context is used.
-    """
-    if process_name is None:
-        process_name = get_mp_context().current_process().name
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
-
-
 def length_from_prompt_token_ids_or_embeds(
     prompt_token_ids: list[int] | None,
     prompt_embeds: torch.Tensor | None,
@@ -1275,36 +1069,3 @@ def length_from_prompt_token_ids_or_embeds(
                 f" prompt_embeds={prompt_embeds_len}"
             )
         return prompt_token_len
-
-
-@contextlib.contextmanager
-def set_env_var(key, value):
-    old = os.environ.get(key)
-    os.environ[key] = value
-    try:
-        yield
-    finally:
-        if old is None:
-            del os.environ[key]
-        else:
-            os.environ[key] = old
-
-
-def unique_filepath(fn: Callable[[int], Path]) -> Path:
-    """
-    unique_filepath returns a unique path by trying
-    to include an integer in increasing order.
-
-    fn should be a callable that returns a path that
-    includes the passed int at a fixed location.
-
-    Note: This function has a TOCTOU race condition.
-    Caller should use atomic operations (e.g., open with 'x' mode)
-    when creating the file to ensure thread safety.
-    """
-    i = 0
-    while True:
-        p = fn(i)
-        if not p.exists():
-            return p
-        i += 1
