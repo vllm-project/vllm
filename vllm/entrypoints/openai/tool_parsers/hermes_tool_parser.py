@@ -112,7 +112,7 @@ class Hermes2ProToolParser(ToolParser):
                 return delta_text
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        super().adjust_request(request)
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # do not skip special tokens because the tool_call tokens are
             # marked "special" in some models. Since they are skipped
