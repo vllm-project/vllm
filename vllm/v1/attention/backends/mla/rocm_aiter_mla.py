@@ -3,7 +3,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
