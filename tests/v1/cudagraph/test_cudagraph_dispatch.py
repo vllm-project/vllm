@@ -73,7 +73,6 @@ class TestCudagraphDispatcher:
             cudagraph_mode=cudagraph_mode_str,
             mode=compilation_mode,
             cudagraph_capture_sizes=[1, 8],
-            # cudagraph_specialize_lora=cudagraph_specialize_lora,
         )
 
         config = _create_vllm_config(
