@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
@@ -168,8 +167,8 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
         call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
         # if the processor has explicit kwargs annotation, use it
         if call_kwargs is not None:
-            processor_kwargs = get_type_hints(get_args(call_kwargs)[0]).keys()
-            return set(processor_kwargs)
+            processor_kwargs = set(get_type_hints(get_args(call_kwargs)[0]).keys())
+            return processor_kwargs
         # otherwise, try to get from ProcessingKwargs
         else:
             module_name = type(processor).__module__
@@ -195,13 +194,12 @@ def cached_get_processor_without_dynamic_kwargs(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    
     # Step 1: use default kwargs to get a temporary processor instance
     processor = cached_get_processor(
         processor_name,
         revision=revision,
         trust_remote_code=trust_remote_code,
-        processor_cls=processor_cls,
+        processor_cls=processor_cls,  # type: ignore[arg-type]
     )
 
     # Step 2: use temporary processor collect dynamic keys
@@ -215,11 +213,12 @@ def cached_get_processor_without_dynamic_kwargs(
         processor_name,
         revision=revision,
         trust_remote_code=trust_remote_code,
-        processor_cls=processor_cls,
+        processor_cls=processor_cls,  # type: ignore[arg-type]
         **filtered_kwargs,
     )
 
     return final_processor
+
 
 def cached_processor_from_config(
     model_config: "ModelConfig",
