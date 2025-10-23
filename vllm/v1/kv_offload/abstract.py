@@ -30,8 +30,12 @@ The class provides the following primitives:
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import BlockHash
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.backend import Backend
 
 
 class LoadStoreSpec(ABC):
@@ -67,6 +71,16 @@ class OffloadingEvent:
 
 
 class OffloadingManager(ABC):
+    def __init__(self, backend: "Backend", enable_events: bool = False):
+        """
+        Initialize the OffloadingManager.
+
+        Args:
+            backend: The backend to use for offloading.
+            enable_events: Whether to enable event tracking.
+        """
+        pass
+
     @abstractmethod
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         """
