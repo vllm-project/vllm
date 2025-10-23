@@ -5,6 +5,8 @@ import math
 import torch
 import torch.nn as nn
 
+from vllm.config import get_current_vllm_config
+
 from .common import rotate_neox
 
 
@@ -42,6 +44,12 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.base = base
         self.short_factor = short_factor
         self.long_factor = long_factor
+
+        # Force long factors if max_model_len (runtime max length) exceeds
+        # original_max_position_embeddings to prevent KV cache invalidation when
+        # sequences cross this threshold during generation
+        max_model_len = get_current_vllm_config().model_config.max_model_len
+        self.use_long_rope = max_model_len > original_max_position_embeddings
 
         scale = self.max_position_embeddings / self.original_max_position_embeddings
         if scale <= 1.0:
@@ -112,15 +120,12 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
-        k = self.original_max_position_embeddings
-        long_prompt_offset = (
-            torch.any(positions > k).float() * torch.full_like(positions, k)
-        ).long()
-        idx = (
-            torch.add(positions, long_prompt_offset)
-            if long_prompt_offset is not None
-            else positions
-        )
+        if self.use_long_rope:
+            k = self.original_max_position_embeddings
+            long_prompt_offset = torch.full_like(positions, k).long()
+            idx = torch.add(positions, long_prompt_offset)
+        else:
+            idx = positions
         idx = torch.add(idx, offsets) if offsets is not None else idx
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
 
