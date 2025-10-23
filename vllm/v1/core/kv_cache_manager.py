@@ -208,16 +208,11 @@ class KVCacheManager:
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
-            if request.num_preemptions > 0:
-                # Previously preempted request
-                self.prefix_cache_stats.preempted_requests += 1
-                self.prefix_cache_stats.preempted_queries += request.num_tokens
-                self.prefix_cache_stats.preempted_hits += num_new_computed_tokens
-            else:
-                # New request
-                self.prefix_cache_stats.requests += 1
-                self.prefix_cache_stats.queries += request.num_tokens
-                self.prefix_cache_stats.hits += num_new_computed_tokens
+            self.prefix_cache_stats.record(
+                num_tokens=request.num_tokens,
+                num_hits=num_new_computed_tokens,
+                preempted=request.num_preemptions > 0,
+            )
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 

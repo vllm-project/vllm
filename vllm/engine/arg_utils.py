@@ -1600,15 +1600,13 @@ class EngineArgs:
         if self.guided_decoding_backend is not None:
             so_config.guided_decoding_backend = self.guided_decoding_backend
         if self.guided_decoding_disable_fallback is not None:
-            so_config.guided_decoding_disable_fallback = (
-                self.guided_decoding_disable_fallback
-            )
+            so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
-            so_config.guided_decoding_disable_any_whitespace = (
+            so_config.disable_any_whitespace = (
                 self.guided_decoding_disable_any_whitespace
             )
         if self.guided_decoding_disable_additional_properties is not None:
-            so_config.guided_decoding_disable_additional_properties = (
+            so_config.disable_additional_properties = (
                 self.guided_decoding_disable_additional_properties
             )
 
@@ -1742,16 +1740,6 @@ class EngineArgs:
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
             self.enable_chunked_prefill = True
-
-            # TODO: When prefix caching supports prompt embeds inputs, this
-            # check can be removed.
-            if self.enable_prompt_embeds and self.enable_prefix_caching is not False:
-                logger.warning(
-                    "--enable-prompt-embeds and --enable-prefix-caching "
-                    "are not supported together in V1. Prefix caching has "
-                    "been disabled."
-                )
-                self.enable_prefix_caching = False
 
             if self.enable_prefix_caching is None:
                 # Disable prefix caching default for hybrid models

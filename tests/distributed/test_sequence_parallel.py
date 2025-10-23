@@ -181,7 +181,7 @@ def _compare_sp(
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
-    skip_tokenizer_init = model_info.skip_tokenizer_init
+    require_embed_inputs = model_info.require_embed_inputs
 
     if load_format == "dummy":
         # Avoid OOM
@@ -233,8 +233,14 @@ def _compare_sp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
-    if skip_tokenizer_init:
-        common_args.append("--skip-tokenizer-init")
+    if require_embed_inputs:
+        common_args.extend(
+            [
+                "--skip-tokenizer-init",
+                "--enable-prompt-embeds",
+                "--enable-mm-embeds",
+            ]
+        )
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,
