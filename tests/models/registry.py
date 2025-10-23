@@ -32,6 +32,11 @@ class _HfExamplesInfo:
     for speculative decoding.
     """
 
+    speculative_method: str | None = None
+    """
+    The method to use for speculative decoding.
+    """
+
     min_transformers_version: str | None = None
     """
     The minimum version of HF Transformers that is required to run this model.
@@ -832,6 +837,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "openbmb/MiniCPM-1B-sft-bf16",
         trust_remote_code=True,
         speculative_model="openbmb/MiniCPM-2B-sft-bf16",
+        speculative_method="eagle",
         tokenizer="openbmb/MiniCPM-2B-sft-bf16",
     ),
     "ErnieMTPModel": _HfExamplesInfo(

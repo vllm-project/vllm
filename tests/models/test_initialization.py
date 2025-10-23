@@ -117,6 +117,7 @@ def can_initialize(
             dtype=model_info.dtype,
             speculative_config={
                 "model": model_info.speculative_model,
+                "method": model_info.speculative_method,
                 "num_speculative_tokens": 1,
             }
             if model_info.speculative_model
