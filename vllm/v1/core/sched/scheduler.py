@@ -165,15 +165,10 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
-        # For models without KV cache (e.g., pooling/embedding models),
-        enable_caching = (
-            self.cache_config.enable_prefix_caching
-            and len(kv_cache_config.kv_cache_groups) > 0
-        )
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=enable_caching,
+            enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
