@@ -566,15 +566,15 @@ class Plamo2AttentionMixer(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            quant_config=quant_config,
         )
 
         self.rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
@@ -800,13 +800,7 @@ class Plamo2Model(torch.nn.Module):
 
 
 class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
