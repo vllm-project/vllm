@@ -221,12 +221,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                         hidden_size=self.w2_lora_a_stacked.shape[-1],
                         rank=self.w2_lora_a_stacked.shape[-2],
                         num_slices=1,
-                        hidden_size_2=self.w2_lora_b_stacked.shape[-2]
+                        hidden_size_2=self.w2_lora_b_stacked.shape[-2],
                     )
                 else:
                     get_config_func = functools.partial(
                         try_get_optimal_moe_config,
-                        layer.w13_weight.size(), 
+                        layer.w13_weight.size(),
                         layer.w2_weight.size(),
                         top_k,
                         config_dtype,
