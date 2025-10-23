@@ -81,7 +81,7 @@ class SchedulerConfig:
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
-    enable_hybrid_chunked_prefill: bool = Field(default=None)
+    enable_hybrid_chunked_prefill: bool = False
     """If True, prefill requests will only be chunked when there are decode 
     requests present, otherwise they will proceed with normal prefill 
     computation to increase throughput."""
@@ -166,9 +166,7 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator(
-        "prefill_max_num_batched_tokens", "enable_hybrid_chunked_prefill", mode="wrap"
-    )
+    @field_validator("prefill_max_num_batched_tokens", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         if value is None:
@@ -192,9 +190,6 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
-
-        if self.enable_hybrid_chunked_prefill is None:
-            self.enable_hybrid_chunked_prefill = False
 
         self.prefill_max_num_batched_tokens = max(
             self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS
