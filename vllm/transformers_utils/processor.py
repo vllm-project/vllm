@@ -57,7 +57,7 @@ def _get_processor_factory_fn(processor_cls: type | tuple[type, ...]):
 
 
 @lru_cache
-def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls) -> set[str]:
+def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
     dynamic_kwargs: set[str] = set()
     if kwargs_cls is None:
         return dynamic_kwargs
