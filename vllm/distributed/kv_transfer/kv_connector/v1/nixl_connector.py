@@ -1923,7 +1923,7 @@ class NixlConnectorWorker:
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
-                req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
+                req_id, tp_size = notif.decode("utf-8").rsplit(":", 1)
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -1936,9 +1936,22 @@ class NixlConnectorWorker:
                     )
                     continue
 
+                # NOTE: `tp_ratio` is the opposite when swapping local<>remote
+                tp_ratio = self.kv_topo.tp_ratio(int(tp_size))
+                n_consumers = int(tp_size)
+
+                # Number of reads *per producer* to wait for.
+                # When remote D TP > local P TP we expect `tp_ratio` reads.
+                consumers_per_producer = (
+                    -tp_ratio if n_consumers > self.world_size else 1
+                )
+
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
-                if self.consumer_notification_counts_by_req[req_id] == int(tp_ratio):
+                if (
+                    self.consumer_notification_counts_by_req[req_id]
+                    == consumers_per_producer
+                ):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
                     self._reqs_to_process.remove(req_id)
@@ -2072,6 +2085,11 @@ class NixlConnectorWorker:
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
+            if self.use_mla and tp_ratio < 0 and i > 0:
+                # MLA opt: when P TP > D TP, only a single read is executed for
+                # the first remote rank (cache is duplicated)..
+                break
+
             remote_block_size = self.kv_topo.remote_block_size[meta.remote.engine_id]
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
@@ -2107,6 +2125,16 @@ class NixlConnectorWorker:
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
+
+            if self.use_mla and tp_ratio < 0:
+                # ..but we still need to notify the other remote ranks that we
+                # have the blocks we need so they can update the request state.
+                notif_id = f"{req_id}:{self.world_size}".encode()
+                for rank_to_notify, agent in self._remote_agents[
+                    meta.remote.engine_id
+                ].items():
+                    if rank_to_notify != remote_rank:
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
         self,
@@ -2151,11 +2179,9 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
-        # Number of D TP workers that will read from dst P. Propagate tp_ratio
+        # Number of D TP workers that will read from dst P. Propagate info
         # on notification so that dst worker can wait before freeing blocks.
-        # Cap to 1 when P TP > D TP: only a single rank will read from remote.
-        tp_ratio = max(1, self.kv_topo.tp_ratio_from_engine_id(dst_engine_id))
-        notif_id = f"{remote_request_id}:{tp_ratio}".encode()
+        notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.

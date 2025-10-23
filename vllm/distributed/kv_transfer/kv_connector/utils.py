@@ -331,11 +331,6 @@ class TpKVTopology:
         else:
             # P TP > D TP case, D reads from |tp_ratio| remote workers.
             tp_ratio = -tp_ratio
-            if self.is_mla:
-                # When cache is replicated on remote, we only need to read
-                # from one remote (they all have the same cache). Fan out
-                # transfers to avoid bottlenecks on single remote.
-                return [self.tp_rank * tp_ratio]
             return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
 
     def get_target_remote_ranks_from_engine_id(
