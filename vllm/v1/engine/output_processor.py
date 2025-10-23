@@ -15,6 +15,7 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.sampling_params import RequestOutputKind
+from vllm.streaming_params import StreamingParams
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
@@ -34,25 +35,41 @@ class RequestOutputCollector:
     producer gets ahead of the consumer.
     """
 
-    def __init__(self, output_kind: RequestOutputKind):
+    def __init__(self,
+                 output_kind: RequestOutputKind,
+                 streaming_params: Optional[StreamingParams] = None):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
+        self.streaming_params = streaming_params
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
-        if self.output is None or isinstance(output, Exception):
+        if isinstance(output, Exception):
             self.output = output
             self.ready.set()
-        elif isinstance(self.output, (RequestOutput, PoolingRequestOutput)):
-            # This ensures that request outputs with different request indexes
-            # (if n > 1) do not override each other.
-            self.output.add(output, aggregate=self.aggregate)
+        else:
+            if self.output is None:
+                self.output = output
+            elif isinstance(self.output,
+                            (RequestOutput, PoolingRequestOutput)):
+                # This ensures that request outputs with different request
+                # indexes(if n > 1) do not override each other.
+                self.output.add(output, aggregate=self.aggregate)
+
+            if isinstance(
+                    self.output, (RequestOutput, PoolingRequestOutput)) and (
+                        self.output.finished or self.streaming_params is None
+                        or sum(len(o.token_ids) for o in self.output.outputs)
+                        >= self.streaming_params.stream_n):
+                self.ready.set()
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
         while (output := self.output) is None:
+            self.ready.clear()
             await self.ready.wait()
+
         self.output = None
         self.ready.clear()
         if isinstance(output, Exception):

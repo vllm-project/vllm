@@ -24,6 +24,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.streaming_params import StreamingParams
 from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -276,6 +277,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         prompt: EngineCoreRequest | PromptType,
         params: SamplingParams | PoolingParams,
+        streaming_params: Optional[StreamingParams] = None,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -292,7 +294,8 @@ class AsyncLLM(EngineClient):
         is_pooling = isinstance(params, PoolingParams)
 
         # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
+        queue = RequestOutputCollector(output_kind=params.output_kind,
+                                       streaming_params=streaming_params)
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -365,6 +368,7 @@ class AsyncLLM(EngineClient):
         sampling_params: SamplingParams,
         request_id: str,
         *,
+        streaming_params: StreamingParams | None = None,
         prompt_text: str | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -417,6 +421,7 @@ class AsyncLLM(EngineClient):
                 request_id,
                 prompt,
                 sampling_params,
+                streaming_params=streaming_params,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,

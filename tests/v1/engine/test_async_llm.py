@@ -15,6 +15,7 @@ from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
+from vllm.streaming_params import StreamingParams
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import (
@@ -57,6 +58,7 @@ async def generate(
     output_kind: RequestOutputKind,
     max_tokens: int,
     n: int = 1,
+    streaming_params: StreamingParams | None = None,
     prompt_logprobs: int | None = None,
     cancel_after: int | None = None,
 ) -> tuple[int, str]:
@@ -73,8 +75,11 @@ async def generate(
         n=n,
         prompt_logprobs=prompt_logprobs,
     )
+    if streaming_params is None:
+        streaming_params = StreamingParams(stream_n=3)
     async for out in engine.generate(
-        request_id=request_id, prompt=prompt, sampling_params=sampling_params
+        request_id=request_id, prompt=prompt, sampling_params=sampling_params,
+                                     streaming_params=streaming_params
     ):
         num_tokens = sum(len(output.token_ids) for output in out.outputs)
         if output_kind == RequestOutputKind.DELTA:
@@ -312,9 +317,10 @@ async def test_finished_flag(
         )
         outputs = [
             out
-            async for out in engine.generate(
-                request_id="request-33", prompt=prompt, sampling_params=sampling_params
-            )
+            async for out in engine.generate(request_id="request-33",
+                                             prompt=prompt,
+                                             sampling_params=sampling_params,
+                                             streaming_params=None)
         ]
 
         # Assert only the last output has the finished flag set
@@ -342,6 +348,7 @@ async def test_mid_stream_cancellation(
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
+        streaming_params = StreamingParams(stream_n=3)
         # Create concurrent requests that will be cancelled mid-stream
         tasks = []
         for request_id in request_ids:
@@ -353,6 +360,7 @@ async def test_mid_stream_cancellation(
                         prompt,
                         RequestOutputKind.DELTA,
                         NUM_TOKENS,
+                        streaming_params=streaming_params,
                         cancel_after=NUM_EXPECTED_TOKENS,
                     )
                 )
@@ -360,13 +368,15 @@ async def test_mid_stream_cancellation(
 
         # Wait for all tasks to complete
         results = await asyncio.gather(*tasks)
+        MIN_EXP_TOKENS = NUM_EXPECTED_TOKENS
+        MAX_EXP_TOKENS = NUM_EXPECTED_TOKENS + streaming_params.stream_n
 
         # Verify all tasks were cancelled at the expected point
         for num_generated_tokens, request_id in results:
-            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+            assert MIN_EXP_TOKENS <= num_generated_tokens <= MAX_EXP_TOKENS, (
                 f"{request_id} generated {num_generated_tokens} tokens but "
-                f"expected to cancel after {NUM_EXPECTED_TOKENS}"
-            )
+                f"expected to cancel after {MIN_EXP_TOKENS} and "
+                f"before {MAX_EXP_TOKENS}")
 
         # Make sure no requests are left hanging
         assert not engine.output_processor.has_unfinished_requests()
@@ -374,14 +384,53 @@ async def test_mid_stream_cancellation(
         # Confirm we can reuse the request id after the cancellations.
         request_id = request_ids[0]
         task = asyncio.create_task(
-            generate(
-                engine, request_id, prompt, RequestOutputKind.DELTA, NUM_EXPECTED_TOKENS
-            )
-        )
+            generate(engine,
+                     request_id,
+                     prompt,
+                     RequestOutputKind.DELTA,
+                     NUM_EXPECTED_TOKENS,
+                     streaming_params=streaming_params))
         num_generated_tokens, request_id = await task
-        assert num_generated_tokens == NUM_EXPECTED_TOKENS
+        assert MIN_EXP_TOKENS <= num_generated_tokens <= MAX_EXP_TOKENS, (
+            f"{request_id} generated {num_generated_tokens} tokens but "
+            f"expected to cancel after {MIN_EXP_TOKENS} and "
+            f"before {MAX_EXP_TOKENS}")
         assert not engine.output_processor.has_unfinished_requests()
 
+@pytest.mark.parametrize("n", [1, 3])
+@pytest.mark.parametrize("engine_args,prompt",
+                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.asyncio
+async def test_streaming_params(monkeypatch: pytest.MonkeyPatch, n: int,
+                                engine_args: AsyncEngineArgs,
+                                prompt: PromptType):
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        sampling_params = SamplingParams(max_tokens=100,
+                                         output_kind=RequestOutputKind.DELTA,
+                                         temperature=1.0,
+                                         seed=33,
+                                         n=n)
+        streaming_params = StreamingParams(stream_n=3)
+        outputs = [
+            out
+            async for out in engine.generate(request_id="request-33",
+                                             prompt=prompt,
+                                             sampling_params=sampling_params,
+                                             streaming_params=streaming_params)
+        ]
+
+        # Assert that all but the last output have at least stream_n tokens
+        assert all(
+            sum(len(o.token_ids)
+                for o in out.outputs) >= streaming_params.stream_n
+            for out in outputs[:-1])
 
 class MockLoggingStatLogger(LoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):

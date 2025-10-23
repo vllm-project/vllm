@@ -88,6 +88,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
+from vllm.streaming_params import StreamingParams
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -233,6 +234,7 @@ AnyResponseFormat: TypeAlias = (
 class StreamOptions(OpenAIBaseModel):
     include_usage: bool | None = True
     continuous_usage_stats: bool | None = False
+    stream_n: Optional[int] = 1
 
 
 class FunctionDefinition(OpenAIBaseModel):
@@ -1411,6 +1413,13 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
+    
+    def to_streaming_params(self, ) -> StreamingParams:
+        stream_n = None
+        if self.stream_options is not None and \
+            self.stream_options.stream_n is not None:
+            stream_n = self.stream_options.stream_n
+        return StreamingParams(stream_n=stream_n)
 
     @model_validator(mode="before")
     @classmethod
@@ -2720,6 +2729,12 @@ class TranscriptionRequest(OpenAIBaseModel):
             else RequestOutputKind.FINAL_ONLY,
             extra_args=self.vllm_xargs,
         )
+    
+    def to_streaming_params(
+        self,
+    ) -> StreamingParams:  # stream_options not defined in transcription request
+        return None
+
 
     @model_validator(mode="before")
     @classmethod
