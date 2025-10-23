@@ -219,9 +219,8 @@ def send_weights_to_remote_instance(
             logger.error(message)
             return {"success": False, "message": message}
 
-        if _weights_send_group[group_name] is not None:
-            send_group = _weights_send_group[group_name]
-        else:
+        send_group = _weights_send_group.get(group_name)
+        if send_group is None:
             message = (
                 f"Group {group_name} not in _weights_send_group list. "
                 f"Please call `init_weights_send_group_for_remote_instance` first."
