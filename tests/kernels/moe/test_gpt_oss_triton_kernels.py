@@ -296,8 +296,8 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
     quant_config = FusedMoEQuantConfig.make(
         w1_bias=w1_bias_tri,
         w2_bias=w2_bias_tri,
-        w1_precision=pc1,
-        w2_precision=pc2,
+        w1_scale=pc1,
+        w2_scale=pc2,
     )
 
     out_triton_monolithic = triton_kernel_moe_forward(
