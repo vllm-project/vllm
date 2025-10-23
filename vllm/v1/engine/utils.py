@@ -134,9 +134,12 @@ class CoreEngineProcManager:
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                # Adjust device control in DP for non-CUDA platforms
+                # For CUDA platforms, setting same device id for different DP
+                # processes affects NCCL init performance.
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (data_parallel)
+                    if (data_parallel and not current_platform.is_cuda_alike())
                     else contextlib.nullcontext()
                 ):
                     proc.start()
