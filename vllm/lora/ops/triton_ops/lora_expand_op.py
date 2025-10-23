@@ -270,7 +270,7 @@ def _lora_expand(
         CAST_TYPE,
         NUM_SLICES,
         same_stride,
-        supports_pdl(),
+        supports_pdl(inputs.device),
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,

@@ -13,7 +13,9 @@ from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+
 from .utils import supports_pdl
+
 
 @triton.jit
 def _lora_shrink_kernel(
@@ -42,7 +44,7 @@ def _lora_shrink_kernel(
     EVEN_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
     SLICE_NUM: tl.constexpr,
-    USE_GDC: tl.constexpr, 
+    USE_GDC: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -208,7 +210,7 @@ def _lora_shrink(
         # thread blocks exit early.
         MAX_LORAS,
     )
-    
+
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -235,7 +237,7 @@ def _lora_shrink(
         EVEN_K,
         SPLIT_K,
         NUM_SLICES,
-        supports_pdl(),
+        supports_pdl(inputs.device),
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
