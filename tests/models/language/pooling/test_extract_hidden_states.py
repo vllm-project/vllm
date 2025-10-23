@@ -12,14 +12,12 @@ from vllm import TokensPrompt
 )
 @torch.inference_mode
 def test_embed_models(hf_runner, vllm_runner, model: str):
-    chunk_size = 10
     n_prompt_tokens = [55, 56, 57]
     token_prompts = [[1024 + i for i in range(n)] for n in n_prompt_tokens]
 
     with vllm_runner(
         model,
         max_model_len=128,
-        max_num_batched_tokens=chunk_size,
         enforce_eager=True,
         runner="pooling",
         enable_chunked_prefill=False,

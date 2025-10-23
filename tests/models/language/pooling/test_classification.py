@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
         ),
     ],
 )
-@pytest.mark.parametrize("dtype", ["float"] if current_platform.is_rocm() else ["float"])
+@pytest.mark.parametrize("dtype", ["half"] if current_platform.is_rocm() else ["float"])
 def test_models(
     hf_runner,
     vllm_runner,
