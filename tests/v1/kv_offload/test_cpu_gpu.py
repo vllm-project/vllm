@@ -13,20 +13,23 @@ from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
 
 BACKENDS_TO_TEST = [FlashAttentionBackend]
 
-try:
+if current_platform.is_cuda():
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
     BACKENDS_TO_TEST.append(FlashInferBackend)
-except ImportError:
-    pass
 
-try:
     from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnMLABackend
 
     BACKENDS_TO_TEST.append(FlashAttnMLABackend)
-except ImportError:
-    pass
 
+if current_platform.is_rocm():
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    BACKENDS_TO_TEST.append(RocmAttentionBackend)
+
+    from vllm.v1.attention.backends.mla.triton_mla import TritonMLABackend
+
+    BACKENDS_TO_TEST.append(TritonMLABackend)
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_BLOCKS = [256]
@@ -41,6 +44,10 @@ CUDA_DEVICES = ["cuda:0"]
 NUM_MAPPINGS = [3]
 
 
+@pytest.mark.skipif(
+    len(BACKENDS_TO_TEST) < 2,
+    reason="Need at least 2 backends to test heterogeneous KV cache layouts",
+)
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -70,7 +77,6 @@ def test_transfer(
 ) -> None:
     current_platform.seed_everything(seed)
 
-    # create per-layer GPU KV caches
     attn_backends_list = BACKENDS_TO_TEST
 
     gpu_caches = {}
