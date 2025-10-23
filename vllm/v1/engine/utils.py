@@ -23,7 +23,7 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import get_mp_context
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -134,9 +134,12 @@ class CoreEngineProcManager:
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                # Adjust device control in DP for non-CUDA platforms
+                # For CUDA platforms, setting same device id for different DP
+                # processes affects NCCL init performance.
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (data_parallel)
+                    if (data_parallel and not current_platform.is_cuda_alike())
                     else contextlib.nullcontext()
                 ):
                     proc.start()
