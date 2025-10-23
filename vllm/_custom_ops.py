@@ -329,7 +329,7 @@ def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
-    # If removed, also need to remove use_contiguous in qk_norm_rope_fusion.py
+    # If removed, also need to remove contiguous in MatcherRMSNorm
     input_contiguous = input.contiguous()
     torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
