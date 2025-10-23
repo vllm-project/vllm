@@ -101,21 +101,23 @@ class RotaryEmbedding(CustomOp):
         cos_sin = cos_sin_cache.index_select(0, positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
 
-        query_shape = query.shape
+        # query_shape = query.shape
         query = query.view(num_tokens, -1, head_size)
         query_rot = query[..., : rotary_dim]
         query_pass = query[..., rotary_dim :]
         query_rot = apply_rotary_emb_torch(query_rot, cos, sin, is_neox_style)
-        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+        # query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+        query = torch.cat((query_rot, query_pass), dim=-1)
 
         # key may be None in some cases, e.g. cross-layer KV sharing
         if key is not None:
-            key_shape = key.shape
+            # key_shape = key.shape
             key = key.view(num_tokens, -1, head_size)
             key_rot = key[..., : rotary_dim]
             key_pass = key[..., rotary_dim :]
             key_rot = apply_rotary_emb_torch(key_rot, cos, sin, is_neox_style)
-            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+            # key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+            key = torch.cat((key_rot, key_pass), dim=-1)
         return query, key
 
     def forward_native(
@@ -125,7 +127,9 @@ class RotaryEmbedding(CustomOp):
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
-        return self.forward_static(
+        query_shape = query.shape
+        key_shape = key.shape if key is not None else None
+        q_rope, k_rope = self.forward_static(
             positions,
             query,
             key,
@@ -134,6 +138,10 @@ class RotaryEmbedding(CustomOp):
             self.cos_sin_cache,
             self.is_neox_style,
         )
+        query = q_rope.reshape(query_shape)
+        if key is not None:
+            key = k_rope.reshape(key_shape)
+        return query, key
 
     def forward_cuda(
         self,
