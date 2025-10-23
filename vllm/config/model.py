@@ -2113,12 +2113,6 @@ def _get_and_verify_max_len(
             if rope_type == "yarn":
                 derived_max_model_len = rope_scaling["original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
-        elif rope_type == "longrope":
-            # For LongRoPE, we default to the original max to avoid performance
-            # degradation for shorter sequences.
-            derived_max_model_len = getattr(
-                hf_config, "original_max_position_embeddings", derived_max_model_len
-            )
 
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
@@ -2126,7 +2120,16 @@ def _get_and_verify_max_len(
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     if max_model_len is None:
-        max_model_len = int(derived_max_model_len)
+        # For LongRoPE, default to original_max_position_embeddings to avoid
+        # performance degradation for shorter sequences
+        if rope_scaling is not None and rope_scaling["rope_type"] == "longrope":
+            max_model_len = int(
+                getattr(
+                    hf_config, "original_max_position_embeddings", derived_max_model_len
+                )
+            )
+        else:
+            max_model_len = int(derived_max_model_len)
         if current_platform.is_tpu():
             logger.warning(
                 "--max-model-len is not specified, "
