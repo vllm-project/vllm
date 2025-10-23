@@ -8,13 +8,14 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils import sha256, sha256_cbor
+from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -447,6 +448,24 @@ def test_generate_block_hash_extra_keys_cache_salt():
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
     assert extra_keys == ("hash1", "salt")
     assert next_mm_idx == 1
+
+
+def test_generate_block_hash_extra_keys_lora():
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(6)],
+    )
+
+    request.lora_request = LoRARequest(
+        lora_name="test_lora_adapter", lora_int_id=1, lora_path="/path/to/lora"
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == ("test_lora_adapter",)
+
+    request.lora_request = None
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys is None
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

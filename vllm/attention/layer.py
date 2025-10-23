@@ -16,6 +16,7 @@ from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
 from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
@@ -35,7 +36,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
-from vllm.utils import (
+from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
@@ -443,6 +444,7 @@ class MultiHeadAttention(nn.Module):
         # This has no effect, it is only here to make it easier to swap
         # between Attention and MultiHeadAttention
         prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -462,7 +464,14 @@ class MultiHeadAttention(nn.Module):
         dtype = torch.get_default_dtype()
 
         # Determine the attention backend
-        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+        attn_backend_override = None
+        if multimodal_config is not None:
+            attn_backend_override = multimodal_config.mm_encoder_attn_backend
+        backend = get_vit_attn_backend(
+            head_size=head_size,
+            dtype=dtype,
+            attn_backend_override=attn_backend_override,
+        )
 
         # Some auto-selected backends can be upgraded
         # to upstream flash attention if available.

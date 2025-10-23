@@ -15,8 +15,8 @@ from tests.v1.attention.utils import _Backend
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import flat_product, multi_gpu_test
 
@@ -151,7 +151,7 @@ def test_attn_quant(
         cudagraph_mode=mode,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
@@ -236,7 +236,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         custom_ops=custom_ops_list,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(
             enable_attn_fusion=True,
             enable_noop=True,
@@ -273,7 +273,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)
-        else CompilationConfig(level=compile_config)
+        else CompilationConfig(mode=compile_config)
     )
 
     prompts = [
