@@ -147,6 +147,13 @@ class EngineCore:
             * vllm_config.parallel_config.decode_context_parallel_size
         )
 
+        additional_config = vllm_config.additional_config
+        self.step_num = int(additional_config.get("multi_step", 1))
+        if self.step_num > 1:
+            logger.info(
+                ("multi step is enabled. step num is %d"),
+                self.step_num,
+            )
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -154,6 +161,7 @@ class EngineCore:
             include_finished_set=vllm_config.parallel_config.data_parallel_size > 1,
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
+            step_num=self.step_num,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
@@ -313,7 +321,7 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-
+        scheduler_output.step_num = self.step_num
         with self.log_error_detail(scheduler_output):
             model_output = self.model_executor.execute_model(scheduler_output)
 

@@ -51,6 +51,7 @@ class Scheduler(SchedulerInterface):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        step_num: int = 1,
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -159,7 +160,9 @@ class Scheduler(SchedulerInterface):
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
                 self.use_eagle = True
-                self.num_lookahead_tokens = self.num_spec_tokens
+                self.num_lookahead_tokens = self.num_spec_tokens + (step_num - 1) * (
+                    1 + self.num_spec_tokens
+                )
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -914,6 +917,7 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        num_steps = model_runner_output.step_num
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -960,9 +964,11 @@ class Scheduler(SchedulerInterface):
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
             if scheduled_spec_token_ids:
-                num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_draft_tokens = len(scheduled_spec_token_ids) * num_steps
+                num_accepted = len(generated_token_ids) - num_steps
                 num_rejected = num_draft_tokens - num_accepted
+                # update because of multi step
+                request.num_computed_tokens += num_tokens_scheduled * (num_steps - 1)
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1266,7 +1272,7 @@ class Scheduler(SchedulerInterface):
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+            spec_decoding_stats = SpecDecodingStats.new(num_draft_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )
