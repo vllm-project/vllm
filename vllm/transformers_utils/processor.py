@@ -89,26 +89,6 @@ def _merge_mm_kwargs(
         requires_kw_only=False,
         allow_var_kwargs=True,
     )
-    # try to get specific processor dynamic kwargs cached in _PROC_CLASS_CACHE
-    cached_dynamic_kwargs = _get_cached_dynamic_keys(model_config, processor_cls)
-    # Get basic processor dynamic kwargs if not cached
-    if cached_dynamic_kwargs is None:
-        try:
-            from transformers.processing_utils import ProcessingKwargs
-
-            kwargs_cls = ProcessingKwargs
-        except Exception:
-            kwargs_cls = None
-        mm_config.mm_processor_dynamic_kwargs = (
-            _collect_dynamic_keys_from_processing_kwargs(kwargs_cls)
-        )
-    # Dynamic-wins: filter out dynamic (call-time) keys from constructor kwargs
-    if mm_config.mm_processor_dynamic_kwargs:
-        allowed_kwargs = {
-            k: v
-            for k, v in allowed_kwargs.items()
-            if k not in mm_config.mm_processor_dynamic_kwargs
-        }
     # NOTE: Pythonic dict is not hashable and will raise unhashable type
     # error when calling `cached_get_processor`, therefore we need to
     # wrap it to a hashable dict.
