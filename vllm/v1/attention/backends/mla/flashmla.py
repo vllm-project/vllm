@@ -15,7 +15,7 @@ from vllm.attention.ops.flashmla import (
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -91,6 +91,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
         self.cg_buf_tile_scheduler_metadata = None
         self.cg_buf_num_splits = None
+        self.is_fp8_kvcache = vllm_config.cache_config.cache_dtype.startswith("fp8")
 
         device_properties = torch.cuda.get_device_properties(self.device)
         num_sms = device_properties.multi_processor_count
@@ -123,6 +124,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             seq_lens_device,
             self.num_q_heads,
             1,  # MQA for the decode path
+            is_fp8_kvcache=self.is_fp8_kvcache,
         )
 
         # TODO: we can disambiguate between decode and mixed-prefill decode here
@@ -234,7 +236,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         tile_scheduler_metadata = attn_metadata.decode.tile_scheduler_metadata
         num_splits = attn_metadata.decode.num_splits
-        if vllm_kernel_override_batch_invariant():
+        if vllm_is_batch_invariant():
             device = q.device
             dtype = torch.int32
 

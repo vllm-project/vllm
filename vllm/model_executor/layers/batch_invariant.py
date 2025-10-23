@@ -134,10 +134,7 @@ def matmul_kernel_persistent(
             bias_ptrs = bias_ptr + offs_cn
             bias = tl.load(bias_ptrs, mask=offs_cn < N, other=0.0).to(tl.float32)
             accumulator += bias
-        if c_ptr.dtype.element_ty == tl.float8e4nv:
-            c = accumulator.to(tl.float8e4nv)
-        else:
-            c = accumulator.to(tl.float16)
+        c = accumulator.to(c_ptr.dtype.element_ty)
         tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -741,8 +738,8 @@ def get_batch_invariant_attention_block_size() -> AttentionBlockSize:
     return AttentionBlockSize(block_m=16, block_n=16)
 
 
-def vllm_kernel_override_batch_invariant():
-    env_key = "VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT"
+def vllm_is_batch_invariant():
+    env_key = "VLLM_BATCH_INVARIANT"
     is_overridden = False
     val = os.getenv(env_key, "0")
     try:
@@ -759,10 +756,10 @@ def override_envs_for_invariance():
         "FLEX_ATTENTION",
         "FLASHINFER",
         "FLASH_ATTN_MLA",
+        "FLASHINFER_MLA",
         "TRITON_MLA",
         # Not yet supported MLA backends
         # "FLASHMLA",
-        # "FLASHINFER_MLA",
     ]
     if curr_attn_backend not in supported_backends:
         warning = (
@@ -797,7 +794,7 @@ def override_envs_for_invariance():
 
 def init_batch_invariance():
     # this will hit all the csrc overrides as well
-    if vllm_kernel_override_batch_invariant():
+    if vllm_is_batch_invariant():
         override_envs_for_invariance()
         enable_batch_invariant_mode()
 
