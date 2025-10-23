@@ -40,7 +40,7 @@ from vllm.utils.flashinfer import (
     flashinfer_disable_q_quantization,
     use_trtllm_attention,
 )
-from vllm.utils.hardware_utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,

@@ -23,7 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
-from vllm.utils.hardware_utils import (
+from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
 )

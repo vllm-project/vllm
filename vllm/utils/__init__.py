@@ -41,7 +41,7 @@ import yaml
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
-from vllm.utils.hardware_utils import cuda_is_initialized, xpu_is_initialized
+from vllm.utils.platform_utils import cuda_is_initialized, xpu_is_initialized
 
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
