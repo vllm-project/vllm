@@ -23,6 +23,7 @@ def launch_lm_eval(eval_config, tp_size):
     backend = eval_config.get("backend", "vllm")
     enforce_eager = eval_config.get("enforce_eager", "true")
     kv_cache_dtype = eval_config.get("kv_cache_dtype", "auto")
+    apply_chat_template = eval_config.get("apply_chat_template", backend == "vllm-vlm")
     model_args = (
         f"pretrained={eval_config['model_name']},"
         f"tensor_parallel_size={tp_size},"
@@ -40,13 +41,11 @@ def launch_lm_eval(eval_config, tp_size):
         limit=eval_config["limit"],
         # TODO(yeq): using chat template w/ fewshot_as_multiturn is supposed help
         # text models. however, this is regressing measured strict-match for
-        # existing text models in CI, so only apply it for mm, or explicitly set
-        apply_chat_template=eval_config.get(
-            "apply_chat_template", backend == "vllm-vlm"
-        ),
+        # existing text models in CI, so only apply it for mm.
+        apply_chat_template=apply_chat_template,
         fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", False),
         # Forward decoding and early-stop controls (e.g., max_gen_toks, until=...)
-        gen_kwargs=eval_config.get("gen_kwargs"),
+        gen_kwargs=eval_config.get("gen_kwargs", None),
         batch_size=batch_size,
     )
     return results
