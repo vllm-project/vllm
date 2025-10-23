@@ -356,6 +356,7 @@ def fused_moe_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    SPLIT_K: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -686,6 +687,7 @@ def invoke_fused_moe_kernel(
         )
     else:
         config = config.copy()
+        config["SPLIT_K"] = 1
         BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
         if block_shape is not None:
             BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
