@@ -3,7 +3,6 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import torch
 
@@ -23,7 +22,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    ReorderSpec,
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -254,7 +252,7 @@ class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
     cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    reorder_spec: ClassVar[ReorderSpec] = ReorderSpec(1, split_extend=True)
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -303,10 +301,9 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> "AiterFlashAttentionMetadata":
-        assert self.reorder_spec.decode_threshold is not None
         split_ret = split_decodes_prefills_and_extends(
             common_attn_metadata,
-            decode_threshold=self.reorder_spec.decode_threshold,
+            decode_threshold=self.reorder_batch_threshold,
         )
 
         (
