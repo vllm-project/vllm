@@ -11,9 +11,9 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -21,7 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 
-from .utils import AutoWeightsLoader, maybe_prefix, get_draft_quant_config
+from .utils import AutoWeightsLoader, get_draft_quant_config, maybe_prefix
 
 logger = init_logger(__name__)
 

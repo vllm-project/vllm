@@ -706,23 +706,28 @@ def maybe_prefix(prefix: str, name: str) -> str:
     """
     return name if not prefix else f"{prefix}.{name}"
 
+
 def get_draft_quant_config(vllm_config: VllmConfig):
     """Get quantization config for Draft models.
-    
-    Draft models should use their own quantization config instead of the verifier/target model's config. This helper retrieves the draft model's quantization config.
-    
+
+    Draft models should use their own quantization config instead of the verifier/target
+    model's config. This helper retrieves the draft model's quantization config.
+
     Args:
         vllm_config: The vLLM configuration object.
-        
+
     Returns:
         The draft model's config if available, None otherwise.
     """
     draft_model_config = vllm_config.speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
-    return VllmConfig.get_quantization_config(
-        draft_model_config,
-        draft_load_config) if draft_model_config else None
+    return (
+        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
+        if draft_model_config
+        else None
+    )
+
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """

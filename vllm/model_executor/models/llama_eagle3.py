@@ -27,7 +27,7 @@ from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
-from .utils import AutoWeightsLoader, maybe_prefix, get_draft_quant_config
+from .utils import AutoWeightsLoader, get_draft_quant_config, maybe_prefix
 
 logger = init_logger(__name__)
 
