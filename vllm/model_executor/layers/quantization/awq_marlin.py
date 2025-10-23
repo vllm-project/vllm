@@ -197,7 +197,11 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-            if is_layer_skipped(prefix, getattr(self, "modules_to_not_convert", [])):
+            if is_layer_skipped(
+                prefix,
+                getattr(self, "modules_to_not_convert", []),
+                skip_with_substr=True,
+            ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
