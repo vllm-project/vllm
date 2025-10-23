@@ -1515,8 +1515,8 @@ class ModelConfig:
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
-        
-        # Since Mamba1 does not have a chunk notion, 
+
+        # Since Mamba1 does not have a chunk notion,
         # use 2048 to align with the kernel chunking.
         if chunk_size is None:
             chunk_size = 2048
