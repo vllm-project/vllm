@@ -574,11 +574,11 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def reset_cache(self) -> bool:
+    def reset_cache(self) -> bool | None:
         """
         Reset the connector's internal cache.
 
         Returns:
             bool: True if the cache was successfully reset, False otherwise.
         """
-        return False
+        return None

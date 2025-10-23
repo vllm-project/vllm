@@ -454,4 +454,4 @@ class MultiConnector(KVConnectorBase_V1):
         )
 
     def reset_cache(self) -> bool:
-        return all(connector.reset_cache() for connector in self._connectors)
+        return all(c.reset_cache() is not False for c in self._connectors)
