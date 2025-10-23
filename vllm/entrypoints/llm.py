@@ -75,7 +75,8 @@ from vllm.transformers_utils.tokenizer import (
     get_cached_tokenizer,
 )
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device, as_iter, is_list_of
+from vllm.utils import Counter, Device
+from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -283,6 +284,16 @@ class LLM:
                 structured_outputs_instance = structured_outputs_config
         else:
             structured_outputs_instance = StructuredOutputsConfig()
+
+        # warn about single-process data parallel usage.
+        _dps = int(kwargs.get("data_parallel_size", 1))
+        if _dps > 1:
+            raise ValueError(
+                f"LLM(data_parallel_size={_dps}) is not supported for single-"
+                "process usage and may hang. Please use "
+                "the explicit multi-process data-parallel example at "
+                "'examples/offline_inference/data_parallel.py'."
+            )
 
         engine_args = EngineArgs(
             model=model,
@@ -1503,7 +1514,7 @@ class LLM:
         """Return a snapshot of aggregated metrics from Prometheus.
 
         Returns:
-            A ``MetricSnapshot`` instance capturing the current state
+            A `MetricSnapshot` instance capturing the current state
             of all aggregated metrics from Prometheus.
 
         Note:

@@ -20,6 +20,9 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -38,13 +41,16 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import LayerBlockType, LazyLoader, common_broadcastable_dtype
+from vllm.utils import LayerBlockType
+from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
+    from vllm.attention.backends.registry import _Backend
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -52,6 +58,7 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
+    _Backend = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -144,6 +151,10 @@ class ModelConfig:
     seed: int | None = None
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
+    hf_config: PretrainedConfig = field(init=False)
+    """The Hugging Face config of the model."""
+    hf_text_config: PretrainedConfig = field(init=False)
+    """The Hugging Face config of the text model (same as hf_config for text models)."""
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -221,8 +232,10 @@ class ModelConfig:
     output will contain token ids."""
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
-    `prompt_embeds` key. Note that enabling this will double the time required
-    for graph compilation."""
+    `prompt_embeds` key.
+
+    WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!"""
     served_model_name: str | list[str] | None = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -292,12 +305,14 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
+    mm_encoder_attn_backend: InitVar[_Backend | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -409,16 +424,22 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         limit_mm_per_prompt: dict[str, int] | None,
+        enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
+        mm_encoder_attn_backend: _Backend | str | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
+        # Enable batch invariance settings if requested
+        if vllm_is_batch_invariant():
+            self.enforce_eager = True
+
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -714,12 +735,14 @@ class ModelConfig:
 
             mm_config_kwargs = dict(
                 limit_per_prompt=limit_mm_per_prompt,
+                enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
+                mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
@@ -764,8 +787,10 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        prefix = "Transformers"
-        prefix += "MoE" if self.get_num_experts() > 1 else ""
+        cls = "Transformers"
+        # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
+        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
+        cls += "MoE" if self.get_num_experts() > 1 else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
         convert = None
@@ -781,18 +806,15 @@ class ModelConfig:
             runner = "generate"
         if convert in {None, "none"}:
             convert = "embed"
-        # Resolve Transformers backend pooling classes
+        # Resolve Transformers backend task
         if runner == "pooling":
             if convert == "embed":
-                return prefix + "EmbeddingModel"
+                return cls + "EmbeddingModel"
             if convert == "classify":
-                return prefix + "ForSequenceClassification"
-        # Resolve Transformers backend generate classes
-        if self.hf_config != self.hf_text_config:
-            # If 'hf_text_config' is the same as 'hf_config'. If not, it is
-            # probably a composite config, i.e. multimodal
-            return prefix + "ForMultimodalLM"
-        return prefix + "ForCausalLM"
+                return cls + "ForSequenceClassification"
+        else:
+            cls += "ForCausalLM"
+        return cls
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""

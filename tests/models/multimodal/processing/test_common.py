@@ -327,10 +327,12 @@ def _test_processing_correctness_one(
     [
         "rhymes-ai/Aria",
         "CohereForAI/aya-vision-8b",
+        "Open-Bee/Bee-8B-RL",
         "Salesforce/blip2-opt-2.7b",
         "facebook/chameleon-7b",
         "CohereLabs/command-a-vision-07-2025",
         "deepseek-ai/deepseek-vl2-tiny",
+        "deepseek-ai/DeepSeek-OCR",
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         "adept/fuyu-8b",
         "google/gemma-3-4b-it",
