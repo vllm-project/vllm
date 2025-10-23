@@ -1,45 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest  # type: ignore
+import pytest
 import torch
 
-from tests.compile.backend import LazyInitPass, TestBackend
+from tests.compile.backend import TestBackend
 from vllm.attention import Attention, AttentionType
+from vllm.compilation.matcher_utils import RMS_OP, ROTARY_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.compilation.qk_norm_rope_fusion import (
     FUSED_QK_ROPE_OP,
-    RMS_OP,
     QKNormRoPEFusionPass,
 )
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
+    ModelConfig,
     PassConfig,
     VllmConfig,
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+
+RSQRT_OP = torch.ops.aten.rsqrt.default
+INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 
 
 class QKNormRoPETestModel(torch.nn.Module):
-    """A minimal model that exercises the unfused Q/K RMSNorm + RoPE pattern.
-
-    It also instantiates an Attention layer to register itself into
-    vllm_config.compilation_config.static_forward_context, which the fusion
-    pass uses to infer per-layer sizes.
-    """
-
     def __init__(
         self,
         *,
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
+        eps: float,
+        is_neox: bool,
         vllm_config: VllmConfig,
+        dtype: torch.dtype,
         prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         super().__init__()
@@ -48,107 +48,146 @@ class QKNormRoPETestModel(torch.nn.Module):
         self.head_dim = head_dim
         self.q_size = num_heads * head_dim
         self.kv_size = num_kv_heads * head_dim
+        self.rotary_dim = head_dim
+        self.eps = eps
+        self.dtype = dtype
 
-        # Register an Attention layer so the pass can read sizes from config
+        # Register layer metadata for the fusion pass via Attention.
         self.attn = Attention(
-            num_heads=num_heads,
-            head_size=head_dim,
-            scale=1.0 / (head_dim**0.5),
-            num_kv_heads=num_kv_heads,
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            scale=1.0 / self.head_dim**0.5,
+            num_kv_heads=self.num_kv_heads,
             cache_config=vllm_config.cache_config,
             prefix=prefix,
             attn_type=AttentionType.DECODER,
         )
 
-        # Use the same RMSNorm and RoPE components as models do
-        self.q_norm = RMSNorm(self.head_dim, eps=1e-6)
-        self.k_norm = RMSNorm(self.head_dim, eps=1e-6)
-        self.rotary_emb = get_rope(
+        self.q_norm = RMSNorm(self.head_dim, eps=self.eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=self.eps)
+        self.rotary_emb = RotaryEmbedding(
             self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=4096,
+            rotary_dim=self.rotary_dim,
+            max_position_embeddings=4096,
             base=10000,
+            is_neox_style=is_neox,
+            dtype=self.dtype,
         )
+        self.enable_rms_norm_custom_op = self.q_norm.enabled()
+        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
-        # Unfused baseline: split, per-head RMS, then RoPE
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
-
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-
         q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
+    def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
+        ops = []
+        if self.enable_rms_norm_custom_op:
+            ops.append(RMS_OP)
+        else:
+            ops.append(RSQRT_OP)
 
+        if self.enable_rope_custom_op:
+            ops.append(ROTARY_OP)
+        else:
+            ops.append(INDEX_SELECT_OP)
+        return ops
+
+    def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
+        return [FUSED_QK_ROPE_OP]
+
+
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("is_neox", [True])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize("enable_rope_custom_op", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("T", [17])
-@pytest.mark.parametrize("num_heads, num_kv_heads, head_dim", [(16, 2, 128)])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Only test on CUDA and ROCm",
 )
-def test_qk_norm_rope_fusion(dtype, T, num_heads, num_kv_heads, head_dim):
+def test_qk_norm_rope_fusion(
+    eps, is_neox, enable_rms_norm_custom_op, enable_rope_custom_op, dtype
+):
+    if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
+        pytest.skip("fused_qk_norm_rope custom op not available")
+
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 
-    # Enable the fusion pass and necessary custom ops
+    custom_ops: list[str] = []
+    if enable_rms_norm_custom_op:
+        custom_ops.append("+rms_norm")
+    if enable_rope_custom_op:
+        custom_ops.append("+rotary_embedding")
+
     vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rms_norm", "+rotary_embedding"],
+            custom_ops=custom_ops,
             pass_config=PassConfig(
                 enable_qk_norm_rope_fusion=True,
                 enable_noop=True,
             ),
-        )
+            debug_dump_path="/mnt/data/nas/zhr/test/log/tmp/vllm_compile_dump",
+        ),
     )
 
-    # Build model; creating Attention during init registers it into
-    # static_forward_context for the pass to query sizes
+    num_heads, num_kv_heads, head_dim = 16, 4, 128
+    T = 5
+
     with set_current_vllm_config(vllm_config):
         model = QKNormRoPETestModel(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            eps=eps,
+            is_neox=is_neox,
             vllm_config=vllm_config,
+            dtype=dtype,
         )
 
-    qkv = torch.randn(T, num_heads * head_dim + 2 * num_kv_heads * head_dim)
-    positions = torch.arange(T, dtype=torch.long, device=qkv.device)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        fusion_pass = QKNormRoPEFusionPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
 
-    # Eager baseline
-    with set_current_vllm_config(vllm_config):
-        q_eager, k_eager, v_eager = model(qkv, positions)
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend_baseline = TestBackend(noop_pass, cleanup_pass)
 
-    # Set up backend with our fusion pass
-    noop_pass = NoOpEliminationPass(vllm_config)
-    fusion_pass = LazyInitPass(QKNormRoPEFusionPass, vllm_config)
-    cleanup_pass = PostCleanupPass(vllm_config)
-    backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        qkv = torch.randn(T, model.q_size + 2 * model.kv_size)
+        pos = torch.arange(T, dtype=torch.long, device=qkv.device)
+        qkv_unfused = qkv.clone()
+        pos_unfused = pos.clone()
 
-    # Compile and run
-    with set_current_vllm_config(vllm_config):
-        model_compiled = torch.compile(model, backend=backend, fullgraph=True)
-        q_comp, k_comp, v_comp = model_compiled(qkv, positions)
+        torch._dynamo.mark_dynamic(qkv, 0)
+        torch._dynamo.mark_dynamic(pos, 0)
+        model_fused = torch.compile(model, backend=backend)
+        q_fused, k_fused, v_fused = model_fused(qkv, pos)
 
-    # Numerical check
-    atol = 1e-2 if dtype == torch.bfloat16 else 2e-3
-    rtol = atol
-    torch.testing.assert_close(q_eager, q_comp, atol=atol, rtol=rtol)
-    torch.testing.assert_close(k_eager, k_comp, atol=atol, rtol=rtol)
-    torch.testing.assert_close(v_eager, v_comp, atol=atol, rtol=rtol)
+        torch._dynamo.mark_dynamic(qkv_unfused, 0)
+        torch._dynamo.mark_dynamic(pos_unfused, 0)
+        model_unfused = torch.compile(model, backend=backend_baseline)
+        q_unfused, k_unfused, v_unfused = model_unfused(qkv_unfused, pos_unfused)
 
-    # Ensure the pass matched at least one site
-    assert fusion_pass.pass_.matched_count > 0
+        if dtype == torch.float16:
+            ATOL, RTOL = (2e-3, 2e-3)
+        else:
+            ATOL, RTOL = (1e-2, 1e-2)
 
-    # Pre graph should contain unfused RMS, post graph should contain fused op
-    backend.check_before_ops([RMS_OP])
-    # At least the fused op should be present after
-    backend.check_after_ops([FUSED_QK_ROPE_OP])
+        torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
+
+        assert fusion_pass.matched_count == 1
+
+        backend.check_before_ops(model.ops_in_model_before())
+        backend.check_after_ops(model.ops_in_model_after())

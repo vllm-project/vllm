@@ -13,7 +13,6 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
 from .fusion import empty_bf16, empty_i64
@@ -163,6 +162,8 @@ class QkNormRopePattern:
             cos_sin_cache,
         ]
 
+        # NOTE: use fx_view_to_reshape to unify view/reshape to simplify
+        # pattern and increase matching opportunities
         pm.register_replacement(
             pattern,
             replacement,
@@ -197,7 +198,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
-        # Register a pattern per attention layer, as sizes differ by shard
+        # use one attn layer to get meta (such as head_dim) for QkNormRopePattern
         attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
             config, Attention
         )
@@ -206,31 +207,21 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                 "QK Norm+RoPE fusion enabled, but no Attention layers were discovered."
             )
             return
-
-        # only use one layer to get meta (such as head_dim) for QkNormRopePattern
         _, layer = next(iter(attn_layers.items()))
+
         for epsilon in [1e-5, 1e-6]:
             for neox in [True, False]:
-                if RotaryEmbedding.enabled():
-                    for rope_flashinfer in [True, False]:
-                        QkNormRopePattern(
-                            head_dim=layer.head_size,
-                            num_heads=layer.num_heads,
-                            num_kv_heads=layer.num_kv_heads,
-                            eps=epsilon,
-                            is_neox=neox,
-                            rope_flashinfer=rope_flashinfer,
-                        ).register(self.patterns)
-                else:
-                    QkNormRopePattern(
-                        head_dim=layer.head_size,
-                        num_heads=layer.num_heads,
-                        num_kv_heads=layer.num_kv_heads,
-                        eps=epsilon,
-                        is_neox=neox,
-                    ).register(self.patterns)
+                # TODO: Support rope_flashinfer=True by enabling direct use of
+                # float32 cos_sin_cache in the fused_qk_norm_rope operator.
+                QkNormRopePattern(
+                    head_dim=layer.head_size,
+                    num_heads=layer.num_heads,
+                    num_kv_heads=layer.num_kv_heads,
+                    eps=epsilon,
+                    is_neox=neox,
+                    rope_flashinfer=False,
+                ).register(self.patterns)
 
-        # Dump patterns for debugging if enabled
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
