@@ -27,6 +27,7 @@ from .qwen3xml_tool_parser import Qwen3XMLToolParser
 from .seed_oss_tool_parser import SeedOssToolParser
 from .step3_tool_parser import Step3ToolParser
 from .xlam_tool_parser import xLAMToolParser
+from .minimax_m2_tool_parser import MinimaxM2ToolParser
 
 __all__ = [
     "ToolParser",
@@ -56,4 +57,5 @@ __all__ = [
     "SeedOssToolParser",
     "Step3ToolParser",
     "OpenAIToolParser",
+    "MinimaxM2ToolParser",
 ]
