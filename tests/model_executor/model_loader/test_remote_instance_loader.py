@@ -6,14 +6,16 @@ Tests for the remote instance model loader.
 
 To run these tests:
 1. Install test dependencies:
-   uv pip install -r requirements/common.txt -r requirements/dev.txt --torch-backend=auto
+   uv pip install -r requirements/common.txt -r requirements/dev.txt
+   --torch-backend=auto
    uv pip install pytest pytest-asyncio
 
 2. Run the tests:
    pytest -s -v tests/model_executor/model_loader/test_remote_instance_loader.py
 
 Note: This test is marked as skip because it requires:
-- Multiple GPUs (at least 8 GPUs for 2x2 TP/PP configuration for both seed and client instances)
+- Multiple GPUs (at least 8 GPUs for 2x2 TP/PP configuration for both seed
+  and client instances)
 - Coordinated seed and client servers
 - Proper setup of environment variables
 - Network communication between servers
@@ -55,7 +57,8 @@ def test_remote_instance_loader_end_to_end(llama_3p2_1b_files, num_gpus_availabl
     3. Compare outputs from both servers
 
     Note: This test is marked as skip because it requires:
-    - Multiple GPUs (at least 8 GPUs for 2x2 TP/PP configuration for both seed and client instances)
+    - Multiple GPUs (at least 8 GPUs for 2x2 TP/PP configuration for both
+      seed and client instances)
     - Coordinated seed and client servers
     - Proper setup of environment variables
     - Network communication between servers
@@ -63,7 +66,8 @@ def test_remote_instance_loader_end_to_end(llama_3p2_1b_files, num_gpus_availabl
     # Need at least 8 GPUs (4 for seed instance + 4 for client instance)
     if num_gpus_available < 8:
         pytest.skip(
-            "Not enough GPUs for 2x2 TP/PP configuration for both seed and client instances (requires 8 GPUs)"
+            "Not enough GPUs for 2x2 TP/PP configuration for both seed and "
+            "client instances (requires 8 GPUs)"
         )
 
     input_dir = llama_3p2_1b_files

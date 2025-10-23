@@ -73,7 +73,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
             self.load_weights(model, model_config)
             end = time.perf_counter()
 
-            logger.info(f"Loading weights on {load_device} using {end - begin} s")
+            logger.info("Loading weights on %s using %s s", load_device, end - begin)
             # process_weights_after_loading(model, model_config, target_device)
             process_weights_after_loading_mla(model, model_config)
             # model.load_state_dict(model.state_dict(), strict=True)
@@ -83,7 +83,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
         """Load a model with the given configurations."""
         global_rank = _get_rank()
         url = f"{_get_seed_instance_ip()}:{_get_instance_ports()[global_rank]}"
-        logger.info(f"url: {url}")
+        logger.info("url: %s", url)
 
         with WeightTransferConnector(url) as client:
             self.load_model_from_remote_instance(model, client, model_config)
@@ -109,7 +109,8 @@ class RemoteInstanceModelLoader(BaseModelLoader):
 
         end_build_group_tic = time.time()
         logger.info(
-            f"finish building group for remote instance, time used: {(end_build_group_tic - start_build_group_tic):.4f}s"
+            "finish building group for remote instance, time used: %.4fs",
+            end_build_group_tic - start_build_group_tic,
         )
         import threading
 
@@ -131,7 +132,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
             t.start()
 
         try:
-            logger.info(f"Recv weight in {client._model_update_group}")
+            logger.info("Recv weight in %s", client._model_update_group)
             start_get_weights_tic = time.time()
             with set_default_torch_dtype(model_config.dtype):
                 state_dict = model.state_dict()
@@ -145,7 +146,8 @@ class RemoteInstanceModelLoader(BaseModelLoader):
 
             end_get_weights_tic = time.time()
             logger.info(
-                f"finish getting all weights from remote instance, time used: {(end_get_weights_tic - start_get_weights_tic):.4f}s"
+                "finish getting all weights from remote instance, time used: %.4fs",
+                end_get_weights_tic - start_get_weights_tic,
             )
             # torch.cuda.empty_cache()
         except Exception as e:

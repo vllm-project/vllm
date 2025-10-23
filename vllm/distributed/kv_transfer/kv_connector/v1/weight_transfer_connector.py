@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC
 from datetime import timedelta
 from typing import Any
 
@@ -23,7 +22,9 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class WeightTransferConnector(ABC):
+class WeightTransferConnector:
+    """weight transfer connectors for RemoteInstanceLoader."""
+
     def __init__(self, url: str):
         self.url = url
         self.closed = False
@@ -47,8 +48,15 @@ class WeightTransferConnector(ABC):
         backend = "nccl"
 
         logger.info(
-            f"init custom process group: master_address={master_address}, master_port={master_port}, "
-            f"rank_offset={group_rank}, world_size={world_size}, group_name={group_name}, backend={backend}, gpu_id={gpu_id}"
+            "init custom process group: master_address=%s, master_port=%s, "
+            "rank_offset=%s, world_size=%s, group_name=%s, backend=%s, gpu_id=%s",
+            master_address,
+            master_port,
+            group_rank,
+            world_size,
+            group_name,
+            backend,
+            gpu_id,
         )
 
         try:
@@ -129,10 +137,7 @@ def init_custom_process_group(
     elif init_method is None:
         init_method = "env://"
 
-    if backend:
-        backend = Backend(backend)
-    else:
-        backend = Backend("undefined")
+    backend = Backend(backend) if backend else Backend("undefined")
 
     if timeout is None:
         timeout = default_pg_timeout
