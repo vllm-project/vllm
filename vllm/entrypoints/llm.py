@@ -1024,19 +1024,6 @@ class LLM:
                 "pooling model."
             )
 
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
-
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
-
-        for param in as_iter(pooling_params):
-            param.verify(pooling_task, model_config)
-            # for backwards compatibility
-            if truncate_prompt_tokens is not None:
-                param.truncate_prompt_tokens = truncate_prompt_tokens
-
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
             io_processor_prompt = True
@@ -1053,6 +1040,34 @@ class LLM:
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
+
+        if io_processor_prompt:
+            assert self.io_processor is not None
+            if is_list_of(pooling_params, PoolingParams):
+                validated_pooling_params: list[PoolingParams] = []
+                for param in as_iter(pooling_params):
+                    validated_pooling_params.append(
+                        self.io_processor.validate_or_generate_params(param)
+                    )
+                pooling_params = validated_pooling_params
+            else:
+                assert not isinstance(pooling_params, Sequence)
+                pooling_params = self.io_processor.validate_or_generate_params(
+                    pooling_params
+                )
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
+
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
+
+        for param in as_iter(pooling_params):
+            param.verify(pooling_task, model_config)
+            # for backwards compatibility
+            if truncate_prompt_tokens is not None:
+                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         self._validate_and_add_requests(
             prompts=prompts,
@@ -1078,6 +1093,9 @@ class LLM:
                 PoolingRequestOutput[Any](
                     request_id="",
                     outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
                     prompt_token_ids=[],
                     finished=True,
                 )
