@@ -128,7 +128,7 @@ class CoreEngineProcManager:
             zmq_addr = get_engine_client_zmq_addr(
                 local_only=False,
                 host=vllm_config.parallel_config.data_parallel_master_ip,
-                port=vllm_config.fault_tolerance_config.fault_report_port,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
             )
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
@@ -873,7 +873,7 @@ def launch_core_engines(
         addresses.fault_report_addr = get_engine_client_zmq_addr(
             local_only=False,
             host=vllm_config.parallel_config.data_parallel_master_ip,
-            port=vllm_config.fault_tolerance_config.fault_report_port,
+            port=vllm_config.fault_tolerance_config.internal_fault_report_port,
         )
         addresses.client_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
