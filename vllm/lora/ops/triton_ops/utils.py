@@ -259,6 +259,6 @@ def supports_pdl(device: torch.device | None = None) -> bool:
     """
     if not current_platform.is_cuda():
         return False
-    # PODL
+    # PDL requires compute capability SM90 or above
     capability = torch.cuda.get_device_capability(device)
     return capability[0] >= 9
