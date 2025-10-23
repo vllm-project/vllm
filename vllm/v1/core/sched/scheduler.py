@@ -32,7 +32,7 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -88,6 +88,7 @@ class Scheduler(SchedulerInterface):
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
+        self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         if self.vllm_config.kv_transfer_config is not None:
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
@@ -99,6 +100,8 @@ class Scheduler(SchedulerInterface):
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER
             )
+            if self.log_stats:
+                self.connector_prefix_cache_stats = PrefixCacheStats()
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -518,6 +521,9 @@ class Scheduler(SchedulerInterface):
                         request,
                         new_computed_blocks + new_blocks,
                         num_external_computed_tokens,
+                    )
+                    self._update_connector_prefix_cache_stats(
+                        request, num_external_computed_tokens
                     )
 
                 # Request was already popped from self.waiting
@@ -1265,11 +1271,13 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
+        connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
+            connector_prefix_cache_stats=connector_prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
             num_corrupted_reqs=sum(req.is_output_corrupted for req in self.running),
             kv_connector_stats=kv_connector_stats.data if kv_connector_stats else None,
@@ -1299,6 +1307,25 @@ class Scheduler(SchedulerInterface):
     ########################################################################
     # KV Connector Related Methods
     ########################################################################
+
+    def _update_connector_prefix_cache_stats(
+        self, request: Request, num_external_tokens: int
+    ) -> None:
+        if self.connector_prefix_cache_stats is None:
+            return
+
+        self.connector_prefix_cache_stats.record(
+            num_tokens=request.num_tokens,
+            num_hits=num_external_tokens,
+            preempted=request.num_preemptions > 0,
+        )
+
+    def _make_connector_prefix_cache_stats(self) -> PrefixCacheStats | None:
+        if self.connector_prefix_cache_stats is None:
+            return None
+        stats = self.connector_prefix_cache_stats
+        self.connector_prefix_cache_stats = PrefixCacheStats()
+        return stats
 
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
