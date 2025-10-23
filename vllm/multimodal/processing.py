@@ -1059,6 +1059,7 @@ class InputProcessingContext:
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+
         try:
             output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
         except Exception as exc:
