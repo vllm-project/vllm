@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from functools import lru_cache
 import importlib
 import inspect
@@ -14,7 +15,7 @@ from transformers import (
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
-from transformers.processing_utils import ProcessingKwargs, ProcessorMixin
+from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
@@ -69,6 +70,7 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls) -> set[str]:
             kw_annotations = kwargs_type_annotations[kw_type].__annotations__
             for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
+    dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
     return dynamic_kwargs
 
 
@@ -88,15 +90,16 @@ def _merge_mm_kwargs(
         requires_kw_only=False,
         allow_var_kwargs=True,
     )
-    kwargs_cls = getattr(processor_cls, "ProcessingKwargs", None)
-    if kwargs_cls is None:
+    # try to get specific processor dynamic kwargs cached in _PROC_CLASS_CACHE
+    cached_dynamic_kwargs = _get_cached_dynamic_keys(model_config, processor_cls)
+    # Get basic processor dynamic kwargs if not cached
+    if cached_dynamic_kwargs is None:
         try:
             from transformers.processing_utils import ProcessingKwargs
 
             kwargs_cls = ProcessingKwargs
         except Exception:
             kwargs_cls = None
-    if mm_config.mm_processor_dynamic_kwargs is None:
         mm_config.mm_processor_dynamic_kwargs = (
             _collect_dynamic_keys_from_processing_kwargs(kwargs_cls)
         )
@@ -192,17 +195,43 @@ def cached_processor_from_config(
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
-    # Extract kwargs from processorkwargs, including those model specific ones
-    dynamic_kwargs = get_processorkwargs_from_processor(processor)
-    mm_config = model_config.get_multimodal_config()
-    mm_config.mm_processor_dynamic_kwargs = (
-        dynamic_kwargs | mm_config.mm_processor_dynamic_kwargs
-        if mm_config.mm_processor_dynamic_kwargs else dynamic_kwargs
-    )
+    # After processor instantiation, refine cached dynamic keys
+    try:
+        info = _update_cache_from_instance(model_config, processor_cls, processor)
+        mm_config = model_config.get_multimodal_config()
+
+        mm_config.mm_processor_dynamic_kwargs = (
+            mm_config.mm_processor_dynamic_kwargs | info.dynamic_keys
+            if mm_config.mm_processor_dynamic_kwargs else info.dynamic_keys
+        )
+
+    except Exception:
+        # Best-effort; should never break processor loading.
+        pass
     return processor
 
 
-def get_processorkwargs_from_processor(processor: ProcessorMixin) -> set[str]:
+@dataclass(frozen=True)
+class _ResolvedProcessorInfo:
+    processor_type: type
+    dynamic_keys: set[str]
+
+
+# Cache key is (model_id, revision, trust_remote_code, processor_cls_identity)
+_PROC_CLASS_CACHE: dict[tuple, _ResolvedProcessorInfo] = {}
+
+
+def _proc_resolution_key(model_config: "ModelConfig", processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin) -> tuple:
+    return (
+        model_config.model,
+        model_config.revision,
+        bool(model_config.trust_remote_code),
+        getattr(processor_cls, "__name__", str(processor_cls)),
+    )
+
+
+@lru_cache
+def get_processorkwargs_from_processor(processor: _P) -> set[str]:
     try:
         call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
         # if the processor has explicit kwargs annotation, use it
@@ -213,13 +242,40 @@ def get_processorkwargs_from_processor(processor: ProcessorMixin) -> set[str]:
         else:
             module_name = type(processor).__module__
             mod = importlib.import_module(module_name)
-
-            for _, obj in inspect.getmembers(mod, inspect.isclass):
-                if issubclass(obj, ProcessingKwargs) and obj is not ProcessingKwargs:
-                    return _collect_dynamic_keys_from_processing_kwargs(obj)
-            return set()
+            # find *ProcessingKwargs in the module
+            processor_kwargs = set()
+            for name, obj in vars(mod).items():
+                if name.endswith("ProcessingKwargs"):
+                    processor_kwargs = processor_kwargs | _collect_dynamic_keys_from_processing_kwargs(obj)
+            return processor_kwargs
     except Exception as e:
         return set()
+
+
+def _update_cache_from_instance(
+        model_config: "ModelConfig",
+        processor_cls: type[_P] | tuple[type[_P], ...],
+        processor: ProcessorMixin
+) -> _ResolvedProcessorInfo:
+    """
+    After instantiation (e.g., via AutoProcessor), record the concrete class
+    and its dynamic keys to the cache keyed by (config, processor_cls identity).
+    """
+    key = _proc_resolution_key(model_config, processor_cls)
+    # Extract kwargs from processorkwargs, including those model specific ones
+    dynamic_kwargs = get_processorkwargs_from_processor(processor)
+    info = _ResolvedProcessorInfo(processor_type=type(processor), dynamic_keys=dynamic_kwargs)
+    _PROC_CLASS_CACHE[key] = info
+    return info
+
+
+def _get_cached_dynamic_keys(
+        model_config: "ModelConfig",
+        processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin
+) -> set[str] | None:
+    key = _proc_resolution_key(model_config, processor_cls)
+    info = _PROC_CLASS_CACHE.get(key)
+    return set(info.dynamic_keys) if info is not None else None
 
 
 def get_feature_extractor(
