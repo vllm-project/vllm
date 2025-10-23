@@ -240,13 +240,14 @@ def main():
     # print the generated text
     if args.print_output:
         for i, output in enumerate(outputs):
-            prompt = tokenizer.decode(output.prompt_token_ids, skip_special_tokens=True)
-            print("-" * 50)
+            ic(output)
+            prompt = tokenizer.decode(output.prompt_token_ids)
+            print("*" * 150)
             print(f"Output {i}:")
-            print(f"Finish reason: {output.outputs[0].finish_reason}")
-            print(f"Prompt: {prompt}")
-            print(f"Generated Text: {output.outputs[0].text}...")
-            print("-" * 50 + '\n')
+            print(f"---Finish reason---\n{output.outputs[0].finish_reason}")
+            print(f"---Prompt ({len(output.prompt_token_ids)} tokens)---\n{prompt}")
+            print(f"---Generated Text ({len(output.outputs[0].token_ids)})---\n{output.outputs[0].text}")
+            print("*" * 150 + '\n')
 
     try:
         metrics = llm.get_metrics()
@@ -309,29 +310,17 @@ def main():
     target_forward_time = sum(target_forward_times)
     forward_ratio = drafter_forward_time / target_forward_time if target_forward_time > 0 else 0
 
-    # drafter_prefill_forward_time = drafter_forward_times[0]
-    # target_prefill_forward_time = target_forward_times[0]
-    # prefill_forward_ratio = drafter_prefill_forward_time / target_prefill_forward_time if target_prefill_forward_time > 0 else 0
-
-    # drafter_decode_forward_time = sum(drafter_forward_times[1:])
-    # target_decode_forward_time = sum(target_forward_times[1:])
-    # decode_forward_ratio = drafter_decode_forward_time / target_decode_forward_time if target_decode_forward_time > 0 else 0
-
     stats = {
         "input_tokens": input_tokens, "output_tokens": output_tokens,
         "input_time": input_time, "output_time": output_time, "total_time": total_time,
         "drafter_forward_time": drafter_forward_time, "target_forward_time": target_forward_time, "forward_ratio": forward_ratio,
-        # "drafter_prefill_forward_time": drafter_prefill_forward_time, "target_prefill_forward_time": target_prefill_forward_time, "prefill_forward_ratio": prefill_forward_ratio,
-        # "drafter_decode_forward_time": drafter_decode_forward_time, "target_decode_forward_time": target_decode_forward_time, "decode_forward_ratio": decode_forward_ratio,
         "input_throughput": input_throughput, "output_throughput": output_throughput, "total_throughput": total_throughput,
         "drafts": drafts, "draft_tokens": draft_tokens, "draft_utilization_rate": draft_utilization_rate,
         "accepted_tokens": accepted_tokens, "mean_acceptance_length": mean_acceptance_length
     }
 
-    # print stats to stdout
+    # print stats to stdout and save to file
     print_dict(stats, newlines=[1, 4, 7, 10, 13, 16])
-
-    # save stats to file
     print_dict(stats, file=outputs_dir / "stats.jsonl")
 
 
