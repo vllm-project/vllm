@@ -208,6 +208,14 @@ class DynamicShapesConfig:
       backed/unbacked.
     """
 
+    evaluate_guards: bool = False
+    """
+    A debug mode to detect and fail if Dynamo ever specializes a dynamic shape by
+    guarding on it. When True, dynamic shape guards are not dropped from Dynamo.
+    And a failure will be triggered if recompilation ever happens due to that.
+    Enabling this allow observing the dynamic shapes guards in the tl-parse artifact.
+    """
+
     # TODO add a debug mode to fail
 
     def compute_hash(self) -> str:
@@ -224,6 +232,7 @@ class DynamicShapesConfig:
         """
         factors: list[Any] = []
         factors.append(self.dynamic_shapes_type.value)
+        factors.append(self.evaluate_guards)
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -562,7 +571,6 @@ class CompilationConfig:
         factors.append(self.use_inductor_graph_partition)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
         factors.append(self.pass_config.uuid())
         factors.append(self.dynamic_shapes_config.compute_hash())
         return hashlib.sha256(str(factors).encode()).hexdigest()

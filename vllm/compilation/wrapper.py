@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
+from contextlib import nullcontext
 from types import CodeType
 
 import torch
@@ -33,6 +34,7 @@ class TorchCompileGuardsStripWrapper:
 
         vllm_config = get_current_vllm_config()
         mode = vllm_config.compilation_config.mode
+
         if mode is None:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
@@ -41,10 +43,15 @@ class TorchCompileGuardsStripWrapper:
 
         if isinstance(backend, str) and backend == "inductor":
             options = vllm_config.compilation_config.inductor_compile_config
-
+        self.first_compile = True
         if mode != CompilationMode.STOCK_TORCH_COMPILE:
             # Drop all the guards.
-            options["guard_filter_fn"] = lambda x: [False for _ in x]
+            if vllm_config.compilation_config.dynamic_shapes_config.evaluate_guards:
+                options["guard_filter_fn"] = lambda x: [
+                    entry.guard_type == "SHAPE_ENV" for entry in x
+                ]
+            else:
+                options["guard_filter_fn"] = lambda x: [False for _ in x]
 
         if envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
@@ -69,10 +76,18 @@ class TorchCompileGuardsStripWrapper:
                 + "Please make sure torch.compile is enabled with the latest "
                 + f"version of PyTorch (current using torch: {torch.__version__})"
             )
-        return self._compiled_callable.aot_compile((args, kwargs))
+        prev = self.first_compile
+        self.first_compile = False
+        ctx = nullcontext() if prev else torch.compiler.set_stance("fail_on_recompile")
+        with ctx:
+            return self._compiled_callable.aot_compile((args, kwargs))
 
     def __call__(self, *args, **kwargs):
-        return self._compiled_callable(*args, **kwargs)
+        prev = self.first_compile
+        self.first_compile = False
+        ctx = nullcontext() if prev else torch.compiler.set_stance("fail_on_recompile")
+        with ctx:
+            return self._compiled_callable(*args, **kwargs)
 
     @abstractmethod
     def forward(self, *args, **kwargs): ...

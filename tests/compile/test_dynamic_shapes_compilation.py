@@ -8,6 +8,7 @@ import torch
 from torch.torch_version import TorchVersion
 
 from vllm import LLM, SamplingParams
+from vllm.config import set_current_vllm_config
 from vllm.config.compilation import DynamicShapesType
 
 
@@ -35,9 +36,10 @@ def get_test_models():
 
 
 @pytest.mark.parametrize("model_name", get_test_models())
-def test_dynamic_shapes_compilation(monkeypatch, model_name):
+@pytest.mark.parametrize("evaluate_guards", [False, True])
+def test_dynamic_shapes_compilation(monkeypatch, model_name, evaluate_guards):
     """Test that all dynamic shapes types produce compiles"""
-    print(f"\nTesting model: {model_name}")
+    print(f"\nTesting model: {model_name} with evaluate_guards={evaluate_guards}")
 
     monkeypatch.setenv("TOKENIZERS_PARALLELISM", "true")
     # Note USE_AOT_COMPILE fails https://github.com/vllm-project/vllm/issues/27040.
@@ -76,7 +78,10 @@ def test_dynamic_shapes_compilation(monkeypatch, model_name):
         DynamicShapesType.UNBACKED,
         DynamicShapesType.BACKED_SIZE_OBLIVIOUS,
     ]:
-        print(f"Testing {shapes_type.name} dynamic shapes...")
+        print(
+            f"Testing {shapes_type.name} dynamic shapes with "
+            f"evaluate_guards={evaluate_guards}..."
+        )
 
         # Initialize the model with specific dynamic shapes configuration
         model = LLM(
@@ -85,7 +90,7 @@ def test_dynamic_shapes_compilation(monkeypatch, model_name):
                 "level": 3,  # PIECEWISE compilation
                 "dynamic_shapes_config": {
                     "dynamic_shapes_type": shapes_type.value,
-                    "eval_dynamo_ds_guards": False,
+                    "eval_dynamo_ds_guards": evaluate_guards,
                 },
             },
             # gpu_memory_utilization=0.2,
@@ -110,36 +115,136 @@ def test_dynamic_shapes_compilation(monkeypatch, model_name):
         print(f"{shape_type}: '{result}'")
 
 
-if __name__ == "__main__":
-    """Run the test directly as a Python script"""
-    import os
+@pytest.mark.parametrize("use_aot_compile", ["0", "1"])
+@pytest.mark.parametrize(
+    "dynamic_shapes_type",
+    [
+        DynamicShapesType.BACKED,
+        DynamicShapesType.BACKED_SIZE_OBLIVIOUS,
+    ],
+)
+@pytest.mark.parametrize("evaluate_guards", [False, True])
+def test_model_specialization_with_evaluate_guards(
+    monkeypatch, use_aot_compile, dynamic_shapes_type, evaluate_guards
+):
+    """Test that evaluate_guards correctly detects shape specialization violations."""
+    from contextlib import contextmanager
 
-    print("Running dynamic shapes compilation test...")
+    from vllm.compilation.decorators import support_torch_compile
+    from vllm.config import CompilationConfig, VllmConfig
+    from vllm.config.compilation import DynamicShapesConfig
+    from vllm.forward_context import set_forward_context
 
-    # Get test models based on PyTorch version
-    test_models = get_test_models()
-    print(f"Testing {len(test_models)} models: {test_models}")
+    @support_torch_compile
+    class ModelWithSizeCheck(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.linear = torch.nn.Linear(10, 10)
 
-    # Create a mock monkeypatch object for environment variables
-    class MockMonkeypatch:
-        def setenv(self, key, value):
-            os.environ[key] = value
+        def forward(self, x: torch.Tensor):
+            x = self.linear(x)
+            # This will cause specialization - torch.compile will guard on x.shape[0]
+            if x.shape[0] >= 10:
+                return x
+            else:
+                return x
 
-    monkeypatch = MockMonkeypatch()
+    @contextmanager
+    def use_vllm_config(vllm_config: VllmConfig):
+        with set_forward_context({}, vllm_config), set_current_vllm_config(vllm_config):
+            yield
 
-    # Run test for each model
-    for model_name in test_models:
-        try:
-            print(f"\n{'=' * 60}")
-            print(f"Testing model: {model_name}")
-            print(f"{'=' * 60}")
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "true")
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", use_aot_compile)
 
-            test_dynamic_shapes_compilation(monkeypatch, model_name)
+    # Reset torch dynamo to clear any cached compilation state
+    torch._dynamo.reset()
 
-            print(f"✅ Test passed for {model_name}")
+    config_desc = (
+        f"AOT={use_aot_compile}, shapes={dynamic_shapes_type.name}, "
+        f"eval_guards={evaluate_guards}"
+    )
+    print(f"\n{'=' * 60}")
+    print(f"Testing: {config_desc}")
+    print(f"{'=' * 60}")
 
-        except Exception as e:
-            print(f"❌ Test failed for {model_name}: {e}")
-            raise
+    # Create vllm config with the desired settings
+    from vllm.config import CompilationMode
 
-    print("\n🎉 All tests completed successfully!")
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            dynamic_shapes_config=DynamicShapesConfig(
+                dynamic_shapes_type=dynamic_shapes_type,
+                evaluate_guards=evaluate_guards,
+            ),
+        )
+    )
+
+    assert (
+        vllm_config.compilation_config.dynamic_shapes_config.evaluate_guards
+        == evaluate_guards
+    )
+    with torch.no_grad(), use_vllm_config(vllm_config):
+        model = ModelWithSizeCheck(vllm_config=vllm_config).cuda()
+
+        # First call with size 20 - should always work
+        input_10 = torch.randn(20, 10).cuda()
+        model(input_10)
+
+        # Second call with different size (5) - behavior depends on evaluate_guards
+        input_5 = torch.randn(5, 10).cuda()
+
+        # Allow recompiles for evaluate_guards=False case
+        # Only when evaluate_guards=True do we want to detect guard violations
+        if evaluate_guards:
+            # With evaluate_guards=True, this should fail because
+            # guards were added. The model specialized on size 10,
+            # so size 5 violates the guard
+            try:
+                model(input_5)
+                # If we get here, no guard violation occurred
+                # This is a TEST FAILURE - evaluate_guards should have caused a failure
+                pytest.fail(
+                    f"{config_desc}: Expected guard violation did "
+                    f"not occur! evaluate_guards=True should fail "
+                    f"when shape changes from 10 to 5, but the "
+                    f"model ran successfully without error."
+                )
+            except Exception as e:
+                # Expected failure - guard was violated
+                error_msg = str(e)
+                if "guard" in error_msg.lower() or "recompile" in error_msg.lower():
+                    print(f"✅ {config_desc}: Expected failure due to guard violation")
+                    print(f"   Error (truncated): {error_msg[:150]}")
+                else:
+                    # Unexpected error type
+                    print(f"❌ {config_desc}: Unexpected error type")
+                    print(f"   Error: {e}")
+                    raise
+        else:
+            # With evaluate_guards=False, guards are dropped, so this should work
+            # However, recompilation may still occur, which is expected
+            try:
+                output_5 = model(input_5)
+                assert output_5.shape == (
+                    5,
+                    10,
+                ), "Output shape should match input"
+                print(f"✅ {config_desc}: Passed without guard violations")
+                print("   Second call (size 5): Success")
+            except RuntimeError as e:
+                # If it's a recompile error, that's expected when evaluate_guards=False
+                # The model is allowed to recompile with different shapes
+                if (
+                    "recompile" in str(e).lower()
+                    and "fail_on_recompile" in str(e).lower()
+                ):
+                    print(f"✅ {config_desc}: Recompile occurred (expected behavior)")
+                    print("   Recompiles are allowed when evaluate_guards=False")
+                else:
+                    print(f"❌ {config_desc}: Unexpected failure")
+                    print(f"   Error: {e}")
+                    raise
+
+    cleanup_gpu_memory()

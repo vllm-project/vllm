@@ -14,6 +14,7 @@ from typing import Any
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
+from torch.utils._sympy.value_ranges import ValueRanges
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
@@ -22,6 +23,7 @@ from vllm.compilation.partition_rules import (
     resolve_defined_ops,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -659,6 +661,27 @@ class VllmBackend:
             self.split_gm, submod_names_to_compile, self.vllm_config, self
         ).run(*example_inputs)
 
+        from torch._guards import detect_fake_mode
+
+        fake_mode = detect_fake_mode()
+
+        if (
+            self.compilation_config.dynamic_shapes_config.evaluate_guards
+            and self.compilation_config.dynamic_shapes_config.dynamic_shapes_type
+            == DynamicShapesType.BACKED
+        ):
+            # Drop counter-0/1 specializations guards; for backed dynamic shapes,
+            # torch.compile will specialize for 0/1 inputs or otherwise guards that
+            # shape is >= 2. This is because it's really hard not to hit a check
+            # against 0/1. When we evaluate shape guards, we exclude checking those
+            # guards (We would fail always otherwise).
+
+            # We avoid that by updating the ranges of backed sizes when the min is
+            # 2 for any, we assume it's 0.
+            for s, r in fake_mode.shape_env.var_to_range.items():
+                if r.lower == 2:
+                    fake_mode.shape_env.var_to_range[s] = ValueRanges(0, r.upper)
+
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
             # code adapted from
@@ -685,9 +708,6 @@ class VllmBackend:
             )
 
         # if we need to copy input buffers for cudagraph
-        from torch._guards import detect_fake_mode
-
-        fake_mode = detect_fake_mode()
         fake_args = [
             fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in example_inputs
