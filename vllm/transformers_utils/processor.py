@@ -179,7 +179,7 @@ def cached_get_processor_without_dynamic_kwargs(
     )
 
     # Step 2: use temporary processor collect dynamic keys
-    dynamic_keys = get_processorkwargs_from_processor(processor)
+    dynamic_keys = get_processor_kwargs_from_processor(processor)
 
     # Step 3: use dynamic_keys filter kwargs
     filtered_kwargs = {k: v for k, v in kwargs.items() if k not in dynamic_keys}
@@ -210,7 +210,7 @@ def cached_processor_from_config(
 
 
 @lru_cache
-def get_processorkwargs_from_processor(processor: _P) -> set[str]:
+def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
     try:
         call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
         # if the processor has explicit kwargs annotation, use it
