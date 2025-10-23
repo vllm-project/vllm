@@ -286,10 +286,11 @@ class LLM:
             structured_outputs_instance = StructuredOutputsConfig()
 
         # warn about single-process data parallel usage.
-        _dps = int(kwargs.get("data_parallel_size", 1))
-        if _dps > 1:
+        _dp_size = int(kwargs.get("data_parallel_size", 1))
+        _distributed_executor_backend = kwargs.get("distributed_executor_backend")
+        if _dp_size > 1 and not _distributed_executor_backend == "external_launcher":
             raise ValueError(
-                f"LLM(data_parallel_size={_dps}) is not supported for single-"
+                f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
                 "process usage and may hang. Please use "
                 "the explicit multi-process data-parallel example at "
                 "'examples/offline_inference/data_parallel.py'."
