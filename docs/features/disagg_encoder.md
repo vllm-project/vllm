@@ -43,7 +43,11 @@ Below ready-to-run scripts shows the workflow:
 
 ---
 
-## 3  Development
+## 3  Test Script
+
+Please refer to the directories `tests/v1/ec_connector`
+
+## 4  Development
 
 Disaggregated encoding is implemented by running two parts:
 

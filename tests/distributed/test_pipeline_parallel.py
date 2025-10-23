@@ -305,10 +305,8 @@ def _compare_tp(
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
     if distributed_backend == "ray":
-        # For V1, test Ray Compiled Graph for all the tests
+        # Test Ray Compiled Graph for all the tests
         pp_env = {
-            "VLLM_USE_RAY_COMPILED_DAG": "1",
-            "VLLM_USE_RAY_SPMD_WORKER": "1",
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
