@@ -776,8 +776,8 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
-- label: LM Eval Small Models on H100 # 65min 
-  timeout_in_minutes: 90
+- label: LM Eval Small Models on H100 # 20min 
+  timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/
   commands:
