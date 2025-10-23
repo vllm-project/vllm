@@ -32,7 +32,7 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import SupportedTask
+from vllm.tasks import PoolingTask, SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import (
     EmbedDType,
@@ -161,12 +161,21 @@ class OpenAIServingPooling(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            pooling_params = request.to_pooling_params()
+            if is_io_processor_request:
+                assert self.io_processor is not None and isinstance(
+                    request, IOProcessorRequest
+                )
+                pooling_params = self.io_processor.validate_or_generate_params()
+            else:
+                pooling_params = request.to_pooling_params()
 
+            pooling_task: PoolingTask
             if "token_embed" in self.supported_tasks:
                 pooling_task = "token_embed"
             elif "token_classify" in self.supported_tasks:
                 pooling_task = "token_classify"
+            elif "plugin" in self.supported_tasks:
+                pooling_task = "plugin"
             else:
                 return self.create_error_response(
                     f"pooling_task must be one of {self.supported_tasks}."
