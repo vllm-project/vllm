@@ -56,8 +56,6 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
-    VLLM_USE_RAY_SPMD_WORKER: bool = False
-    VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -215,6 +213,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
 
 
 def get_default_cache_root():
@@ -623,22 +622,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK": lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
     # (CPU backend only) whether to use SGL kernels, optimized for small batch.
     "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
-    # If the env var is set, then all workers will execute as separate
-    # processes from the engine, and we use the same mechanism to trigger
-    # execution on all workers.
-    # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
-    "VLLM_USE_RAY_SPMD_WORKER": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))
-    ),
-    # If the env var is set, it uses the Ray's Compiled Graph
-    # (previously known as ADAG) API which optimizes the
-    # control plane overhead.
-    # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-    # Note that this variable is set to 1 in V1 by default
-    # when ray distributed executor is used.
-    "VLLM_USE_RAY_COMPILED_DAG": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))
-    ),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
     # different pipeline-parallel stages.
@@ -646,20 +629,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "auto": use the default channel type
     # - "nccl": use NCCL for communication
     # - "shm": use shared memory and gRPC for communication
-    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE": env_with_choices(
         "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto", ["auto", "nccl", "shm"]
     ),
     # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
-    # VLLM_USE_RAY_COMPILED_DAG is not set.
+    # (experimental feature) in Ray's Compiled Graph.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
     ),
     # If the env var is set, it uses a Ray Communicator wrapping
     # vLLM's pipeline parallelism communicator to interact with Ray's
     # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
-    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
     ),
@@ -1400,6 +1380,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Disables parallel execution of shared_experts via separate cuda stream
+    "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
+        "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
