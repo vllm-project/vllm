@@ -1640,8 +1640,7 @@ class EngineArgs:
         fault_tolerance_config = FaultToleranceConfig(
             enable_fault_tolerance=self.enable_fault_tolerance,
             engine_recovery_timeout=self.engine_recovery_timeout,
-            fault_report_port=self.fault_report_port
-            or FaultToleranceConfig.fault_report_port,
+            fault_report_port=self.fault_report_port,
         )
 
         config = VllmConfig(
