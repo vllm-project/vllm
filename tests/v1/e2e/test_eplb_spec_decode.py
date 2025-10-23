@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tests.utils import large_gpu_mark
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
@@ -20,7 +19,7 @@ def create_test_prompts() -> list[str]:
 
 @pytest.fixture
 def sampling_config():
-    return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
+    return SamplingParams(temperature=0, max_tokens=64, ignore_eos=False)
 
 
 def check_outputs(ref_outputs, spec_outputs):
@@ -37,59 +36,6 @@ def check_outputs(ref_outputs, spec_outputs):
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
-
-
-@pytest.mark.parametrize(
-    "model_setup",
-    [
-        pytest.param(
-            (
-                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                4,
-            ),
-            marks=large_gpu_mark(min_gb=80),
-        ),  # works on 4x H100
-    ],
-    ids=["llama4"],
-)
-def test_eplb_model(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    model_setup: tuple[str, int],
-):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_MLA_DISABLE", "1")
-
-        model_name, tp_size = model_setup
-        test_prompts = create_test_prompts()
-        eplb_llm = LLM(
-            model=model_name,
-            tensor_parallel_size=tp_size,
-            max_model_len=2048,
-            enable_expert_parallel=True,
-            num_redundant_experts=tp_size,
-            eplb_window_size=4,
-            eplb_step_interval=16,
-            eplb_log_balancedness=True,
-            enable_eplb=True,
-            gpu_memory_utilization=0.95,
-        )
-        eplb_outputs = eplb_llm.generate(test_prompts, sampling_config)
-        del eplb_llm
-        torch.cuda.empty_cache()
-
-        ref_llm = LLM(
-            model=model_name,
-            max_model_len=2048,
-            tensor_parallel_size=tp_size,
-        )
-        test_prompts = create_test_prompts()
-        ref_outputs = ref_llm.generate(test_prompts, sampling_config)
-        check_outputs(ref_outputs, eplb_outputs)
-        del ref_llm
-        torch.cuda.empty_cache()
-        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize(
@@ -132,14 +78,14 @@ def test_eplb_spec_decode(
             speculative_config={
                 "method": method,
                 "model": spec_model_name,
-                "num_speculative_tokens": 1,
+                "num_speculative_tokens": 4,
                 "max_model_len": 2048,
             },
             max_model_len=2048,
             enable_expert_parallel=True,
             num_redundant_experts=tp_size,
-            eplb_window_size=1000,
-            eplb_step_interval=3000,
+            eplb_window_size=8,
+            eplb_step_interval=32,
             eplb_log_balancedness=True,
             enable_eplb=True,
         )

@@ -432,18 +432,17 @@ class EplbState:
                 eplb_model_state.expert_load_pass.zero_()
 
         if log_stats:
-            # total_expert_load_pass: (num_moe_layers, num_physical_experts)
-            for eplb_model_state in self.model_states.values():
-                total_expert_load_pass = eplb_model_state.expert_load_pass.clone()
-
-                # Collect load metrics from all ranks
-                ep_group = get_ep_group().device_group
-                all_reduce(total_expert_load_pass, group=ep_group)
-
+            # Sync the expert load pass for each model (main and drafter).
+            # expert_load_pass: (num_moe_layers, num_physical_experts)
+            expert_load_pass_list = self._sync_load_pass()
+            ep_group = get_ep_group().device_group
+            for expert_load_pass, eplb_model_state in zip(
+                expert_load_pass_list, self.model_states.values()
+            ):
                 # num_tokens_per_rank: (num_moe_layers, num_ranks)
                 num_tokens_per_rank = (
-                    total_expert_load_pass.reshape(
-                        total_expert_load_pass.shape[0], ep_group.size(), -1
+                    expert_load_pass.reshape(
+                        expert_load_pass.shape[0], ep_group.size(), -1
                     )
                     .sum(dim=-1)
                     .float()
@@ -502,6 +501,19 @@ class EplbState:
     ) -> torch.Tensor | None:
         """
         Rearrange the experts according to the current load.
+
+        Args:
+            is_profile (bool): If `True`, perform a dummy rearrangement.
+            This is used in `profile_run` to reserve enough memory,
+            no memory movement will be performed. Default is False.
+            execute_shuffle (bool): If `True`, execute the shuffle in eep.
+            Default is True.
+            global_expert_loads (list[torch.Tensor] | None):
+            The global expert loads when scaling is done in eep.
+            List of expert loads for the main and drafter
+            (when spec decode is used) models.
+            rank_mapping (dict[int, int] | None): The rank mapping when scaling
+            is done in eep.
         """
 
         ep_group = get_ep_group().device_group
@@ -555,17 +567,21 @@ class EplbState:
                         metadata, group=get_ep_group().cpu_group, group_src=0
                     )
 
-                # Perform all-reduce to get the expert load across all ranks
                 global_expert_load_window = logical_expert_load_window.sum(dim=0)
-                all_reduce(global_expert_load_window, group=ep_group)
-
-                if not execute_shuffle:
+                global_expert_load_windows.append(global_expert_load_window)
+            # Perform all-reduce to get the expert load across all ranks for each model
+            global_expert_load_windows = self._allreduce_list(
+                global_expert_load_windows
+            )
+            if not execute_shuffle:
+                for eplb_model_state, global_expert_load_window in zip(
+                    self.model_states.values(), global_expert_load_windows
+                ):
                     # (num_moe_layers, old_num_physical_experts)
                     old_global_expert_indices = eplb_model_state.physical_to_logical_map
                     torch.distributed.broadcast(
                         old_global_expert_indices, group=ep_group, group_src=0
                     )
-                global_expert_load_windows.append(global_expert_load_window)
             if not execute_shuffle:
                 return global_expert_load_windows
         else:
@@ -745,6 +761,43 @@ class EplbState:
             old_global_expert_indices_per_model,
             rank_mapping,
         )
+
+    def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
+        """
+        All-reduce a list of tensors.
+        """
+        if len(tensor_list) == 1:
+            all_reduce(tensor_list[0], group=get_ep_group().device_group)
+            return tensor_list
+        assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
+        assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
+            "All tensors must have the same shape[1]."
+        )
+        # Concatenate, all_reduce, then unpack to original shapes.
+        # We assume all tensors are 2D and shape[1] (num_physical_experts)
+        # is the same across all models.
+        shapes = [t.shape for t in tensor_list]
+        concat_tensor = torch.cat(tensor_list, dim=0)
+
+        ep_group = get_ep_group().device_group
+        all_reduce(concat_tensor, group=ep_group)
+
+        all_reduce_list = []
+        offset = 0
+        for shape in shapes:
+            all_reduce_list.append(concat_tensor[offset : offset + shape[0], :])
+            offset += shape[0]
+        return all_reduce_list
+
+    def _sync_load_pass(self) -> list[torch.Tensor]:
+        """
+        Sync the expert load pass across all ranks for log stats.
+        Doesn't update the expert load pass in eplb_model_state.
+        """
+        load_pass_list = []
+        for eplb_model_state in self.model_states.values():
+            load_pass_list.append(eplb_model_state.expert_load_pass.clone())
+        return self._allreduce_list(load_pass_list)
 
 
 def _node_count_with_rank_mapping(

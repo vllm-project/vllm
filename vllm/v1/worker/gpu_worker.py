@@ -629,7 +629,17 @@ class Worker(WorkerBase):
 
         parallel_config = self.vllm_config.parallel_config
 
-        def update_moe_modules(moe_modules: list[FusedMoE]):
+        def get_moe_modules(model: torch.nn.Module) -> list[FusedMoE]:
+            return [
+                module
+                for module in model.modules()
+                if (
+                    module.__class__.__name__ == "FusedMoE"
+                    or module.__class__.__name__ == "SharedFusedMoE"
+                )
+            ]
+
+        def update_moe_modules(moe_modules: list[FusedMoE], num_local_experts: int):
             assert all(
                 module.moe_config.num_local_experts == num_local_experts
                 for module in moe_modules
@@ -643,36 +653,24 @@ class Worker(WorkerBase):
                     vllm_parallel_config=parallel_config,
                 )
                 module.moe_config.moe_parallel_config = module.moe_parallel_config
+            return moe_modules
 
-        model_moe_modules = [
-            module
-            for module in self.model_runner.model.modules()
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
-        ]
+        model_moe_modules = get_moe_modules(self.model_runner.model)
         num_local_experts = model_moe_modules[0].moe_config.num_local_experts
 
-        update_moe_modules(model_moe_modules)
-        if (
-            hasattr(self.model_runner, "drafter")
-            and hasattr(self.model_runner.drafter, "model")
-            and is_mixture_of_experts(self.model_runner.drafter.model)
+        update_moe_modules(model_moe_modules, num_local_experts)
+        drafter_model = None
+        if hasattr(self.model_runner, "drafter") and hasattr(
+            self.model_runner.drafter, "model"
         ):
-            drafter_moe_modules = [
-                module
-                for module in self.model_runner.drafter.model.modules()
-                if (
-                    module.__class__.__name__ == "FusedMoE"
-                    or module.__class__.__name__ == "SharedFusedMoE"
-                )
-            ]
+            drafter_model = self.model_runner.drafter.model
+        if drafter_model is not None and is_mixture_of_experts(drafter_model):
+            drafter_moe_modules = get_moe_modules(drafter_model)
             # Check if drafter and model have matching configs
             assert (
                 drafter_moe_modules[0].moe_config.num_local_experts == num_local_experts
             ), "Drafter and model configs should be the same"
-            update_moe_modules(drafter_moe_modules)
+            update_moe_modules(drafter_moe_modules, num_local_experts)
 
         if new_ep_size < old_ep_size:
             num_local_physical_experts = num_local_experts
@@ -702,10 +700,8 @@ class Worker(WorkerBase):
                 new_physical_experts - global_expert_loads[0].shape[1]
             )
         prepare_communication_buffer_for_model(self.model_runner.model)
-        if hasattr(self.model_runner, "drafter") and hasattr(
-            self.model_runner.drafter, "model"
-        ):
-            prepare_communication_buffer_for_model(self.model_runner.drafter.model)
+        if drafter_model is not None:
+            prepare_communication_buffer_for_model(drafter_model)
         self.model_runner.model.update_physical_experts_metadata(
             num_physical_experts=new_physical_experts,
             num_local_physical_experts=num_local_physical_experts,
