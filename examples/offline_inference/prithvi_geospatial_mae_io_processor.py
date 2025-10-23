@@ -11,8 +11,9 @@ from vllm import LLM
 # multimodal data. In this specific case this example will take a geotiff
 # image as input, process it using the multimodal data processor, and
 # perform inference.
-# Requirement - install plugin at:
-#   https://github.com/christian-pinto/prithvi_io_processor_plugin
+# Requirements:
+# - install TerraTorch v1.1 (or later):
+#   pip install terratorch>=v1.1
 
 
 def main():
@@ -35,7 +36,7 @@ def main():
         # to avoid the model going OOM.
         # The maximum number depends on the available GPU memory
         max_num_seqs=32,
-        io_processor_plugin="prithvi_to_tiff",
+        io_processor_plugin="terratorch_segmentation",
         model_impl="terratorch",
         enable_mm_embeds=True,
     )

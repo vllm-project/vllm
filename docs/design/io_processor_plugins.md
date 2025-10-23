@@ -13,7 +13,6 @@ IOProcessorInput = TypeVar("IOProcessorInput")
 IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
-
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
 
@@ -49,12 +48,25 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
-        collected_output = [item async for i, item in model_output]
+        # We cannot guarantee outputs are returned in the same order they were
+        # fed to vLLM.
+        # Let's sort them by id before post_processing
+        sorted_output = sorted(
+            [(i, item) async for i, item in model_output], key=lambda output: output[0]
+        )
+        collected_output = [output[1] for output in sorted_output]
         return self.post_process(collected_output, request_id, **kwargs)
 
     @abstractmethod
     def parse_request(self, request: Any) -> IOProcessorInput:
         raise NotImplementedError
+
+    def validate_or_generate_params(
+        self, params: SamplingParams | PoolingParams | None = None
+    ) -> SamplingParams | PoolingParams:
+        if params:
+            return params
+        return PoolingParams()
 
     @abstractmethod
     def output_to_response(
@@ -66,10 +78,10 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 The `parse_request` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
 The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
 The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
-
+The `validate_or_generate_params` method is used for validating with the plugin any `SamplingParameters`/`PoolingParameters` received with the user request, or to generate new ones if none are specified. The function always returns the validated/generated parameters.
 The `output_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorResponse` type that is then returned by the API Server. The implementation of the `/pooling` serving endpoint is available here [vllm/entrypoints/openai/serving_pooling.py](../../vllm/entrypoints/openai/serving_pooling.py).
 
-An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/christian-pinto/prithvi_io_processor_plugin). Please, also refer to our online ([examples/online_serving/prithvi_geospatial_mae.py](../../examples/online_serving/prithvi_geospatial_mae.py)) and offline ([examples/offline_inference/prithvi_geospatial_mae_io_processor.py](../../examples/offline_inference/prithvi_geospatial_mae_io_processor.py)) inference examples.
+An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/IBM/terratorch/tree/main/terratorch/vllm/plugins/segmentation). Please, also refer to our online ([examples/online_serving/prithvi_geospatial_mae.py](../../examples/online_serving/prithvi_geospatial_mae.py)) and offline ([examples/offline_inference/prithvi_geospatial_mae_io_processor.py](../../examples/offline_inference/prithvi_geospatial_mae_io_processor.py)) inference examples.
 
 ## Using an IO Processor plugin
 
