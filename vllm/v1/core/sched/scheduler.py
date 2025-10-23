@@ -1327,8 +1327,11 @@ class Scheduler(SchedulerInterface):
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
         if not supports_hma(self.connector):
-            # NOTE(Kuntai): We should remove this code path after we enforce
+            # NOTE(Kuntai): We should deprecate this code path after we enforce
             # all connectors to support HMA.
+            # Hybrid memory allocator should be already turned off for this
+            # code path, but let's double-check here.
+            assert len(self.kv_cache_config.kv_cache_groups) == 1
             return self.connector.request_finished(request, block_ids[0])
         else:
             return self.connector.request_finished(request, block_ids)

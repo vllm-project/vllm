@@ -70,21 +70,24 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
-class SupportsHMA:
+class SupportsHMA(ABC):
     """
     The class that indicates the corresponding connector supports hybrid memory
     allocator (HMA).
     This is required to use the connector together with hybrid memory allocator.
     """
 
-    def request_finished(
+    @abstractmethod
+    def request_finished_all_groups(
         self,
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
-        Called exactly once when a request has finished, before its blocks are
-        freed.
+        Called exactly once when a request has finished for all kv cache groups,
+        before its blocks are freed for each group.
+
+        NOTE(Kuntai): This function is only supported by connectors that support HMA.
 
         The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
@@ -96,7 +99,7 @@ class SupportsHMA:
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        return False, None
+        raise NotImplementedError
 
 
 def supports_hma(connector: Any) -> bool:
