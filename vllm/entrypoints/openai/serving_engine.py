@@ -645,12 +645,13 @@ class OpenAIServing:
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
-
+                cache_hit_threshold = getattr(ctx.request, "cache_hit_threshold", None)
                 self._log_inputs(
                     request_id_item,
                     engine_prompt,
                     params=pooling_params,
                     lora_request=ctx.lora_request,
+                    cache_hit_threshold=cache_hit_threshold,
                 )
 
                 generator = self.engine_client.encode(
@@ -660,6 +661,7 @@ class OpenAIServing:
                     lora_request=ctx.lora_request,
                     trace_headers=trace_headers,
                     priority=getattr(ctx.request, "priority", 0),
+                    cache_hit_threshold=cache_hit_threshold,
                 )
 
                 generators.append(generator)
@@ -1158,6 +1160,7 @@ class OpenAIServing:
         lora_request: LoRARequest | None,
         trace_headers: Mapping[str, str] | None,
         priority: int,
+        cache_hit_threshold: float | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
         tokenization_kwargs: dict[str, Any] = {}
@@ -1173,6 +1176,7 @@ class OpenAIServing:
             tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=priority,
+            cache_hit_threshold=cache_hit_threshold,
         )
         return engine_request, tokenization_kwargs
 
@@ -1190,11 +1194,13 @@ class OpenAIServing:
         prompt_text, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
         while True:
+            cache_hit_threshold = kwargs.get("cache_hit_threshold")
             self._log_inputs(
                 request_id,
                 request_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
+                cache_hit_threshold=cache_hit_threshold,
             )
             trace_headers = kwargs.get("trace_headers")
             engine_request, tokenization_kwargs = await self._process_inputs(
@@ -1204,6 +1210,7 @@ class OpenAIServing:
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                cache_hit_threshold=cache_hit_threshold,
             )
 
             generator = self.engine_client.generate(
@@ -1258,6 +1265,7 @@ class OpenAIServing:
         inputs: RequestPrompt | PromptType,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
+        cache_hit_threshold: float | None = None,
     ) -> None:
         if self.request_logger is None:
             return
@@ -1271,6 +1279,7 @@ class OpenAIServing:
             prompt_embeds,
             params=params,
             lora_request=lora_request,
+            cache_hit_threshold=cache_hit_threshold,
         )
 
     async def _get_trace_headers(

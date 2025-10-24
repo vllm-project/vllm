@@ -137,6 +137,14 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    global_cache_hit_threshold: float = 0.0
+    """The threshold for cache hit ratio to handle all requests,
+    except for requests which override it using the "cache_hit_threshold" field.
+    This feature enables Decode-first optimization in P/D disaggregation:
+    Decode nodes can avoide remote Prefill in case of high cache hit ratio.
+    If set to 0.0, the optimization is disabled.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -293,6 +301,15 @@ class SchedulerConfig:
                 f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills})."
+            )
+
+        if (self.global_cache_hit_threshold < 0.0) or (
+            self.global_cache_hit_threshold > 1.0
+        ):
+            raise ValueError(
+                "global_cache_hit_threshold "
+                f"({self.global_cache_hit_threshold}) "
+                "must be between 0.0 and 1.0, inclusive."
             )
 
         return self
