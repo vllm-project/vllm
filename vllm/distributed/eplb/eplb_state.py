@@ -525,9 +525,9 @@ class EplbState:
                 )
                 input_args = self.rebalance_task_args
 
-                assert (
-                    self.expert_mapper_args is not None
-                ), "expert_mapper_args is not initialized"
+                assert self.expert_mapper_args is not None, (
+                    "expert_mapper_args is not initialized"   
+                )
                 self.expert_mapper_args.phyhsical_to_logical_map = (
                     self.physical_to_logical_map.cpu()
                 )
