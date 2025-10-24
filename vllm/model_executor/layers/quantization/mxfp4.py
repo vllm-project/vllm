@@ -197,8 +197,6 @@ class Mxfp4Config(QuantizationConfig):
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.topk_indices_dtype = None
-        self.moe = moe
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
