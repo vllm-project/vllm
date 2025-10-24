@@ -206,6 +206,9 @@ class ForwardContext:
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
     batch_descriptor: BatchDescriptor | None = None
 
+    # Set when recording usage histogram
+    expert_usage_histogram: torch.Tensor | None = None
+
     ubatch_slices: UBatchSlices | None = None
 
     def __post_init__(self):
@@ -233,6 +236,7 @@ def create_forward_context(
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
+    expert_usage_histogram: torch.Tensor | None = None,
     ubatch_slices: UBatchSlices | None = None,
 ):
     return ForwardContext(
@@ -242,6 +246,7 @@ def create_forward_context(
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
+        expert_usage_histogram=expert_usage_histogram,
         ubatch_slices=ubatch_slices,
     )
 
@@ -270,6 +275,7 @@ def set_forward_context(
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
+    expert_usage_histogram: torch.Tensor | None = None,
     ubatch_slices: UBatchSlices | None = None,
 ):
     """A context manager that stores the current forward context,
@@ -315,6 +321,7 @@ def set_forward_context(
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,
+        expert_usage_histogram,
         ubatch_slices,
     )
 
