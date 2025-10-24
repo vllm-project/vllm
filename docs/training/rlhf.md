@@ -5,6 +5,7 @@ Reinforcement Learning from Human Feedback (RLHF) is a technique that fine-tunes
 The following open-source RL libraries use vLLM for fast rollouts (sorted alphabetically and non-exhaustive):
 
 - [Cosmos-RL](https://github.com/nvidia-cosmos/cosmos-rl)
+- [ms-swift](https://github.com/modelscope/ms-swift/tree/main)
 - [NeMo-RL](https://github.com/NVIDIA-NeMo/RL)
 - [Open Instruct](https://github.com/allenai/open-instruct)
 - [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)
