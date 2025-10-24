@@ -178,7 +178,10 @@ class AWQMarlinConfig(QuantizationConfig):
             isinstance(layer, ParallelLMHead) and self.lm_head_quantized
         ):
             if is_layer_skipped(
-                prefix, self.modules_to_not_convert, self.packed_modules_mapping
+                prefix,
+                self.modules_to_not_convert,
+                self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
             # Check if the layer is supported by AWQMarlin.
@@ -194,7 +197,11 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-            if is_layer_skipped(prefix, getattr(self, "modules_to_not_convert", [])):
+            if is_layer_skipped(
+                prefix,
+                getattr(self, "modules_to_not_convert", []),
+                skip_with_substr=True,
+            ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(

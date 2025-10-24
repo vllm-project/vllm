@@ -8,7 +8,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -178,7 +178,10 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-    elif ops._supports_onednn:
+    elif (
+        ops._supports_onednn
+        and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
+    ):
         origin_weight = layer.weight
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
