@@ -3,6 +3,7 @@
 import argparse
 import copy
 import itertools
+import os
 
 import torch
 from weight_shapes import WEIGHT_SHAPES
@@ -23,21 +24,45 @@ PROVIDER_CFGS = {
     "torch-bf16": dict(enabled=True),
     "nvfp4": dict(no_a_quant=False, enabled=True),
     "nvfp4-noquant": dict(no_a_quant=True, enabled=True),
+    "fbgemm-nvfp4": dict(fbgemm=True, no_a_quant=False, enabled=True),
+    "fbgemm-nvfp4-noquant": dict(fbgemm=True, no_a_quant=True, enabled=True),
 }
+
+_needs_fbgemm = any(
+    v.get("fbgemm", False) for v in PROVIDER_CFGS.values() if v.get("enabled", False)
+)
+if _needs_fbgemm:
+    try:
+        from fbgemm_gpu.experimental.gemm.triton_gemm.fp4_quantize import (
+            triton_scale_nvfp4_quant,
+        )
+    except ImportError:
+        print(
+            "WARNING: FBGEMM providers are enabled but fbgemm_gpu is not installed. "
+            "These providers will be skipped. Please install fbgemm_gpu with: "
+            "'pip install fbgemm-gpu-genai' to run them."
+        )
+        # Disable FBGEMM providers so the benchmark can run.
+        for cfg in PROVIDER_CFGS.values():
+            if cfg.get("fbgemm"):
+                cfg["enabled"] = False
 
 _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
 
 
-def _quant_weight_nvfp4(b: torch.Tensor, device: str):
+def _quant_weight_nvfp4(b: torch.Tensor, device: str, cfg):
     # Compute global scale for weight
     b_amax = torch.abs(b).max().to(torch.float32)
     b_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / b_amax
-    b_fp4, scale_b_fp4 = ops.scaled_fp4_quant(b, b_global_scale)
+    if "fbgemm" in cfg and cfg["fbgemm"]:
+        b_fp4, scale_b_fp4 = triton_scale_nvfp4_quant(b, b_global_scale)
+    else:
+        b_fp4, scale_b_fp4 = ops.scaled_fp4_quant(b, b_global_scale)
     return b_fp4, scale_b_fp4, b_global_scale
 
 
 def build_nvfp4_runner(cfg, a, b, dtype, device):
-    b_fp4, scale_b_fp4, b_global_scale = _quant_weight_nvfp4(b, device)
+    b_fp4, scale_b_fp4, b_global_scale = _quant_weight_nvfp4(b, device, cfg)
 
     # Compute global scale for activation
     # NOTE: This is generally provided ahead-of-time by the model checkpoint.
@@ -46,6 +71,35 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
 
     # Alpha for the GEMM operation
     alpha = 1.0 / (a_global_scale * b_global_scale)
+    if "fbgemm" in cfg and cfg["fbgemm"]:
+        if cfg["no_a_quant"]:
+            a_fp4, scale_a_fp4 = triton_scale_nvfp4_quant(a, a_global_scale)
+
+            def run():
+                return torch.ops.fbgemm.f4f4bf16(
+                    a_fp4,
+                    b_fp4,
+                    scale_a_fp4,
+                    scale_b_fp4,
+                    global_scale=alpha,
+                    use_mx=False,
+                )
+
+            return run
+        else:
+
+            def run():
+                a_fp4, scale_a_fp4 = triton_scale_nvfp4_quant(a, a_global_scale)
+                return torch.ops.fbgemm.f4f4bf16(
+                    a_fp4,
+                    b_fp4,
+                    scale_a_fp4,
+                    scale_b_fp4,
+                    global_scale=alpha,
+                    use_mx=False,
+                )
+
+            return run
 
     if cfg["no_a_quant"]:
         # Pre-quantize activation
@@ -130,10 +184,13 @@ if __name__ == "__main__":
 
     for K, N, model in prepare_shapes(args):
         print(f"{model}, N={N} K={K}, BF16 vs NVFP4 GEMMs TFLOP/s:")
+        save_dir = f"bench_nvfp4_res_n{N}_k{K}"
+        os.makedirs(save_dir, exist_ok=True)
+
         benchmark.run(
             print_data=True,
             show_plots=True,
-            save_path=f"bench_nvfp4_res_n{N}_k{K}",
+            save_path=save_dir,
             N=N,
             K=K,
         )

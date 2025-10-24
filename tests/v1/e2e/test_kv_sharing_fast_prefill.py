@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig, CompilationMode
 from vllm.distributed import cleanup_dist_env_and_memory
 
 from ...utils import fork_new_process_for_each_test
@@ -64,6 +64,7 @@ def cleanup(llm: LLM, compilation_config: CompilationConfig):
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.skip(reason="Disable until Gemma3n supports fast prefill")
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
@@ -74,12 +75,12 @@ def test_kv_sharing_fast_prefill(
         # This allows vLLM compilation backend to handle allocating and
         # managing buffers for cudagraph
         cudagraph_copy_inputs=True,
-        level=CompilationLevel.PIECEWISE
-        if not enforce_eager else CompilationLevel.NO_COMPILATION)
+        mode=CompilationMode.VLLM_COMPILE
+        if not enforce_eager
+        else CompilationMode.NONE,
+    )
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Make scheduling deterministic for reproducibility
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -93,21 +94,21 @@ def test_kv_sharing_fast_prefill(
 
         cleanup(llm, compilation_config)
 
-        llm = LLM(model="google/gemma-3n-E2B-it",
-                  enforce_eager=enforce_eager,
-                  compilation_config=compilation_config,
-                  seed=SEED,
-                  kv_sharing_fast_prefill=True)
+        llm = LLM(
+            model="google/gemma-3n-E2B-it",
+            enforce_eager=enforce_eager,
+            compilation_config=compilation_config,
+            seed=SEED,
+            kv_sharing_fast_prefill=True,
+        )
         optimized_responses = llm.generate(test_prompts, sampling_params)
 
         cleanup(llm, compilation_config)
 
         misses = 0
 
-        for ref_response, optimized_response in zip(ref_responses,
-                                                    optimized_responses):
-            if ref_response.outputs[0].text != optimized_response.outputs[
-                    0].text:
+        for ref_response, optimized_response in zip(ref_responses, optimized_responses):
+            if ref_response.outputs[0].text != optimized_response.outputs[0].text:
                 misses += 1
 
         assert misses == 0

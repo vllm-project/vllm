@@ -4,39 +4,39 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 === "Intel/AMD x86"
 
-    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:installation"
+    --8<-- "docs/getting_started/installation/cpu.x86.inc.md:installation"
 
 === "ARM AArch64"
 
-    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:installation"
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:installation"
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu/apple.inc.md:installation"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:installation"
 
 === "IBM Z (S390X)"
 
-    --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:installation"
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:installation"
 
 ## Requirements
 
-- Python: 3.9 -- 3.12
+- Python: 3.10 -- 3.13
 
 === "Intel/AMD x86"
 
-    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:requirements"
+    --8<-- "docs/getting_started/installation/cpu.x86.inc.md:requirements"
 
 === "ARM AArch64"
 
-    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:requirements"
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:requirements"
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu/apple.inc.md:requirements"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:requirements"
 
 === "IBM Z (S390X)"
 
-    --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:requirements"
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:requirements"
 
 ## Set up using Python
 
@@ -52,19 +52,19 @@ Currently, there are no pre-built CPU wheels.
 
 === "Intel/AMD x86"
 
-    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:build-wheel-from-source"
+    --8<-- "docs/getting_started/installation/cpu.x86.inc.md:build-wheel-from-source"
 
 === "ARM AArch64"
 
-    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-wheel-from-source"
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-wheel-from-source"
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu/apple.inc.md:build-wheel-from-source"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:build-wheel-from-source"
 
 === "IBM Z (s390x)"
 
-    --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:build-wheel-from-source"
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-wheel-from-source"
 
 ## Set up using Docker
 
@@ -72,30 +72,31 @@ Currently, there are no pre-built CPU wheels.
 
 === "Intel/AMD x86"
 
-    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:pre-built-images"
+    --8<-- "docs/getting_started/installation/cpu.x86.inc.md:pre-built-images"
 
 ### Build image from source
 
 === "Intel/AMD x86"
 
-    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.x86.inc.md:build-image-from-source"
 
 === "ARM AArch64"
 
-    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-image-from-source"
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-image-from-source"
 
 === "IBM Z (S390X)"
-    --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"
 
 ## Related runtime environment variables
 
 - `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GiB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users. Default value is `0`.
 - `VLLM_CPU_OMP_THREADS_BIND`: specify the CPU cores dedicated to the OpenMP threads, can be set as CPU id lists or `auto` (by default). For example, `VLLM_CPU_OMP_THREADS_BIND=0-31` means there will be 32 OpenMP threads bound on 0-31 CPU cores. `VLLM_CPU_OMP_THREADS_BIND=0-31|32-63` means there will be 2 tensor parallel processes, 32 OpenMP threads of rank0 are bound on 0-31 CPU cores, and the OpenMP threads of rank1 are bound on 32-63 CPU cores. By setting to `auto`, the OpenMP threads of each rank are bound to the CPU cores in each NUMA node respectively.
 - `VLLM_CPU_NUM_OF_RESERVED_CPU`: specify the number of CPU cores which are not dedicated to the OpenMP threads for each rank. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. Default value is `None`. If the value is not set and use `auto` thread binding, no CPU will be reserved for `world_size == 1`, 1 CPU per rank will be reserved for `world_size > 1`.
+- `CPU_VISIBLE_MEMORY_NODES`: specify visible NUMA memory nodes for vLLM CPU workers, similar to ```CUDA_VISIBLE_DEVICES```. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. The variable provides more control for the auto thread-binding feature, such as masking nodes and changing nodes binding sequence.
 - `VLLM_CPU_MOE_PREPACK` (x86 only): whether to use prepack for MoE layer. This will be passed to `ipex.llm.modules.GatedMLPMOE`. Default is `1` (True). On unsupported CPUs, you might need to set this to `0` (False).
 - `VLLM_CPU_SGL_KERNEL` (x86 only, Experimental): whether to use small-batch optimized kernels for linear layer and MoE layer, especially for low-latency requirements like online serving. The kernels require AMX instruction set, BFloat16 weight type and weight shapes divisible by 32. Default is `0` (False).
 
@@ -179,7 +180,7 @@ Inference batch size is an important parameter for the performance. Larger batch
     - Offline Inference: `256 * world_size`
     - Online Serving: `128 * world_size`
 
-vLLM CPU supports tensor parallel (TP) and pipeline parallel (PP) to leverage multiple CPU sockets and memory nodes. For more details of tuning TP and PP, please refer to [Optimization and Tuning](../../configuration/optimization.md). For vLLM CPU, it is recommend to use TP and PP together if there are enough CPU sockets and memory nodes.
+vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel (PP) to leverage multiple CPU sockets and memory nodes. For more details of tuning DP, TP and PP, please refer to [Optimization and Tuning](../../configuration/optimization.md). For vLLM CPU, it is recommended to use DP, TP and PP together if there are enough CPU sockets and memory nodes.
 
 ### Which quantization configs does vLLM CPU support?
 
@@ -193,3 +194,35 @@ vLLM CPU supports tensor parallel (TP) and pipeline parallel (PP) to leverage mu
 - Both of them require `amx` CPU flag.
     - `VLLM_CPU_MOE_PREPACK` can provides better performance for MoE models
     - `VLLM_CPU_SGL_KERNEL` can provides better performance for MoE models and small-batch scenarios.
+
+### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
+
+In some container environments (like Docker), NUMA-related syscalls used by vLLM (e.g., `get_mempolicy`, `migrate_pages`) are blocked/denied in the runtime's default seccomp/capabilities settings. This may lead to warnings like `get_mempolicy: Operation not permitted`. Functionality is not affected, but NUMA memory binding/migration optimizations may not take effect and performance can be suboptimal.
+
+To enable these optimizations inside Docker with the least privilege, you can follow below tips:
+
+```bash
+docker run ... --cap-add SYS_NICE --security-opt seccomp=unconfined  ...
+
+# 1) `--cap-add SYS_NICE` is to address `get_mempolicy` EPERM issue.
+
+# 2) `--security-opt seccomp=unconfined` is to enable `migrate_pages` for `numa_migrate_pages()`.
+# Actually, `seccomp=unconfined` bypasses the seccomp for container,
+# if it's unacceptable, you can customize your own seccomp profile,
+# based on docker/runtime default.json and add `migrate_pages` to `SCMP_ACT_ALLOW` list.
+
+# reference : https://docs.docker.com/engine/security/seccomp/
+```
+
+Alternatively, running with `--privileged=true` also works but is broader and not generally recommended.
+
+In K8S, the following configuration can be added to workload yaml to achieve the same effect as above:
+
+```yaml
+securityContext:
+  seccompProfile:
+    type: Unconfined
+  capabilities:
+    add:
+    - SYS_NICE
+```

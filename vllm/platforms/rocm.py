@@ -2,29 +2,34 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+else:
+    _Backend = None
 
 logger = init_logger(__name__)
 
 try:
-    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
-                        amdsmi_get_processor_handles, amdsmi_init,
-                        amdsmi_shut_down, amdsmi_topo_get_link_type)
+    from amdsmi import (
+        AmdSmiException,
+        amdsmi_get_gpu_asic_info,
+        amdsmi_get_processor_handles,
+        amdsmi_init,
+        amdsmi_shut_down,
+        amdsmi_topo_get_link_type,
+    )
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
 
@@ -44,24 +49,21 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
-_ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
-                    "Triton flash attention. For half-precision SWA support, "
-                    "please use CK flash attention by setting "
-                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
+_ROCM_SWA_REASON = (
+    "Sliding window attention (SWA) is not yet supported in "
+    "Triton flash attention. For half-precision SWA support, "
+    "please use CK flash attention by setting "
+    "`VLLM_USE_TRITON_FLASH_ATTN=0`"
+)
 _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
-    "Qwen2ForCausalLM":
-    _ROCM_SWA_REASON,
-    "MistralForCausalLM":
-    _ROCM_SWA_REASON,
-    "MixtralForCausalLM":
-    _ROCM_SWA_REASON,
-    "PaliGemmaForConditionalGeneration":
-    ("ROCm flash attention does not yet "
-     "fully support 32-bit precision on PaliGemma"),
-    "Phi3VForCausalLM":
-    ("ROCm Triton flash attention may run into compilation errors due to "
-     "excessive use of shared memory. If this happens, disable Triton FA "
-     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
+    "Qwen2ForCausalLM": _ROCM_SWA_REASON,
+    "MistralForCausalLM": _ROCM_SWA_REASON,
+    "MixtralForCausalLM": _ROCM_SWA_REASON,
+    "Phi3VForCausalLM": (
+        "ROCm Triton flash attention may run into compilation errors due to "
+        "excessive use of shared memory. If this happens, disable Triton FA "
+        "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`"
+    ),
 }
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
@@ -73,7 +75,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74bd": "AMD_Instinct_MI300X_HF",
 }
 
-# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
+# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
 if "HIP_VISIBLE_DEVICES" in os.environ:
     val = os.environ["HIP_VISIBLE_DEVICES"]
     if cuda_val := os.environ.get("CUDA_VISIBLE_DEVICES", None):
@@ -88,7 +90,6 @@ if "HIP_VISIBLE_DEVICES" in os.environ:
 
 
 def with_amdsmi_context(fn):
-
     @wraps(fn)
     def wrapper(*args, **kwargs):
         amdsmi_init()
@@ -119,17 +120,23 @@ def on_gfx9() -> bool:
 
 
 @cache
-def use_rocm_custom_paged_attention(
-        qtype: torch.dtype,
-        head_size: int,
-        block_size: int,
-        gqa_ratio: int,
-        max_seq_len: int,
-        sliding_window: int,
-        kv_cache_dtype: str,
-        alibi_slopes: Optional[torch.Tensor] = None,
-        sinks: Optional[torch.Tensor] = None) -> bool:
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
 
+
+@cache
+def use_rocm_custom_paged_attention(
+    qtype: torch.dtype,
+    head_size: int,
+    block_size: int,
+    gqa_ratio: int,
+    max_seq_len: int,
+    sliding_window: int,
+    kv_cache_dtype: str,
+    alibi_slopes: torch.Tensor | None = None,
+    sinks: torch.Tensor | None = None,
+) -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
@@ -137,26 +144,36 @@ def use_rocm_custom_paged_attention(
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
     if ON_GFX9:
-        return ((not envs.VLLM_USE_V1 or sliding_window == 0
-                 or sliding_window == (-1, -1))
-                and (qtype == torch.half or qtype == torch.bfloat16)
-                and (head_size == 64 or head_size == 128)
-                and (block_size == 16 or block_size == 32)
-                and (gqa_ratio >= 1 and gqa_ratio <= 16)
-                and max_seq_len <= 128 * 1024
-                and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-                and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-                         and envs.VLLM_ROCM_USE_AITER) and sinks is None)
+        return (
+            (not envs.VLLM_USE_V1 or sliding_window == 0 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16)
+            and max_seq_len <= 128 * 1024
+            and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+            and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN and envs.VLLM_ROCM_USE_AITER)
+            and sinks is None
+        )
 
     else:
-        return (ON_GFX11_GFX12 and (not envs.VLLM_USE_V1 or sliding_window == 0
-                                    or sliding_window == (-1, -1))
-                and (qtype == torch.half or qtype == torch.bfloat16)
-                and head_size == 128 and block_size == 16
-                and (gqa_ratio >= 3 and gqa_ratio <= 16)
-                and max_seq_len <= 128 * 1024 and alibi_slopes is None
-                and kv_cache_dtype == "auto"
-                and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN and sinks is None)
+        return (
+            ON_GFX11_GFX12
+            and (
+                not envs.VLLM_USE_V1
+                or sliding_window == 0
+                or sliding_window == (-1, -1)
+            )
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and head_size == 128
+            and block_size == 16
+            and (gqa_ratio >= 3 and gqa_ratio <= 16)
+            and max_seq_len <= 128 * 1024
+            and alibi_slopes is None
+            and kv_cache_dtype == "auto"
+            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN
+            and sinks is None
+        )
 
 
 class RocmPlatform(Platform):
@@ -170,89 +187,123 @@ class RocmPlatform(Platform):
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     supported_quantization: list[str] = [
-        "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
-        "quark", "ptpc_fp8", "mxfp4", "petit_nvfp4"
+        "awq",
+        "gptq",
+        "fp8",
+        "compressed-tensors",
+        "fbgemm_fp8",
+        "gguf",
+        "quark",
+        "ptpc_fp8",
+        "mxfp4",
+        "petit_nvfp4",
+        "torchao",
     ]
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
-        if support_fa:
-            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
-                    and on_gfx9()):
-                # Note: AITER FA is only supported for Qwen-VL models.
-                # TODO: Add support for other VL models in their model class.
-                return _Backend.ROCM_AITER_FA
-            if on_gfx9():
-                return _Backend.FLASH_ATTN
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
+
+        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
+            return _Backend.ROCM_AITER_FA
+        if on_gfx9():
+            return _Backend.FLASH_ATTN
         return _Backend.TORCH_SDPA
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        block_size,
+        use_v1,
+        use_mla,
+        has_sink,
+        use_sparse,
+    ) -> str:
+        from vllm.attention.backends.registry import _Backend
+
+        if use_sparse:
+            raise NotImplementedError("Sparse Attention is not supported on ROCm.")
         if use_mla:
-            from vllm.attention.backends.rocm_aiter_mla import (
-                is_aiter_mla_enabled)
+            if not use_v1:
+                raise RuntimeError(
+                    "MLA attention backends require the V1 engine. "
+                    "Set VLLM_USE_V1=1 to enable them."
+                )
+
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+                is_aiter_mla_enabled,
+            )
 
             if selected_backend is None:
-                selected_backend = (_Backend.ROCM_AITER_MLA if
-                                    is_aiter_mla_enabled() or block_size == 1
-                                    else _Backend.TRITON_MLA)
+                selected_backend = (
+                    _Backend.ROCM_AITER_MLA
+                    if is_aiter_mla_enabled() or block_size == 1
+                    else _Backend.TRITON_MLA
+                )
 
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
-                    if use_v1:
-                        logger.info_once(
-                            "Using Triton MLA backend on V1 engine.")
-                        return ("vllm.v1.attention.backends.mla."
-                                "triton_mla.TritonMLABackend")
-                    else:
-                        logger.info("Using Triton MLA backend.")
-                        return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
-                else:
-                    raise ValueError(
-                        f" The selected backend, {selected_backend.name},"
-                        f"does not support block size {block_size}.")
-            elif selected_backend == _Backend.ROCM_AITER_MLA \
-                or selected_backend == _Backend.ROCM_AITER_MLA_VLLM_V1:
-                if block_size == 1:
-                    if use_v1:
-                        logger.info("Using AITER MLA backend on V1 engine.")
-                        return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
-                    else:
-                        logger.info("Using AITER MLA backend")
-                        return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
-                else:
-                    raise ValueError(
-                        f" The selected backend, {selected_backend.name},"
-                        f"does not support block size {block_size}."
-                        "(currently only supports block size 1)")
-            else:
+                    logger.info_once("Using Triton MLA backend on V1 engine.")
+                    return "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
-                    f"is not MLA type while requested for MLA backend.")
-
-        if selected_backend is None or selected_backend == _Backend.FLASH_ATTN:
-            selected_backend = _Backend.ROCM_FLASH
+                    f"does not support block size {block_size}."
+                )
+            if selected_backend == _Backend.ROCM_AITER_MLA:
+                if block_size == 1:
+                    logger.info("Using AITER MLA backend on V1 engine.")
+                    return (
+                        "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    )
+                raise ValueError(
+                    f" The selected backend, {selected_backend.name},"
+                    f"does not support block size {block_size}."
+                    "(currently only supports block size 1)"
+                )
+            raise ValueError(
+                f" The selected backend, {selected_backend.name},"
+                f"is not MLA type while requested for MLA backend."
+            )
 
         if envs.VLLM_USE_V1:
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
-                and on_gfx9():
-                logger.info("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "rocm_aiter_fa.AiterFlashAttentionBackend")
-            else:
-                logger.info("Using Triton Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "triton_attn.TritonAttentionBackend")
-        if selected_backend == _Backend.ROCM_FLASH:
-            if not cls.has_device_capability(90):
-                # not Instinct series GPUs.
-                logger.info("flash_attn is not supported on NAVI GPUs.")
-        else:
-            logger.info("%s is not supported in AMD GPUs.", selected_backend)
-        logger.info("Using ROCmFlashAttention backend.")
-        return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
+            if selected_backend == _Backend.FLEX_ATTENTION:
+                logger.info("Using FlexAttention backend on V1 engine.")
+                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+            if (
+                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
+            ) or selected_backend == _Backend.ROCM_AITER_FA:
+                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                return (
+                    "vllm.v1.attention.backends."
+                    "rocm_aiter_fa.AiterFlashAttentionBackend"
+                )
+            if (
+                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+            ) or selected_backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+                logger.info("Using Aiter Unified Attention backend on V1 engine.")
+                return (
+                    "vllm.v1.attention.backends."
+                    "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend"
+                )
+            if (
+                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+                or selected_backend == _Backend.ROCM_ATTN
+            ):
+                # rocm specific backend, with aiter and/or
+                #   triton prefix-prefill
+                logger.info("Using Rocm Attention backend on V1 engine.")
+                return "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
+            # default case, using triton unified attention
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+        raise RuntimeError(
+            "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
+            "to select a supported backend."
+        )
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -263,9 +314,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls,
-                              device_id: int = 0
-                              ) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
@@ -275,21 +324,17 @@ class RocmPlatform(Platform):
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
-        handles = [
-            amdsmi_get_processor_handles()[i] for i in physical_device_ids
-        ]
+        handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
                 if i < j:
                     try:
-                        link_type = amdsmi_topo_get_link_type(
-                            handle, peer_handle)
+                        link_type = amdsmi_topo_get_link_type(handle, peer_handle)
                         # type is 2 for XGMI
                         if link_type["hops"] != 1 or link_type["type"] != 2:
                             return False
                     except AmdSmiException as error:
-                        logger.error("AMD 1 hop XGMI detection failed.",
-                                     exc_info=error)
+                        logger.error("AMD 1 hop XGMI detection failed.", exc_info=error)
                         return False
         return True
 
@@ -311,46 +356,47 @@ class RocmPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if enforce_eager and not envs.VLLM_USE_V1:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
-            return False
-        return True
-
-    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.config.compilation import CUDAGraphMode
+
         cache_config = vllm_config.cache_config
+        compilation_config = vllm_config.compilation_config
+        parallel_config = vllm_config.parallel_config
+        is_eager_execution = compilation_config == CUDAGraphMode.NONE
+
+        use_v1 = envs.VLLM_USE_V1
+        use_aiter_rms_norm = (
+            envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        )
+
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
-        parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            if vllm_config.speculative_config:
-                if not envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Speculative decoding is not supported on vLLM V0.")
-                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-            else:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.gpu_worker.Worker"
-                else:
-                    parallel_config.worker_cls = "vllm.worker.worker.Worker"
+            parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
+        if (
+            use_v1
+            and use_aiter_rms_norm
+            and not is_eager_execution
+            and "-rms_norm" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
-            raise ValueError(f"Model architecture '{model_arch}' is not "
-                             "supported by ROCm for now.")
+            raise ValueError(
+                f"Model architecture '{model_arch}' is not supported by ROCm for now."
+            )
 
         if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
             msg = _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch]
             logger.warning(
-                "Model architecture '%s' is partially "
-                "supported by ROCm: %s", model_arch, msg)
+                "Model architecture '%s' is partially supported by ROCm: %s",
+                model_arch,
+                msg,
+            )
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
@@ -358,7 +404,8 @@ class RocmPlatform(Platform):
         if quant == "awq" and not envs.VLLM_USE_TRITON_AWQ:
             logger.warning(
                 "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
-                " is not set, enabling VLLM_USE_TRITON_AWQ.")
+                " is not set, enabling VLLM_USE_TRITON_AWQ."
+            )
         envs.VLLM_USE_TRITON_AWQ = True
 
     @classmethod
@@ -366,16 +413,17 @@ class RocmPlatform(Platform):
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
-    def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+    def get_current_memory_usage(
+        cls, device: torch.types.Device | None = None
+    ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
-        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
-            device)[0]
+        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(device)[0]
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+        return (
+            "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+        )
 
     @classmethod
     def supports_mx(cls) -> bool:
@@ -385,12 +433,12 @@ class RocmPlatform(Platform):
     @classmethod
     def supports_fp8(cls) -> bool:
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ['gfx94', 'gfx95', 'gfx12'])
+        return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx12"])
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return 'gfx94' in torch.cuda.get_device_properties(0).gcnArchName
+        return "gfx94" in torch.cuda.get_device_properties(0).gcnArchName
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
@@ -400,15 +448,10 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fn
 
     @classmethod
-    def supports_v1(cls, model_config: "ModelConfig") -> bool:
-        # V1 support on AMD gpus is experimental
-        return True
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        supported_archs = ['gfx94', 'gfx95']
+        supported_archs = ["gfx94", "gfx95"]
         return any(gfx in gcn_arch for gfx in supported_archs)
 
     @classmethod
@@ -417,59 +460,29 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(
-            device_id).multi_processor_count
+        return torch.cuda.get_device_properties(device_id).multi_processor_count
 
     @classmethod
     def is_navi(cls) -> bool:
-        return 'gfx1' in torch.cuda.get_device_properties(0).gcnArchName
+        return "gfx1" in torch.cuda.get_device_properties(0).gcnArchName
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
-    def stateless_init_device_torch_dist_pg(
-        cls,
-        backend: str,
-        prefix_store: PrefixStore,
-        group_rank: int,
-        group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
-        assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
-                                         backend_options)
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-        pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
-
-    @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
-                                    model_config: "ModelConfig") -> bool:
+    def is_kv_cache_dtype_supported(
+        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+    ) -> bool:
         return True
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()
                 gpu_name = cls.get_device_name()
@@ -485,4 +498,13 @@ class RocmPlatform(Platform):
                     "with compute capability of at least 8.0. "
                     f"Your {gpu_name} GPU {compute_str}. "
                     "You can use float16 instead by explicitly setting the "
-                    "`dtype` flag in CLI, for example: --dtype=half.")
+                    "`dtype` flag in CLI, for example: --dtype=half."
+                )
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        return True

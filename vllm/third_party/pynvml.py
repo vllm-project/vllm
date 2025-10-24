@@ -1022,7 +1022,7 @@ def _extractNVMLErrorsAsClasses():
     Each NVML Error gets a new NVMLError subclass. This way try,except blocks can filter appropriate
     exceptions more easily.
 
-    NVMLError is a parent class. Each NVML_ERROR_* gets it's own subclass.
+    NVMLError is a parent class. Each NVML_ERROR_* gets its own subclass.
     e.g. NVML_ERROR_ALREADY_INITIALIZED will be turned into NVMLError_AlreadyInitialized
     '''
     this_module = sys.modules[__name__]
@@ -3533,7 +3533,7 @@ def nvmlDeviceGetMPSComputeRunningProcesses_v3(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v3_t * c_count.value
         c_procs = proc_array()

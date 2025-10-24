@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import hashlib
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import safetensors
-import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
-    ECConnectorBase, ECConnectorMetadata, ECConnectorRole)
+    ECConnectorBase,
+    ECConnectorMetadata,
+    ECConnectorRole,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -28,12 +28,8 @@ class MMMeta:
 
     @staticmethod
     def make_meta(mm_hash, num_token) -> "MMMeta":
-        return MMMeta(
-            mm_hash=mm_hash,
-            num_token=num_token
-        )
+        return MMMeta(mm_hash=mm_hash, num_token=num_token)
 
-    
 
 @dataclass
 class ECSharedStorageConnectorMetadata(ECConnectorMetadata):
@@ -42,7 +38,7 @@ class ECSharedStorageConnectorMetadata(ECConnectorMetadata):
     def __init__(self):
         self.mm_datas = []
 
-    def add_mm_data(self, mm_data:MMMeta):
+    def add_mm_data(self, mm_data: MMMeta):
         self.mm_datas.append(mm_data)
 
 
@@ -55,66 +51,79 @@ class ECSharedStorageConnector(ECConnectorBase):
         # req_id -> index
         self._mm_datas_need_loads: dict[str, int] = {}
         transfer_config = vllm_config.ec_transfer_config
-        self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp")
-        logger.debug(transfer_config)
-        logger.debug("Shared storage path is %s", self._storage_path)
+        if transfer_config is not None:
+            self._storage_path = transfer_config.get_from_extra_config(
+                "shared_storage_path", "/tmp"
+            )
+            logger.debug(transfer_config)
+            logger.debug("Shared storage path is %s", self._storage_path)
+        else:
+            raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
-    def start_load_caches(self, **kwargs) -> None:
-        """Start loading the EC cache from the connector buffer to worker 
-        encoder_cache
+    def start_load_caches(self, encoder_cache, **kwargs) -> None:
+        """
+        Start loading the cache from the connector into vLLM's encoder cache.
+
+        This method loads the encoder cache based on metadata provided by the scheduler.
+        It is called before `_gather_mm_embeddings` for the EC Connector. For EC,
+        the `encoder_cache` and `mm_hash` are stored in `kwargs`.
 
         Args:
-            **kwargs: additional arguments for the load operation
+            encoder_cache (dict[str, torch.Tensor]): A dictionary mapping multimodal
+                data hashes (`mm_hash`) to encoder cache tensors.
+            kwargs (dict): Additional keyword arguments for the connector.
         """
 
-        # Get the metadata 
+        # Get the metadata
         metadata: ECConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, ECSharedStorageConnectorMetadata)
-        encoder_cache = kwargs.get("encoder_cache")   # returns None if missing
         assert encoder_cache is not None
         if metadata is None:
             logger.warning(
-                "In connector.start_load_caches, but the connector metadata is None"
+                (
+                    "In connector.start_load_caches, ",
+                    "but the connector metadata is None",
+                )
             )
             return
-        # Load the EC for each mm datas
+        # Load the EC for each mm data
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
             ec_cache = safetensors.torch.load_file(filename)["ec_cache"].cuda()
             encoder_cache[mm_data.mm_hash] = ec_cache
-            logger.debug(f"Success load encoder cache for hash {mm_data.mm_hash}")
+            logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
-    def save_caches(self, **kwargs) -> None:
-        """Start saving the EC cache for each mm_datas from encoder cache
+    def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
+        """
+        Save the encoder cache to the connector.
+
+        This method saves the encoder cache from the worker's local storage
+        to shared storage or another external connector.
 
         Args:
-            **kwargs: additional arguments for the save operation.
+            encoder_cache (dict[str, torch.Tensor]): A dictionary mapping multimodal
+                data hashes (`mm_hash`) to encoder cache tensors.
+            mm_hash (str): The hash of the multimodal data whose cache is being saved.
+            kwargs (dict): Additional keyword arguments for the connector.
         """
         # Return if it is PD Instance
         if not self.is_producer:
             return
-        encoder_cache = kwargs.get("encoder_cache") 
-        mm_hash = kwargs.get("mm_hash")
-        assert encoder_cache is not None
-        assert mm_hash is not None
         filename = self._generate_filename_debug(mm_hash)
         ec_cache = encoder_cache[mm_hash]
         tensors = {"ec_cache": ec_cache.detach().cpu()}
         safetensors.torch.save_file(tensors, filename)
-        logger.debug(f"Save cache successful for mm_hash {mm_hash}")
-    
-    def wait_for_save(self):
-        return
+        logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
-    def check_caches_exist(
+    def has_caches(
         self,
         request: "Request",
     ) -> list[bool]:
         """
         Check if cache exist externally for each mm_data of request
-        
+
         Args:
             request (Request): the request object.
 
@@ -122,18 +131,19 @@ class ECSharedStorageConnector(ECConnectorBase):
             List of bool indicate that ith mm_data exist in cache or not
         """
         result = []
-        for mm_hash in request.mm_hashes:
-            result.append(self._found_match_for_mm_data(mm_hash))
+        for feature in request.mm_features:
+            result.append(self._found_match_for_mm_data(feature.identifier))
         return result
 
-    def update_state_after_alloc(self, 
-                                 request: "Request",
-                                 index: int,
-                                ) -> None:
+    def update_state_after_alloc(
+        self,
+        request: "Request",
+        index: int,
+    ) -> None:
         """
         Update ECConnector state after encoder cache allocation.
         """
-        mm_hash = request.mm_hashes[index]
+        mm_hash = request.mm_features[index].identifier
         num_encoder_token = request.get_num_encoder_tokens(index)
         # Insert mm_hash only if this block has not been recorded yet.
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
@@ -160,19 +170,15 @@ class ECSharedStorageConnector(ECConnectorBase):
     # Helper functions
     # ==============================
 
-    def _found_match_for_mm_data(
-        self,
-        mm_hash
-    ) -> bool:
-        """Check if the cache is hit for the request.
-        """
+    def _found_match_for_mm_data(self, mm_hash) -> bool:
+        """Check if the cache is hit for the request."""
         filename = self._generate_filename_debug(mm_hash)
         return os.path.exists(filename)
 
     def _generate_foldername_debug(
         self,
         mm_hash: str,
-        create_folder: bool = True,   # <- now defaults to True
+        create_folder: bool = True,  # <- now defaults to True
     ) -> str:
         """
         Return the folder in which the cache for this mm_hash lives.
@@ -191,6 +197,5 @@ class ECSharedStorageConnector(ECConnectorBase):
         `_generate_foldername_debug` is called with its default
         (`create_folder=True`).
         """
-        foldername = self._generate_foldername_debug(mm_hash)   # <- folder auto-created
+        foldername = self._generate_foldername_debug(mm_hash)  # <- folder auto-created
         return os.path.join(foldername, "encoder_cache.safetensors")
-

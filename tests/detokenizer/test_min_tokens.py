@@ -8,15 +8,17 @@ from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import FastIncrementalDetokenizer
 
-PROMPT = "Hello, my name is Lee, and I'm a student in the " + \
-         "college of engineering"
+PROMPT = "Hello, my name is Lee, and I'm a student in the " + "college of engineering"
 
 
-@pytest.mark.parametrize("min_tokens,stop,truth", [
-    (0, None, " is Lee, and I'm a student in the college of engineering"),
-    (0, "e", " is L"),
-    (5, "e", " is Lee, and I'm a stud"),
-])
+@pytest.mark.parametrize(
+    "min_tokens,stop,truth",
+    [
+        (0, None, " is Lee, and I'm a student in the college of engineering"),
+        (0, "e", " is L"),
+        (5, "e", " is Lee, and I'm a stud"),
+    ],
+)
 def test_min_tokens_with_stop(min_tokens: int, stop: str, truth: str):
     """Test for a specific min_tokens and stop.
 
@@ -31,18 +33,18 @@ def test_min_tokens_with_stop(min_tokens: int, stop: str, truth: str):
         stop=stop,
         min_tokens=min_tokens,
     )
-    request = EngineCoreRequest("",
-                                prompt_token_ids,
-                                None,
-                                None,
-                                None,
-                                params,
-                                None,
-                                None,
-                                0.0,
-                                None,
-                                cache_salt=None,
-                                data_parallel_rank=None)
+    request = EngineCoreRequest(
+        request_id="",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=params,
+        pooling_params=None,
+        eos_token_id=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
 
     detokenizer = FastIncrementalDetokenizer(tokenizer, request)
 

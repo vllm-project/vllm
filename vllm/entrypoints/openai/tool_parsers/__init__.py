@@ -4,6 +4,7 @@
 from .abstract_tool_parser import ToolParser, ToolParserManager
 from .deepseekv3_tool_parser import DeepSeekV3ToolParser
 from .deepseekv31_tool_parser import DeepSeekV31ToolParser
+from .ernie45_tool_parser import Ernie45ToolParser
 from .glm4_moe_tool_parser import Glm4MoeModelToolParser
 from .granite_20b_fc_tool_parser import Granite20bFCToolParser
 from .granite_tool_parser import GraniteToolParser
@@ -14,11 +15,15 @@ from .jamba_tool_parser import JambaToolParser
 from .kimi_k2_tool_parser import KimiK2ToolParser
 from .llama4_pythonic_tool_parser import Llama4PythonicToolParser
 from .llama_tool_parser import Llama3JsonToolParser
+from .longcat_tool_parser import LongcatFlashToolParser
 from .minimax_tool_parser import MinimaxToolParser
 from .mistral_tool_parser import MistralToolParser
+from .olmo3_tool_parser import Olmo3PythonicToolParser
+from .openai_tool_parser import OpenAIToolParser
 from .phi4mini_tool_parser import Phi4MiniJsonToolParser
 from .pythonic_tool_parser import PythonicToolParser
 from .qwen3coder_tool_parser import Qwen3CoderToolParser
+from .qwen3xml_tool_parser import Qwen3XMLToolParser
 from .seed_oss_tool_parser import SeedOssToolParser
 from .step3_tool_parser import Step3ToolParser
 from .xlam_tool_parser import xLAMToolParser
@@ -34,16 +39,21 @@ __all__ = [
     "Llama3JsonToolParser",
     "JambaToolParser",
     "Llama4PythonicToolParser",
+    "LongcatFlashToolParser",
     "PythonicToolParser",
     "Phi4MiniJsonToolParser",
     "DeepSeekV3ToolParser",
     "DeepSeekV31ToolParser",
+    "Ernie45ToolParser",
     "xLAMToolParser",
+    "Olmo3PythonicToolParser",
     "MinimaxToolParser",
     "KimiK2ToolParser",
     "HunyuanA13BToolParser",
     "Glm4MoeModelToolParser",
     "Qwen3CoderToolParser",
+    "Qwen3XMLToolParser",
     "SeedOssToolParser",
     "Step3ToolParser",
+    "OpenAIToolParser",
 ]
