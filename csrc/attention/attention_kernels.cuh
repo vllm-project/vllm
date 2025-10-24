@@ -98,7 +98,11 @@ inline __device__ float block_max(float* red_smem, float val) {
     val = fmaxf(val, VLLM_SHFL_XOR_SYNC(val, mask));
   }
 
-  return VLLM_SHFL_SYNC(val, 0);
+  if (threadIdx.x == 0) {
+    red_smem[0] = val;
+  }
+  __syncthreads();
+  return red_smem[0];
 }
 
 // TODO(woosuk): Merge the last two dimensions of the grid.
