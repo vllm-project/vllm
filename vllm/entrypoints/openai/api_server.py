@@ -1977,6 +1977,7 @@ if __name__ == "__main__":
     )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
