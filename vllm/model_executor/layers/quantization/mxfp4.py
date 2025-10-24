@@ -18,10 +18,15 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    BatchedMarlinExperts,
+    MarlinExperts,
+    fused_marlin_moe,
+)
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
 )
@@ -43,13 +48,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_s
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import (
-    has_triton_kernels,
-    is_torch_equal_or_newer,
-    next_power_of_2,
-    round_up,
-)
+from vllm.utils import round_up
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -93,12 +95,6 @@ def get_mxfp4_backend():
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         ):
-            logger.info_once(
-                "Using FlashInfer MXFP4 MXFP8 TRTLLM backend for SM100, "
-                "for high concurrency throughput workloads consider setting "
-                "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS=1 for better "
-                "performance"
-            )
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
         elif current_platform.is_device_capability(100) and has_flashinfer():
             logger.info_once(
@@ -353,7 +349,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
         ):
             from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
-            from flashinfer.fused_moe.core import _maybe_get_cached_w2_permute_indices
+            from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
 
             layer.gemm1_alpha = Parameter(
                 torch.tensor([1.702] * self.num_experts, dtype=torch.float32).cuda(),
@@ -445,7 +441,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
             for i in range(self.num_experts):
                 # w13 weight shuffling
-                permute_indices = _maybe_get_cached_w2_permute_indices(
+                permute_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w13_weight[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -456,7 +452,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     .contiguous()
                 )
                 # w13 scale shuffling
-                permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                permute_sf_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w13_weight_scale[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -472,7 +468,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     )
                 )
                 # w13 bias shuffling
-                permute_bias_indices = _maybe_get_cached_w2_permute_indices(
+                permute_bias_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w13_bias[i].clone().reshape(-1, 1),
                     epilogue_tile_m,
@@ -484,7 +480,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     .contiguous()
                 )
                 # w2 weight shuffling
-                permute_indices = _maybe_get_cached_w2_permute_indices(
+                permute_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w2_weight[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -495,7 +491,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     .contiguous()
                 )
                 # w2 scale shuffling
-                permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                permute_sf_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w2_weight_scale[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -511,7 +507,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     )
                 )
                 # w2 bias shuffling
-                permute_indices = _maybe_get_cached_w2_permute_indices(
+                permute_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w2_bias[i].clone().reshape(-1, 1),
                     epilogue_tile_m,
@@ -731,30 +727,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
-    def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int):
-        # Number of tokens in the input tensor.
-        num_tokens = x.shape[0]
-        # Factor to account for the imbalance of the experts.
-        # factor equals to the
-        # max_real_num_tokens_per_expert / perfect_num_tokens_per_expert
-        # - 1.0 means perfect expert distribution.
-        # - > 1.0 means some experts have more
-        #     tokens than the perfect distribution.
-        # - < 1.0 does not make sense.
-        imbalance_factor = 1.3
-        # Calculate the number of tokens per expert
-        # assuming perfect distribution.
-        num_tokens_per_expert = (num_tokens * top_k) // self.num_experts
-        # Apply the imbalance factor.
-        num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
-        # And pad the number to the next power of 2.
-        tile_tokens_dim = next_power_of_2(num_tokens_per_expert)
-        # Cap to 8-64 tokens per CTA tile
-        # as it's the range supported by the kernel.
-        tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-
-        return tile_tokens_dim
-
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -773,6 +745,23 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=layer.w2_bias,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
+            )
+        elif self.mxfp4_backend in [
+            Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM,
+            Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS,
+        ]:
+            return mxfp4_mxfp8_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
+        elif self.mxfp4_backend in [Mxfp4Backend.SM100_FI_MXFP4_BF16]:
+            return mxfp4_w4a16_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
             )
         else:
             w1_scale = layer.w13_weight_scale
@@ -794,9 +783,19 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             prepare_finalize.activation_format
             == mk.FusedMoEActivationFormat.BatchedExperts
         ):
-            raise NotImplementedError(
-                "Mxfp4 does not support batched experts format for EP"
-            )
+            if self.mxfp4_backend == Mxfp4Backend.MARLIN:
+                max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+                assert max_num_tokens_per_rank is not None
+                assert self.moe_quant_config is not None
+                return BatchedMarlinExperts(
+                    max_num_tokens=max_num_tokens_per_rank,
+                    num_dispatchers=prepare_finalize.num_dispatchers(),
+                    quant_config=self.moe_quant_config,
+                )
+            else:
+                raise NotImplementedError(
+                    "Incompatible Mxfp4 backend for EP batched experts format"
+                )
         else:
             assert self.moe_quant_config is not None
             if (
@@ -947,7 +946,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 e_score_correction_bias=e_score_correction_bias,
             )
 
-            return torch.ops.vllm.fused_marlin_moe(
+            return fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1023,7 +1022,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
                 None,
-                self._get_tile_tokens_dim(x, top_k),
+                None,
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
                 tune_max_num_tokens=self.max_capture_size,

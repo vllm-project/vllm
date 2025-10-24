@@ -32,7 +32,7 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
@@ -51,6 +51,7 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
+        aggregate_engine_logging: bool = False,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -132,6 +133,7 @@ class LLMEngine:
                 vllm_config=vllm_config,
                 custom_stat_loggers=stat_loggers,
                 enable_default_loggers=log_stats,
+                aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
 

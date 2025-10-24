@@ -30,7 +30,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler
 
@@ -335,10 +334,10 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [],
             requests[1].request_id: [10],
         },
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -383,10 +382,10 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [10, 42],
             requests[1].request_id: [13],
         },
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -429,10 +428,10 @@ def test_stop_via_update_from_output():
             requests[0].request_id: [10, 11],
             requests[1].request_id: [],
         },
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -470,10 +469,10 @@ def test_stop_via_update_from_output():
         total_num_scheduled_tokens=3,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={requests[0].request_id: [EOS_TOKEN_ID, 10]},
-        num_common_prefix_blocks=0,
+        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
+        structured_output_request_ids=[],
         grammar_bitmask=None,
     )
 
@@ -1013,6 +1012,66 @@ def test_kv_connector_basic():
     assert (
         scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == NUM_TOTAL_BLOCKS
     )
+
+
+def test_external_prefix_cache_metrics():
+    """
+    Verify connector prefix cache metrics are updated
+    correctly when the scheduler processes requests with KV connector hits.
+    """
+
+    # Setup Scheduler.
+    scheduler = create_scheduler(
+        enable_prefix_caching=False,
+        use_kv_connector=True,
+    )
+
+    # Mock connector to simulate a partial external cache hit
+    NUM_MATCHED_NEW_TOKENS = 4
+    scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
+    scheduler.connector.get_num_new_matched_tokens.return_value = (
+        NUM_MATCHED_NEW_TOKENS,
+        False,
+    )
+
+    # --- Prepare simple requests ---
+    NUM_REQUESTS = 2
+    NUM_TOKENS = 8
+    MAX_TOKENS = 2
+    requests = create_requests(
+        num_requests=NUM_REQUESTS,
+        num_tokens=NUM_TOKENS,
+        max_tokens=MAX_TOKENS,
+    )
+
+    for req in requests:
+        scheduler.add_request(req)
+
+    # --- Trigger scheduling and simulate model output ---
+    output = scheduler.schedule()
+    MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+        req_ids=[r.request_id for r in requests],
+        req_id_to_index={r.request_id: i for i, r in enumerate(requests)},
+        sampled_token_ids=[[1000]] * NUM_REQUESTS,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Update scheduler stats
+    ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+
+    # --- Assertions ---
+    assert ecos is not None and len(ecos) > 0
+    assert ecos[0].scheduler_stats is not None
+
+    external_stats = ecos[0].scheduler_stats.connector_prefix_cache_stats
+    assert external_stats is not None
+
+    assert external_stats.queries == NUM_TOKENS * NUM_REQUESTS
+    assert external_stats.hits == NUM_MATCHED_NEW_TOKENS * NUM_REQUESTS
+    assert external_stats.requests == NUM_REQUESTS
+    assert external_stats.preempted_requests == 0
 
 
 def test_kv_connector_unable_to_allocate():
@@ -1941,7 +2000,6 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
         sampling_params=sampling_params,
         pooling_params=None,
         eos_token_id=EOS_TOKEN_ID,
-        structured_output_request=StructuredOutputRequest(sampling_params),
     )
     scheduler.add_request(request)
     output = scheduler.schedule()

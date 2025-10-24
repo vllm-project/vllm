@@ -6,26 +6,24 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from collections.abc import Callable
-from datetime import timedelta
 from functools import cache, wraps
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless, import_pynvml
+from vllm.utils import import_pynvml
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 else:
     _Backend = None
 
@@ -192,7 +190,7 @@ class CudaPlatformBase(Platform):
 
         compilation_config = vllm_config.compilation_config
         if (
-            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            parallel_config.all2all_backend == "deepep_high_throughput"
             and parallel_config.data_parallel_size > 1
             and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
@@ -204,7 +202,7 @@ class CudaPlatformBase(Platform):
                 "kernels are optimized for prefill and are incompatible with "
                 "CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
-                "set VLLM_ALL2ALL_BACKEND to another option, such as "
+                "use --all2all-backend with another option, such as "
                 "deepep_low_latency, pplx, or allgather_reducescatter."
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -456,86 +454,12 @@ class CudaPlatformBase(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
-    def stateless_init_device_torch_dist_pg(
-        cls,
-        backend: str,
-        prefix_store: PrefixStore,
-        group_rank: int,
-        group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
-        assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(
-            prefix_store, group_rank, group_size, backend_options
-        )
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-        pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
-
-    @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        fp8_attention = kv_cache_dtype.startswith("fp8")
-        attention_backend = envs.VLLM_ATTENTION_BACKEND
-
-        supported = False
-        if model_config is not None and model_config.use_mla:
-            # Default to CutlassMLA for blackwell,
-            # FlashMLA otherwise
-            if attention_backend is None:
-                if cls.is_device_capability(100):
-                    attention_backend = "CUTLASS_MLA"
-                else:
-                    attention_backend = "FLASHMLA"
-
-            # Only FlashMLA and CUTLASS_MLA support fp8
-            if attention_backend in ["FLASHMLA", "CUTLASS_MLA", "FLASHINFER_MLA"]:
-                supported = True
-            else:
-                supported = not fp8_attention
-        else:
-            # Default to FlashAttention
-            if attention_backend is None:
-                attention_backend = "FLASH_ATTN"
-
-            # All Blackwell backends support fp8
-            if cls.is_device_capability(100):
-                supported = True
-            elif attention_backend == "FLASH_ATTN":
-                if fp8_attention:
-                    from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
-
-                    supported = flash_attn_supports_fp8()
-                else:
-                    supported = True
-            elif attention_backend == "FLASHINFER":
-                supported = True
-            elif attention_backend == "TRITON_ATTN":
-                supported = cls.supports_fp8()
-        return supported
-
-    @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()
                 gpu_name = cls.get_device_name()

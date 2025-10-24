@@ -320,6 +320,7 @@ class Qwen2VisionAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -355,6 +356,7 @@ class Qwen2VisionAttention(nn.Module):
         self.attn_backend = get_vit_attn_backend(
             head_size=self.hidden_size_per_attention_head,
             dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         self.use_upstream_fa = False
 
@@ -362,6 +364,7 @@ class Qwen2VisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
@@ -423,7 +426,7 @@ class Qwen2VisionAttention(nn.Module):
         q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
 
-        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
+        q, k, v = (rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
         if rotary_pos_emb is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
@@ -497,6 +500,7 @@ class Qwen2VisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -512,6 +516,7 @@ class Qwen2VisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.mlp = Qwen2VisionMLP(
             dim,
@@ -662,6 +667,7 @@ class Qwen2VisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
 
@@ -703,6 +709,7 @@ class Qwen2VisionTransformer(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
+                    attn_backend_override=attn_backend_override,
                 )
                 for layer_idx in range(depth)
             ]
@@ -716,7 +723,9 @@ class Qwen2VisionTransformer(nn.Module):
             use_data_parallel=use_data_parallel,
         )
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
             torch.get_default_dtype()
@@ -1356,12 +1365,18 @@ class Qwen2VLForConditionalGeneration(
         if multimodal_config.get_limit_per_prompt(
             "image"
         ) or multimodal_config.get_limit_per_prompt("video"):
+            attn_backend_override = (
+                multimodal_config.mm_encoder_attn_backend
+                if multimodal_config is not None
+                else None
+            )
             self.visual = Qwen2VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
+                attn_backend_override=attn_backend_override,
             )
         else:
             self.visual = None
@@ -1561,12 +1576,12 @@ class Qwen2VLForConditionalGeneration(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 

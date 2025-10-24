@@ -95,6 +95,10 @@ class KVConnectorBase_V1(ABC):
         )
         self._connector_metadata: KVConnectorMetadata | None = None
         self._vllm_config = vllm_config
+        if vllm_config.kv_transfer_config is not None:
+            self._kv_transfer_config = vllm_config.kv_transfer_config
+        else:
+            raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._role = role
 
     @property
@@ -409,7 +413,8 @@ class KVConnectorBase_V1(ABC):
     def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations
-        via this connector.
+        via this connector. This method is used to initialize the
+        KVOutputAggregator, overwriting the default world_size.
 
         Returns:
             int: expected sending or receiving completion count.

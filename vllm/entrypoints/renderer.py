@@ -17,7 +17,7 @@ from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 
 @dataclass(frozen=True)
@@ -26,12 +26,12 @@ class RenderConfig:
 
     max_length: int | None = None
     """Maximum allowable total input token length. If provided,
-    token inputs longer than this raise ``ValueError``."""
+    token inputs longer than this raise `ValueError`."""
 
     truncate_prompt_tokens: int | None = None
-    """Number of tokens to keep. ``None`` means no truncation.
-    ``0`` yields an empty list (and skips embeds).
-    ``-1`` maps to ``model_config.max_model_len``."""
+    """Number of tokens to keep. `None` means no truncation.
+    `0` yields an empty list (and skips embeds).
+    `-1` maps to `model_config.max_model_len`."""
 
     add_special_tokens: bool | None = True
     """Whether to add model-specific special tokens during tokenization."""
@@ -107,10 +107,10 @@ class BaseRenderer(ABC):
 
         Args:
             prompt_or_prompts: One of:
-                - ``str``: Single text prompt.
-                - ``list[str]``: Batch of text prompts.
-                - ``list[int]``: Single pre-tokenized sequence.
-                - ``list[list[int]]``: Batch of pre-tokenized sequences.
+                - `str`: Single text prompt.
+                - `list[str]`: Batch of text prompts.
+                - `list[int]`: Single pre-tokenized sequence.
+                - `list[list[int]]`: Batch of pre-tokenized sequences.
             config: Render configuration controlling how prompts are prepared
                 (e.g., tokenization and length handling).
 
@@ -134,9 +134,9 @@ class BaseRenderer(ABC):
         Convert text/token and/or base64-encoded embeddings inputs into
         engine-ready prompt objects using a unified RenderConfig.
 
-        At least one of ``prompt_or_prompts`` or ``prompt_embeds`` must be
+        At least one of `prompt_or_prompts` or `prompt_embeds` must be
         provided and non-empty. If both are omitted or empty (e.g., empty
-        string and empty list), a ``ValueError`` is raised.
+        string and empty list), a `ValueError` is raised.
 
         Args:
             prompt_or_prompts: Text or token inputs to include.
@@ -150,20 +150,23 @@ class BaseRenderer(ABC):
                 Engine-ready prompt objects.
 
         Raises:
-            ValueError: If both ``prompt_or_prompts`` and ``prompt_embeds``
+            ValueError: If both `prompt_or_prompts` and `prompt_embeds`
                 are omitted or empty (decoder prompt cannot be empty), or if
                 length limits are exceeded.
         """
         raise NotImplementedError
 
-    @classmethod
     def load_prompt_embeds(
-        cls,
+        self,
         prompt_embeds: bytes | list[bytes],
         truncate_prompt_tokens: Annotated[int, Field(ge=0)] | None = None,
         cache_salt: str | None = None,
     ) -> list[EngineEmbedsPrompt]:
         """Load and validate base64-encoded embeddings into prompt objects."""
+        if not self.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            )
 
         def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
             tensor = torch.load(

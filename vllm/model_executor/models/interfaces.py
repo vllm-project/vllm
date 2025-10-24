@@ -24,7 +24,7 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model
 
@@ -673,7 +673,9 @@ class MixtureOfExperts(Protocol):
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
-    return isinstance(model, MixtureOfExperts)
+    return (
+        isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
+    )
 
 
 @runtime_checkable
@@ -875,27 +877,6 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
-
-
-@runtime_checkable
-class SupportsV0Only(Protocol):
-    """Models with this interface are not compatible with V1 vLLM."""
-
-    supports_v0_only: ClassVar[Literal[True]] = True
-
-
-@overload
-def supports_v0_only(model: type[object]) -> TypeIs[type[SupportsV0Only]]: ...
-
-
-@overload
-def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]: ...
-
-
-def supports_v0_only(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsV0Only]] | TypeIs[SupportsV0Only]:
-    return getattr(model, "supports_v0_only", False)
 
 
 @runtime_checkable

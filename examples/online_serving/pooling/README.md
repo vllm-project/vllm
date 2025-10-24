@@ -6,10 +6,28 @@
 python examples/online_serving/pooling/cohere_rerank_client.py
 ```
 
+## Embedding requests base64 encoding_format usage
+
+```bash
+python examples/online_serving/pooling/embedding_requests_base64_client.py
+```
+
+## Embedding requests bytes encoding_format usage
+
+```bash
+python examples/online_serving/pooling/embedding_requests_bytes_client.py
+```
+
 ## Jinaai rerank usage
 
 ```bash
 python examples/online_serving/pooling/jinaai_rerank_client.py
+```
+
+## Multi vector retrieval usage
+
+```bash
+python examples/online_serving/pooling/multi_vector_retrieval_client.py
 ```
 
 ## Named Entity Recognition (NER) usage

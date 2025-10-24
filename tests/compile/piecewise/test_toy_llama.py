@@ -9,6 +9,7 @@ if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,12 +21,13 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from .. import silly_attention  # noqa: F401
@@ -257,27 +259,13 @@ def tractable_computation(
 
 
 @torch.inference_mode
-def run_model(
-    llama_config, use_compile: bool, use_inductor: bool, split_attn: bool = False
-) -> torch.Tensor:
-    if use_compile:
-        compilation_config = CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
-            use_cudagraph=True,
-            use_inductor=use_inductor,
-            cudagraph_capture_sizes=[1, 2],
-        )
-        if split_attn:
-            compilation_config.splitting_ops = ["silly::attention"]
-        cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
-    else:
-        compilation_config = CompilationConfig(
-            level=CompilationLevel.NO_COMPILATION,
-        )
-        cudagraph_runtime_mode = CUDAGraphMode.NONE
+def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
+    # Start with a fresh copy to make sure there's no cache dir sharing
+    compile_config = deepcopy(compile_config)
+    cudagraph_runtime_mode = compile_config.cudagraph_mode
 
     vllm_config = VllmConfig(
-        compilation_config=compilation_config, additional_config=llama_config
+        compilation_config=compile_config, additional_config=llama_config
     )
     with set_current_vllm_config(vllm_config):
         model = (
@@ -338,8 +326,24 @@ def run_model(
             return output.cpu()
 
 
-@pytest.mark.parametrize("use_inductor", [True, False])
-def test_toy_llama(use_inductor: bool):
+@pytest.mark.parametrize(
+    "backend, use_inductor_graph_partition",
+    [
+        ("eager", False),  # No inductor
+        ("inductor", False),  # Inductor, Dynamo partition
+        ("inductor", True),  # Inductor, Inductor partition
+    ],
+)
+def test_toy_llama(
+    backend: str, use_inductor_graph_partition: bool, monkeypatch, tmp_path
+):
+    # We disable the vLLM compile cache into a new tmp dir for 1 reason:
+    # 1. To make sure we can properly track the number of Inductor compilations.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition only supported in torch>=2.9")
+
     # compare output with and without piecewise compilation
 
     llama_config = LlamaConfig(
@@ -350,6 +354,23 @@ def test_toy_llama(use_inductor: bool):
         hidden_size=128, mlp_size=256, vocab_size=128, num_layers=2, tractable_init=True
     )
 
+    compile_config_no_compile = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        backend="eager",
+    )
+
+    compile_config_no_split = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        use_inductor_graph_partition=use_inductor_graph_partition,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        backend=backend,
+        cudagraph_capture_sizes=[1, 2],
+    )
+
+    compile_config_split = deepcopy(compile_config_no_split)
+    compile_config_split.splitting_ops = ["silly::attention"]
+
     outputs = []
     with compilation_counter.expect(
         num_graphs_seen=0,
@@ -358,53 +379,44 @@ def test_toy_llama(use_inductor: bool):
         num_backend_compilations=0,
         num_cudagraph_captured=0,
     ):
-        outputs.append(run_model(llama_config, use_inductor=False, use_compile=False))
-    run_model(tractable_config, use_inductor=False, use_compile=False)
+        outputs.append(run_model(llama_config, compile_config_no_compile))
 
-    if use_inductor:
+    run_model(tractable_config, compile_config_no_compile)
+
+    if backend == "inductor":
         kwargs = {"num_inductor_compiles": 1, "num_eager_compiles": 0}
     else:
         kwargs = {"num_eager_compiles": 1, "num_inductor_compiles": 0}
 
     with compilation_counter.expect(
-        # One graph for the model
-        num_graphs_seen=1,
+        num_graphs_seen=1,  # one graph for the model
         num_piecewise_graphs_seen=1,
         num_piecewise_capturable_graphs_seen=1,
-        # num_piecewise_capturable_graphs_seen
-        num_backend_compilations=1,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_backend_compilations=1,  # num_piecewise_capturable_graphs_seen
         num_cudagraph_captured=2,
         **kwargs,
     ):
-        outputs.append(
-            run_model(llama_config, use_inductor=use_inductor, use_compile=True)
-        )
-    run_model(tractable_config, use_inductor=use_inductor, use_compile=True)
+        outputs.append(run_model(llama_config, compile_config_no_split))
+
+    run_model(tractable_config, compile_config_no_split)
+
+    if use_inductor_graph_partition:
+        num_piecewise_fx = 1
+        num_piecewise_capturable_fx = 1
+    else:
+        num_piecewise_fx = 2 * llama_config.num_layers + 1
+        num_piecewise_capturable_fx = 1 + llama_config.num_layers
 
     with compilation_counter.expect(
         num_graphs_seen=1,  # one graph for the model
-        num_piecewise_graphs_seen=2 * llama_config.num_layers + 1,  # 2 * num_layers + 1
-        num_piecewise_capturable_graphs_seen=1
-        + llama_config.num_layers,  # 1 + num_layers
-        num_backend_compilations=1
-        + llama_config.num_layers,  # num_piecewise_capturable_graphs_seen
-        num_cudagraph_captured=2
-        * (
-            1 + llama_config.num_layers
-        ),  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_piecewise_graphs_seen=num_piecewise_fx,
+        num_piecewise_capturable_graphs_seen=num_piecewise_capturable_fx,
+        num_backend_compilations=num_piecewise_capturable_fx,
+        # num_cudagraph_sizes * num_partitions
+        num_cudagraph_captured=2 * (1 + llama_config.num_layers),
     ):
-        outputs.append(
-            run_model(
-                llama_config,
-                use_inductor=use_inductor,
-                use_compile=True,
-                split_attn=True,
-            )
-        )
-    run_model(
-        tractable_config, use_inductor=use_inductor, use_compile=True, split_attn=True
-    )
+        outputs.append(run_model(llama_config, compile_config_split))
+    run_model(tractable_config, compile_config_split)
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])
@@ -436,14 +448,14 @@ def benchmark():
     for piecewise in [False, True]:
         if piecewise:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 use_cudagraph=True,
                 splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
 
