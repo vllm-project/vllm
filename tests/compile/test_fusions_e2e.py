@@ -132,6 +132,9 @@ def test_attn_quant(
         mode = CUDAGraphMode.FULL_AND_PIECEWISE
         splitting_ops: list[str] | None = None
     else:
+        # FIXME: Llama-4-Scout-17B-16E-Instruct-FP8 + FlashInfer + Blackwell end at
+        # CUDAGraphMode.NONE here because it derives an attention backend that
+        # does not support full cudagraphs
         mode = CUDAGraphMode.FULL_DECODE_ONLY
         splitting_ops = []
 

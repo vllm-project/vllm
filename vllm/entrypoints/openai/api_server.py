@@ -41,11 +41,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    load_chat_template,
-    resolve_hf_chat_template,
-    resolve_mistral_chat_template,
-)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -90,7 +85,6 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
-    LoRAModulePath,
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
@@ -107,19 +101,16 @@ from vllm.entrypoints.utils import (
     cli_env_setup,
     load_aware_call,
     log_non_default_args,
+    process_chat_template,
+    process_lora_modules,
     with_cancellation,
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (
-    Device,
-    FlexibleArgumentParser,
-    decorate_logs,
-    set_ulimit,
-)
+from vllm.utils import Device, FlexibleArgumentParser, set_ulimit
 from vllm.utils.network_utils import is_valid_ipv6_address
+from vllm.utils.system_utils import decorate_logs
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
@@ -1655,32 +1646,9 @@ async def init_app_state(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
-    resolved_chat_template = load_chat_template(args.chat_template)
-    if resolved_chat_template is not None:
-        # Get the tokenizer to check official template
-        tokenizer = await engine_client.get_tokenizer()
-
-        if isinstance(tokenizer, MistralTokenizer):
-            # The warning is logged in resolve_mistral_chat_template.
-            resolved_chat_template = resolve_mistral_chat_template(
-                chat_template=resolved_chat_template
-            )
-        else:
-            hf_chat_template = resolve_hf_chat_template(
-                tokenizer=tokenizer,
-                chat_template=None,
-                tools=None,
-                model_config=vllm_config.model_config,
-            )
-
-            if hf_chat_template != resolved_chat_template:
-                logger.warning(
-                    "Using supplied chat template: %s\n"
-                    "It is different from official chat template '%s'. "
-                    "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template,
-                    args.model,
-                )
+    resolved_chat_template = await process_chat_template(
+        args.chat_template, engine_client, vllm_config.model_config
+    )
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -1699,19 +1667,12 @@ async def init_app_state(
         else {}
     )
 
-    lora_modules = args.lora_modules
-    if default_mm_loras:
-        default_mm_lora_paths = [
-            LoRAModulePath(
-                name=modality,
-                path=lora_path,
-            )
-            for modality, lora_path in default_mm_loras.items()
-        ]
-        if args.lora_modules is None:
-            lora_modules = default_mm_lora_paths
-        else:
-            lora_modules += default_mm_lora_paths
+    default_mm_loras = (
+        vllm_config.lora_config.default_mm_loras
+        if vllm_config.lora_config is not None
+        else {}
+    )
+    lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
@@ -1787,7 +1748,12 @@ async def init_app_state(
                 log_error_stack=args.log_error_stack,
             )
         )
-        if ("token_embed" in supported_tasks or "token_classify" in supported_tasks)
+        if (
+            any(
+                task in supported_tasks
+                for task in ["token_embed", "token_classify", "plugin"]
+            )
+        )
         else None
     )
     state.openai_serving_embedding = (
