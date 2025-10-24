@@ -164,6 +164,40 @@ class CoreEngineProcManager:
         }
 
 
+class CoreEngineProcManagerExecutorOnly(CoreEngineProcManager):
+    """
+    Utility class to handle creation, readiness, and shutdown
+    of background processes used by the AsyncLLM and LLMEngine.
+    """
+
+    def __init__(
+        self,
+        target_fn: Callable,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+    ) -> None:
+        context = get_mp_context()
+        common_kwargs = {
+            "vllm_config": vllm_config,
+            "executor_class": executor_class,
+        }
+        global_index = vllm_config.parallel_config.distributed_node_rank
+        self.process = context.Process(
+            target=target_fn, name=f"EngineCore_{global_index}", kwargs=common_kwargs
+        )
+        self.process.start()
+
+    def finished_procs(self) -> dict[str, int]:
+        """Returns dict of proc name -> exit code for any finished procs."""
+        if self.process.exitcode is not None:
+            return {self.process.name: self.process.exitcode}
+        return {}
+
+    def join_first(self):
+        """Wait for any process to exit."""
+        connection.wait(self.process.sentinel)
+
+
 @contextlib.contextmanager
 def set_device_control_env_var(
     vllm_config: VllmConfig, local_dp_rank: int

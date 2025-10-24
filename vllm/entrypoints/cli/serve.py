@@ -24,8 +24,12 @@ from vllm.utils import (
     get_tcp_uri,
     set_process_title,
 )
-from vllm.v1.engine.core import EngineCoreProc
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
+from vllm.v1.engine.core import EngineCoreProc, ExecutorOnlyEngineProc
+from vllm.v1.engine.utils import (
+    CoreEngineProcManager,
+    CoreEngineProcManagerExecutorOnly,
+    launch_core_engines,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
@@ -51,7 +55,8 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
-
+        if args.distributed_node_size > 1 and args.distributed_node_rank > 0:
+            args.headless = True
         if args.headless or args.api_server_count < 1:
             run_headless(args)
         else:
@@ -81,6 +86,13 @@ def cmd_init() -> list[CLISubcommand]:
 
 
 def run_headless(args: argparse.Namespace):
+    if args.distributed_node_size > 1:
+        run_headless_mp(args)
+    else:
+        run_headless_dp(args)
+
+
+def run_headless_dp(args: argparse.Namespace):
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
@@ -135,6 +147,41 @@ def run_headless(args: argparse.Namespace):
         log_stats=not engine_args.disable_log_stats,
     )
 
+    try:
+        engine_manager.join_first()
+    finally:
+        logger.info("Shutting down.")
+        engine_manager.close()
+
+
+def run_headless_mp(args: argparse.Namespace) -> None:
+    if args.distributed_node_rank == 0:
+        raise ValueError("first node in distributed mode can't be run in headless mode")
+
+    # Catch SIGTERM and SIGINT to allow graceful shutdown.
+    def signal_handler(signum, frame):
+        logger.debug("Received %d signal.", signum)
+        raise SystemExit
+
+    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    usage_context = UsageContext.OPENAI_API_SERVER
+    vllm_config = engine_args.create_engine_config(
+        usage_context=usage_context, headless=True
+    )
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    headnode_address = f"{args.distributed_master_ip}:{args.distributed_master_port}"
+    logger.info(
+        "Launching executor only engine in headless mode, with head node address %s.",
+        headnode_address,
+    )
+
+    # Create the engines.
+    engine_manager = CoreEngineProcManagerExecutorOnly(
+        target_fn=ExecutorOnlyEngineProc.run_engine_core,
+        vllm_config=vllm_config,
+        executor_class=Executor.get_class(vllm_config),
+    )
     try:
         engine_manager.join_first()
     finally:
