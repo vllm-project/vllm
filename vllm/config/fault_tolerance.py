@@ -32,6 +32,11 @@ class FaultToleranceConfig:
     The port to use for fault reporting.
     """
 
+    fault_pub_port: int = 22877
+    """
+    the port used for publishing fault
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

@@ -54,7 +54,7 @@ async def generate(request: Request) -> Response:
     return await _generate(request_dict, raw_request=request)
 
 
-@app.post("/fault_tolerance/send_fault_tolerance_instruction")
+@app.post("/fault_tolerance/apply")
 async def send_fault_tolerance_instruction(request: Request) -> Response:
     """Generate completion for the request.
 
@@ -74,7 +74,7 @@ async def send_fault_tolerance_instruction(request: Request) -> Response:
     )
 
 
-@app.get("/fault_tolerance/get_fault_info")
+@app.get("/fault_tolerance/status")
 async def get_fault_info() -> Response:
     """Health check."""
     assert engine is not None
