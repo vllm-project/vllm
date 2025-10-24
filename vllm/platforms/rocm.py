@@ -230,79 +230,132 @@ class RocmPlatform(Platform):
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on ROCm.")
+
         if use_mla:
             if not use_v1:
                 raise RuntimeError(
                     "MLA attention backends require the V1 engine. "
                     "Set VLLM_USE_V1=1 to enable them."
                 )
-
             from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
                 is_aiter_mla_enabled,
             )
 
+            # Determine MLA backend
             if selected_backend is None:
-                selected_backend = (
-                    _Backend.ROCM_AITER_MLA
-                    if is_aiter_mla_enabled() or block_size == 1
-                    else _Backend.TRITON_MLA
-                )
+                # When AITER is enabled and block_size is 1, use AITER MLA
+                # Otherwise, use TRITON MLA
+                if is_aiter_mla_enabled() and block_size == 1:
+                    selected_backend = _Backend.ROCM_AITER_MLA
+                else:
+                    selected_backend = _Backend.TRITON_MLA
 
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
                     return "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
                 raise ValueError(
-                    f" The selected backend, {selected_backend.name},"
+                    f"The selected backend, {selected_backend.name}, "
                     f"does not support block size {block_size}."
                 )
+
             if selected_backend == _Backend.ROCM_AITER_MLA:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend on V1 engine.")
                     return (
-                        "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                        "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
                     )
                 raise ValueError(
-                    f" The selected backend, {selected_backend.name},"
-                    f"does not support block size {block_size}."
+                    f"The selected backend, {selected_backend.name}, "
+                    f"does not support block size {block_size}. "
                     "(currently only supports block size 1)"
                 )
+
             raise ValueError(
-                f" The selected backend, {selected_backend.name},"
+                f"The selected backend, {selected_backend.name}, "
                 f"is not MLA type while requested for MLA backend."
             )
 
-        if envs.VLLM_USE_V1:
-            if selected_backend == _Backend.FLEX_ATTENTION:
-                logger.info("Using FlexAttention backend on V1 engine.")
-                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
-            if (
-                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
-            ) or selected_backend == _Backend.ROCM_AITER_FA:
+        if not use_v1:
+            raise RuntimeError(
+                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
+                "to select a supported backend."
+            )
+
+        # Handle explicit backend selection first
+        if selected_backend == _Backend.FLEX_ATTENTION:
+            logger.info("Using FlexAttention backend on V1 engine.")
+            return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+
+        if selected_backend == _Backend.TRITON_ATTN:
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+
+        if selected_backend == _Backend.ROCM_ATTN:
+            logger.info("Using Rocm Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
+
+        if selected_backend == _Backend.ROCM_AITER_FA:
+            if on_gfx9():
                 logger.info("Using Aiter Flash Attention backend on V1 engine.")
                 return (
                     "vllm.v1.attention.backends."
                     "rocm_aiter_fa.AiterFlashAttentionBackend"
                 )
-            if (
-                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
-            ) or selected_backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+            else:
+                raise ValueError(
+                    f"The selected backend, {selected_backend.name}, "
+                    "is only supported on gfx9 architectures."
+                )
+
+        if selected_backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+            logger.info("Using Aiter Unified Attention backend on V1 engine.")
+            return (
+                "vllm.v1.attention.backends."
+                "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend"
+            )
+
+        # Handle automatic backend selection based on environment variables
+        if selected_backend is None:
+            # Priority 1: Check for AITER Unified Attention (must check before MHA)
+            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
                 logger.info("Using Aiter Unified Attention backend on V1 engine.")
                 return (
                     "vllm.v1.attention.backends."
                     "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend"
                 )
-            if (
-                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
-                or selected_backend == _Backend.ROCM_ATTN
-            ):
-                # rocm specific backend, with aiter and/or
-                #   triton prefix-prefill
+
+            # Priority 2: Check for AITER MHA (Flash Attention)
+            # Only use if explicitly enabled (not just VLLM_ROCM_USE_AITER=1)
+            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
+                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                return (
+                    "vllm.v1.attention.backends."
+                    "rocm_aiter_fa.AiterFlashAttentionBackend"
+                )
+
+            # Priority 3: Check for ROCM_ATTN (prefill-decode split)
+            if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
                 logger.info("Using Rocm Attention backend on V1 engine.")
                 return "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
-            # default case, using triton unified attention
+
+            # Priority 4: Check for AITER enabled without specific flags
+            # This defaults to AITER FA only if MHA is not explicitly disabled
+            if (
+                envs.VLLM_ROCM_USE_AITER
+                and on_gfx9()
+                and envs.VLLM_ROCM_USE_AITER_MHA is not False
+            ):
+                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                return (
+                    "vllm.v1.attention.backends."
+                    "rocm_aiter_fa.AiterFlashAttentionBackend"
+                )
+
+            # Default: Triton Unified Attention
             logger.info("Using Triton Attention backend on V1 engine.")
             return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+
         raise RuntimeError(
             "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
             "to select a supported backend."
