@@ -60,11 +60,13 @@ class RebalanceTaskArgs:
     num_nodes: int
     num_gpus: int
 
+
 @dataclass
 class ExpertMapperArgs:
     num_moe_layers: int
     policy_type: Literal["greedy", "bipartite"]
     phyhsical_to_logical_map: torch.Tensor
+
 
 @dataclass
 class EplbState:
@@ -385,7 +387,7 @@ class EplbState:
         expert_mapper_args = ExpertMapperArgs(
             model.num_moe_layers,
             parallel_config.eplb_config.expert_mapper_policy_type,
-            None
+            None,
         )
         return cls(
             physical_to_logical_map,
@@ -523,10 +525,9 @@ class EplbState:
                 )
                 input_args = self.rebalance_task_args
 
-                assert(
-                    self.expert_mapper_args is not None,
-                    "expert_mapper_args is not initialized",
-                )
+                assert (
+                    self.expert_mapper_args is not None
+                ), "expert_mapper_args is not initialized"
                 self.expert_mapper_args.phyhsical_to_logical_map = (
                     self.physical_to_logical_map.cpu()
                 )

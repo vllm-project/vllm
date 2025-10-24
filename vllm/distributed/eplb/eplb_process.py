@@ -84,7 +84,6 @@ class EPLBProcess:
         log2phy_all = []
         layer_ids = []
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
-
             send_info_this_rank = send_info.get(self.rank_id, [])
             recv_info_this_rank = recv_info.get(self.rank_id, [])
             send_all.append(send_info_this_rank)
