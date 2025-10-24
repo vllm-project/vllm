@@ -112,6 +112,7 @@ class WorkerGuard:
             # Use blocking receive - will wait until a message arrives
             has_msg, cmd_str = self._recv_cmd()
             if has_msg:
+                assert cmd_str is not None
                 method, method_params = deserialize_method_call(cmd_str)
                 logger.info(
                     "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s] Executing command: %s",
