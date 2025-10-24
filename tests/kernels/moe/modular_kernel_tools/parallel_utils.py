@@ -12,7 +12,7 @@ from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import init_distributed_environment, initialize_model_parallel
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 ## Parallel Processes Utils
 

@@ -78,10 +78,18 @@ def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInf
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
+def get_vit_attn_backend(
+    head_size: int,
+    dtype: torch.dtype,
+    *,
+    attn_backend_override: _Backend | None = None,
+) -> _Backend:
     """
     Get the available attention backend for Vision Transformer.
     """
+    if attn_backend_override is not None:
+        return attn_backend_override
+
     # Lazy import to avoid circular dependency
     from vllm.attention.selector import get_env_variable_attn_backend
 

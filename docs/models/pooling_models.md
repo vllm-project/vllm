@@ -185,10 +185,10 @@ print(f"Data: {data!r}")
 
 Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
-- [Pooling API][pooling-api] is similar to `LLM.encode`, being applicable to all types of pooling models.
-- [Embeddings API][embeddings-api] is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for embedding models.
-- [Classification API][classification-api] is similar to `LLM.classify` and is applicable to sequence classification models.
-- [Score API][score-api] is similar to `LLM.score` for cross-encoder models.
+- [Pooling API](../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
+- [Embeddings API](../serving/openai_compatible_server.md#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for embedding models.
+- [Classification API](../serving/openai_compatible_server.md#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
+- [Score API](../serving/openai_compatible_server.md#score-api) is similar to `LLM.score` for cross-encoder models.
 
 ## Matryoshka Embeddings
 
