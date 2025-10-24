@@ -1104,8 +1104,8 @@ class OpenAIServing:
                     "or Responses API requests."
                 )
                 raise NotImplementedError(msg)
-            request = tool_parser(tokenizer).adjust_request(  # type: ignore
-                request=request
+            request = tool_parser(tokenizer).adjust_request(
+                request=request  # type: ignore
             )
 
         if tokenizer is None:
