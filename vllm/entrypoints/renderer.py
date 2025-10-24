@@ -3,6 +3,7 @@
 
 import asyncio
 import io
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Annotated
@@ -232,7 +233,13 @@ class CompletionRenderer(BaseRenderer):
             for prompt_input in parse_raw_prompts(prompt_or_prompts)
         )
 
-        return await asyncio.gather(*tasks)
+        print("_create_prompt", (time.perf_counter() - time.a) * 1000)
+
+        a = await asyncio.gather(*tasks)
+
+        print("asyncio.gather", (time.perf_counter() - time.a) * 1000)
+
+        return a
 
     async def render_prompt_and_embeds(
         self,
