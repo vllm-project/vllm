@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
-    ECConnectorBase, ECConnectorMetadata, ECConnectorRole)
-from vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store import (
-    ECMooncakeStore)
+    ECConnectorBase,
+    ECConnectorMetadata,
+    ECConnectorRole,
+)
+from vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store import ECMooncakeStore
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -34,7 +36,7 @@ class ECMooncakeStorageConnectorMetadata(ECConnectorMetadata):
     def __init__(self):
         self.mm_datas = []
 
-    def add_mm_data(self, mm_data:MMMeta):
+    def add_mm_data(self, mm_data: MMMeta):
         self.mm_datas.append(mm_data)
 
 
@@ -72,8 +74,11 @@ class ECMooncakeStorageConnector(ECConnectorBase):
             )
             return
 
-        mm_hashes = [mm_data.mm_hash for mm_data in metadata.mm_datas
-                    if mm_data.mm_hash not in encoder_cache]
+        mm_hashes = [
+            mm_data.mm_hash
+            for mm_data in metadata.mm_datas
+            if mm_data.mm_hash not in encoder_cache
+        ]
         tensors = self.store.batch_get(mm_hashes)
 
         for mm_hash, ec_cache in zip(mm_hashes, tensors):
@@ -100,7 +105,7 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         assert encoder_cache is not None
         assert mm_hash is not None
         self.store.batch_put([mm_hash], [encoder_cache[mm_hash]])
-    
+
     def wait_for_save(self):
         self.store.wait_for_put()
 
@@ -120,10 +125,11 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         mm_hashes = [feature.identifier for feature in request.mm_features]
         return self.store.batch_exists(mm_hashes)
 
-    def update_state_after_alloc(self, 
-                                 request: "Request",
-                                 index: int,
-                                ) -> None:
+    def update_state_after_alloc(
+        self,
+        request: "Request",
+        index: int,
+    ) -> None:
         """
         Update ECConnector state after encoder cache allocation.
         """
@@ -149,4 +155,3 @@ class ECMooncakeStorageConnector(ECConnectorBase):
             meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
         return meta
-

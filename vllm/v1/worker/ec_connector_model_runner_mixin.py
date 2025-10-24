@@ -35,7 +35,7 @@ class ECConnectorModelRunnerMixin:
             return
         connector = get_ec_transfer()
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
-    
+
     @staticmethod
     def maybe_wait_for_ec_save() -> None:
         if has_ec_transfer():
