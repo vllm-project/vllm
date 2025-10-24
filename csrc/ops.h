@@ -29,6 +29,11 @@ torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
   return new_tensor;
 }
 
+std::tuple<torch::Tensor, torch::Tensor> arg_topk_impl(
+    torch::Tensor& input,
+    int64_t k,
+    bool sorted);
+
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
