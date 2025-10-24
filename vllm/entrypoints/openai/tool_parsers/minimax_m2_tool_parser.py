@@ -94,8 +94,8 @@ class MinimaxM2ToolParser(ToolParser):
                 "tokens in the tokenizer!"
             )
 
-        logger.warning(
-            f"vLLM Successfully import tool parser {self.__class__.__name__} !"
+        logger.info(
+            "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 
     def _generate_tool_call_id(self) -> str:
@@ -173,64 +173,60 @@ class MinimaxM2ToolParser(ToolParser):
         self, invoke_str: str, tools: list | None
     ) -> ToolCall | None:
         """Parse a single <invoke> block."""
-        try:
-            # Extract function name
-            name_match = re.search(r"^([^>]+)", invoke_str)
-            if not name_match:
-                return None
-
-            function_name = self._extract_name(name_match.group(1))
-
-            # Get parameter configuration
-            param_config = {}
-            if tools:
-                for tool in tools:
-                    if (
-                        hasattr(tool, "function")
-                        and tool.function.name == function_name
-                    ):
-                        if hasattr(tool.function, "parameters"):
-                            params = tool.function.parameters
-                            if isinstance(params, dict) and "properties" in params:
-                                param_config = params["properties"]
-                            break
-
-            # Extract parameters
-            param_dict = {}
-            for match in self.parameter_complete_regex.findall(invoke_str):
-                param_match = re.search(r"^([^>]+)>(.*)", match, re.DOTALL)
-                if param_match:
-                    param_name = self._extract_name(param_match.group(1))
-                    param_value = param_match.group(2).strip()
-                    if param_value.startswith("\n"):
-                        param_value = param_value[1:]
-                    if param_value.endswith("\n"):
-                        param_value = param_value[:-1]
-
-                    # Get parameter type
-                    param_type = "string"
-                    if param_name in param_config:
-                        if (
-                            isinstance(param_config[param_name], dict)
-                            and "type" in param_config[param_name]
-                        ):
-                            param_type = param_config[param_name]["type"]
-
-                    # Convert value
-                    param_dict[param_name] = self._convert_param_value(
-                        param_value, param_type
-                    )
-
-            return ToolCall(
-                type="function",
-                function=FunctionCall(
-                    name=function_name,
-                    arguments=json.dumps(param_dict, ensure_ascii=False),
-                ),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to parse invoke: {e}")
+        # Extract function name
+        name_match = re.search(r"^([^>]+)", invoke_str)
+        if not name_match:
             return None
+
+        function_name = self._extract_name(name_match.group(1))
+
+        # Get parameter configuration
+        param_config = {}
+        if tools:
+            for tool in tools:
+                if (
+                    hasattr(tool, "function")
+                    and tool.function.name == function_name
+                    and hasattr(tool.function, "parameters")
+                ):
+                    params = tool.function.parameters
+                    if isinstance(params, dict) and "properties" in params:
+                        param_config = params["properties"]
+                    break
+
+        # Extract parameters
+        param_dict = {}
+        for match in self.parameter_complete_regex.findall(invoke_str):
+            param_match = re.search(r"^([^>]+)>(.*)", match, re.DOTALL)
+            if param_match:
+                param_name = self._extract_name(param_match.group(1))
+                param_value = param_match.group(2).strip()
+                if param_value.startswith("\n"):
+                    param_value = param_value[1:]
+                if param_value.endswith("\n"):
+                    param_value = param_value[:-1]
+
+                # Get parameter type
+                param_type = "string"
+                if (
+                    param_name in param_config
+                    and isinstance(param_config[param_name], dict)
+                    and "type" in param_config[param_name]
+                ):
+                    param_type = param_config[param_name]["type"]
+
+                # Convert value
+                param_dict[param_name] = self._convert_param_value(
+                    param_value, param_type
+                )
+
+        return ToolCall(
+            type="function",
+            function=FunctionCall(
+                name=function_name,
+                arguments=json.dumps(param_dict, ensure_ascii=False),
+            ),
+        )
 
     def extract_tool_calls(
         self,
@@ -300,9 +296,6 @@ class MinimaxM2ToolParser(ToolParser):
 
         # Store request for type conversion
         if not previous_text or self.tool_call_start_token in delta_text:
-            logger.warning(
-                f"[M2_STREAMING] RESET triggered: previous_text={previous_text}; current_text={current_text}; delta_text={delta_text}"
-            )
             self._reset_streaming_state()
             self.streaming_request = request
 
@@ -423,7 +416,7 @@ class MinimaxM2ToolParser(ToolParser):
                     self.in_function = True
 
                     # Add to prev_tool_call_arr immediately when we detect a tool call
-                    # Each tool call should be recorded regardless of function name (same function can be called multiple times)
+                    # Each tool call should be recorded regardless of function name
                     # Ensure we don't add the same tool call index multiple times
                     if len(self.prev_tool_call_arr) <= self.current_tool_index:
                         self.prev_tool_call_arr.append(
@@ -434,9 +427,6 @@ class MinimaxM2ToolParser(ToolParser):
                         )
 
                     # Send header with function info
-                    logger.warning(
-                        f"[M2_STREAMING] Sending tool call header: {self.current_function_name}"
-                    )
                     return DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
@@ -479,7 +469,7 @@ class MinimaxM2ToolParser(ToolParser):
                     # Close JSON
                     self.json_closed = True
 
-                    # Extract complete tool call to update prev_tool_call_arr with final arguments
+                    # Extract complete tool call
                     # Find the invoke content
                     invoke_start = tool_text.find(self.invoke_start_prefix) + len(
                         self.invoke_start_prefix
@@ -497,15 +487,14 @@ class MinimaxM2ToolParser(ToolParser):
                                 if self.streaming_request
                                 else None,
                             )
-                            if parsed_tool:
-                                # Update existing entry in prev_tool_call_arr with complete args based on current tool index
-                                if self.current_tool_index < len(
-                                    self.prev_tool_call_arr
-                                ):
-                                    args = parsed_tool.function.arguments
-                                    self.prev_tool_call_arr[self.current_tool_index][
-                                        "arguments"
-                                    ] = args
+                            if parsed_tool and self.current_tool_index < len(
+                                self.prev_tool_call_arr
+                            ):
+                                # Update existing entry in prev_tool_call_arr
+                                args = parsed_tool.function.arguments
+                                self.prev_tool_call_arr[self.current_tool_index][
+                                    "arguments"
+                                ] = args
                         except Exception:
                             pass  # Ignore parsing errors during streaming
 
@@ -518,8 +507,7 @@ class MinimaxM2ToolParser(ToolParser):
                         ]
                     )
 
-                    # Reset state for next tool - but keep in_function True until tool call actually ends
-                    # Don't set in_function = False here, it will be set when tool call truly ends
+                    # Reset state for next tool
                     self.json_closed = True
                     self.in_function = False
                     self.accumulated_params = {}
@@ -581,7 +569,7 @@ class MinimaxM2ToolParser(ToolParser):
                         else:
                             # Neither found, check if tool call is complete
                             if self.invoke_end_token in tool_text:
-                                # Tool call is complete, so parameter must be complete too
+                                # Tool call and parameter is complete
                                 param_end_idx = len(value_text)
                             else:
                                 # Still streaming, wait for more content
@@ -603,26 +591,24 @@ class MinimaxM2ToolParser(ToolParser):
                                 if (
                                     hasattr(tool, "function")
                                     and tool.function.name == self.current_function_name
+                                    and hasattr(tool.function, "parameters")
                                 ):
-                                    if hasattr(tool.function, "parameters"):
-                                        params = tool.function.parameters
-                                        if (
-                                            isinstance(params, dict)
-                                            and "properties" in params
-                                        ):
-                                            param_config = params["properties"]
-                                        break
+                                    params = tool.function.parameters
+                                    if (
+                                        isinstance(params, dict)
+                                        and "properties" in params
+                                    ):
+                                        param_config = params["properties"]
+                                    break
 
                         # Get parameter type
                         param_type = "string"
-                        if self.current_param_name in param_config:
-                            if (
-                                isinstance(param_config[self.current_param_name], dict)
-                                and "type" in param_config[self.current_param_name]
-                            ):
-                                param_type = param_config[self.current_param_name][
-                                    "type"
-                                ]
+                        if (
+                            self.current_param_name in param_config
+                            and isinstance(param_config[self.current_param_name], dict)
+                            and "type" in param_config[self.current_param_name]
+                        ):
+                            param_type = param_config[self.current_param_name]["type"]
 
                         # Convert param value to appropriate type
                         converted_value = self._convert_param_value(

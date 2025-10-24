@@ -22,7 +22,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only DeepseekV2/DeepseekV3 model."""
+"""Inference-only MiniMaxM2 model."""
 
 from collections.abc import Iterable
 from typing import Any
@@ -279,9 +279,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
         # default to full rope theta
         swa_rope_theta = rope_theta if swa_rope_theta <= 0 else swa_rope_theta
         rope_theta = swa_rope_theta if attn_window_size is not None else rope_theta
-        print(
-            f"[M2-Mini] layer_idx: {layer_idx}, attn_window_size: {attn_window_size}, rope_theta: {rope_theta}"
-        )
 
         self.layer_idx = layer_idx
         self.self_attn = MiniMaxM2Attention(
@@ -330,14 +327,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        # if self.layer_idx == 61 and get_tensor_model_parallel_rank() == 0 and \
-        #     hidden_states.shape[0] > 1:
-        #     with open("/data/minimax-dialogue/users/neo/dumps/request_id.txt", "r") as f:
-        #         request_id = f.read()
-        #     print(f"request_id: {request_id} seq_len: {hidden_states.shape[0]}")
-        #     dump_dir = f"/data/minimax-dialogue/users/neo/dumps/layer_{self.layer_idx}_moe_input"
-        #     torch.save(hidden_states, f"{dump_dir}/{request_id}.pt")
-        #     self.count += 1
 
         hidden_states = self.block_sparse_moe(hidden_states)
 
@@ -417,15 +406,6 @@ class MiniMaxM2Model(nn.Module):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        # print(f"hidden_states.shape: {hidden_states.shape}")
-        # if get_tensor_model_parallel_rank() == 0 and \
-        #     hidden_states.shape[0] == 8191:
-        #     # hidden_states_max, _ = hidden_states.abs().max(dim=-1)
-        #     torch.save(hidden_states, f"/data/minimax-dialogue/users/neo/dumps/hidden_states_{self.count}.pt")
-        #     outlier_counts = (hidden_states > 100000).sum(dim=-1)
-        #     torch.save(outlier_counts, f"/data/minimax-dialogue/users/neo/dumps/outlier_counts_{self.count}.pt")
-        #     print(self.count)
-        #     self.count += 1
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -439,7 +419,6 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
         self.quant_config = quant_config
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
-        print(config)
         self.model = MiniMaxM2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
