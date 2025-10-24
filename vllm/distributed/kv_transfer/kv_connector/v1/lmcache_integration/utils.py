@@ -128,7 +128,8 @@ def create_lmcache_metadata(
                                     vllm_config)
 
     Returns:
-        tuple[LMCacheEngineMetadata, LMCacheEngineConfig]
+        tuple[LMCacheEngineMetadata, LMCacheEngineConfig]: a tuple of
+            LMCacheEngineConfig and LMCacheEngineMetadata
     """
     # Third Party
     # First Party
