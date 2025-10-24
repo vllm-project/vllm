@@ -1,23 +1,35 @@
 #!/bin/bash
 set -xe
 
+# script to run accuracy tests for disaggregated prefill/decode
+# optionally enable ucx fault injection with --enable-fault-injection flag
+
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
+ENABLE_FAULT_INJECTION=false
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
       KV_BUFFER_DEVICE="$2"
       shift 2
       ;;
+    --enable-fault-injection)
+      ENABLE_FAULT_INJECTION=true
+      shift
+      ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--enable-fault-injection]"
       exit 1
       ;;
   esac
 done
 
-echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
+if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
+  echo "Running tests with kv_buffer_device=$KV_BUFFER_DEVICE and FAULT INJECTION ENABLED"
+else
+  echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
+fi
 
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
 if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
@@ -49,9 +61,39 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 2048; fi)}  # limit sequence length for fault injection tests
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
+
+# Install ucx-fault-injector if fault injection is enabled
+if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
+  UCX_INJECTOR_DIR="${GIT_ROOT}/.ucx-fault-injector"
+  echo "Installing ucx-fault-injector to ${UCX_INJECTOR_DIR}..."
+  mkdir -p "${UCX_INJECTOR_DIR}"
+  cd "${UCX_INJECTOR_DIR}"
+
+  # Download and extract the latest release
+  TARBALL="ucx-fault-injector-linux-amd64.tar.gz"
+  curl -LO "https://github.com/wseaton/ucx-fault-injector/releases/latest/download/${TARBALL}"
+  tar xzf "${TARBALL}" --strip-components=1
+  rm "${TARBALL}"
+
+  # Set path to the shared library
+  export UCX_FAULT_INJECTOR_LIB="${UCX_INJECTOR_DIR}/libucx_fault_injector.so"
+  export UCX_FAULT_CLIENT="${UCX_INJECTOR_DIR}/ucx-fault-client"
+
+  if [[ ! -f "$UCX_FAULT_INJECTOR_LIB" ]]; then
+    echo "ERROR: ucx-fault-injector library not found at $UCX_FAULT_INJECTOR_LIB"
+    exit 1
+  fi
+
+  echo "ucx-fault-injector installed successfully"
+  echo "Library: $UCX_FAULT_INJECTOR_LIB"
+  echo "Client: $UCX_FAULT_CLIENT"
+
+  cd "${GIT_ROOT}"
+fi
 
 SMI_BIN=$(which nvidia-smi || which rocm-smi)
 
@@ -126,7 +168,11 @@ run_tests_for_model() {
     # Calculate side channel port. Avoid clash with with TP workers.
     SIDE_CHANNEL_PORT=$((5559 + i))
 
-    echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
+    if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
+      echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT (no fault injection)"
+    else
+      echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
+    fi
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
@@ -140,6 +186,11 @@ run_tests_for_model() {
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
+
+    # Add max model len if set
+    if [[ -n "$MAX_MODEL_LEN" ]]; then
+      BASE_CMD="${BASE_CMD} --max-model-len $MAX_MODEL_LEN"
+    fi
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -168,20 +219,43 @@ run_tests_for_model() {
     # Calculate side channel port
     SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
 
-    echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
+    if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
+      echo "Starting decode instance $i on GPU $GPU_ID, port $PORT WITH FAULT INJECTION"
+    else
+      echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
+    fi
 
-    # Build the command with or without model-specific args
-    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
-    UCX_NET_DEVICES=all \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
-    vllm serve $model_name \
-    --port $PORT \
-    --enforce-eager \
-    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --disable-hybrid-kv-cache-manager \
-    --kv-transfer-config '$KV_CONFIG'"
-  
+    # Build the command with fault injection env vars if enabled
+    if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
+      BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+      VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
+      UCX_NET_DEVICES=all \
+      VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+      UCX_LOG_LEVEL=debug \
+      UCX_FAULT_DEBUG=1 \
+      NCCL_DEBUG=INFO \
+      NIXL_LOG_LEVEL=DEBUG \
+      VLLM_LOGGING_LEVEL=DEBUG \
+      VLLM_WORKER_MULTIPROC_METHOD=spawn \
+      VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+      RUST_LOG=debug \
+      LD_PRELOAD=$UCX_FAULT_INJECTOR_LIB \
+      vllm serve $model_name \
+      --port $PORT \
+      --enforce-eager \
+      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      --kv-transfer-config '$KV_CONFIG'"
+    else
+      BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+      VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
+      UCX_NET_DEVICES=all \
+      VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+      vllm serve $model_name \
+      --port $PORT \
+      --enforce-eager \
+      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      --kv-transfer-config '$KV_CONFIG'"
+    fi
   # DP-EP attention mode
   if [[ -z "$DP_EP" ]]; then
     BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
@@ -190,6 +264,11 @@ run_tests_for_model() {
     BASE_CMD="${BASE_CMD} --data-parallel-size $DECODER_TP_SIZE \
     --tensor-parallel-size 1 --enable-expert-parallel"
   fi
+
+    # Add max model len if set
+    if [[ -n "$MAX_MODEL_LEN" ]]; then
+      BASE_CMD="${BASE_CMD} --max-model-len $MAX_MODEL_LEN"
+    fi
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -215,6 +294,22 @@ run_tests_for_model() {
     wait_for_server $PORT
   done
 
+  # Configure fault injection AFTER decode instances have started
+  if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
+    echo "Configuring fault injection pattern via ucx-fault-client..."
+    sleep 2  # give the file watcher time to fully initialize
+
+    # Set fault pattern (fault every 16th operation)
+    $UCX_FAULT_CLIENT set-pattern OOOOOOOOOOOOOOOX
+
+    # Enable fault injection
+    $UCX_FAULT_CLIENT toggle
+
+    # Verify configuration
+    echo "Fault injection status:"
+    $UCX_FAULT_CLIENT status
+  fi
+
   # Build the command for the proxy server with all the hosts and ports
   PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
 
@@ -233,8 +328,7 @@ run_tests_for_model() {
   # Wait for the proxy to start
   sleep 5
 
-  # Run lm eval for this model
-  echo "Running tests for $model_name"
+  echo "Running accuracy tests for $model_name"
   TEST_MODEL=$model_name python3 -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
