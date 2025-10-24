@@ -2410,9 +2410,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
-                if self.parallel_config.eplb_config.enable_async:
-                    if self.eplb_state is not None:
-                        self.eplb_state.step_before_forward(self.get_model())
+                if self.parallel_config.eplb_config.enable_async and self.eplb_state:
+                    self.eplb_state.step_before_forward(self.get_model())
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 

@@ -51,6 +51,7 @@ from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
 
+
 @dataclass
 class RebalanceTaskArgs:
     global_expert_load_window: torch.Tensor
@@ -62,7 +63,7 @@ class RebalanceTaskArgs:
 @dataclass
 class ExpertMapperArgs:
     num_moe_layers: int
-    policy_type: Literal["greedy","bipartite"]
+    policy_type: Literal["greedy", "bipartite"]
     phyhsical_to_logical_map: torch.Tensor
 
 @dataclass
@@ -211,7 +212,7 @@ class EplbState:
     """
     Records the current moe layer being precessed for expert weight transfer.
     """
-    
+
     @staticmethod
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
@@ -381,9 +382,11 @@ class EplbState:
                 rank_mapping,
             )
             expert_rearrangement_step = 0
-        expert_mapper_args = ExpertMapperArgs()
-        expert_mapper_args.num_moe_layers = model.num_moe_layers
-        expert_mapper_args.policy_type = parallel_config.eplb_config.expert_mapper_policy_type
+        expert_mapper_args = ExpertMapperArgs(
+            model.num_moe_layers,
+            parallel_config.eplb_config.expert_mapper_policy_type,
+            None
+        )
         return cls(
             physical_to_logical_map,
             logical_to_physical_map,
@@ -393,9 +396,11 @@ class EplbState:
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
-            num_wait_worker_iterations=parallel_config.eplb_config.num_wait_worker_iterations,
+            num_wait_worker_iterations=(
+                parallel_config.eplb_config.num_wait_worker_iterations
+            ),
             enable_async=parallel_config.eplb_config.enable_async,
-            expert_mapper_args=expert_mapper_args
+            expert_mapper_args=expert_mapper_args,
         )
 
     def __post_init__(self):
@@ -518,7 +523,13 @@ class EplbState:
                 )
                 input_args = self.rebalance_task_args
 
-                self.expert_mapper_args.phyhsical_to_logical_map = self.physical_to_logical_map.cpu()
+                assert(
+                    self.expert_mapper_args is not None,
+                    "expert_mapper_args is not initialized",
+                )
+                self.expert_mapper_args.phyhsical_to_logical_map = (
+                    self.physical_to_logical_map.cpu()
+                )
                 expert_mapper_args = self.expert_mapper_args
 
                 self.rebalance_task(input_args, expert_mapper_args)
@@ -529,7 +540,7 @@ class EplbState:
                 + self.num_wait_worker_iterations
                 + model.num_moe_layers
             ):
-                self.expert_rearrangement_step = 0 
+                self.expert_rearrangement_step = 0
 
     def rearrange(
         self,
@@ -747,9 +758,10 @@ class EplbState:
         size = len(result)
         # check if queue length matches the of layers
         if size != model.num_moe_layers:
-            logger.info(f"size={size}, num_moe_layers={model.num_moe_layers}")
+            logger.info("size=%s, num_moe_layers=%s", size, model.num_moe_layers)
             raise ValueError(
-                f"Queue length {size} does not match the number of moe layers in the model"
+                f"Queue length {size} does not match "
+                "the number of moe layers in the model"
             )
         if layer_id < 0 or layer_id >= size:
             raise ValueError(f"Index {layer_id} out of range for queue of size {size}")
@@ -884,6 +896,7 @@ class EplbState:
         return self.expert_rearrangement_step == (
             self.expert_rearrangement_step_interval - 1
         )
+
     def compute_and_set_moe_load(self):
         """
         Computes the MoE load across all ranks and sets it in the shared dictionary.
@@ -991,7 +1004,6 @@ class EplbState:
         else:
             logger.error("Failed to submit rebalance task to async process")
         return None
-
 
     def __del__(self):
         """Clean up async process resources"""

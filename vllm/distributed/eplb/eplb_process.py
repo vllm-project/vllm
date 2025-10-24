@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
 import random
+from collections.abc import Callable
 from contextlib import suppress
 from multiprocessing import Queue
-from typing import Callable
 from queue import Empty
 
 import torch
@@ -13,7 +13,7 @@ import torch.distributed as dist
 from vllm.logger import init_logger
 
 from .eplb_expert_mapper import BipartiteExpertUpdate, GreedyExpertUpdate
-from .eplb_state import RebalanceTaskArgs, ExpertMapperArgs
+from .eplb_state import ExpertMapperArgs, RebalanceTaskArgs
 
 logger = init_logger(__name__)
 
@@ -44,7 +44,6 @@ class EPLBProcess:
         self._exception_queue: Queue | None = None
         self._step_counter = 0
         self._result: tuple | None = None
-        self._args: tuple | None = None
         self._is_running = False
         self._has_pending_task = False
         self._is_post_processing = False
@@ -65,13 +64,13 @@ class EPLBProcess:
             self._process = mp.Process(
                 target=self._worker_loop,
                 name="EPLBProcess",
-                args=(self._input_queue, self._result_queue, self._exception_queue)
+                args=(self._input_queue, self._result_queue, self._exception_queue),
             )
             self._process.start()
             self._is_running = True
             logger.debug("EPLB background process started")
 
-        except Exception as e:
+        except Exception:
             self.cleanup()
             raise
 
@@ -126,9 +125,8 @@ class EPLBProcess:
         num_ranks, num_global_expert = log2phy_map.shape
 
         row_indices = (
-            torch.arange(num_ranks).view(-1, 1).expand(
-                num_ranks, num_global_expert
-            ) * num_local_experts
+            torch.arange(num_ranks).view(-1, 1).expand(num_ranks, num_global_expert)
+            * num_local_experts
         )
         log2phy_map[log2phy_map != -1] += row_indices[log2phy_map != -1]
 
@@ -182,7 +180,8 @@ class EPLBProcess:
                             expert_mapper_args.num_moe_layers,
                             args.num_gpus,
                             -1,
-                    ))
+                        )
+                    )
                     if policy_type == "bipartite":
                         update_info = BipartiteExpertUpdate(
                             new_deployment, old_deployment
@@ -212,9 +211,7 @@ class EPLBProcess:
             logger.debug("EPLB worker process exiting")
 
     def submit_task(
-        self,
-        args: RebalanceTaskArgs,
-        expert_mapper_args: ExpertMapperArgs
+        self, args: RebalanceTaskArgs, expert_mapper_args: ExpertMapperArgs
     ) -> bool:
         """
         Submit a task to the asynchronous process
@@ -242,7 +239,6 @@ class EPLBProcess:
             # Put arguments to the input queue
             combined_args = (args, expert_mapper_args)
             self._input_queue.put(combined_args)
-            self._args = args
             self._has_pending_task = True
             self._step_counter = 0
             self._result = None
@@ -302,7 +298,7 @@ class EPLBProcess:
         # Send sentinel value to stop the process
         if self._input_queue:
             with suppress(Exception):
-                self._input_queue.put(None, None)
+                self._input_queue.put(None)
 
         if self._process:
             if self._process.is_alive():

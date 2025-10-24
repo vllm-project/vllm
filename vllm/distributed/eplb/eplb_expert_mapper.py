@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import networkx as nx
 import numpy as np
 import torch
 
-
-from typing import Dict, List
 
 class ComposeExpertUpdate:
     def __init__(self, updated_expert_maps, current_expert_maps):
@@ -39,8 +38,8 @@ class ComposeExpertUpdate:
             updated_layer = self.updated[layer_id]
             current_layer = self.current[layer_id]
 
-            expert_send_info_this_layer: Dict[int, List[int]] = {}
-            expert_recv_info_this_layer: Dict[int, List[int]] = {}
+            expert_send_info_this_layer: dict[int, list[int]] = {}
+            expert_recv_info_this_layer: dict[int, list[int]] = {}
 
             # Guard Clause: if there is no expert weight update,
             # avoid subsequent processing.
@@ -49,7 +48,7 @@ class ComposeExpertUpdate:
                     expert_send_info_this_layer,
                     expert_recv_info_this_layer,
                     self._map_to_yield(layer_id),
-                    layer_id
+                    layer_id,
                 )
 
             # Main planning
@@ -66,7 +65,7 @@ class ComposeExpertUpdate:
                 expert_send_info_this_layer,
                 expert_recv_info_this_layer,
                 self._map_to_yield(layer_id),
-                layer_id
+                layer_id,
             )
 
 
@@ -97,9 +96,9 @@ class BipartiteExpertUpdate(ComposeExpertUpdate):
         for idx in range(len(dst_rank_indices)):
             expert_id = experts_to_recv[idx].item()
             if expert_id not in src_ranks_set:
-                src_ranks_set[expert_id] = np.where(
-                    current_layer[:, expert_id] != -1
-                )[0]
+                src_ranks_set[expert_id] = np.where(current_layer[:, expert_id] != -1)[
+                    0
+                ]
 
         # Loop until all experts are scheduled
         while len(dst_rank_indices) > 0:
@@ -129,7 +128,7 @@ class BipartiteExpertUpdate(ComposeExpertUpdate):
             for src_rank, dst_rank in all_matches.items():
                 dst_rank = int(dst_rank)
                 assert src_rank != dst_rank
-                if graph_expert_update.nodes[src_rank].get('bipartite') == 0:
+                if graph_expert_update.nodes[src_rank].get("bipartite") == 0:
                     # currently not scheduled experts in rank dst_rank
                     experts_v = experts_to_recv[np.where(dst_rank_indices == dst_rank)]
                     # src: src_rank, dest: dst_rank, expert: expert_id
@@ -161,6 +160,7 @@ class BipartiteExpertUpdate(ComposeExpertUpdate):
 
 class GreedyExpertUpdate(ComposeExpertUpdate):
     """Greedy version."""
+
     def _prepare_internal(self, updated, current):
         # align devices
         if not torch.is_tensor(updated):
@@ -209,4 +209,3 @@ class GreedyExpertUpdate(ComposeExpertUpdate):
 
             send_dict[src_rank_id].append((dst_rank_id, expert_id))
             recv_dict[dst_rank_id].append((src_rank_id, expert_id))
-
