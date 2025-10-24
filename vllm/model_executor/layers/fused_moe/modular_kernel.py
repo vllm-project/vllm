@@ -952,22 +952,12 @@ class FusedMoEModularKernel(torch.nn.Module):
             # to global physical experts, after which it will not change.
             # expert_load_view: (num_physical_experts,)
             # expert_num_tokens: (local_num_physical_experts,)
-            if self.expert_map is None:
+            local_num_experts= expert_tokens_meta.expert_num_tokens.shape[0]
+            if self.expert_map is None or not torch.equal(self.expert_map, expert_map):
                 self.expert_map = expert_map.clone()
-                self.local_to_global_physical_experts = torch.nonzero(
-                    expert_map != -1, as_tuple=False
-                ).squeeze()
-            else:
-                if not torch.equal(self.expert_map, expert_map):
-                    self.expert_map = expert_map.clone()
-                    self.local_to_global_physical_experts = torch.nonzero(
-                        expert_map != -1,as_tuple=False
-                    ).squeeze()
-            expert_load_view.scatter_add_(
-                dim=0,
-                index=self.local_to_global_physical_experts,
-                src=expert_tokens_meta.expert_num_tokens,
-            )
+            
+            start_idx = int(torch.distributed.get_rank()) * local_num_experts
+            expert_load_view[start_idx:start_idx+local_num_experts] += expert_tokens_meta.expert_num_tokens
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
