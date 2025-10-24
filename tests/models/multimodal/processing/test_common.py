@@ -22,9 +22,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
     MistralTokenizer,
     cached_tokenizer_from_config,
     encode_tokens,
@@ -134,16 +132,19 @@ def get_model_ids_to_test():
 
 
 def get_text_token_prompts(
-    model_config: ModelConfig,
+    processor: BaseMultiModalProcessor,
     mm_data: MultiModalDataDict,
-    tokenizer: AnyTokenizer,
-    dummy_inputs: BaseDummyInputsBuilder,
 ):
+    dummy_inputs = processor.dummy_inputs
+    tokenizer = processor.info.get_tokenizer()
+    model_config = processor.info.ctx.model_config
+
     model_type = model_config.hf_config.model_type
     if model_type in MM_DATA_PATCHES:
         mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
-    mm_counts = {k: len(vs) for k, vs in mm_data.items()}
+    parsed_data = processor.data_parser.parse_mm_data(mm_data)
+    mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
     text_prompt: str | None
     token_prompt: list[int]
@@ -296,15 +297,8 @@ def _test_processing_correctness_one(
     batch_idx: int,
 ):
     model_type = model_config.hf_config.model_type
-    dummy_inputs = baseline_processor.dummy_inputs
-    tokenizer = baseline_processor.info.get_tokenizer()
 
-    text_prompt, token_prompt = get_text_token_prompts(
-        model_config,
-        mm_data,
-        tokenizer,
-        dummy_inputs,
-    )
+    text_prompt, token_prompt = get_text_token_prompts(baseline_processor, mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
     baseline_tokenized_result = baseline_processor.apply(

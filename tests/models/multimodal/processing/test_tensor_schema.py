@@ -91,7 +91,6 @@ def create_batched_mm_kwargs(
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
-    tokenizer = processor.info.get_tokenizer()
     supported_mm_limits = processing_info.get_supported_mm_limits()
     mm_counts = {
         modality: 3 if limit is None else limit
@@ -107,12 +106,7 @@ def create_batched_mm_kwargs(
         for modality, data in mm_data.items()
     }
 
-    text_prompt, token_prompt = get_text_token_prompts(
-        model_config,
-        resized_mm_data,
-        tokenizer,
-        dummy_inputs,
-    )
+    text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
 
     mm_kwargs = processor.apply(
         prompt=token_prompt if text_prompt is None else text_prompt,
