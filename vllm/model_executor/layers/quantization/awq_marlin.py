@@ -178,9 +178,9 @@ class AWQMarlinConfig(QuantizationConfig):
             isinstance(layer, ParallelLMHead) and self.lm_head_quantized
         ):
             if is_layer_skipped(
-                prefix, 
-                self.modules_to_not_convert, 
-                self.packed_modules_mapping, 
+                prefix,
+                self.modules_to_not_convert,
+                self.packed_modules_mapping,
                 skip_with_substr=True
             ):
                 return UnquantizedLinearMethod()
