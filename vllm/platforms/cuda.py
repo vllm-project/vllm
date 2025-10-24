@@ -298,9 +298,7 @@ class CudaPlatformBase(Platform):
             )
 
             if use_cutlassmla:
-                logger.info_once(
-                    "Using Cutlass MLA backend on V1 engine.", scope="local"
-                )
+                logger.info_once("Using Cutlass MLA backend on V1 engine.")
                 return "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
             if use_flashinfermla:
                 from vllm.v1.attention.backends.utils import set_kv_cache_layout

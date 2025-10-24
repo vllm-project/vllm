@@ -13,7 +13,7 @@ from logging import Logger
 from logging.config import dictConfig
 from os import path
 from types import MethodType
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import vllm.envs as envs
 
@@ -59,37 +59,20 @@ DEFAULT_LOGGING_CONFIG = {
 
 @lru_cache
 def _print_debug_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 3 to print the original caller's line info
-    logger.debug(msg, *args, stacklevel=3)
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.debug(msg, *args, stacklevel=2)
 
 
 @lru_cache
 def _print_info_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 3 to print the original caller's line info
-    logger.info(msg, *args, stacklevel=3)
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.info(msg, *args, stacklevel=2)
 
 
 @lru_cache
 def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 3 to print the original caller's line info
-    logger.warning(msg, *args, stacklevel=3)
-
-
-LogScope = Literal["process", "global", "local"]
-
-
-def _should_log_with_scope(scope: LogScope) -> bool:
-    """Decide whether to log based on scope"""
-    if scope == "global":
-        from vllm.distributed.parallel_state import is_global_first_rank
-
-        return is_global_first_rank()
-    if scope == "local":
-        from vllm.distributed.parallel_state import is_local_first_rank
-
-        return is_local_first_rank()
-    # default "process" scope: always log
-    return True
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.warning(msg, *args, stacklevel=2)
 
 
 class _VllmLogger(Logger):
@@ -101,43 +84,33 @@ class _VllmLogger(Logger):
         `intel_extension_for_pytorch.utils._logger`.
     """
 
-    def debug_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
-    ) -> None:
+    def debug_once(self, msg: str, *args: Hashable) -> None:
         """
         As [`debug`][logging.Logger.debug], but subsequent calls with
         the same message are silently dropped.
         """
-        if not _should_log_with_scope(scope):
-            return
         _print_debug_once(self, msg, *args)
 
-    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "process") -> None:
+    def info_once(self, msg: str, *args: Hashable) -> None:
         """
         As [`info`][logging.Logger.info], but subsequent calls with
         the same message are silently dropped.
         """
-        if not _should_log_with_scope(scope):
-            return
         _print_info_once(self, msg, *args)
 
-    def warning_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
-    ) -> None:
+    def warning_once(self, msg: str, *args: Hashable) -> None:
         """
         As [`warning`][logging.Logger.warning], but subsequent calls with
         the same message are silently dropped.
         """
-        if not _should_log_with_scope(scope):
-            return
         _print_warning_once(self, msg, *args)
 
 
 # Pre-defined methods mapping to avoid repeated dictionary creation
 _METHODS_TO_PATCH = {
-    "debug_once": _VllmLogger.debug_once,
-    "info_once": _VllmLogger.info_once,
-    "warning_once": _VllmLogger.warning_once,
+    "debug_once": _print_debug_once,
+    "info_once": _print_info_once,
+    "warning_once": _print_warning_once,
 }
 
 

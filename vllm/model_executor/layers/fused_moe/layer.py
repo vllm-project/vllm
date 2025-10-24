@@ -368,13 +368,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is available for EP"
                     " but not enabled, consider setting"
-                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
-                    scope="local",
+                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it."
                 )
             elif self.moe.moe_parallel_config.dp_size > 1:
                 logger.info_once(
-                    "FlashInfer CUTLASS MoE is currently not available for DP.",
-                    scope="local",
+                    "FlashInfer CUTLASS MoE is currently not available for DP."
                 )
             self.flashinfer_cutlass_moe = None  # type: ignore
 
