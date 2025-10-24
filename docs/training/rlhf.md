@@ -14,6 +14,7 @@ The following open-source RL libraries use vLLM for fast rollouts (sorted alphab
 - [TRL](https://github.com/huggingface/trl)
 - [Unsloth](https://github.com/unslothai/unsloth)
 - [verl](https://github.com/volcengine/verl)
+- [ms-swift](https://github.com/modelscope/ms-swift/tree/main)
 
 See the following basic examples to get started if you don't want to use an existing library:
 
