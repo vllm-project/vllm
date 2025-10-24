@@ -391,8 +391,7 @@ async def test_named_tool_use(
     messages.append(
         {
             "role": "user",
-            "content": f"{json_string}"
-            "Give me another one with a different name and age",
+            "content": "Give me another one with a different name and age",
         }
     )
 
