@@ -3,7 +3,7 @@
 # Standard
 import os
 import threading
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 import torch
 from lmcache.config import LMCacheEngineConfig as Config
@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
 
 # Thread-safe singleton storage
-_config_instance: Union[Config, V1Config, None] = None
+_config_instance: Config | V1Config | None = None
 _config_lock = threading.Lock()
 
 
@@ -28,7 +28,7 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def lmcache_get_or_create_config() -> Union[Config, V1Config]:
+def lmcache_get_or_create_config() -> Config | V1Config:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
     function will return the default configuration.
@@ -116,14 +116,18 @@ def create_lmcache_metadata(
     across multiple files.
 
     Args:
-        vllm_config: vLLM configuration object containing model, parallel, and
-                    cache configs (alternative to individual config parameters)
-        model_config: Model configuration (alternative to vllm_config)
-        parallel_config: Parallel configuration (alternative to vllm_config)
-        cache_config: Cache configuration (alternative to vllm_config)
+        vllm_config (VllmConfig): vLLM configuration object containing model,
+                                  parallel, and cache configs (alternative to
+                                  individual config parameters)
+        model_config (ModelConfig): Model configuration (alternative to
+                                    vllm_config)
+        parallel_config (ParallelConfig): Parallel configuration (alternative
+                                          to vllm_config)
+        cache_config (CacheConfig): Cache configuration (alternative to
+                                    vllm_config)
 
     Returns:
-        tuple: (LMCacheEngineMetadata, LMCacheEngineConfig)
+        tuple[LMCacheEngineMetadata, LMCacheEngineConfig]
     """
     # Third Party
     # First Party

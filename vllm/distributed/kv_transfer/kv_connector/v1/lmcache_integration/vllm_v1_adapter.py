@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from lmcache import utils
@@ -91,7 +91,7 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
-def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
+def extract_request_configs(sampling_params: SamplingParams) -> dict | None:
     request_configs = None
     if (
         sampling_params.extra_args is not None
@@ -125,14 +125,14 @@ class RequestTracker:
     num_saved_tokens: int = 0
 
     # Disagg spec for the request
-    disagg_spec: Optional[DisaggSpec] = None
+    disagg_spec: DisaggSpec | None = None
 
     # Multimodal hashes and positions
-    mm_hashes: Optional[list[str]] = None
-    mm_positions: Optional[list["PlaceholderRange"]] = None
+    mm_hashes: list[str] | None = None
+    mm_positions: list["PlaceholderRange"] | None = None
 
     # The configs of the request, includes tags and other configs
-    request_configs: Optional[dict] = None
+    request_configs: dict | None = None
 
     # Whether the request is in decode phase
     is_decode_phase = False
@@ -159,7 +159,6 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
             lmcache_cached_tokens (int): the number of tokens that are
                 cached in LMCache.
-            request_priority (int): the priority of the request
             skip_save (bool): whether the request cache should be saved
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
@@ -200,7 +199,7 @@ class RequestTracker:
     def update(
         self,
         new_token_ids: list[int],
-        new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
+        new_block_ids: tuple[list[int], ...] | None | list[int],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -241,20 +240,20 @@ class ReqMeta:
     is_last_prefill: bool = False
 
     # Skip save or not
-    save_spec: Optional[SaveSpec] = None
+    save_spec: SaveSpec | None = None
     # load_spec
-    load_spec: Optional[LoadSpec] = None
+    load_spec: LoadSpec | None = None
     # disagg spec
-    disagg_spec: Optional[DisaggSpec] = None
+    disagg_spec: DisaggSpec | None = None
     # the configs of the request
-    request_configs: Optional[dict] = None
+    request_configs: dict | None = None
 
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
         lmcache_chunk_size: int = 256,
-        load_spec: Optional[LoadSpec] = None,
+        load_spec: LoadSpec | None = None,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
     ) -> Optional["ReqMeta"]:
@@ -467,11 +466,11 @@ def _init_lmcache_engine(
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
-    vllm_gpu_connector: Union[
-        VLLMBufferLayerwiseGPUConnector,
-        VLLMPagedMemGPUConnectorV2,
-        VLLMPagedMemLayerwiseGPUConnector,
-    ]
+    vllm_gpu_connector: (
+        VLLMBufferLayerwiseGPUConnector
+        | VLLMPagedMemGPUConnectorV2
+        | VLLMPagedMemLayerwiseGPUConnector
+    )
 
     if use_mla and lmcache_config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
@@ -570,9 +569,7 @@ class LMCacheConnectorV1Impl:
         self.config = config
 
         self.async_loading = config.enable_async_loading
-        self.layerwise_retrievers: list[
-            Generator[Optional[torch.Tensor], None, None]
-        ] = []
+        self.layerwise_retrievers: list[Generator[torch.Tensor | None, None, None]] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
@@ -623,7 +620,7 @@ class LMCacheConnectorV1Impl:
         # request_id -> (vllm cached tokens, lmcache cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
 
-        self.kv_cache_manager: Optional[KVCacheManager] = None
+        self.kv_cache_manager: KVCacheManager | None = None
 
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
@@ -767,7 +764,6 @@ class LMCacheConnectorV1Impl:
 
         Args:
             forward_context (ForwardContext): the forward context.
-            **kwargs: additional arguments for the load operation
 
         Note:
             The number of elements in kv_caches and layer_names should be
@@ -911,7 +907,6 @@ class LMCacheConnectorV1Impl:
             kv_layer (torch.Tensor): the paged KV buffer of the current
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
-            **kwargs: additional arguments for the save operation.
         """
         assert self.lmcache_engine is not None
 
@@ -1098,7 +1093,7 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         return None, None
 
     ###################
@@ -1110,7 +1105,7 @@ class LMCacheConnectorV1Impl:
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Check for external KV cache hit.
 
@@ -1370,7 +1365,7 @@ class LMCacheConnectorV1Impl:
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         params = (
             request.kv_transfer_params
             if hasattr(request, "kv_transfer_params")
