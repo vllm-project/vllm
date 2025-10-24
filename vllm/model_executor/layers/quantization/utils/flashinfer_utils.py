@@ -28,6 +28,7 @@ class FlashinferMoeBackend(Enum):
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
     from flashinfer import next_positive_power_of_2
+
     # FlashInfer 0.2.10 has issues with larger tile sizes. Set to 8 for now.
     # TODO: Revert this to dynamic calculation once a new version of FlashInfer
     # with the necessary kernels is released.
