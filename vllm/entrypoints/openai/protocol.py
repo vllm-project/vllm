@@ -48,6 +48,12 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
+)
+
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
     from openai.types.responses import ResponseTextConfig
@@ -63,6 +69,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     ValidationInfo,
     field_serializer,
     field_validator,
@@ -83,18 +90,6 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
-
-EMBED_DTYPE_TO_TORCH_DTYPE = {
-    "float32": torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    # I'm not sure if other platforms' CPUs support the fp8 data format.
-    # EMBED_DTYPE only uses the fp8 data representation,
-    # does not use fp8 computation, and only occurs on the CPU.
-    # Apologize for any possible break.
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-}
 
 logger = init_logger(__name__)
 
@@ -482,6 +477,48 @@ class ResponsesRequest(OpenAIBaseModel):
                 raise ValueError(
                     "Parameter 'cache_salt' must be a non-empty string if provided."
                 )
+        return data
+
+    @model_validator(mode="before")
+    def function_call_parsing(cls, data):
+        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
+        This ensures Pydantic can properly resolve union types in the input field.
+        Function calls provided as dicts are converted to ResponseFunctionToolCall
+        objects before validation, while invalid structures are left for Pydantic
+        to reject with appropriate error messages.
+        """
+
+        input_data = data.get("input")
+
+        # Early return for None, strings, or bytes
+        # (strings are iterable but shouldn't be processed)
+        if input_data is None or isinstance(input_data, (str, bytes)):
+            return data
+
+        # Convert iterators (like ValidatorIterator) to list
+        if not isinstance(input_data, list):
+            try:
+                input_data = list(input_data)
+            except TypeError:
+                # Not iterable, leave as-is for Pydantic to handle
+                return data
+
+        processed_input = []
+        for item in input_data:
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                try:
+                    processed_input.append(ResponseFunctionToolCall(**item))
+                except ValidationError:
+                    # Let Pydantic handle validation for malformed function calls
+                    logger.debug(
+                        "Failed to parse function_call to ResponseFunctionToolCall, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+            else:
+                processed_input.append(item)
+
+        data["input"] = processed_input
         return data
 
 
@@ -1531,7 +1568,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str | None = None
     input: list[int] | list[list[int]] | str | list[str]
-    encoding_format: Literal["float", "base64"] = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1564,11 +1601,20 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
     )
-    embed_dtype: str = Field(
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
-            "What dtype to use for base64 encoding. Default to using "
-            "float32 for base64 encoding to match the OpenAI python client behavior."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
     # --8<-- [end:embedding-extra-params]
@@ -1585,7 +1631,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     model: str | None = None
     messages: list[ChatCompletionMessageParam]
 
-    encoding_format: Literal["float", "base64"] = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1650,11 +1696,20 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
     )
-    embed_dtype: str = Field(
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
-            "Which dtype to use for base64 encoding. Defaults to float32 "
-            "to match OpenAI API."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
     # --8<-- [end:chat-embedding-extra-params]
@@ -1695,22 +1750,27 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     if the served model does not use priority scheduling.
     """
     data: T
-    """
-    When using plugins IOProcessor plugins, the actual input is processed
-    by the plugin itself. Hence, we use a generic type for the request data
-    """
-    activation: bool = False
 
-    embed_dtype: str = Field(
+    encoding_format: EncodingFormat = "float"
+    embed_dtype: EmbedDType = Field(
         default="float32",
         description=(
-            "What dtype to use for base64 encoding. Default to using "
-            "float32 for base64 encoding to match the OpenAI python client behavior."
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
         ),
     )
 
     def to_pooling_params(self):
-        return PoolingParams(task="token_classify", activation=self.activation)
+        return PoolingParams()
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
@@ -1905,6 +1965,12 @@ class EmbeddingResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
+class EmbeddingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
+
+
 class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
@@ -1918,6 +1984,12 @@ class PoolingResponse(OpenAIBaseModel):
     model: str
     data: list[PoolingResponseData]
     usage: UsageInfo
+
+
+class PoolingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
 
 
 class ScoreResponseData(OpenAIBaseModel):

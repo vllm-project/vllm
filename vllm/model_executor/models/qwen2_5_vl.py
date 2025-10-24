@@ -72,7 +72,7 @@ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -1078,9 +1078,8 @@ class Qwen2_5_VLForConditionalGeneration(
 
     supports_encoder_tp_data = True
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,
