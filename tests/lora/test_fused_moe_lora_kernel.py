@@ -298,4 +298,3 @@ def test_fused_moe_lora_kernel(
     )
 
     torch.testing.assert_close(output, output2, atol=1e-1, rtol=1e-1)
-
