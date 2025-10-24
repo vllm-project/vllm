@@ -152,6 +152,11 @@ def init_custom_process_group(
         # different systems (e.g. RPC) in case the store is multi-tenant.
         store = PrefixStore(group_name, store)
 
+    # Get the rank of the current process in the default process group
+    my_rank = torch.distributed.get_rank()
+    global_ranks_in_group = [my_rank]  # Must include itself at least
+    logger.debug("global_ranks_in_group: %s", global_ranks_in_group)
+
     # NOTE: The pg_options parameter was renamed into backend_options in PyTorch 2.6.0
     # https://github.com/pytorch/pytorch/commit/a0c7029a75628cd5fa8df83c0de0ea98ee7fd844
     # We need to determine the appropriate parameter name based on PyTorch version
@@ -161,7 +166,7 @@ def init_custom_process_group(
     pg, _ = _new_process_group_helper(
         world_size,
         rank,
-        [],
+        global_ranks_in_group,
         backend,
         store,
         group_name=group_name,
@@ -170,6 +175,9 @@ def init_custom_process_group(
         device_id=device_id,
     )
 
-    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
-
+    _world.pg_group_ranks[pg] = {
+        global_rank: group_rank
+        for group_rank, global_rank in enumerate(global_ranks_in_group)
+    }
+    logger.debug("_world: %s", _world.pg_group_ranks[pg])
     return pg

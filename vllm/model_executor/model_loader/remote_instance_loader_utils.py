@@ -281,15 +281,16 @@ def send_weights_to_remote_instance(
             return {"success": False, "message": message}
 
         logger.info("Send weight in %s", send_group)
+        torch.cuda.empty_cache()
         state_dict = model.state_dict()
         for key, tensor in state_dict.items():
             if tensor.numel():
                 torch.distributed.broadcast(
                     tensor,
-                    src=0,
+                    group_src=0,
                     group=send_group,
                 )
-
+        torch.cuda.empty_cache()
         success = True
         message = (
             f"Succeeded to send weights through {master_address}:{group_port} "

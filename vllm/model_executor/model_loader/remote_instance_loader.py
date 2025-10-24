@@ -74,9 +74,8 @@ class RemoteInstanceModelLoader(BaseModelLoader):
             end = time.perf_counter()
 
             logger.info("Loading weights on %s using %s s", load_device, end - begin)
-            # process_weights_after_loading(model, model_config, target_device)
             process_weights_after_loading_mla(model, model_config)
-            # model.load_state_dict(model.state_dict(), strict=True)
+
         return model.eval()
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
@@ -132,6 +131,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
             t.start()
 
         try:
+            torch.cuda.empty_cache()
             logger.info("Recv weight in %s", client._model_update_group)
             start_get_weights_tic = time.time()
             with set_default_torch_dtype(model_config.dtype):
@@ -140,7 +140,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
                     if tensor.numel():
                         torch.distributed.broadcast(
                             tensor,
-                            src=0,
+                            group_src=0,
                             group=client._model_update_group,
                         )
 
@@ -149,7 +149,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
                 "finish getting all weights from remote instance, time used: %.4fs",
                 end_get_weights_tic - start_get_weights_tic,
             )
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
         except Exception as e:
             message = f"Failed to initialize custom process group: {e}."
             logger.error(message)
