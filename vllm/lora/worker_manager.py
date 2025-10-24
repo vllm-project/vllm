@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 import torch
 
@@ -40,7 +40,7 @@ class WorkerLoRAManager:
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
         self.embedding_padding_modules = embedding_padding_modules
-        self._cached_dummy_lora: Union[None, Literal[False], LoRAModel] = False
+        self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
@@ -94,7 +94,8 @@ class WorkerLoRAManager:
                     expected_lora_modules.extend(packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
-
+                if module == "experts":
+                    expected_lora_modules.append(module)
             expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
@@ -166,7 +167,7 @@ class WorkerLoRAManager:
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
-    def set_active_adapters(self, requests: set[Any], mapping: Optional[Any]) -> None:
+    def set_active_adapters(self, requests: set[Any], mapping: Any | None) -> None:
         self._apply_adapters(requests)
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)

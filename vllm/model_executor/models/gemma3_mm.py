@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
@@ -82,7 +82,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(Gemma3Processor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def _resolve_image_kwargs(
@@ -112,7 +112,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -182,7 +182,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> PromptUpdateDetails[str]:
         if processor is None:
             processor = self.get_hf_processor()
@@ -217,7 +217,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -256,7 +256,7 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -510,7 +510,7 @@ class Gemma3ForConditionalGeneration(
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<start_of_image>"
 
@@ -555,7 +555,7 @@ class Gemma3ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Gemma3ImageInputs]:
+    ) -> Gemma3ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -609,8 +609,8 @@ class Gemma3ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
@@ -692,7 +692,7 @@ class Gemma3ForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

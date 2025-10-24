@@ -41,8 +41,6 @@ which indicates that the logits processor is running. However, on a non-"cuda"
 device, the first and third requests would not repeat the same token.
 """
 
-from typing import Optional
-
 import torch
 
 from vllm import LLM, SamplingParams
@@ -91,7 +89,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
 

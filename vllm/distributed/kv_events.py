@@ -6,10 +6,11 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict
 from itertools import count
 from queue import Queue
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import msgspec
 import zmq
@@ -29,7 +30,7 @@ class EventBatch(
 ):
     ts: float
     events: list[Any]
-    data_parallel_rank: Optional[int] = None
+    data_parallel_rank: int | None = None
 
 
 class KVCacheEvent(
@@ -47,16 +48,16 @@ MEDIUM_GPU = "GPU"
 
 class BlockStored(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
-    parent_block_hash: Optional[ExternalBlockHash]
+    parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
-    lora_id: Optional[int]
-    medium: Optional[str]
+    lora_id: int | None
+    medium: str | None
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
-    medium: Optional[str]
+    medium: str | None
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -64,7 +65,7 @@ class AllBlocksCleared(KVCacheEvent):
 
 
 class KVEventBatch(EventBatch):
-    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
 
 
 class EventPublisher(ABC):
@@ -116,7 +117,7 @@ class ZmqEventPublisher(EventPublisher):
     Parameters
     ----------
     endpoint:
-        PUB address. Use ``tcp://*:5557`` to bind or ``tcp://host:5557`` to
+        PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
         connect.
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can
@@ -139,7 +140,7 @@ class ZmqEventPublisher(EventPublisher):
         self,
         data_parallel_rank: int,
         endpoint: str = "tcp://*:5557",
-        replay_endpoint: Optional[str] = None,
+        replay_endpoint: str | None = None,
         buffer_steps: int = 10_000,
         hwm: int = 100_000,
         max_queue_size: int = 100_000,
@@ -147,13 +148,13 @@ class ZmqEventPublisher(EventPublisher):
     ) -> None:
         # Storage
         super().__init__(data_parallel_rank)
-        self._event_queue = Queue[Optional[EventBatch]](maxsize=max_queue_size)
+        self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
 
         # ZMQ sockets
         self._ctx = zmq.Context.instance()
-        self._pub: Optional[zmq.Socket] = None
-        self._replay: Optional[zmq.Socket] = None
+        self._pub: zmq.Socket | None = None
+        self._replay: zmq.Socket | None = None
         self._dp_rank = data_parallel_rank
 
         self._endpoint = self.offset_endpoint_port(endpoint, self._dp_rank)
@@ -303,8 +304,8 @@ class ZmqEventPublisher(EventPublisher):
 
     @staticmethod
     def offset_endpoint_port(
-        endpoint: Optional[str], data_parallel_rank: int
-    ) -> Optional[str]:
+        endpoint: str | None, data_parallel_rank: int
+    ) -> str | None:
         """Helper function to offset the port in an endpoint by
             the data parallel rank.
 
@@ -349,15 +350,15 @@ class EventPublisherFactory:
 
     @classmethod
     def create(
-        cls, config: Optional[KVEventsConfig], data_parallel_rank: int = 0
+        cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
     ) -> EventPublisher:
         """Create publisher from a config mapping."""
-        if not config:
+        if config is None or config.publisher == "null":
             return NullEventPublisher()
 
         config_dict = asdict(config)
 
-        kind = config_dict.pop("publisher", "null")
+        kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")
         try:
             constructor = cls._registry[kind]

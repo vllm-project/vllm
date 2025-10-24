@@ -3,7 +3,7 @@
 import atexit
 import contextlib
 import tempfile
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from packaging import version
@@ -14,7 +14,7 @@ from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import find_nccl_include_paths
+from vllm.utils.nccl import find_nccl_include_paths
 
 logger = init_logger(__name__)
 
@@ -141,7 +141,7 @@ class nccl_symm_mem_context:
             or version.parse(torch.__version__) < version.parse("2.8.0.a0")
         )
         if self.disabled:
-            self.pynccl_comm: Optional[PyNcclCommunicator] = None
+            self.pynccl_comm: PyNcclCommunicator | None = None
             self._mem_pool_ctx: contextlib.AbstractContextManager[Any] = (
                 contextlib.nullcontext()
             )

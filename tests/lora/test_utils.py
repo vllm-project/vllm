@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import OrderedDict
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 from unittest.mock import patch
 
 import pytest
@@ -21,8 +21,7 @@ class LoRANameParserTestConfig(NamedTuple):
     name: str
     module_name: str
     is_lora_a: bool
-    is_bias: bool
-    weights_mapper: Optional[WeightsMapper] = None
+    weights_mapper: WeightsMapper | None = None
 
 
 def test_parse_fine_tuned_lora_name_valid():
@@ -37,36 +36,30 @@ def test_parse_fine_tuned_lora_name_valid():
             "base_model.model.model.embed_tokens.lora_embedding_A",
             "model.embed_tokens",
             True,
-            False,
         ),
         LoRANameParserTestConfig(
             "base_model.model.model.embed_tokens.lora_embedding_B",
             "model.embed_tokens",
-            False,
             False,
         ),
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_A.weight",
             "model.layers.9.mlp.down_proj",
             True,
-            False,
         ),
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_B.weight",
             "model.layers.9.mlp.down_proj",
-            False,
             False,
         ),
         LoRANameParserTestConfig(
             "language_model.layers.9.mlp.down_proj.lora_A.weight",
             "language_model.layers.9.mlp.down_proj",
             True,
-            False,
         ),
         LoRANameParserTestConfig(
             "language_model.layers.9.mlp.down_proj.lora_B.weight",
             "language_model.layers.9.mlp.down_proj",
-            False,
             False,
         ),
         # Test with WeightsMapper
@@ -74,7 +67,6 @@ def test_parse_fine_tuned_lora_name_valid():
             "base_model.model.model.layers.9.mlp.down_proj.lora_A.weight",
             "language_model.model.layers.9.mlp.down_proj",
             True,
-            False,
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
             ),
@@ -82,7 +74,6 @@ def test_parse_fine_tuned_lora_name_valid():
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_B.weight",
             "language_model.model.layers.9.mlp.down_proj",
-            False,
             False,
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
@@ -92,7 +83,6 @@ def test_parse_fine_tuned_lora_name_valid():
             "model.layers.9.mlp.down_proj.lora_A.weight",
             "language_model.model.layers.9.mlp.down_proj",
             True,
-            False,
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
             ),
@@ -101,14 +91,13 @@ def test_parse_fine_tuned_lora_name_valid():
             "model.layers.9.mlp.down_proj.lora_B.weight",
             "language_model.model.layers.9.mlp.down_proj",
             False,
-            False,
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
             ),
         ),
     ]
-    for name, module_name, is_lora_a, is_bias, weights_mapper in fixture:
-        assert (module_name, is_lora_a, is_bias) == parse_fine_tuned_lora_name(
+    for name, module_name, is_lora_a, weights_mapper in fixture:
+        assert (module_name, is_lora_a) == parse_fine_tuned_lora_name(
             name, weights_mapper
         )
 
