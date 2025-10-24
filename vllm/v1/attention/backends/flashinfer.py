@@ -1014,24 +1014,25 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        key_across_cp = get_pcp_group().all_gather(key.contiguous(), dim=0)
-        value_across_cp = get_pcp_group().all_gather(value.contiguous(), dim=0)
-        if (
-            self.pcp_world_size > 1
-            and attn_metadata.pcp_allgather_restore_idx is not None
-        ):
-            # Reorder kv after cp allgather.
+        if (self.pcp_world_size > 1):
+            assert attn_metadata.pcp_allgather_restore_idx is not None
+            # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
+            # ignores the padding from CUDA Graph. To be optimized for performance!
+            key_across_cp = get_pcp_group().all_gather(
+                key[:num_actual_tokens].contiguous(), dim=0
+            )
+            value_across_cp = get_pcp_group().all_gather(
+                value[:num_actual_tokens].contiguous(), dim=0
+            )
+            # Reorder kv after pcp allgather.
             # Note that there are duplicate decoding tokens,
             # but we only save the first one in kvcache.
-            key_across_cp = torch.index_select(
+            key = torch.index_select(
                 key_across_cp, 0, attn_metadata.pcp_allgather_restore_idx
             )
-            value_across_cp = torch.index_select(
+            value = torch.index_select(
                 value_across_cp, 0, attn_metadata.pcp_allgather_restore_idx
             )
-        key = key_across_cp
-        value = value_across_cp
-
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.

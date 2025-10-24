@@ -359,6 +359,15 @@ class VllmConfig:
                     ):
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+                    # prefill context parallel do not support full cudagraphs now.
+                    if self.parallel_config.prefill_context_parallel_size > 1:
+                        logger.warning(
+                            "Prefill context parallel (PCP) is enabled, which is "
+                            "incompatible with full CUDA graphs. Set "
+                            "cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
                     # decode context parallel do not support full cudagraphs now.
                     if self.parallel_config.decode_context_parallel_size > 1:
                         logger.warning(

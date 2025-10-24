@@ -2696,7 +2696,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 aux_hidden_states = None
 
             if self.pcp_world_size > 1:
-                hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+                # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
+                # ignores the padding from CUDA Graph.
+                hidden_states = get_pcp_group().all_gather(
+                    hidden_states[:num_scheduled_tokens],
+                    0,
+                )
                 hidden_states = torch.index_select(
                     hidden_states,
                     0,
