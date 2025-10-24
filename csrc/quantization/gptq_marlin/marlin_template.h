@@ -1279,7 +1279,7 @@ __global__ void Marlin(
   auto dequant_data = [&](int q, scalar_32bit_t* frag_b_ptr, int zp = 0) {
     if constexpr (a_type.size_bits() != b_type.size_bits()) {
       if constexpr (is_a_8bit && has_zp) {
-        dequant_and_sub_zp<scalar_32bit_t, b_type_id, dequant_skip_flop>(
+        sub_zp_and_dequant<scalar_32bit_t, b_type_id, dequant_skip_flop>(
             q, frag_b_ptr, zp);
       } else {
         dequant<scalar_32bit_t, b_type_id, dequant_skip_flop>(q, frag_b_ptr);
