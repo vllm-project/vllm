@@ -1440,7 +1440,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            dict(**mm_kwargs, text_kwargs={**tok_kwargs}),
         )
 
     def _hf_processor_applies_updates(

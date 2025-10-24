@@ -739,11 +739,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             # TODO(Isotr0py): Remove this patch after upstream fix PR
             # released and Transformers version update:
             # https://github.com/huggingface/transformers/pull/41473
-            if (
-                Version(TRANSFORMERS_VERSION) < Version("4.58.0")
-                and "truncation" not in mm_kwargs
-            ):
-                mm_kwargs["truncation"] = False
+            if Version(TRANSFORMERS_VERSION) < Version("4.58.0"):
+                # move truncation to audio_kwargs level to avoid conflict
+                # with tok_kwargs
+                mm_kwargs["audio_kwargs"] = {
+                    "truncation": mm_kwargs.pop("truncation", False)
+                }
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
