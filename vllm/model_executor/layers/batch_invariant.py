@@ -518,7 +518,8 @@ def matmul_batch_invariant(a, b, *, out=None):
         return result
     else:
         raise ValueError(
-            f"matmul_batch_invariant currently only supports 2D x 2D, 3D x 3D, 3D x 2D, 2D x 3D, and 4D x 4D, "
+            f"matmul_batch_invariant currently only supports 2D x 2D, 3D x 3D, "
+            f"3D x 2D, 2D x 3D, and 4D x 4D, "
             f"got shapes {a.shape} and {b.shape}"
         )
 
