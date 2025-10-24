@@ -101,6 +101,8 @@ from .utils import (AttentionGroup, MultiModalBudget,
                     gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
 
+from transformers.loss.loss_utils import ForCausalLMLoss
+
 if TYPE_CHECKING:
     import xgrammar as xgr
 
@@ -261,8 +263,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
-        # Training manager for LoRA training (initialized after model load)
-        self.training_manager = None
+        # Training manager
+        self.training_manager: Optional[TrainingManager] = None
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -585,7 +587,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
                 is_training=new_req_data.is_training,
-                training_config=new_req_data.training_config,
+                training_params=new_req_data.training_params,
+                labels=new_req_data.labels,
             )
             self.requests[req_id] = req_state
 
@@ -2383,16 +2386,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cudagraph_runtime_mode, batch_descriptor = \
                 self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
+        # TODO(girfan): Use a field from input_batch to check?
         # Check if this is a LoRA training request
         is_lora_training = all(req.lora_request is not None for req in scheduler_output.scheduled_new_reqs)
         if not is_lora_training:
             raise ValueError("Only LoRA training requests are supported.")
 
+        # TODO(girfan): Use a field from input_batch to check?
         # Check if any request is marked as evaluation
-        is_eval_batch = any(req.training_config and req.training_config.is_eval for req in scheduler_output.scheduled_new_reqs if req.is_training)
+        is_eval_batch = any(req.training_params and req.training_params.is_eval for req in scheduler_output.scheduled_new_reqs if req.is_training)
         if is_eval_batch:
             # Assert that all requests are evaluation requests
-            all_eval = all(req.training_config and req.training_config.is_eval for req in scheduler_output.scheduled_new_reqs if req.is_training)
+            all_eval = all(req.training_params and req.training_params.is_eval for req in scheduler_output.scheduled_new_reqs if req.is_training)
             if not all_eval:
                 raise ValueError("Mixed training and evaluation requests are not supported.")
 
@@ -2408,13 +2413,134 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), record_function_or_nullcontext("Forward")):
             # Keep torch.enable_grad() active for ENTIRE forward + loss computation
             with torch.enable_grad():
-                pass
+                self.model.train()
 
-        # TODO(girfan): Fix all these.
-        req_ids_output = self.input_batch.req_ids
-        req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids_output)}
-        training_losses = {}
-        training_logits = {}
+                # Get the embedding layer
+                embed_layer = self.model.model.embed_tokens
+
+                # Use torch.nn.functional.embedding directly to compute embeddings
+                # This is critical for gradient flow through embeddings
+                embed_weight = embed_layer.weight
+                if not embed_weight.requires_grad:
+                    # Temporarily enable gradients for the embedding lookup
+                    # This allows the gradient graph to be built through the embeddings
+                    embed_weight = embed_weight.detach().requires_grad_(True)
+
+                inputs_embeds = torch.nn.functional.embedding(input_ids, embed_weight)
+                input_ids = None  # Clear input_ids so the model uses inputs_embeds
+
+                model_output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+
+                # For training, model_output should be hidden states
+                hidden_states = model_output
+
+                # Handle pipeline parallelism
+                if not get_pp_group().is_last_rank:
+                    # Return the intermediate tensors for next PP stage
+                    assert isinstance(hidden_states, IntermediateTensors)
+                    return hidden_states
+
+                # Select the hidden states for the tokens we want
+                # (logits_indices was prepared in _prepare_inputs - for training it includes ALL tokens)
+                hidden_states = hidden_states[logits_indices]
+
+                # Compute logits for loss calculation
+                # For training, we need logits for all tokens (achieved via logits_indices)
+                logits = self.model.compute_logits(hidden_states, None)
+
+                per_req_logits = {}
+                all_logits = []
+                all_labels = []
+
+                req_id_to_index = {}
+                req_ids_output = []
+
+                offset = 0
+                for i, req_id in enumerate(self.input_batch.req_ids):
+                    if req_id is None:
+                        continue
+
+                    req_state = self.requests.get(req_id)
+                    if req_state is None or not req_state.is_training:
+                        continue
+
+                    # Get the number of tokens for this request
+                    num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                    if num_tokens == 0:
+                        raise ValueError(f"Request {req_id} has no tokens to train on.")
+
+                    # Store logits for this request
+                    request_logits = logits[offset:offset + num_tokens]
+                    per_req_logits[req_id] = request_logits
+                    all_logits.append(request_logits)
+
+                    # Get labels for this request
+                    labels = req_state.labels
+                    if not isinstance(labels, torch.Tensor):
+                        labels = torch.tensor(labels,
+                                                dtype=torch.long,
+                                                device=self.device)
+                    else:
+                        labels = labels.to(self.device)
+
+                    # Handle variable length sequences like PEFT does
+                    if len(labels) != num_tokens:
+                        # Pad or truncate labels to match sequence length
+                        if len(labels) < num_tokens:
+                            # Pad with -100 (ignored in loss computation)
+                            pad_length = num_tokens - len(labels)
+                            padding = torch.full((pad_length,), -100, dtype=labels.dtype, device=labels.device)
+                            labels = torch.cat([labels, padding])
+                        else:
+                            # Truncate to fit
+                            labels = labels[:num_tokens]
+
+                    # Store labels for this request
+                    all_labels.append(labels)
+
+                    # Store request ID and index
+                    req_ids_output.append(req_id)
+                    req_id_to_index[req_id] = len(req_ids_output) - 1
+
+                    # Update offset for next request
+                    offset += num_tokens
+
+                # Create a single tensor for loss and logits for this batch
+                logits = torch.stack(all_logits, dim=0)
+                labels = torch.stack(all_labels, dim=0)
+
+                # TODO(girfan): Check if this is correct.
+                # https://github.com/huggingface/transformers/issues/41842
+                num_items_in_batch = labels.ne(-100).sum()
+                logger.info(f"num_items_in_batch: {num_items_in_batch}")
+
+                # Compute loss for this batch
+                loss = ForCausalLMLoss(
+                    logits,
+                    labels,
+                    self.model.config.vocab_size,
+                    num_items_in_batch=num_items_in_batch
+                )
+
+                # Backward pass
+                loss.backward()
+
+                # Add loss to training manager
+                self.training_manager.add_loss(loss)
+
+                # Step the training manager
+                self.training_manager.step()
+
+            # Run the optimizer step if it is time to do so
+            if self.training_manager.should_run_optimizer_step():
+                self.training_manager.optimizer_step()
+                self.training_manager.reset()
 
         return ModelRunnerOutput(
             req_ids=req_ids_output,
@@ -2425,8 +2551,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=None,
             num_nans_in_logits={},
-            training_losses=training_losses,
-            training_logits=training_logits,
+            training_loss=self.training_manager.loss,
+            training_logits=per_req_logits,
         )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:

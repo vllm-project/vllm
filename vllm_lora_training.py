@@ -31,6 +31,11 @@ DATASET_SIZE = 1000
 EVAL_STEPS = 200
 TARGET_MODULES = ["q_proj", "v_proj"]
 
+# This determines the batch size in vLLM.
+# Since we want BATCH_SIZE num requests per batch and each request is MAX_LENGTH tokens,
+# we need to set MAX_NUM_BATCHED_TOKENS to BATCH_SIZE * MAX_LENGTH.
+MAX_NUM_BATCHED_TOKENS = BATCH_SIZE * MAX_LENGTH
+
 print("\nvLLM LORA TRAINING")
 print(f"  Epochs: {NUM_EPOCHS}")
 print(f"  Dataset size: {DATASET_SIZE}")
@@ -82,6 +87,7 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 llm = LLM(
     model=BASE_MODEL_PATH,
     max_model_len=MAX_LENGTH,
+    max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
     gpu_memory_utilization=0.5,
     enforce_eager=True,
     disable_log_stats=True,

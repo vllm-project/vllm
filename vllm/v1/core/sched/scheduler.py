@@ -973,9 +973,8 @@ class Scheduler(SchedulerInterface):
                 # Get training loss and logits if available
                 training_loss = None
                 training_logits = None
-                if request.is_training and model_runner_output.training_losses:
-                    training_loss = model_runner_output.training_losses.get(req_id)
-                if request.is_training and model_runner_output.training_logits:
+                if request.is_training:
+                    training_loss = model_runner_output.training_loss
                     training_logits = model_runner_output.training_logits.get(req_id)
 
                 # Add EngineCoreOutput for this Request.

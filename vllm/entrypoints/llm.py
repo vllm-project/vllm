@@ -57,7 +57,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
 from vllm.v1.sample.logits_processor import LogitsProcessor
-from vllm.v1.request import TrainingConfig
+from vllm.v1.request import TrainingParams
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
@@ -68,16 +68,16 @@ logger = init_logger(__name__)
 _R = TypeVar("_R", default=Any)
 
 
-def tokenize(tokenizer: AnyTokenizer, sample: dict[str, Any], max_length: Optional[int]) -> dict[str, Any]:
+def tokenize(tokenizer: AnyTokenizer, dataset: dict[str, Any], max_length: Optional[int]) -> dict[str, Any]:
     tokenized = tokenizer(
-        sample["text"],
+        dataset["text"],
         truncation=True,
         max_length=max_length,
         padding="max_length" if max_length is not None else "do_not_pad",
     )
 
     tokenized["labels"] = []
-    for text, input_ids in zip(sample["text"], tokenized["input_ids"]):
+    for text, input_ids in zip(dataset["text"], tokenized["input_ids"]):
         labels = input_ids[:]
 
         # Mask instruction part (only compute loss on response)
@@ -97,7 +97,6 @@ def tokenize(tokenizer: AnyTokenizer, sample: dict[str, Any], max_length: Option
         tokenized["labels"].append(labels)
 
     return tokenized
-
 
 
 class LLM:
@@ -495,7 +494,7 @@ class LLM:
 
     def _add_training_requests(
         self,
-        training_data: Sequence[dict[str, Any]],
+        training_data: Dataset,
         lora_request: LoRARequest,
         use_tqdm: bool,
     ) -> list[str]:
@@ -505,19 +504,20 @@ class LLM:
 
         request_ids = []
         for sample in training_data_iter:
-            training_config = TrainingConfig()
+            training_params = TrainingParams()
             request_id = self._add_training_request(
                 sample=sample,
-                training_config=training_config,
+                training_params=training_params,
                 lora_request=lora_request,
             )
             request_ids.append(request_id)
+        logger.info(f"Added {len(request_ids)} training requests")
         return request_ids
 
     def _add_training_request(
         self,
         sample: dict[str, Any],
-        training_config: TrainingConfig,
+        training_params: TrainingParams,
         lora_request: LoRARequest
     ) -> str:
         # Get EOS token ID
@@ -527,6 +527,7 @@ class LLM:
         # Create the training request
         prompt_token_ids = sample["input_ids"]
         prompt_str = sample["text"]
+        labels = sample["labels"]
         request_id = str(next(self.request_counter))
 
         training_request = Request(
@@ -537,7 +538,8 @@ class LLM:
             pooling_params=None,
             eos_token_id=eos_token_id,
             is_training=True,
-            training_config=training_config,
+            training_params=training_params,
+            labels=labels,
         )
 
         # Add to output processor first (needed for get_num_unfinished_requests)

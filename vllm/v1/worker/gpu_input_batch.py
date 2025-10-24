@@ -23,7 +23,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-
+from vllm.training_params import TrainingParams
 
 @dataclass
 class CachedRequestState:
@@ -45,7 +45,8 @@ class CachedRequestState:
     lora_request: Optional[LoRARequest] = None
 
     is_training: bool = False
-    training_config: Optional["TrainingConfig"] = None
+    training_params: Optional[TrainingParams] = None
+    labels: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -266,6 +267,11 @@ class InputBatch:
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
 
+        # Training state
+        self.is_training: bool = False
+        self.training_params: dict[str, TrainingParams] = {}
+        self.labels: dict[str, torch.Tensor] = {}
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -405,7 +411,8 @@ class InputBatch:
         elif request.is_training:
             # TODO(girfan): Does this self.is_training set it for the full batch?
             self.is_training = True
-            self.training_config = request.training_config
+            self.training_params[req_index] = request.training_params
+            self.labels[req_index] = request.labels
         else:
             raise NotImplementedError("Unrecognized request type")
 

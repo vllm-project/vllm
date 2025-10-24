@@ -113,7 +113,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
                 self.n_slices == 1)
 
-        self.reset_lora(index)
+        from vllm.lora.training_manager import TrainingManager
+        training_manager = TrainingManager.get_instance()
+        if not training_manager.is_registered_by_index(index):
+            # Only reset LoRA if not registered in training manager (i.e., not training mode)
+            self.reset_lora(index)
+
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
@@ -146,12 +151,88 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        if x.requires_grad or output.requires_grad:
+            return self._training_apply(x, output)
+        else:
+            return self._inference_apply(x, output)
+
+    def _inference_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_linear(
                 output, x, self.lora_a_stacked, self.lora_b_stacked,
                 self.lora_bias_stacked, 1.0, self.output_slices)
         if not current_platform.can_update_inplace():
             output = lora_output
+        return output
+
+    def _training_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        if len(self.lora_a_stacked) <= 0:
+            raise ValueError("No LoRA weights found")
+
+        from vllm.lora.training_manager import TrainingManager
+        training_manager = TrainingManager.get_instance()
+
+        # Apply ALL LoRAs in the stacked tensors (supports parallel training)
+        # We apply even zero-initialized LoRAs to enable gradient flow from scratch
+        max_loras = self.lora_a_stacked[0].shape[0]
+        for lora_idx in range(max_loras):
+            # Check if this slot might be active by looking at tensor shapes
+            # We don't check for zero values because LoRAs can start from zero during training
+            first_lora_a = self.lora_a_stacked[0][lora_idx, 0, :, :]
+
+            # Apply LoRA if the slot is properly shaped (not uninitialized)
+            if first_lora_a.numel() > 0:
+                # Apply this LoRA using PyTorch ops (supports autograd)
+                # For packed layers (e.g., QKV), apply each component to its output slice
+                output_offset = 0
+                # Determine which slices to apply (Q/V only for packed QKV)
+                try:
+                    from vllm.lora.layers.column_parallel_linear import (
+                        MergedQKVParallelLinearWithLoRA,
+                        QKVParallelLinearWithLoRA,
+                    )
+                    is_merged_qkv = isinstance(self, MergedQKVParallelLinearWithLoRA)
+                    is_single_qkv = isinstance(self, QKVParallelLinearWithLoRA)
+                except Exception:
+                    is_merged_qkv, is_single_qkv = False, False
+
+                if is_merged_qkv:
+                    indices = training_manager.get_qkv_indices_for_training()
+                elif is_single_qkv:
+                    raise ValueError(f"Single-slice QKV LoRA layer training is not supported")
+                else:
+                    raise ValueError(f"Unsupported LoRA layer: {self.__class__.__name__}")
+
+                # LoRA scale matching PEFT: alpha / r
+                lora_scale = 1.0
+                if hasattr(self, 'lora_config') and getattr(self, 'lora_config') is not None:
+                    alpha = getattr(self.lora_config, 'lora_alpha', 1.0)
+                    rank = getattr(self.lora_config, 'max_lora_rank', 1.0)
+                    if rank:
+                        lora_scale = float(alpha) / float(rank)
+
+                for i in indices:
+                    lora_a = self.lora_a_stacked[i][lora_idx, 0, :, :]  # [rank, input_size]
+                    lora_b = self.lora_b_stacked[i][lora_idx, 0, :, :]  # [output_size, rank]
+
+                    # Convert to bfloat16 to match PEFT
+                    target_dtype = output.dtype if output.dtype in [torch.bfloat16, torch.float16] else torch.bfloat16
+
+                    # Note:
+                    # For training LoRAs, scaling is applied here, not in models.py (lora.optimize()).
+                    # (x @ A^T) @ B^T * scaling
+                    lora_hidden = x.to(target_dtype) @ lora_a.T.to(target_dtype)
+                    lora_output = (lora_hidden @ lora_b.T.to(target_dtype)) * float(lora_scale)
+                    lora_output = lora_output.to(output.dtype)
+
+                    # Get the output slice size for this component
+                    slice_size = self.output_slices[i]
+
+                    # Add LoRA output to corresponding slice (build delta to avoid in-place on view)
+                    delta = torch.zeros_like(output)
+                    delta[:, output_offset:output_offset + slice_size] = lora_output
+                    output = output + delta
+                    output_offset += slice_size
 
         return output
 

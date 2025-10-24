@@ -148,34 +148,9 @@ training_args = TrainingArguments(
     weight_decay=0.0,
 )
 
-# Custom trainer to capture loss tensor for computation graph
-class ComputationGraphTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.loss_tensor = None
-        self.captured = False
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        result = super().compute_loss(model, inputs, return_outputs=return_outputs)
-
-        # Extract loss from result
-        if isinstance(result, tuple):
-            loss = result[0]
-        else:
-            loss = result
-
-        # Capture first training loss tensor for visualization
-        if not self.captured and hasattr(loss, 'requires_grad') and loss.requires_grad:
-            self.loss_tensor = loss.detach().clone().requires_grad_(True)
-            self.captured = True
-            print(f"\n[CAPTURE] Captured loss tensor for computation graph")
-            print(f"  Loss value: {loss.item():.6f}")
-            print(f"  Requires grad: {loss.requires_grad}")
-
-        return result
 
 print("\n[5/5] Training...")
-trainer = ComputationGraphTrainer(
+trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,

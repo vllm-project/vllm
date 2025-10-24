@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import torch
 import time
-from dataclasses import dataclass
 from collections.abc import Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.training_params import TrainingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -19,30 +20,6 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
-
-# TODO(girfan): Check which ones we need and which can be removed
-@dataclass
-class TrainingConfig:
-    """Configuration for training requests.
-
-    This allows a request to be used for training instead of inference.
-    Training requests compute loss and cache outputs for backward pass.
-    """
-    # Whether to compute loss for this request
-    compute_loss: bool = True
-
-    # Loss function to use (currently only cross_entropy supported)
-    loss_fn: str = "cross_entropy"
-
-    # Whether to cache activations for backward pass
-    cache_for_backward: bool = True
-
-    # LoRA configuration for training
-    # If provided, the model will use this LoRA adapter during training
-    lora_request: Optional["LoRARequest"] = None
-
-    # Whether this is an evaluation request (skips backward pass)
-    is_eval: bool = False
 
 class Request:
 
@@ -64,7 +41,8 @@ class Request:
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
         is_training: bool = False,
-        training_config: Optional[TrainingConfig] = None,
+        training_params: Optional[TrainingParams] = None,
+        labels: Optional[torch.Tensor] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -84,7 +62,8 @@ class Request:
         self.stop_reason: Union[int, str, None] = None
 
         self.is_training = is_training
-        self.training_config = training_config
+        self.training_params = training_params
+        self.labels = labels
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None

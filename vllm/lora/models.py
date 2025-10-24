@@ -180,8 +180,13 @@ class LoRAModel:
                     loras[module_name].lora_b = loras[
                         module_name].lora_b.pin_memory()
 
-        for lora in loras.values():
-            lora.optimize()
+        # Skip applying optimize to the LoRA if it will be used for training
+        # We will apply scaling in the LoRA computation itself in base_linear.py
+        from vllm.lora.training_manager import TrainingManager
+        training_manager = TrainingManager.get_instance()
+        if not training_manager.is_registered_by_id(lora_model_id):
+            for lora in loras.values():
+                lora.optimize()
 
         return cls(lora_model_id, peft_helper.r, loras)
 
@@ -407,6 +412,9 @@ class LoRAModelManager:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
             return False
+        from vllm.lora.training_manager import TrainingManager
+        training_manager = TrainingManager.get_instance()
+        is_training_lora = training_manager.is_registered_by_id(lora_id)
         first_free_slot = next(
             ((i, lora_id) for i, lora_id in enumerate(self.lora_index_to_id)
              if lora_id is None), None)
@@ -421,7 +429,10 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
-                module_lora.optimize()
+                # Skip applying optimize to the LoRA if it will be used for training
+                # We will apply scaling in the LoRA computation itself in base_linear.py
+                if not is_training_lora:
+                    module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
                 bias = module_lora.bias
                 if ((torch.is_tensor(bias) or
@@ -545,6 +556,9 @@ class LoRAModelManager:
             embedding_modules: Optional[dict[str, str]] = None) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
+        from vllm.lora.training_manager import TrainingManager
+        training_manager = TrainingManager.get_instance()
+        is_training_lora = training_manager.is_registered_by_id(lora_id)
         for module_name, module in self.model.named_modules():
             bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)
@@ -585,7 +599,10 @@ class LoRAModelManager:
                         "cpu",
                         bias_enabled=bias_enabled,
                     )
-                lora.optimize()
+                # Skip applying optimize to the LoRA if it will be used for training
+                # We will apply scaling in the LoRA computation itself in base_linear.py
+                if not is_training_lora:
+                    lora.optimize()
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -600,7 +617,10 @@ class LoRAModelManager:
                         "cpu",
                         bias_enabled=bias_enabled,
                     )
-                    lora.optimize()
+                    # Skip applying optimize to the LoRA if it will be used for training
+                    # We will apply scaling in the LoRA computation itself in base_linear.py
+                    if not is_training_lora:
+                        lora.optimize()
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
             model.loras[module_name] = lora

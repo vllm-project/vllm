@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 import json
 import os
 from typing import Dict, List, Optional, Set
+from functools import partial
 
+import math
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -17,17 +20,101 @@ from vllm.lora.layers.column_parallel_linear import MergedQKVParallelLinearWithL
 from vllm.lora.models import LoRAModel
 from vllm.lora.worker_manager import WorkerLoRAManager
 from vllm.lora.request import LoRARequest
+from vllm.lora.training_state import TrainingState
 
 
 logger = init_logger(__name__)
 
 
+def _get_cosine_schedule_with_warmup_lr_lambda(
+    current_step: int, *, num_warmup_steps: int, num_training_steps: int, num_cycles: float, min_lr_rate: float = 0.0
+):
+    if current_step < num_warmup_steps:
+        return float(current_step) / float(max(1, num_warmup_steps))
+    progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+    factor = 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))
+    factor = factor * (1 - min_lr_rate) + min_lr_rate
+    return max(0, factor)
+
+
+def get_decay_parameter_names(model) -> list[str]:
+    """
+    Get all parameter names that weight decay will be applied to.
+
+    This function filters out parameters in two ways:
+    1. By layer type (instances of layers specified in ALL_LAYERNORM_LAYERS)
+    2. By parameter name patterns (containing 'bias', or variation of 'norm')
+    """
+    forbidden_name_patterns = [r"bias", r"layernorm", r"rmsnorm", r"(?:^|\.)norm(?:$|\.)", r"_norm(?:$|\.)"]
+    decay_parameters = get_parameter_names(model, [nn.LayerNorm], forbidden_name_patterns)
+    return decay_parameters
+
+
+def get_parameter_names(model, forbidden_layer_types, forbidden_layer_names=None):
+    """
+    Returns the names of the model parameters that are not inside a forbidden layer.
+    """
+    forbidden_layer_patterns = (
+        [re.compile(pattern) for pattern in forbidden_layer_names] if forbidden_layer_names is not None else []
+    )
+    print(f"forbidden: {forbidden_layer_patterns}")
+    result = []
+    for name, child in model.named_children():
+        child_params = get_parameter_names(child, forbidden_layer_types, forbidden_layer_names)
+        result += [
+            f"{name}.{n}"
+            for n in child_params
+            if not isinstance(child, tuple(forbidden_layer_types))
+            and not any(pattern.search(f"{name}.{n}".lower()) for pattern in forbidden_layer_patterns)
+        ]
+    # Add model specific parameters that are not in any child
+    result += [
+        k for k in model._parameters if not any(pattern.search(k.lower()) for pattern in forbidden_layer_patterns)
+    ]
+    print(f"result: {result}")
+    return result
+
+
+# TODO(girfan): Either use this or remove this. Need to fix the way decay parameters are obtained. Is that correct?
+def create_optimizer(model, weight_decay: float = 0.0, lr: float = 0.0001):
+    decay_parameters = get_decay_parameter_names(model)
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                p for n, p in model.named_parameters() if (n in decay_parameters and p.requires_grad)
+            ],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [
+                p for n, p in model.named_parameters() if (n not in decay_parameters and p.requires_grad)
+            ],
+            "weight_decay": 0.0,
+        },
+    ]
+
+    optimizer_kwargs = {'lr': lr, 'betas': (0.9, 0.999), 'eps': 1e-08, 'fused': True}
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **optimizer_kwargs)
+    return optimizer
+
+
 class TrainingManager:
     """
     Training manager for managing LoRA adapters during training.
+    
+    This class implements the singleton pattern to ensure only one instance
+    exists throughout the application lifecycle.
 
     TODO(girfan): Add support for multiple LoRA adapters.
     """
+    
+    _instance = None
+    _initialized = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(TrainingManager, cls).__new__(cls)
+        return cls._instance
 
     def __init__(
         self,
@@ -37,6 +124,10 @@ class TrainingManager:
         device: torch.device,
         dtype: torch.dtype,
     ):
+        # Only initialize once
+        if self._initialized:
+            return
+
         self.model_runner = model_runner
         self.lora_manager = lora_manager
         self.lora_config = lora_config
@@ -49,17 +140,61 @@ class TrainingManager:
 
         # Track trainable parameters and training state
         self.trainable_lora_ids: Set[int] = set()
+        self.in_prog_lora_ids: Set[int] = set()
         self.trainable_lora_params: Dict[str, nn.Parameter] = {}
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
         self.training_step: int = 0
-        self.gradient_accumulation_steps: int = 1
-        self.gradient_accumulation_counter: int = 0
+        self.max_grad_norm: float = 1.0
+
+        # TODO(girfan): Take the params from elsewhere.
+        self.training_state = TrainingState(grad_accumulation_steps=1)
 
         # # Register with LoRAModelManager
         # if hasattr(self.lora_manager, '_adapter_manager'):
         #     self.lora_manager._adapter_manager._training_manager = self
         #     logger.info("[TrainingManager] Registered with LoRAModelManager")
+        
+        # Mark as initialized
+        self._initialized = True
+
+    @classmethod
+    def get_instance(cls):
+        """
+        Get the singleton instance of TrainingManager.
+        
+        Returns:
+            TrainingManager: The singleton instance
+            
+        Raises:
+            RuntimeError: If the instance has not been initialized yet
+        """
+        if cls._instance is None:
+            raise RuntimeError("TrainingManager has not been initialized yet. "
+                             "Create an instance first with TrainingManager(...)")
+        return cls._instance
+
+    @classmethod
+    def reset_instance(cls):
+        """
+        Reset the singleton instance. 
+        
+        This is primarily useful for testing or when you need to create
+        a fresh instance. Use with caution as this will lose all state.
+        """
+        if cls._instance is not None:
+            cls._instance = None
+            cls._initialized = False
+
+    @classmethod
+    def is_initialized(cls) -> bool:
+        """
+        Check if the singleton instance has been initialized.
+        
+        Returns:
+            bool: True if initialized, False otherwise
+        """
+        return cls._instance is not None and cls._initialized
 
     @property
     def model(self):
@@ -72,6 +207,23 @@ class TrainingManager:
             return model
         return self.model_runner
 
+    @property
+    def loss(self) -> Optional[torch.Tensor]:
+        return self.training_state.loss
+
+    def add_loss(self, loss: torch.Tensor):
+        self.training_state.add_loss(loss)
+
+    def step(self):
+        self.training_state.step()
+
+    def reset(self):
+        self.training_state.reset()
+
+    def should_run_optimizer_step(self) -> bool:
+        return self.training_state.steps % self.training_state.grad_accumulation_steps == 0 and self.training_state.steps > 0
+
+    # TODO(girfan): Cache this result?
     def _get_qkv_indices_for_training(self) -> List[int]:
         """
         Determine which Q/K/V indices to train based on target_patterns.
@@ -123,6 +275,18 @@ class TrainingManager:
             'frozen': frozen_count,
         }
 
+    def is_registered_by_id(self, lora_id: int) -> bool:
+        return lora_id in self.trainable_lora_ids or lora_id in self.in_prog_lora_ids
+
+    def is_registered_by_index(self, index: int) -> bool:
+        mapping = self.lora_manager._adapter_manager.lora_index_to_id
+        if index < 0 or index >= len(mapping):
+            raise ValueError(f"LoRA index {index} out of range")
+        lora_id = mapping[index]
+        if lora_id is None:
+            raise ValueError(f"LoRA index {index} not found in LoRA manager")
+        return self.is_registered_by_id(lora_id)
+
     def make_lora_trainable(
         self,
         lora_request: LoRARequest,
@@ -133,12 +297,16 @@ class TrainingManager:
         weight_decay: float = 0.0,
         scheduler_type: str = "cosine",
     ):
-        """Convert a loaded LoRA adapter to trainable Parameters and setup optimizer."""
+        """Convert a loaded LoRA adapter to trainable parameters and setup optimizer."""
         lora_id = lora_request.lora_int_id
 
+        # Check if the LoRA adapter is already trainable
         if lora_id in self.trainable_lora_ids:
             logger.warning(f"LoRA adapter {lora_id} is already trainable")
             return
+
+        # Mark the LoRA adapter setup as in progress
+        self.in_prog_lora_ids.add(lora_id)
 
         # Add the LoRA adapter to the LoRAManager
         self.lora_manager.add_adapter(lora_request)
@@ -201,6 +369,7 @@ class TrainingManager:
                 trainable_params.append(stacked_tensor)
 
         # Setup optimizer
+        # self.optimizer = create_optimizer(self.model, lr=learning_rate, weight_decay=weight_decay)
         self.optimizer = torch.optim.AdamW(
             trainable_params,
             lr=learning_rate,
@@ -220,6 +389,7 @@ class TrainingManager:
 
         # Mark the LoRA adapter as trainable
         self.trainable_lora_ids.add(lora_id)
+        self.in_prog_lora_ids.remove(lora_id)
 
         lora_stats = {
             "trainable_params": len(trainable_params),
@@ -238,21 +408,13 @@ class TrainingManager:
     ):
         """Setup learning rate scheduler."""
         if scheduler_type == "cosine":
-            if num_warmup_steps > 0:
-
-                def lr_lambda(current_step: int):
-                    # PyTorch LambdaLR correctly starts from step 0
-                    if current_step < num_warmup_steps:
-                        lr_factor = float(current_step) / float(max(1, num_warmup_steps))
-                        return lr_factor
-                    progress = float(current_step - num_warmup_steps) / float(
-                        max(1, num_training_steps - num_warmup_steps))
-                    lr_factor = max(0.0, 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.141592653589793))))
-                    return lr_factor
-
-                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-            else:
-                scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps)
+            lr_lambda = partial(
+                _get_cosine_schedule_with_warmup_lr_lambda,
+                num_warmup_steps=100, # TODO(girfan): variable
+                num_training_steps=300, # TODO(girfan): variable
+                num_cycles=0.5,
+            )
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=-1)
         elif scheduler_type == "linear":
             scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=num_training_steps)
         else:
@@ -260,138 +422,33 @@ class TrainingManager:
 
         return scheduler
 
-    def optimizer_step(
-        self,
-        optimizer: torch.optim.Optimizer,
-        scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
-        max_grad_norm: Optional[float] = 1.0,
-    ) -> Dict[str, float]:
+    def optimizer_step(self):
         """Perform optimizer step with optional gradient clipping."""
-        stats = {}
-
-        if max_grad_norm is not None and max_grad_norm > 0:
+        if self.max_grad_norm is not None and self.max_grad_norm > 0:
             # Clip gradients to prevent exploding gradients during training
             # This matches PEFT's TrainingArguments(max_grad_norm=1.0) default
-            trainable_params = [p for p in optimizer.param_groups[0]['params'] if p.grad is not None]
-            total_norm_before_clip = torch.nn.utils.clip_grad_norm_(
+            trainable_params = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 trainable_params,
-                max_norm=max_grad_norm,
-                norm_type=2.0  # L2 norm (default)
+                max_norm=self.max_grad_norm,
             )
-            stats['grad_norm'] = float(total_norm_before_clip)  # Store pre-clip norm for logging
-            stats['grad_norm_before_clip'] = float(total_norm_before_clip)
-            stats['grad_norm_after_clip'] = min(float(total_norm_before_clip), max_grad_norm)
         else:
             # Calculate gradient norm without clipping
             total_norm = 0.0
-            for param in optimizer.param_groups[0]['params']:
+            for param in self.optimizer.param_groups[0]['params']:
                 if param.grad is not None:
                     param_norm = param.grad.data.norm(2)
                     total_norm += param_norm.item()**2
             total_norm = total_norm**0.5
-            stats['grad_norm'] = total_norm
 
-        # Optimizer step
-        optimizer.step()
-        stats['learning_rate'] = optimizer.param_groups[0]['lr']
+        self.optimizer.step()
+        self.scheduler.step()
 
-        # Scheduler step if provided
-        if scheduler is not None:
-            scheduler.step()
-            # Log LR after scheduler step for first 10 steps
-            if self.training_step <= 10:
-                new_lr = optimizer.param_groups[0]['lr']
-                stats['learning_rate'] = new_lr
-
-        return stats
-
-    def zero_grad(self, optimizer: torch.optim.Optimizer) -> None:
+    def zero_grad(self) -> None:
         """Zero out all gradients."""
-        optimizer.zero_grad()
-
-    def step_with_accumulation(
-        self,
-        gradient_accumulation_steps: int = 1,
-        max_grad_norm: Optional[float] = 1.0,
-    ) -> Optional[Dict[str, float]]:
-        """Handle gradient accumulation and optimizer step."""
-        if self.optimizer is None:
-            logger.warning("[TrainingManager] No optimizer configured, skipping step")
-            return None
-
-        # Check if gradients are computed and log norms (every step)
-        grad_count = 0
-        total_grad_l2 = 0.0
-        sample_b_grads: list[tuple[str, float]] = []
-        for name, param in self.trainable_lora_params.items():
-            if param.grad is not None:
-                grad_count += 1
-                try:
-                    gnorm = float(param.grad.data.norm().detach().cpu())
-                    total_grad_l2 += gnorm * gnorm
-                    if 'lora_b_stacked' in name and len(sample_b_grads) < 3:
-                        sample_b_grads.append((name, gnorm))
-                except Exception:
-                    print("Error calculating gradient norm")
-        if grad_count == 0:
-            logger.warning(f"[TrainingManager] No gradients found in {len(self.trainable_lora_params)} LoRA parameters")
-            return None
-        try:
-            msg = f"[LORA/GRAD] step={self.training_step} grads_present={grad_count}/{len(self.trainable_lora_params)} total_grad_norm={(total_grad_l2 ** 0.5):.6e}"
-            if sample_b_grads:
-                msg += " sample_B_grad_norms=" + ",".join(f"{n}:{g:.3e}" for n,g in sample_b_grads)
-            logger.info(msg)
-        except Exception:
-            print("Error logging gradient presence after step")
-
-        # ✅ FIX: Check if high-level training loop is controlling gradient accumulation
-        external_control = hasattr(self, '_should_step_optimizer')
-
-        if external_control:
-            # External control from high-level loop - respect the flag
-            should_step = self._should_step_optimizer
-            if should_step:
-                self.training_step += 1
-        else:
-            self.gradient_accumulation_counter += 1
-            self.training_step += 1
-            should_step = self.gradient_accumulation_counter >= gradient_accumulation_steps
-
-        # Check if we should perform an optimizer step
-        if should_step:
-            # Snapshot params before step for delta logging
-            params_before = {}
-            try:
-                for param_name, param in self.trainable_lora_params.items():
-                    params_before[param_name] = param.detach().clone()
-            except Exception:
-                params_before = {}
-
-            # Perform optimizer step (directly updates the stacked tensor parameters)
-            stats = self.optimizer_step(
-                optimizer=self.optimizer,
-                scheduler=self.scheduler,
-                max_grad_norm=max_grad_norm,
-            )
-
-            # Zero gradients and reset accumulation counter
-            self.zero_grad(self.optimizer)
-            if not external_control:
-                # Only reset internal counter if not using external control
-                self.gradient_accumulation_counter = 0
-            stats['training_step'] = self.training_step
-
-            # Clear external control flag if set
-            if external_control:
-                delattr(self, '_should_step_optimizer')
-
-            return stats
-        else:
-            # Clear external control flag if set (even when not stepping)
-            if external_control:
-                delattr(self, '_should_step_optimizer')
-
-            return None
+        # TODO(girfan): Zero grad of the model?
+        # self.model.zero_grad()
+        self.optimizer.zero_grad()
 
     def save_lora_checkpoint(
         self,
