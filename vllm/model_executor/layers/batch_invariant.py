@@ -705,17 +705,7 @@ def rms_norm_batch_invariant(
 
 
 def linear_batch_invariant(input, weight, bias=None):
-    # Handle 3D input tensors (batch, seq, hidden) by reshaping to 2D
-    input_shape = input.shape
-    if input.ndim == 3:
-        # Reshape (batch, seq, hidden) -> (batch*seq, hidden)
-        input_2d = input.reshape(-1, input.shape[-1])
-        output = mm_batch_invariant(input_2d, weight.t())
-        # Reshape back to (batch, seq, output_dim)
-        output = output.reshape(*input_shape[:-1], output.shape[-1])
-    else:
-        # 2D case: standard mm
-        output = mm_batch_invariant(input, weight.t())
+    output = matmul_batch_invariant(input, weight.t())
 
     if bias is not None:
         output = output + bias
