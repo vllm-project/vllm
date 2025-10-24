@@ -36,9 +36,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from packaging.version import Version
 from transformers import BatchFeature
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor,
@@ -301,6 +299,7 @@ class Glm4vVisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
@@ -1274,14 +1273,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
 
-                # backward compatibility for Transformers 4.55
                 unuse_metadata = ["do_sample_frames"]
-                if (
-                    not hasattr(VideoMetadata, "frames_indices")
-                    and "frames_indices" in metadata
-                ):
-                    unuse_metadata.append("frames_indices")
-
                 video_mm_data["video_metadata"] = [
                     [
                         VideoMetadata(
@@ -1300,24 +1292,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_kwargs=video_mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                if not video_mm_kwargs["do_sample_frames"] and Version(
-                    TRANSFORMERS_VERSION
-                ) < Version("4.56.0"):
-                    # Transformers v4.55 has incorrect timestamps issue for
-                    # skip sampling. We construct the placeholder manually to
-                    # get placeholders with correct timestamps.
-                    placeholder = self.info._construct_video_placeholder(
-                        video_array,
-                        metadata,
-                        video_outputs["video_grid_thw"].squeeze(0),
-                    )
-                    video_placeholder = processor.tokenizer.decode(placeholder)
-                else:
-                    input_ids = video_outputs.pop("input_ids")
-                    input_ids[input_ids == processor.image_token_id] = (
-                        processor.video_token_id
-                    )
-                    video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
+                input_ids = video_outputs.pop("input_ids")
+                input_ids[input_ids == processor.image_token_id] = (
+                    processor.video_token_id
+                )
+                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
