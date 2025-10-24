@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Any, Union
+from typing import Any
 
 from transformers import PretrainedConfig
 
@@ -18,7 +18,7 @@ class SpeculatorsConfig(PretrainedConfig):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: Union[str, os.PathLike],
+        pretrained_model_name_or_path: str | os.PathLike,
         **kwargs,
     ) -> "SpeculatorsConfig":
         """Load speculators Eagle config and convert to vLLM format."""

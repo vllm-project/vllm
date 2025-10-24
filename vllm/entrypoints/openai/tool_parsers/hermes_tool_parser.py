@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -113,6 +112,7 @@ class Hermes2ProToolParser(ToolParser):
                 return delta_text
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # do not skip special tokens because the tool_call tokens are
             # marked "special" in some models. Since they are skipped
@@ -181,7 +181,7 @@ class Hermes2ProToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         # 1. All tokens are parsed based on _text, not token_ids.
         # 2. All incoming text data is processed by the tool_call_delta_buffer
         #    function for buffering before being used for parsing.
@@ -333,7 +333,7 @@ class Hermes2ProToolParser(ToolParser):
             if not self.current_tool_name_sent:
                 if current_tool_call is None:
                     return None
-                function_name: Union[str, None] = current_tool_call.get("name")
+                function_name: str | None = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
                     return DeltaMessage(

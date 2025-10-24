@@ -110,7 +110,7 @@ class TorchSDPAMetadata(AttentionMetadata):
     """Metadata for PagedAttention."""
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
-    decode_seq_lens_tensor: Optional[torch.Tensor]
+    decode_seq_lens_tensor: torch.Tensor | None
     # Maximum sequence length in the batch. 0 if it is prefill-only batch.
     decode_max_seq_len: int
     # (batch_size, max_blocks_per_seq).
@@ -119,39 +119,39 @@ class TorchSDPAMetadata(AttentionMetadata):
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
-    decode_block_tables: Optional[torch.Tensor]
+    decode_block_tables: torch.Tensor | None
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     chunked_prefill: bool
-    seq_lens: Optional[list[int]] = None  # For non-chunked prefill
+    seq_lens: list[int] | None = None  # For non-chunked prefill
 
     # For chunked prefill only
-    max_query_len: Optional[int] = None
-    prefill_max_seq_len: Optional[int] = None
-    prefill_query_start_loc: Optional[torch.Tensor] = None
-    prefill_seq_start_loc: Optional[torch.Tensor] = None
-    prefill_block_tables: Optional[torch.Tensor] = None
+    max_query_len: int | None = None
+    prefill_max_seq_len: int | None = None
+    prefill_query_start_loc: torch.Tensor | None = None
+    prefill_seq_start_loc: torch.Tensor | None = None
+    prefill_block_tables: torch.Tensor | None = None
 
     # For V1 logits index only
-    query_start_loc: Optional[torch.Tensor] = None
+    query_start_loc: torch.Tensor | None = None
 
     # Begin encoder attn & enc/dec cross-attn fields...
     # Encoder sequence lengths representation
-    encoder_seq_lens: Optional[list[int]] = None
-    encoder_seq_lens_tensor: Optional[torch.Tensor] = None
+    encoder_seq_lens: list[int] | None = None
+    encoder_seq_lens_tensor: torch.Tensor | None = None
 
     # Maximum sequence length among encoder sequences
-    max_encoder_seq_len: Optional[int] = None
+    max_encoder_seq_len: int | None = None
 
     # Number of tokens input to encoder
-    num_encoder_tokens: Optional[int] = None
+    num_encoder_tokens: int | None = None
 
     # Cross-attention memory-mapping data structures: slot mapping
     # and block tables
-    cross_slot_mapping: Optional[torch.Tensor] = None
-    cross_block_tables: Optional[torch.Tensor] = None
+    cross_slot_mapping: torch.Tensor | None = None
+    cross_block_tables: torch.Tensor | None = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -159,9 +159,9 @@ class TorchSDPAMetadata(AttentionMetadata):
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[list[torch.Tensor]] = None
-        self.encoder_attn_bias: Optional[list[torch.Tensor]] = None
-        self.cross_attn_bias: Optional[list[torch.Tensor]] = None
+        self.attn_bias: list[torch.Tensor] | None = None
+        self.encoder_attn_bias: list[torch.Tensor] | None = None
+        self.cross_attn_bias: list[torch.Tensor] | None = None
 
     @property
     def is_all_encoder_attn_metadata_set(self):
@@ -237,7 +237,7 @@ class TorchSDPAMetadata(AttentionMetadata):
     def get_attn_bias(
         self,
         attn_type: str,
-    ) -> Optional[list[torch.Tensor]]:
+    ) -> list[torch.Tensor] | None:
         """
         Extract appropriate attention bias from attention metadata
         according to attention type.
@@ -412,7 +412,7 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
             # to ensure inference when chunked_prefill is disabled
-            seq_lens=seq_lens_cpu.tolist(),
+            seq_lens=seq_lens_cpu.tolist()[num_decodes:],  # prefill
             decode_seq_lens_tensor=seq_lens_cpu[:num_decodes],  # decode
             decode_max_seq_len=max_decode_seq_len,  # decode
             decode_block_tables=block_table_tensor[:num_decodes],  # decode
@@ -439,12 +439,12 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0.")
@@ -484,9 +484,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,  # type: ignore
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
@@ -617,7 +617,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     prefill_meta.prefill_block_tables,
                     self.alibi_slopes,
                 )
-
         if decode_meta := attn_metadata.decode_metadata:
             assert attn_type != AttentionType.ENCODER_ONLY, (
                 "Encoder-only models should not have decode metadata."
@@ -686,7 +685,12 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         causal_attn = attn_type == AttentionType.DECODER
 
         seq_lens_q, seq_lens_kv = attn_metadata.get_seq_lens(attn_type)
-        start_q, start_kv = 0, 0
+        # Incoming Q and KV contain decoded tokens as well, hence start at an offset
+        # equal to num_decode_tokens since decode requests appear first
+        start_q, start_kv = (
+            attn_metadata.num_decode_tokens,
+            attn_metadata.num_decode_tokens,
+        )
         for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv, attn_masks):
             end_q = start_q + seq_len_q
             end_kv = start_kv + seq_len_kv
@@ -737,7 +741,7 @@ def _make_alibi_bias(
 
 def _make_sliding_window_bias(
     seq_lens: list[int],
-    window_size: Optional[int],
+    window_size: int | None,
     dtype: torch.dtype,
 ) -> list[torch.Tensor]:
     attn_biases: list[torch.Tensor] = []
@@ -824,7 +828,7 @@ class _PagedAttention:
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
-        alibi_slopes: Optional[torch.Tensor],
+        alibi_slopes: torch.Tensor | None,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         *args,
@@ -907,7 +911,7 @@ class _IPEXPagedAttention(_PagedAttention):
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
-        alibi_slopes: Optional[torch.Tensor],
+        alibi_slopes: torch.Tensor | None,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         *args,

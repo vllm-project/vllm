@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import regex as re
 
@@ -509,7 +509,7 @@ class MinimaxToolParser(ToolParser):
 
     def _get_current_tool_content(
         self, text: str, tool_index: int
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         """
         Get the content of a specific tool by index.
 
@@ -545,7 +545,7 @@ class MinimaxToolParser(ToolParser):
 
     def _handle_tool_name_streaming(
         self, tool_content: str, tool_count: int
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Handle streaming of tool names.
 
@@ -595,7 +595,7 @@ class MinimaxToolParser(ToolParser):
 
     def _handle_tool_args_streaming(
         self, tool_content: str, tool_count: int
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Handle streaming of tool arguments.
 
@@ -702,7 +702,7 @@ class MinimaxToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         self._update_thinking_state(current_text)
 
         if self.in_thinking_tag:
@@ -776,7 +776,7 @@ class MinimaxToolParser(ToolParser):
             )
             return None
 
-    def _find_tool_start_outside_thinking(self, current_text: str) -> Optional[int]:
+    def _find_tool_start_outside_thinking(self, current_text: str) -> int | None:
         """
         Find the start position of tool calls outside of thinking tags.
 
@@ -809,7 +809,7 @@ class MinimaxToolParser(ToolParser):
 
     def _extract_content_before_tools(
         self, current_text: str, delta_text: str, tool_start: int
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Extract content that appears before tool calls.
 

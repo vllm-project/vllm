@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -13,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
@@ -28,7 +28,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         vllm_config: VllmConfig,
         disable_input_layernorm: bool,
         prefix: str = "",
-        config: Optional[LlamaConfig] = None,
+        config: LlamaConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, prefix=prefix, config=config)
 
@@ -37,6 +37,17 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         if disable_input_layernorm:
             del self.input_layernorm
             self.input_layernorm = nn.Identity()
+
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
+        """Use drafter's quantization config instead of verifier's."""
+        draft_model_config = vllm_config.speculative_config.draft_model_config
+        draft_load_config = vllm_config.load_config
+
+        return (
+            VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
+            if draft_model_config
+            else None
+        )
 
 
 @support_torch_compile
@@ -155,7 +166,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is not None:
             raise NotImplementedError(

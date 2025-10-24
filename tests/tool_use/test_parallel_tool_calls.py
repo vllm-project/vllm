@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from typing import Optional
 
 import openai
 import pytest
@@ -80,7 +79,7 @@ async def test_parallel_tool_calls(
         stream=True,
     )
 
-    role_name: Optional[str] = None
+    role_name: str | None = None
     finish_reason_count: int = 0
 
     tool_call_names: list[str] = []

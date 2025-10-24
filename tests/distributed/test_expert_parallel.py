@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
-from vllm.config import RunnerOption
+from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -22,9 +22,9 @@ class ParallelSetup(NamedTuple):
 
 class EPTestOptions(NamedTuple):
     trust_remote_code: bool
-    tokenizer_mode: Optional[str]
-    load_format: Optional[str] = None
-    hf_overrides: Optional[str] = None
+    tokenizer_mode: str | None
+    load_format: str | None = None
+    hf_overrides: str | None = None
 
 
 @dataclass
@@ -40,9 +40,9 @@ class EPTestSettings:
         tp_base: int = 2,
         runner: RunnerOption = "auto",
         trust_remote_code: bool = False,
-        tokenizer_mode: Optional[str] = None,
-        load_format: Optional[str] = None,
-        hf_overrides: Optional[str] = None,
+        tokenizer_mode: str | None = None,
+        load_format: str | None = None,
+        hf_overrides: str | None = None,
     ):
         return EPTestSettings(
             parallel_setups=[
@@ -72,9 +72,9 @@ class EPTestSettings:
         tp_base: int = 2,
         runner: RunnerOption = "auto",
         trust_remote_code: bool = False,
-        tokenizer_mode: Optional[str] = None,
-        load_format: Optional[str] = None,
-        hf_overrides: Optional[str] = None,
+        tokenizer_mode: str | None = None,
+        load_format: str | None = None,
+        hf_overrides: str | None = None,
     ):
         return EPTestSettings(
             parallel_setups=[

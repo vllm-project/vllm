@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -37,7 +37,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
 
@@ -68,8 +68,8 @@ class MambaMixer(MambaBase, CustomOp):
         rms_norm_eps: float = 1e-5,
         activation="silu",
         is_lora_enabled: bool = False,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -410,7 +410,7 @@ class MambaMixer(MambaBase, CustomOp):
 
         return Mamba1AttentionBackend
 
-    def _time_proj_bias(self) -> Optional[torch.Tensor]:
+    def _time_proj_bias(self) -> torch.Tensor | None:
         if hasattr(self.dt_proj, "bias") and self.dt_proj.bias is not None:
             return self.dt_proj.bias.float()
         return None
@@ -423,8 +423,8 @@ class PrefillDecodeSplit(NamedTuple):
     gate_d: torch.Tensor
     state_indices_tensor_p: torch.Tensor
     state_indices_tensor_d: torch.Tensor
-    query_start_loc_p: Optional[torch.Tensor]
-    has_initial_states_p: Optional[torch.Tensor]
+    query_start_loc_p: torch.Tensor | None
+    has_initial_states_p: torch.Tensor | None
 
 
 def split_batch_to_prefill_and_decode(
@@ -432,7 +432,7 @@ def split_batch_to_prefill_and_decode(
     gate: torch.Tensor,
     state_indices_tensor: torch.Tensor,
     query_start_loc: torch.Tensor,
-    has_initial_states: Optional[torch.Tensor],
+    has_initial_states: torch.Tensor | None,
     num_prefill_tokens: int,
     num_decode_tokens: int,
     num_prefills: int,

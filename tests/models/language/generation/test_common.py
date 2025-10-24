@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
 import torch
@@ -100,7 +99,7 @@ AITER_MODEL_LIST = [
             "allenai/OLMoE-1B-7B-0924-Instruct",
             marks=[pytest.mark.cpu_model],
         ),
-        pytest.param("swiss-ai/Apertus-8B-2509"),  # apertus
+        pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
@@ -138,7 +137,7 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
-        prompt_embeds: Optional[list[torch.Tensor]] = [] if use_prompt_embeds else None
+        prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
         prompt_token_ids = []
         for prompt in example_prompts:

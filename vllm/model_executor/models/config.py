@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import cdiv, round_up
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -59,16 +60,26 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
 
         if config.position_embedding_type == "rotary":
             assert config.__class__.__name__ == "XLMRobertaFlashConfig"
 
             head_dim = config.hidden_size // config.num_attention_heads
+            max_position = config.max_position_embeddings
+            # Jina-embeddings-v3 has max_position_embeddings=8194, which will cause
+            # out-of-bound index issue at RoPE for long prompts with torch.compile,
+            # because it can't be divided by triton num_warps(default=4 or 8).
+            # To deal with this, we increase max_position to multiple of n_warps,
+            # so that triton kernel won't hit out-of-bound index in RoPE cache.
+            if not model_config.enforce_eager:
+                max_position = round_up(max_position, 8)
+
             config.rotary_kwargs = {
                 "head_size": head_dim,
                 "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-                "max_position": config.max_position_embeddings,
+                "max_position": max_position,
                 "base": getattr(config, "rope_theta", config.rotary_emb_base),
                 "rope_scaling": getattr(config, "rope_scaling", None),
             }
@@ -248,21 +259,19 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         # Increase the max capture size from 512 to 992 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
         # from 67 to 81.
-        scheduler_config = vllm_config.scheduler_config
-        if len(scheduler_config.cuda_graph_sizes) == 1:
-            max_capture_size = scheduler_config.cuda_graph_sizes[0]
+        compilation_config = vllm_config.compilation_config
+        # Only override when the user has not set either of
+        # cudagraph_capture_sizes or max_cudagraph_capture_size.
+        if (
+            compilation_config.cudagraph_capture_sizes is None
+            and compilation_config.max_cudagraph_capture_size is None
+        ):
             # FIXME(woosuk): When using full cuda graph with FA3, the max
             # supported size is 992.
-            if max_capture_size < 992:
-                cuda_graph_sizes = [1, 2, 4]
-                # Step size 8 for small batch sizes
-                cuda_graph_sizes += [i for i in range(8, 256, 8)]
-                # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 993, 16)]
-                scheduler_config.cuda_graph_sizes = cuda_graph_sizes
-                logger.info(
-                    "Overriding max cuda graph capture size to %d for performance.", 992
-                )
+            compilation_config.max_cudagraph_capture_size = 992
+            logger.info(
+                "Overriding max cuda graph capture size to %d for performance.", 992
+            )
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):
@@ -365,6 +374,23 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             block_size=model_config.max_model_len,
         ).page_size_bytes
 
+        # Model may be marked as is_hybrid
+        #  but mamba is skipped via config,
+        #  return directly
+        if mamba_page_size == 0:
+            return
+
+        # Attention backend constraints:
+        # - FlashAttention (FA) requires block size to be multiple of 16
+        # - MLA (Multi-head Latent Attention) requires larger alignment:
+        #   * CUTLASS_MLA backend: 128-byte alignment
+        #   * Other MLA backends: 64-byte alignment
+        if model_config.use_mla:
+            use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
+            kernel_block_alignment_size = 128 if use_cutlass_mla else 64
+        else:
+            kernel_block_alignment_size = 16
+
         if cache_config.enable_prefix_caching:
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
@@ -381,19 +407,28 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # TODO(tdoublep): this constraint can be relaxed fairly
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
-            chunk_size = model_config.get_mamba_chunk_size()
+
+            from math import gcd
+
+            def lcm(a, b):
+                return a * b // gcd(a, b)
+
+            base_chunk_size = model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
+
+            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size
             # to minimize mamba state padding
 
-            # some attention backends (e.g. FA) only support setting
-            # block size to multiple of 16, so let's suggest a value
-            # that would work (note: FA is currently not compatible
-            # with mamba layers, use FlashInfer instead).
-            attn_block_size = 16 * cdiv(mamba_page_size, 16 * attn_page_size_1_token)
+            # Calculate minimum attention block size that satisfies both:
+            # 1. Backend alignment requirements (kernel_block_alignment_size)
+            # 2. Mamba page size compatibility (attn_page_size >= mamba_page_size)
+            attn_block_size = kernel_block_alignment_size * cdiv(
+                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
+            )
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
@@ -444,12 +479,9 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 
-        # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
-        #   "auto")
+        # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
-            "fp8"
-        ):
+        if cache_config.cache_dtype.startswith("fp8"):
             cache_config.cache_dtype = "fp8_ds_mla"
             logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
         if cache_config.cache_dtype == "bfloat16":

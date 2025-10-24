@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
-from typing import Optional, Union
 
 import numpy as np
 import pytest
-from mistral_common.protocol.instruct.messages import ImageChunk, TextChunk, UserMessage
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
@@ -108,7 +108,9 @@ def _test_processing_correctness(
         hf_overrides=model_info.hf_overrides,
         # Ensure that the cache can fit all of the data
         mm_processor_cache_gb=2048,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -246,7 +248,7 @@ MM_DATA_PATCHES = {
 def _test_processing_correctness_one(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-    prompt: Union[str, list[int]],
+    prompt: str | list[int],
     mm_data: MultiModalDataDict,
     baseline_processor: BaseMultiModalProcessor,
     cached_processor: BaseMultiModalProcessor,
@@ -327,10 +329,12 @@ def _test_processing_correctness_one(
     [
         "rhymes-ai/Aria",
         "CohereForAI/aya-vision-8b",
+        "Open-Bee/Bee-8B-RL",
         "Salesforce/blip2-opt-2.7b",
         "facebook/chameleon-7b",
         "CohereLabs/command-a-vision-07-2025",
         "deepseek-ai/deepseek-vl2-tiny",
+        "deepseek-ai/DeepSeek-OCR",
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         "adept/fuyu-8b",
         "google/gemma-3-4b-it",
@@ -383,6 +387,7 @@ def _test_processing_correctness_one(
         "Qwen/Qwen2.5-Omni-3B",
         "Qwen/Qwen3-VL-4B-Instruct",
         "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         "YannQi/R-4B",
         "Skywork/Skywork-R1V-38B",
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
@@ -439,7 +444,7 @@ def _assert_inputs_equal(
     a: MultiModalInputs,
     b: MultiModalInputs,
     *,
-    ignore_mm_keys: Optional[set[str]] = None,
+    ignore_mm_keys: set[str] | None = None,
     msg: str = "",
 ):
     if ignore_mm_keys is None:

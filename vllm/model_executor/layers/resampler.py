@@ -34,8 +34,8 @@ Example models: Qwen (Qwen-VL), MiniCPM-V 2.0
 """
 
 import math
+from collections.abc import Callable
 from functools import partial
-from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -48,9 +48,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
 
 
-def get_abs_pos(
-    abs_pos: torch.Tensor, tgt_size: Union[torch.Tensor, int]
-) -> torch.Tensor:
+def get_abs_pos(abs_pos: torch.Tensor, tgt_size: torch.Tensor | int) -> torch.Tensor:
     # abs_pos: L, C
     # tgt_size: (H, W)
     # return: M, C
@@ -124,7 +122,7 @@ def get_2d_sincos_pos_embed_from_grid(
 
 def get_2d_sincos_pos_embed(
     embed_dim: int,
-    grid_size: Union[int, tuple[int, int]],
+    grid_size: int | tuple[int, int],
     cls_token: bool = False,
     version: tuple[int, int] = (2, 0),
 ) -> torch.Tensor:
@@ -168,10 +166,10 @@ class BaseResampler(nn.Module):
         num_queries: int,
         embed_dim: int,
         num_heads: int,
-        kv_dim: Optional[int] = None,
+        kv_dim: int | None = None,
         norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
         do_post_projection: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -200,12 +198,10 @@ class BaseResampler(nn.Module):
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
         self.do_post_projection = do_post_projection
-        self.ln_post = norm_layer(embed_dim) if do_post_projection else None
-        self.proj = (
-            nn.Parameter((embed_dim**-0.5) * torch.empty(embed_dim, embed_dim))
-            if do_post_projection
-            else None
-        )
+        if self.do_post_projection:
+            self.ln_post = norm_layer(embed_dim)
+            data = (embed_dim**-0.5) * torch.empty(embed_dim, embed_dim)
+            self.proj = nn.Parameter(data=data)
 
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
@@ -224,11 +220,11 @@ class Resampler2(BaseResampler):
         grid_size: int,
         embed_dim: int,
         num_heads: int,
-        kv_dim: Optional[int] = None,
+        kv_dim: int | None = None,
         norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
         adaptive: bool = False,
         do_post_projection: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(
@@ -252,8 +248,8 @@ class Resampler2(BaseResampler):
     def forward(
         self,
         x: torch.Tensor,
-        tgt_sizes: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None,
+        tgt_sizes: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if tgt_sizes is None:
             tgt_sizes = int(math.sqrt(x.size(1)))

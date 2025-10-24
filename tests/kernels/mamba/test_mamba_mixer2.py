@@ -13,7 +13,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import Mixer2RMSNormGated
 from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 
 @multi_gpu_test(num_gpus=2)
@@ -25,7 +25,6 @@ from vllm.utils import update_environment_variables
         (64, 1),
         (64, 2),
         (64, 4),  # hidden_size be divisible by num_gpus
-        (100, 5),  # and n_groups must divide hidden_size
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.float16])

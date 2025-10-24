@@ -45,10 +45,10 @@ class BitBLASConfig(QuantizationConfig):
     def __init__(
         self,
         weight_bits: int,
-        group_size: Optional[int],
-        desc_act: Optional[bool],
-        is_sym: Optional[bool],
-        quant_method: Optional[str],
+        group_size: int | None,
+        desc_act: bool | None,
+        is_sym: bool | None,
+        quant_method: str | None,
         lm_head_quantized: bool,
     ) -> None:
         try:
@@ -160,7 +160,7 @@ class BitBLASConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> QuantizationMethods | None:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_bitblas_format: bool
         is_bitblas_format = hf_quant_cfg.get(
@@ -469,7 +469,7 @@ class BitBLASLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qweight = layer.qweight
         scales = layer.scales

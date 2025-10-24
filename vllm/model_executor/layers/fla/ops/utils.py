@@ -11,8 +11,9 @@ import contextlib
 import functools
 import logging
 import os
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import torch
 
@@ -43,8 +44,8 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
             A wrapped version of the input function with single-entry caching.
     """
 
-    cache_entries: tuple[Optional[tuple], Optional[dict], Any] = []
-    cache_size = 4
+    cache_entries: tuple[tuple | None, dict | None, Any] = []
+    cache_size = 8
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -149,6 +150,11 @@ is_nvidia_hopper = is_nvidia and (
     or torch.cuda.get_device_capability()[0] >= 9
 )
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
+is_gather_supported = hasattr(triton.language, "gather")
+is_tma_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) and (
+    hasattr(triton.language, "_experimental_make_tensor_descriptor")
+    or hasattr(triton.language, "make_tensor_descriptor")
+)
 
 
 def get_all_max_shared_mem():

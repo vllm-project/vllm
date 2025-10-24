@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -14,6 +13,7 @@ from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric
 from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
 )
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -26,8 +26,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        device: Optional[torch.device] = None,
-        device_group: Optional[ProcessGroup] = None,
+        device: torch.device | None = None,
+        device_group: ProcessGroup | None = None,
         unique_name: str = "",
     ):
         super().__init__(cpu_group, device, device_group, unique_name)
@@ -54,7 +54,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
-        self.pynccl_comm: Optional[PyNcclCommunicator] = None
+        self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
@@ -63,9 +63,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
 
-        self.ca_comm: Optional[CustomAllreduce] = None
-        self.qr_comm: Optional[QuickAllReduce] = None
-        self.symm_mem_comm: Optional[SymmMemCommunicator] = None
+        self.ca_comm: CustomAllreduce | None = None
+        self.qr_comm: QuickAllReduce | None = None
+        self.symm_mem_comm: SymmMemCommunicator | None = None
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
@@ -91,39 +91,38 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
         if self.use_all2all:
-            all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-            if all2all_backend == "naive":
+            if self.all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
 
                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager.")
-            elif all2all_backend == "allgather_reducescatter":
+            elif self.all2all_backend == "allgather_reducescatter":
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
-                logger.info("Using AllGather-ReduceScatter all2all manager.")
-            elif all2all_backend == "pplx":
+            elif self.all2all_backend == "pplx":
                 from .all2all import PPLXAll2AllManager
 
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
-                logger.info("Using PPLX all2all manager.")
-            elif all2all_backend == "deepep_high_throughput":
+            elif self.all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
 
                 self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
-                logger.info("Using DeepEP High-Throughput all2all manager.")
-            elif all2all_backend == "deepep_low_latency":
+            elif self.all2all_backend == "deepep_low_latency":
                 from .all2all import DeepEPLLAll2AllManager
 
                 self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
-                logger.info("Using DeepEP Low-Latency all2all manager.")
-            elif all2all_backend == "flashinfer_all2allv":
+            elif self.all2all_backend == "flashinfer_all2allv":
                 from .all2all import FlashInferAllToAllManager
 
                 self.all2all_manager = FlashInferAllToAllManager(self.cpu_group)
-                logger.info("Using Flashinfer all2allv manager.")
             else:
-                raise ValueError(f"Unknown all2all backend: {all2all_backend}")
+                raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
+
+            if is_global_first_rank():
+                logger.info(
+                    "Using %s all2all manager.",
+                    self.all2all_manager.__class__.__name__,
+                )
 
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
@@ -201,7 +200,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return output.movedim(0, dim).contiguous()
 
     def reduce_scatterv(
-        self, input_: torch.Tensor, dim: int = -1, sizes: Optional[list[int]] = None
+        self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
@@ -235,7 +234,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
-    def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
+    def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
@@ -248,7 +247,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
     def recv(
-        self, size: torch.Size, dtype: torch.dtype, src: Optional[int] = None
+        self, size: torch.Size, dtype: torch.dtype, src: int | None = None
     ) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
@@ -274,9 +273,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def all_gatherv(
         self,
-        input_: Union[torch.Tensor, list[torch.Tensor]],
+        input_: torch.Tensor | list[torch.Tensor],
         dim: int = 0,
-        sizes: Optional[list[int]] = None,
+        sizes: list[int] | None = None,
     ):
         if dim != 0:
             raise NotImplementedError("only dim 0 all-gatherv is supported")
@@ -289,7 +288,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
-        def _all_gather_single(input_: torch.Tensor, sizes: Optional[list[int]] = None):
+        def _all_gather_single(input_: torch.Tensor, sizes: list[int] | None = None):
             input_size = input_.size()
             if sizes is not None:
                 assert len(sizes) == world_size

@@ -5,13 +5,16 @@ These envs only work for a small part of the tests, fix what you need!
 """
 
 import os
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+from vllm.envs import maybe_convert_bool
 
 if TYPE_CHECKING:
     VLLM_CI_NO_SKIP: bool = False
-    VLLM_CI_DTYPE: Optional[str] = None
-    VLLM_CI_HEAD_DTYPE: Optional[str] = None
-    VLLM_CI_HF_DTYPE: Optional[str] = None
+    VLLM_CI_DTYPE: str | None = None
+    VLLM_CI_HEAD_DTYPE: str | None = None
+    VLLM_CI_HF_DTYPE: str | None = None
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # A model family has many models with the same architecture.
@@ -24,6 +27,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CI_HEAD_DTYPE": lambda: os.getenv("VLLM_CI_HEAD_DTYPE", None),
     # Allow changing the head dtype used by transformers in tests
     "VLLM_CI_HF_DTYPE": lambda: os.getenv("VLLM_CI_HF_DTYPE", None),
+    # Allow control over whether tests use enforce_eager
+    "VLLM_CI_ENFORCE_EAGER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_CI_ENFORCE_EAGER", None)
+    ),
 }
 
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 from unittest import mock
 
 import pytest
@@ -12,7 +11,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
-    get_attention_backend,
+    try_get_attention_backend,
 )
 from vllm.attention.backends.registry import _Backend
 from vllm.config import (
@@ -39,7 +38,7 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 def _create_proposer(
     method: str,
     num_speculative_tokens: int,
-    speculative_token_tree: Optional[list[tuple[int, ...]]] = None,
+    speculative_token_tree: list[tuple[int, ...]] | None = None,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
 
@@ -535,11 +534,11 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     sampling_metadata = mock.MagicMock()
 
     if attn_backend == "FLASH_ATTN":
-        attn_metadata_builder_cls, _ = get_attention_backend(_Backend.FLASH_ATTN)
+        attn_metadata_builder_cls, _ = try_get_attention_backend(_Backend.FLASH_ATTN)
     elif attn_backend == "TRITON_ATTN":
-        attn_metadata_builder_cls, _ = get_attention_backend(_Backend.TRITON_ATTN)
+        attn_metadata_builder_cls, _ = try_get_attention_backend(_Backend.TRITON_ATTN)
     elif attn_backend == "TREE_ATTN":
-        attn_metadata_builder_cls, _ = get_attention_backend(_Backend.TREE_ATTN)
+        attn_metadata_builder_cls, _ = try_get_attention_backend(_Backend.TREE_ATTN)
     else:
         raise ValueError(f"Unsupported attention backend: {attn_backend}")
 
@@ -674,7 +673,7 @@ def test_propose_tree(spec_token_tree):
     proposer.attn_layer_names = ["layer.0"]
 
     # Get the tree attention metadata builder.
-    attn_metadata_builder_cls, _ = get_attention_backend(_Backend.TREE_ATTN)
+    attn_metadata_builder_cls, _ = try_get_attention_backend(_Backend.TREE_ATTN)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
         layer_names=proposer.attn_layer_names,

@@ -14,6 +14,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    MultipleOf,
 )
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
@@ -38,6 +39,10 @@ class TreeAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -99,7 +104,7 @@ class TreeAttentionMetadata:
     num_prefills: int = 0
     num_decodes: int = 0
 
-    tree_attn_bias: Optional[torch.Tensor] = None
+    tree_attn_bias: torch.Tensor | None = None
 
     # Cached Prefill/decode metadata.
     _cached_prefill_metadata: Optional["TreeAttentionMetadata"] = None
@@ -262,8 +267,8 @@ def _get_depth_counts(sorted_tree_choices: list[tuple[int, ...]]) -> list[int]:
 def _prepare_tree_attn_bias(
     sorted_tree_choices: list[tuple[int, ...]],
     depth_counts: list[int],
-    dtype: Optional[torch.dtype],
-    device: Optional[torch.device],
+    dtype: torch.dtype | None,
+    device: torch.device | None,
 ) -> torch.Tensor:
     # +1 comes from the additional root node.
     tree_len = len(sorted_tree_choices) + 1
@@ -305,12 +310,12 @@ class TreeAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -349,9 +354,9 @@ class TreeAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TreeAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with TreeAttention.
 
@@ -374,7 +379,7 @@ class TreeAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         # Cache the input KVs.
         key_cache, value_cache = kv_cache.unbind(0)

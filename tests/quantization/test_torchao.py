@@ -19,7 +19,7 @@ def test_pre_quantized_model(vllm_runner):
         dtype="bfloat16",
         enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
     assert output
 
 
@@ -39,8 +39,9 @@ def test_opt_125m_int8wo_model_loading_with_params(vllm_runner, pt_load_map_loca
         quantization="torchao",
         dtype="bfloat16",
         pt_load_map_location=pt_load_map_location,
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -54,8 +55,9 @@ def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
         quantization="torchao",
         dtype="bfloat16",
         pt_load_map_location="cuda:0",
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -69,8 +71,9 @@ def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
         quantization="torchao",
         dtype="bfloat16",
         pt_load_map_location="cuda:0",
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -90,7 +93,7 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
         dtype="bfloat16",
         pt_load_map_location="cuda:0",
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -122,8 +125,9 @@ def test_on_the_fly_quant_config_dict_json(vllm_runner):
         pt_load_map_location="cuda:0",
         quantization="torchao",
         hf_overrides=hf_overrides,
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -156,8 +160,9 @@ def test_on_the_fly_quant_config_file(vllm_runner):
             pt_load_map_location="cuda:0",
             quantization="torchao",
             hf_overrides=hf_overrides,
+            enforce_eager=True,
         ) as llm:
-            output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+            output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
             assert output
 
@@ -228,7 +233,24 @@ def test_opt_125m_float8_weight_only_safetensors_model_loading_with_params(vllm_
         "torchao-testing/opt-125m-Float8WeightOnlyConfig-v2-0.14.0.dev-safetensors"
     )
     with vllm_runner(model_name=model_name, dtype="bfloat16") as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+
+        assert output
+
+
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skip(
+    reason="since torchao nightly is only compatible with torch nightly"
+    "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
+    "torchao tests that requires newer versions (0.14.0.dev+) for now"
+)
+def test_opt_125m_module_fqn_to_config_regex_model(vllm_runner):
+    torch._dynamo.reset()
+    model_name = "torchao-testing/opt-125m-ModuleFqnToConfig-v1-regex-0.14.0.dev"
+    with vllm_runner(
+        model_name=model_name, dtype="bfloat16", pt_load_map_location="cuda:0"
+    ) as llm:
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 

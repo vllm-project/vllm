@@ -3,12 +3,12 @@
 import base64
 from io import BytesIO
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
 
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 from .base import MediaIO
 
@@ -53,7 +53,7 @@ class AudioResampler:
 
     def __init__(
         self,
-        target_sr: Optional[float] = None,
+        target_sr: float | None = None,
         method: Literal["librosa", "scipy"] = "librosa",
     ):
         self.target_sr = target_sr

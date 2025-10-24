@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from mistral_common.tokens.tokenizers.base import SpecialTokens
-from mistral_common.tokens.tokenizers.tekken import SpecialTokenInfo, Tekkenizer
 
 from tests.reasoning.utils import run_reasoning_extraction_mistral
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -14,33 +12,9 @@ parser_name = "mistral"
 
 @pytest.fixture(scope="module")
 def mistral_tokenizer():
-    # TODO(Julien): upon model release change to a tokenizer already configured.
-    # =================================================================
     mistral_tokenizer = MistralTokenizer.from_pretrained(
-        "mistralai/Devstral-Small-2507"
+        "mistralai/Magistral-Small-2509"
     )
-    assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
-    # Add think special tokens to the tokenizer
-    mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
-        rank=35, is_control=True, token_str=SpecialTokens.begin_think.value
-    )
-    mistral_tokenizer.tokenizer._all_special_tokens[36] = SpecialTokenInfo(
-        rank=36, is_control=True, token_str=SpecialTokens.end_think.value
-    )
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab = {
-        k: v
-        for k, v in mistral_tokenizer.tokenizer._special_tokens_reverse_vocab.items()
-        if v not in {35, 36}
-    }
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.begin_think.value
-    ] = 35
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.end_think.value
-    ] = 36
-    mistral_tokenizer.instruct.BEGIN_THINK = 35
-    mistral_tokenizer.instruct.END_THINK = 36
-    # =================================================================
     return mistral_tokenizer
 
 

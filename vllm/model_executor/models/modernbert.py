@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Set
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -40,9 +39,12 @@ class ModernBertEmbeddings(nn.Module):
         self.tok_embeddings = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
-        self.norm = nn.LayerNorm(
-            config.hidden_size, eps=config.layer_norm_eps, bias=config.norm_bias
+        eps = (
+            getattr(config, "norm_eps", None)
+            or getattr(config, "layer_norm_eps", None)
+            or 1e-5
         )
+        self.norm = nn.LayerNorm(config.hidden_size, eps=eps, bias=config.norm_bias)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.tok_embeddings(input_ids)
@@ -50,7 +52,7 @@ class ModernBertEmbeddings(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             return self.norm(inputs_embeds)
@@ -74,7 +76,7 @@ class ModernBertRotaryEmbedding(RotaryEmbedding):
 
 
 class ModernBertAttention(nn.Module):
-    def __init__(self, config: ModernBertConfig, layer_id: Optional[int] = None):
+    def __init__(self, config: ModernBertConfig, layer_id: int | None = None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -151,7 +153,7 @@ class ModernBertMLP(nn.Module):
 
 class ModernBertLayer(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, prefix: str = "", layer_id: Optional[int] = None
+        self, config: ModernBertConfig, prefix: str = "", layer_id: int | None = None
     ):
         super().__init__()
         self.config = config
@@ -243,8 +245,8 @@ class ModernBertModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -287,9 +289,9 @@ class ModernBertPooler(Pooler):
 
     def forward(
         self,
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        hidden_states: torch.Tensor | list[torch.Tensor],
         pooling_metadata: PoolingMetadata,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         pooled_output = self.pooling(hidden_states, pooling_metadata)
 
         if isinstance(pooled_output, list):
@@ -323,20 +325,14 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
-                    pooling=self.pooling,
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    pooling=self.pooling, classifier=self.classifier, act_fn="classify"
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.pooling,
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=self.pooling, classifier=self.classifier, act_fn="score"
                 ),
             }
         )
@@ -370,10 +366,10 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor],
+        input_ids: torch.LongTensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.model(
             input_ids=input_ids,
@@ -422,7 +418,9 @@ class ModernBertForTokenClassification(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config=pooler_config
+                ),
             }
         )
 
@@ -436,10 +434,10 @@ class ModernBertForTokenClassification(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,

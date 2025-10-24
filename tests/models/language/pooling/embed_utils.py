@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Optional
 
 import pytest
 
@@ -13,7 +12,7 @@ def run_embedding_correctness_test(
     hf_model: "HfRunner",
     inputs: list[str],
     vllm_outputs: Sequence[list[float]],
-    dimensions: Optional[int] = None,
+    dimensions: int | None = None,
 ):
     hf_outputs = hf_model.encode(inputs)
     if dimensions:

@@ -13,7 +13,6 @@ Key Features:
 
 import threading
 from collections import deque
-from typing import Optional, Union
 
 import torch
 
@@ -46,7 +45,7 @@ class SimpleBuffer(KVLookupBufferBase):
         self.buffer_cv = threading.Condition()
         self.signal_pipe = signal_pipe
         self.data_pipe = data_pipe
-        self.request_handling_thread: Optional[threading.Thread] = None
+        self.request_handling_thread: threading.Thread | None = None
 
         self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
@@ -81,14 +80,14 @@ class SimpleBuffer(KVLookupBufferBase):
 
         return 0
 
-    def _send_tensor_and_dec_size(self, tensor: Optional[torch.Tensor]) -> None:
+    def _send_tensor_and_dec_size(self, tensor: torch.Tensor | None) -> None:
         assert tensor is not None, "Use self.data_pipe.send(None) instead"
         self.buffer_size -= tensor.element_size() * tensor.numel()
         if tensor.dtype == torch.bool:
             tensor = tensor.float()
         self.data_pipe.send_tensor(tensor)
 
-    def _get_element_size(self, data: Optional[Union[list, torch.Tensor]]):
+    def _get_element_size(self, data: list | torch.Tensor | None):
         if isinstance(data, torch.Tensor):
             return data.element_size() * data.numel()
         if not data:
@@ -184,8 +183,8 @@ class SimpleBuffer(KVLookupBufferBase):
         logger.debug("Closing drop_select_handler")
 
     def drop_select(
-        self, input_tokens: Optional[torch.Tensor], roi: Optional[torch.Tensor]
-    ) -> list[Optional[torch.Tensor]]:
+        self, input_tokens: torch.Tensor | None, roi: torch.Tensor | None
+    ) -> list[torch.Tensor | None]:
         assert self.request_handling_thread is None, (
             "drop_select should be called by the KV cache consumer "
             "(e.g. the decode vLLM instance)"

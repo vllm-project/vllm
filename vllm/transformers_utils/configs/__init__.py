@@ -17,6 +17,7 @@ from vllm.transformers_utils.configs.eagle import EAGLEConfig
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
+from vllm.transformers_utils.configs.flex_olmo import FlexOlmoConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
@@ -45,6 +46,7 @@ __all__ = [
     "DeepseekV3Config",
     "DotsOCRConfig",
     "EAGLEConfig",
+    "FlexOlmoConfig",
     "RWConfig",
     "JAISConfig",
     "Lfm2MoeConfig",
