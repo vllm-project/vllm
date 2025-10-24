@@ -98,44 +98,31 @@ def _test_stream_thread(main_expected_stream: torch.cuda.Stream):
             pytest.fail("Child thread failed to exit properly")
 
 
-def test_current_stream_multithread_cuda():
+def test_current_stream_multithread():
     from vllm.platforms import current_platform
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
     if current_platform.is_rocm():
-        pytest.skip("ROCm creates dedicated streams instead of default stream")
+        main_dedicated_stream = current_stream()
 
-    main_default_stream = torch.cuda.default_stream()
-    main_initial_stream = current_stream()
+        assert main_dedicated_stream.cuda_stream != 0, (
+            "ROCm should create a dedicated stream, not use default stream (0x0)"
+        )
 
-    assert main_initial_stream == main_default_stream, (
-        "First call to current_stream should return default stream on CUDA"
-    )
+        main_stream_again = current_stream()
+        assert main_stream_again == main_dedicated_stream, (
+            "Multiple calls to current_stream should return the same dedicated stream"
+        )
 
-    _test_stream_thread(main_default_stream)
+        _test_stream_thread(main_dedicated_stream)
+    else:
+        main_default_stream = torch.cuda.default_stream()
+        main_initial_stream = current_stream()
 
+        assert main_initial_stream == main_default_stream, (
+            "First call to current_stream should return default stream on CUDA"
+        )
 
-# We need to test this separately because ROCm creates a dedicated stream
-def test_current_stream_multithread_rocm():
-    from vllm.platforms import current_platform
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    if not current_platform.is_rocm():
-        pytest.skip("This test is specific to ROCm's dedicated stream behavior")
-
-    main_dedicated_stream = current_stream()
-
-    assert main_dedicated_stream.cuda_stream != 0, (
-        "ROCm should create a dedicated stream, not use default stream (0x0)"
-    )
-
-    main_stream_again = current_stream()
-    assert main_stream_again == main_dedicated_stream, (
-        "Multiple calls to current_stream should return the same dedicated stream"
-    )
-
-    _test_stream_thread(main_dedicated_stream)
+        _test_stream_thread(main_default_stream)
