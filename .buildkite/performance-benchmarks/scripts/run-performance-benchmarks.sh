@@ -365,8 +365,7 @@ run_serving_tests() {
       continue
     fi
 
-    server_command="$server_envs python3 \
-      -m vllm.entrypoints.openai.api_server \
+    server_command="$server_envs vllm serve \
       $server_args"
 
     # run the server
@@ -455,11 +454,6 @@ main() {
   fi
   check_hf_token
 
-  # Set to v1 to run v1 benchmark
-  if [[ "${ENGINE_VERSION:-v0}" == "v1" ]]; then
-    export VLLM_USE_V1=1
-  fi
-
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
   (which jq) || (apt-get update && apt-get -y install jq)
@@ -476,6 +470,11 @@ main() {
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
   QUICK_BENCHMARK_ROOT=../.buildkite/performance-benchmarks/
+
+  # dump vllm info via vllm collect-env
+  env_output=$(vllm collect-env)
+
+  echo "$env_output" >"$RESULTS_FOLDER/vllm_env.txt"
 
   # benchmarking
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"

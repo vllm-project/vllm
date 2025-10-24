@@ -5,11 +5,13 @@ Warmup kernels used during model execution.
 This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
+
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
@@ -23,18 +25,38 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def flashinfer_autotune_supported(vllm_config: VllmConfig) -> bool:
+    """
+    Record known issues with vllm + flashinfer autotune here. Return True if
+    and only if flashinfer autotune will run through without issues.
+    """
+    return not (
+        vllm_config.parallel_config.data_parallel_size > 1
+        and (
+            envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
+            or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+        )
+    )
+
+
 def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
-    do_deep_gemm_warmup = (envs.VLLM_USE_DEEP_GEMM
-                           and is_deep_gemm_supported()
-                           and not envs.VLLM_SKIP_DEEP_GEMM_WARMUP)
+    do_deep_gemm_warmup = (
+        envs.VLLM_USE_DEEP_GEMM
+        and is_deep_gemm_supported()
+        and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
+    )
     if do_deep_gemm_warmup:
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if has_flashinfer() and current_platform.has_device_capability(90):
+    if (
+        has_flashinfer()
+        and current_platform.has_device_capability(90)
+        and flashinfer_autotune_supported(worker.vllm_config)
+    ):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
@@ -47,8 +69,10 @@ def kernel_warmup(worker: "Worker"):
             return False
 
     if not worker.model_runner.is_pooling_model and all(
-            _is_flashinfer_backend(group.backend)
-            for groups in worker.model_runner.attn_groups for group in groups):
+        _is_flashinfer_backend(group.backend)
+        for groups in worker.model_runner.attn_groups
+        for group in groups
+    ):
         logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
         # This is to warm up both prefill and decode attention kernels
@@ -78,6 +102,8 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         # When autotuning with number of tokens m, flashinfer will autotune
         # operations for all number of tokens up to m.
         # So we only need to run with the max number of tokens.
-        runner._dummy_run(runner.scheduler_config.max_num_batched_tokens,
-                          skip_eplb=True,
-                          is_profile=True)
+        runner._dummy_run(
+            runner.scheduler_config.max_num_batched_tokens,
+            skip_eplb=True,
+            is_profile=True,
+        )
