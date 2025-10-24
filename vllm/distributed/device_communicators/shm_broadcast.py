@@ -312,7 +312,7 @@ class MessageQueue:
             remote_addr_ipv6=remote_addr_ipv6,
         )
 
-        logger.info("vLLM message queue communication handle: %s", self.handle)
+        logger.debug("vLLM message queue communication handle: %s", self.handle)
 
     def export_handle(self) -> Handle:
         return self.handle
