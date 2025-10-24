@@ -312,6 +312,9 @@ def fused_marlin_moe(
         if M * topk / E / block_size_m < 0.9:
             break
 
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        block_size_m = max(block_size_m, 16)
+
     if global_num_experts == -1:
         global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
