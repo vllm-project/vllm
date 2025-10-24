@@ -93,8 +93,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ):
-        self.reset_lora(index)
+        if not is_trainable:
+            self.reset_lora(index)
         self.lora_a_stacked[index, :lora_a.shape[0], :lora_a.shape[1]].copy_(
             lora_a, non_blocking=True)
         self.lora_b_stacked[index,
@@ -118,6 +121,13 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 )[self.embeddings_slice[0]:self.embeddings_slice[1]]
                 assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
+        if is_trainable:
+            self.lora_a_stacked[index].requires_grad_(True)
+            self.lora_b_stacked[index].requires_grad_(True)
+            if embeddings_tensor is not None:
+                self.embeddings_tensors[index].requires_grad_(True)
+            if self.embeddings_weights is not None:
+                self.embeddings_weights.requires_grad_(True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,

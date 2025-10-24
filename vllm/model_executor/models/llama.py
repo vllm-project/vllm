@@ -384,6 +384,7 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        is_lora_training: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
                                                         list[torch.Tensor]]]:
         if get_pp_group().is_first_rank:
@@ -391,6 +392,8 @@ class LlamaModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+                if is_lora_training:
+                    hidden_states.requires_grad_(True)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -593,9 +596,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        is_lora_training: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
+                                  inputs_embeds, is_lora_training=is_lora_training)
         return model_output
 
     def compute_logits(

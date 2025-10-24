@@ -47,6 +47,8 @@ class BaseLayerWithLoRA(nn.Module):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ):
         """Overwrites lora tensors at index."""
         ...

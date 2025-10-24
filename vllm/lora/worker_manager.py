@@ -180,12 +180,12 @@ class WorkerLoRAManager:
         for adapter_id in requested_ids - existing_adapters:
             self.add_adapter(models_map[adapter_id])
 
-    def add_adapter(self, adapter_request: Any) -> bool:
+    def add_adapter(self, adapter_request: Any, is_trainable: bool = False, trainable_slices: Optional[list[int]] = None) -> bool:
         if adapter_request.adapter_id in self.list_adapters():
             return False
         loaded_adapter = self._load_adapter(adapter_request)
         loaded = self._adapter_manager.add_adapter(loaded_adapter)
-        self._adapter_manager.activate_adapter(loaded_adapter.id)
+        self._adapter_manager.activate_adapter(loaded_adapter.id, is_trainable=is_trainable, trainable_slices=trainable_slices)
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
@@ -236,7 +236,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         for lora in loras_map.values():
             self.add_adapter(lora)
 
-    def add_adapter(self, lora_request: LoRARequest) -> bool:
+    def add_adapter(self, lora_request: LoRARequest, is_trainable: bool = False, trainable_slices: Optional[list[int]] = None) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
@@ -262,5 +262,5 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # update its position in the caches
             loaded = self._adapter_manager.get_adapter(
                 lora_request.lora_int_id) is not None
-        self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        self._adapter_manager.activate_adapter(lora_request.lora_int_id, is_trainable=is_trainable, trainable_slices=trainable_slices)
         return loaded

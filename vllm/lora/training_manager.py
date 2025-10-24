@@ -224,7 +224,7 @@ class TrainingManager:
         return self.training_state.steps % self.training_state.grad_accumulation_steps == 0 and self.training_state.steps > 0
 
     # TODO(girfan): Cache this result?
-    def _get_qkv_indices_for_training(self) -> List[int]:
+    def get_qkv_indices_for_training(self) -> List[int]:
         """
         Determine which Q/K/V indices to train based on target_patterns.
         Returns (a_indices, b_indices) where indices map to: 0=Q, 1=K, 2=V.
@@ -308,8 +308,11 @@ class TrainingManager:
         # Mark the LoRA adapter setup as in progress
         self.in_prog_lora_ids.add(lora_id)
 
+        # Get QKV indices for training
+        indices = self.get_qkv_indices_for_training()
+
         # Add the LoRA adapter to the LoRAManager
-        self.lora_manager.add_adapter(lora_request)
+        self.lora_manager.add_adapter(lora_request, is_trainable=True, trainable_slices=indices)
 
         # Freeze the base model
         base_model_stats = self._freeze_base_model()
@@ -327,9 +330,6 @@ class TrainingManager:
         trainable_params = []
         trainable_count = 0
         self.trainable_lora_params.clear()
-
-        # Get QKV indices for training
-        indices = self._get_qkv_indices_for_training()
 
         # Make stacked tensors trainable
         for module_name, module in self.model.named_modules():
@@ -353,7 +353,6 @@ class TrainingManager:
             # Process lora_a_stacked
             for idx in a_indices:
                 stacked_tensor = module.lora_a_stacked[idx]
-                stacked_tensor.requires_grad_(True)
 
                 param_name = f"{module_name}.lora_a_stacked[{idx}]"
                 self.trainable_lora_params[param_name] = stacked_tensor
@@ -362,7 +361,6 @@ class TrainingManager:
             # Process lora_b_stacked
             for idx in b_indices:
                 stacked_tensor = module.lora_b_stacked[idx]
-                stacked_tensor.requires_grad_(True)
 
                 param_name = f"{module_name}.lora_b_stacked[{idx}]"
                 self.trainable_lora_params[param_name] = stacked_tensor

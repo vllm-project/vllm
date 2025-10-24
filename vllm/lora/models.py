@@ -408,13 +408,12 @@ class LoRAModelManager:
     def activate_adapter(
         self,
         lora_id: int,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ) -> bool:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
             return False
-        from vllm.lora.training_manager import TrainingManager
-        training_manager = TrainingManager.get_instance()
-        is_training_lora = training_manager.is_registered_by_id(lora_id)
         first_free_slot = next(
             ((i, lora_id) for i, lora_id in enumerate(self.lora_index_to_id)
              if lora_id is None), None)
@@ -431,7 +430,7 @@ class LoRAModelManager:
             if module_lora:
                 # Skip applying optimize to the LoRA if it will be used for training
                 # We will apply scaling in the LoRA computation itself in base_linear.py
-                if not is_training_lora:
+                if not is_trainable:
                     module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
                 bias = module_lora.bias
@@ -445,9 +444,10 @@ class LoRAModelManager:
                         " without --enable-lora-bias.")
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
                                 module_lora.embeddings_tensor,
-                                module_lora.bias)
+                                module_lora.bias, is_trainable=is_trainable, trainable_slices=trainable_slices)
             else:
-                module.reset_lora(index)
+                if not is_trainable:
+                    module.reset_lora(index)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -780,11 +780,13 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     def activate_adapter(
         self,
         lora_id: int,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ) -> bool:
         if lora_id not in self._active_adapters and len(
                 self._active_adapters) >= self.lora_slots:
             self._active_adapters.remove_oldest()
-        result = super().activate_adapter(lora_id)
+        result = super().activate_adapter(lora_id, is_trainable=is_trainable, trainable_slices=trainable_slices)
         # We always touch to update the LRU cache order
         self._active_adapters.touch(lora_id)
         return result

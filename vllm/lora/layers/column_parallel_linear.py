@@ -273,8 +273,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ):
-        self.reset_lora(index)
+        if not is_trainable:
+            self.reset_lora(index)
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
@@ -301,6 +304,14 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                                               0, :lora_bias_i.shape[0]].copy_(
                                                   lora_bias_i.T,
                                                   non_blocking=True)
+
+        if is_trainable:
+            assert trainable_slices is not None, "trainable_slices is required for MergedColumnParallelLinearWithLoRA"
+            for slice in trainable_slices:
+                self.lora_a_stacked[slice].requires_grad_(True)
+                self.lora_b_stacked[slice].requires_grad_(True)
+                if lora_bias is not None and lora_bias[slice] is not None:
+                    self.lora_bias_stacked[slice].requires_grad_(True)
 
     @classmethod
     @_not_fully_sharded_can_replace

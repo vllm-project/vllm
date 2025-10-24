@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 # yapf: disable
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, ReplicatedLinear,
                                                RowParallelLinear)
@@ -16,6 +17,9 @@ from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
+
+
+logger = init_logger(__name__)
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -105,6 +109,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
@@ -113,9 +119,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
                 self.n_slices == 1)
 
-        from vllm.lora.training_manager import TrainingManager
-        training_manager = TrainingManager.get_instance()
-        if not training_manager.is_registered_by_index(index):
+        if not is_trainable:
             # Only reset LoRA if not registered in training manager (i.e., not training mode)
             self.reset_lora(index)
 
@@ -132,12 +136,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                                0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                    lora_b.T, non_blocking=True)
         if lora_bias is not None:
-
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             assert len(self.lora_bias_stacked)
             self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
                 lora_bias.T, non_blocking=True)
+        if is_trainable:
+            self.lora_a_stacked[0].requires_grad_(True)
+            self.lora_b_stacked[0].requires_grad_(True)
+            if lora_bias is not None:
+                self.lora_bias_stacked[0].requires_grad_(True)
 
     def apply(self,
               x: torch.Tensor,
@@ -151,7 +159,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        if x.requires_grad or output.requires_grad:
+        # TODO(girfan): This is WRONG. It is evaluating to true even in inference mode.
+        if self.training:
+            # TODO(girfan): Do this conditionally only for training inputs.
+            # Maybe by setting it in input_ids and checking if they require_grad?
+            # Maybe we don't need this if it is already set higher up in the call chain?
+            x.requires_grad_(True)
             return self._training_apply(x, output)
         else:
             return self._inference_apply(x, output)
@@ -165,74 +178,36 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = lora_output
         return output
 
+    # TODO(girfan): Add tests to verify if this is functionally correct and matches punica.
     def _training_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        if len(self.lora_a_stacked) <= 0:
-            raise ValueError("No LoRA weights found")
+        # Get active LoRA indices from the current batch
+        lora_indices = self.punica_wrapper.token_lora_indices
 
-        from vllm.lora.training_manager import TrainingManager
-        training_manager = TrainingManager.get_instance()
+        # Apply LoRA for each token using its assigned LoRA index
+        for token_idx, lora_idx in enumerate(lora_indices):
+            if lora_idx == -1:  # No LoRA for this token
+                continue
 
-        # Apply ALL LoRAs in the stacked tensors (supports parallel training)
-        # We apply even zero-initialized LoRAs to enable gradient flow from scratch
-        max_loras = self.lora_a_stacked[0].shape[0]
-        for lora_idx in range(max_loras):
-            # Check if this slot might be active by looking at tensor shapes
-            # We don't check for zero values because LoRAs can start from zero during training
-            first_lora_a = self.lora_a_stacked[0][lora_idx, 0, :, :]
+            # Apply LoRA for each slice (Q, K, V for QKV layers)
+            output_offset = 0
+            for slice_idx in range(len(self.lora_a_stacked)):
+                # Get LoRA weights for this slice
+                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :]  # [rank, input_size]
+                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :]  # [output_size, rank]
 
-            # Apply LoRA if the slot is properly shaped (not uninitialized)
-            if first_lora_a.numel() > 0:
-                # Apply this LoRA using PyTorch ops (supports autograd)
-                # For packed layers (e.g., QKV), apply each component to its output slice
-                output_offset = 0
-                # Determine which slices to apply (Q/V only for packed QKV)
-                try:
-                    from vllm.lora.layers.column_parallel_linear import (
-                        MergedQKVParallelLinearWithLoRA,
-                        QKVParallelLinearWithLoRA,
-                    )
-                    is_merged_qkv = isinstance(self, MergedQKVParallelLinearWithLoRA)
-                    is_single_qkv = isinstance(self, QKVParallelLinearWithLoRA)
-                except Exception:
-                    is_merged_qkv, is_single_qkv = False, False
+                # Apply LoRA: x @ A^T @ B^T
+                lora_hidden = x[token_idx:token_idx+1] @ lora_a.T
+                lora_output = lora_hidden @ lora_b.T
 
-                if is_merged_qkv:
-                    indices = training_manager.get_qkv_indices_for_training()
-                elif is_single_qkv:
-                    raise ValueError(f"Single-slice QKV LoRA layer training is not supported")
-                else:
-                    raise ValueError(f"Unsupported LoRA layer: {self.__class__.__name__}")
+                # Add to correct output slice
+                slice_size = self.output_slices[slice_idx]
+                output[token_idx:token_idx+1, output_offset:output_offset + slice_size] += lora_output
+                output_offset += slice_size
 
-                # LoRA scale matching PEFT: alpha / r
-                lora_scale = 1.0
-                if hasattr(self, 'lora_config') and getattr(self, 'lora_config') is not None:
-                    alpha = getattr(self.lora_config, 'lora_alpha', 1.0)
-                    rank = getattr(self.lora_config, 'max_lora_rank', 1.0)
-                    if rank:
-                        lora_scale = float(alpha) / float(rank)
-
-                for i in indices:
-                    lora_a = self.lora_a_stacked[i][lora_idx, 0, :, :]  # [rank, input_size]
-                    lora_b = self.lora_b_stacked[i][lora_idx, 0, :, :]  # [output_size, rank]
-
-                    # Convert to bfloat16 to match PEFT
-                    target_dtype = output.dtype if output.dtype in [torch.bfloat16, torch.float16] else torch.bfloat16
-
-                    # Note:
-                    # For training LoRAs, scaling is applied here, not in models.py (lora.optimize()).
-                    # (x @ A^T) @ B^T * scaling
-                    lora_hidden = x.to(target_dtype) @ lora_a.T.to(target_dtype)
-                    lora_output = (lora_hidden @ lora_b.T.to(target_dtype)) * float(lora_scale)
-                    lora_output = lora_output.to(output.dtype)
-
-                    # Get the output slice size for this component
-                    slice_size = self.output_slices[i]
-
-                    # Add LoRA output to corresponding slice (build delta to avoid in-place on view)
-                    delta = torch.zeros_like(output)
-                    delta[:, output_offset:output_offset + slice_size] = lora_output
-                    output = output + delta
-                    output_offset += slice_size
+                # Apply bias if present
+                if self.lora_bias_stacked is not None and self.lora_bias_stacked[slice_idx] is not None:
+                    bias = self.lora_bias_stacked[slice_idx][lora_idx, 0, :]
+                    output[token_idx:token_idx+1, output_offset-slice_size:output_offset] += bias
 
         return output
 

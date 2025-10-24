@@ -137,10 +137,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ):
-        from vllm.lora.training_manager import TrainingManager
-        training_manager = TrainingManager.get_instance()
-        if not training_manager.is_registered_by_index(index):
+        if not is_trainable:
             # Only reset LoRA if not registered in training manager (i.e., not training mode)
             self.reset_lora(index)
         self.lora_a_stacked[index,
@@ -155,6 +155,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 :embeddings_tensor.shape[0],
                 :embeddings_tensor.shape[1],
             ] = embeddings_tensor
+        if is_trainable:
+            self.lora_a_stacked[index].requires_grad_(True)
+            self.lora_b_stacked[index].requires_grad_(True)
+            if embeddings_tensor is not None:
+                self.embeddings_tensors[index].requires_grad_(True)
 
     def _get_logits(
         self,

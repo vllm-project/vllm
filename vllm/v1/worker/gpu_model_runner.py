@@ -2415,20 +2415,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             with torch.enable_grad():
                 self.model.train()
 
-                # Get the embedding layer
-                embed_layer = self.model.model.embed_tokens
+                # # TODO(girfan): Do we need this or let the model do this itself?
+                # # Get the embedding layer
+                # embed_layer = self.model.model.embed_tokens
+                # # Use torch.nn.functional.embedding directly to compute embeddings
+                # # This is critical for gradient flow through embeddings
+                # embed_weight = embed_layer.weight
+                # if not embed_weight.requires_grad:
+                #     # Temporarily enable gradients for the embedding lookup
+                #     # This allows the gradient graph to be built through the embeddings
+                #     embed_weight = embed_weight.detach().requires_grad_(True)
+                # inputs_embeds = torch.nn.functional.embedding(input_ids, embed_weight)
+                # input_ids = None  # Clear input_ids so the model uses inputs_embeds
 
-                # Use torch.nn.functional.embedding directly to compute embeddings
-                # This is critical for gradient flow through embeddings
-                embed_weight = embed_layer.weight
-                if not embed_weight.requires_grad:
-                    # Temporarily enable gradients for the embedding lookup
-                    # This allows the gradient graph to be built through the embeddings
-                    embed_weight = embed_weight.detach().requires_grad_(True)
+                model_kwargs["is_lora_training"] = True
 
-                inputs_embeds = torch.nn.functional.embedding(input_ids, embed_weight)
-                input_ids = None  # Clear input_ids so the model uses inputs_embeds
-
+                # Start the gradient flow through the input_ids.
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
