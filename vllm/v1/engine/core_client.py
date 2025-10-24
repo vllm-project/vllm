@@ -657,6 +657,10 @@ class MPClient(EngineCoreClient):
                 self.engine_registry = addresses.engine_core_guard_identities
                 self.engine_exception_q_lock = asyncio.Lock()
                 assert self.engine_registry is not None
+                assert addresses.fault_pub_socket_addr is not None, (
+                    "addresses.fault_pub_socket_addr should not be None at"
+                    "fault tolerance scenario"
+                )
                 self.client_guard = ClientGuard(
                     addresses.fault_report_addr,
                     addresses.client_cmd_addr,
