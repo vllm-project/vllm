@@ -126,6 +126,8 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
+        from vllm.config.cache import BlockSize
+
         if block_size is None:
             return True
 
@@ -153,8 +155,6 @@ class AttentionBackend(ABC):
     def get_default_block_size(cls) -> "BlockSize":
         from vllm.config.cache import BlockSize
 
-        valid_sizes = get_args(BlockSize)
-
         supported_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_block_sizes:
             raise ValueError(
@@ -166,6 +166,7 @@ class AttentionBackend(ABC):
         if isinstance(block_size, MultipleOf):
             block_size = block_size.base
 
+        valid_sizes = get_args(BlockSize)
         if block_size not in valid_sizes:
             raise ValueError(
                 f"Default block size {block_size} for backend {cls.get_name()} is not "
