@@ -60,7 +60,7 @@ class MiniCPM3Attention(nn.Module):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: int,
+        q_lora_rank: Optional[int],
         kv_lora_rank: int,
         rope_theta: float = 10000,
         rope_scaling: dict[str, Any] | None = None,
@@ -87,16 +87,27 @@ class MiniCPM3Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.q_a_proj = ReplicatedLinear(
-            self.hidden_size, self.q_lora_rank, bias=False, quant_config=quant_config
-        )
-        self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-        self.q_b_proj = ColumnParallelLinear(
-            q_lora_rank,
-            self.num_heads * self.qk_head_dim,
-            bias=False,
-            quant_config=quant_config,
-        )
+        if self.q_lora_rank is not None:
+            self.q_a_proj = ReplicatedLinear(
+                self.hidden_size,
+                self.q_lora_rank,
+                bias=False,
+                quant_config=quant_config,
+            )
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
+            self.q_b_proj = ColumnParallelLinear(
+                self.q_lora_rank,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+            )
+        else:
+            self.q_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+            )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
@@ -141,10 +152,14 @@ class MiniCPM3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        q, _ = self.q_a_proj(hidden_states)
-        q = self.q_a_layernorm(q)
-        q, _ = self.q_b_proj(q)
+        if self.q_lora_rank is not None:
+            q, _ = self.q_a_proj(hidden_states)
+            q = self.q_a_layernorm(q)
+            q, _ = self.q_b_proj(q)
+        else:
+            q, _ = self.q_proj(hidden_states)
         q = q.view(-1, self.num_local_heads, self.qk_head_dim)
+
         _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
         kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -191,6 +206,7 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
         self.input_layernorm = RMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
+
         self.self_attn = MiniCPM3Attention(
             config=self.config,
             hidden_size=self.hidden_size,
@@ -198,7 +214,7 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             qk_nope_head_dim=self.config.qk_nope_head_dim,
             qk_rope_head_dim=self.config.qk_rope_head_dim,
             v_head_dim=self.config.v_head_dim,
-            q_lora_rank=self.config.q_lora_rank,
+            q_lora_rank=getattr(self.config, "q_lora_rank", None),
             kv_lora_rank=self.config.kv_lora_rank,
             rope_theta=self.rope_theta,
             rope_scaling=self.rope_scaling,
@@ -210,6 +226,12 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
 
 
 class MiniCPM3Model(MiniCPMModel):
+    stacked_params_mapping = [
+        # (param_name, shard_name, shard_id)
+        ("gate_up_proj", "gate_proj", 0),
+        ("gate_up_proj", "up_proj", 1),
+    ]
+
     def _init_layers(
         self,
         prefix: str,
