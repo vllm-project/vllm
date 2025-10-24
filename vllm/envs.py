@@ -131,7 +131,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
-    VLLM_USE_STANDALONE_COMPILE: bool = False
+    VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -183,6 +183,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
+    VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
@@ -494,10 +495,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_FLASH_ATTN_VERSION", None)
     ),
     # Feature flag to enable/disable Inductor standalone compile.
-    # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
-    # disabled by default.
+    # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
+    # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE": lambda: os.environ.get(
-        "VLLM_USE_STANDALONE_COMPILE", "0"
+        "VLLM_USE_STANDALONE_COMPILE", "1"
     )
     == "1",
     # Debug pattern matching inside custom passes.
@@ -1250,6 +1251,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL": lambda: bool(
         int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))
     ),
+    # Controls whether to use TRT-LLM ragged DeepSeek prefill
+    "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL", "0"))
+    ),
     # If set to 1/True, use the TRTLLM attention backend in flashinfer.
     # If set to 0/False, use the default attention backend in flashinfer.
     # If not set, auto-detect the attention backend in flashinfer.
@@ -1481,6 +1486,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
         "VLLM_USE_CUDNN_PREFILL",
+        "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
         "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
         "VLLM_ROCM_USE_AITER",
