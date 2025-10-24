@@ -48,6 +48,7 @@ AudioInput = list[tuple[np.ndarray, int]]
 def _resize_data(
     _data: Image.Image | np.ndarray, size_factor: float
 ) -> Image.Image | np.ndarray:
+    assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
         W, H = _data.width, _data.height
@@ -85,9 +86,7 @@ def create_batched_mm_kwargs(
     model_cls: type[SupportsMultiModal],
     model_config: ModelConfig,
     processor: BaseMultiModalProcessor,
-    # NOTE: Use increasing size factors to avoid items being too small
-    # (e.g. for Qwen3-VL)
-    size_factors: tuple[float, ...] = (1.0, 1.5, 2.5),
+    size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
