@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.attention.utils.fa_utils import (
@@ -17,7 +18,7 @@ from vllm.attention.utils.fa_utils import (
     get_flash_attn_version,
 )
 from vllm.config import VllmConfig
-from vllm.config.cache import BlockSize, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -60,18 +61,12 @@ class FlashAttnMLABackend(MLACommonBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
+
+    @classmethod
     def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
         return ["auto"]
-
-    @classmethod
-    def supports_block_size(cls, block_size: BlockSize | None) -> bool:
-        if block_size is None:
-            return True
-        return block_size % 16 == 0
-
-    @classmethod
-    def get_default_block_size(cls) -> BlockSize:
-        return 16
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:

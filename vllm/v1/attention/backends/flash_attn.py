@@ -32,7 +32,7 @@ if is_flash_attn_varlen_func_available():
         reshape_and_cache_flash,
     )
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.cache import BlockSize, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -107,7 +107,7 @@ class FlashAttentionBackend(AttentionBackend):
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     @classmethod
@@ -121,16 +121,6 @@ class FlashAttentionBackend(AttentionBackend):
         if kv_cache_dtype.startswith("fp8"):
             return flash_attn_supports_fp8()
         return kv_cache_dtype in ["auto"]
-
-    @classmethod
-    def supports_block_size(cls, block_size: BlockSize | None) -> bool:
-        if block_size is None:
-            return True
-        return block_size % 16 == 0
-
-    @classmethod
-    def get_default_block_size(cls) -> BlockSize:
-        return 16
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:

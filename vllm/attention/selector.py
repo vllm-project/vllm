@@ -153,6 +153,7 @@ def _cached_get_attn_backend(
     backend = resolve_obj_by_qualname(attention_cls)
 
     # Adjust block size if the selected backend doesn't support it
+    # The hybrid block table will handle mapping between allocation and kernel sizes
     # TODO: per-layer block size configuration
     if not backend.supports_block_size(block_size):
         from vllm.config import get_current_vllm_config

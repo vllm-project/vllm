@@ -12,7 +12,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
-from vllm.config.cache import BlockSize, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -45,10 +45,6 @@ class TritonMLABackend(MLACommonBackend):
     @classmethod
     def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
         return ["auto"]
-
-    @classmethod
-    def get_supported_block_sizes(cls) -> list[BlockSize]:
-        return []
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:

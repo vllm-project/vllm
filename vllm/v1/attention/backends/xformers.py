@@ -82,7 +82,7 @@ class XFormersAttentionBackend(AttentionBackend):
         ]
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     @staticmethod

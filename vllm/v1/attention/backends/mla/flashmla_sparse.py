@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
     AttentionMetadata,
+    MultipleOf,
 )
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.flashmla import (
@@ -19,7 +20,7 @@ from vllm.attention.ops.flashmla import (
     get_mla_metadata,
 )
 from vllm.config import VllmConfig
-from vllm.config.cache import BlockSize, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -76,12 +77,12 @@ class FlashMLASparseBackend(AttentionBackend):
         return [torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
-        return ["auto", "fp8_ds_mla"]
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        return [64]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[BlockSize]:
-        return [64]
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto", "fp8_ds_mla"]
 
     @classmethod
     def is_sparse(cls) -> bool:

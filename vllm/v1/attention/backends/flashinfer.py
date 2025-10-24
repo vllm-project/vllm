@@ -23,7 +23,7 @@ from vllm.attention.backends.abstract import (
     MultipleOf,
 )
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.config.cache import BlockSize, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -215,7 +215,7 @@ class FlashInferBackend(AttentionBackend):
         return [64, 128, 256]
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
         # Note: Not sure for all platforms,
         # but on Blackwell, only support a page size of
         # 16, 32, 64
@@ -228,10 +228,6 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
         return ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
-
-    @classmethod
-    def get_supported_block_sizes(cls) -> list[BlockSize]:
-        return []
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:

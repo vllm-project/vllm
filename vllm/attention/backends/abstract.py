@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast, get_args
 
 import torch
 
@@ -62,8 +62,8 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
-        return cls.get_impl_cls().get_supported_kernel_block_size()
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @classmethod
     def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
@@ -125,33 +125,54 @@ class AttentionBackend(ABC):
         )
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list["BlockSize"]:
-        return []
-
-    @classmethod
-    def supports_block_size(cls, block_size: "BlockSize | None") -> bool:
-        from vllm.config.cache import BlockSize
-
+    def supports_block_size(cls, block_size: int | None) -> bool:
         if block_size is None:
             return True
-        try:
-            block_size_literal = cast(BlockSize, block_size)
-        except ValueError:
+
+        valid_sizes = get_args(BlockSize)
+        if block_size not in valid_sizes:
             return False
-        supported_block_sizes = cls.get_supported_block_sizes()
-        return (
-            not supported_block_sizes
-        ) or block_size_literal in supported_block_sizes
+
+        supported_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_block_sizes:
+            return True
+
+        for supported_size in supported_block_sizes:
+            is_multiple_of = (
+                isinstance(supported_size, MultipleOf)
+                and block_size % supported_size.base == 0
+            )
+            is_int_divisor = (
+                isinstance(supported_size, int) and block_size % supported_size == 0
+            )
+            if is_multiple_of or is_int_divisor:
+                return True
+        return False
 
     @classmethod
     def get_default_block_size(cls) -> "BlockSize":
-        supported_block_sizes = cls.get_supported_block_sizes()
+        from vllm.config.cache import BlockSize
+
+        valid_sizes = get_args(BlockSize)
+
+        supported_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_block_sizes:
             raise ValueError(
                 f"Fallback failed, no explicitly supported block sizes for "
                 f"backend {cls.get_name()}"
             )
-        return supported_block_sizes[0]
+
+        block_size = supported_block_sizes[0]
+        if isinstance(block_size, MultipleOf):
+            block_size = block_size.base
+
+        if block_size not in valid_sizes:
+            raise ValueError(
+                f"Default block size {block_size} for backend {cls.get_name()} is not "
+                f"a valid BlockSize."
+            )
+
+        return cast(BlockSize, block_size)
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -325,11 +346,6 @@ class AttentionImpl(ABC, Generic[T]):
         kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         raise NotImplementedError
-
-    @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
-        # TODO: implement this function for all backends.
-        return [MultipleOf(1)]
 
     @abstractmethod
     def forward(
