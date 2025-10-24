@@ -941,16 +941,16 @@ class OpenAIServingResponses(OpenAIServing):
     def _construct_chat_message_with_tool_call(
         self, item: ResponseInputOutputItem
     ) -> ChatCompletionMessageParam:
-        if item.get("type") == "function_call":
+        if isinstance(item, ResponseFunctionToolCall):
             # Append the function call as a tool call.
             return ChatCompletionAssistantMessageParam(
                 role="assistant",
                 tool_calls=[
                     ChatCompletionMessageToolCallParam(
-                        id=item.get("call_id"),
+                        id=item.call_id,
                         function=FunctionCallTool(
-                            name=item.get("name"),
-                            arguments=item.get("arguments"),
+                            name=item.name,
+                            arguments=item.arguments,
                         ),
                         type="function",
                     )
