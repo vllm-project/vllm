@@ -359,7 +359,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     @property
     def allow_inplace(self) -> bool:
-        return self._allow_inplace
+        return self.old_quant_method.allow_inplace
 
     def create_weights(
         self,
