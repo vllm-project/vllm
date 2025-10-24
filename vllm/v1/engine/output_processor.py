@@ -44,17 +44,16 @@ class RequestOutputCollector:
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
-        elif isinstance(self.output, (RequestOutput, PoolingRequestOutput)):
+        elif isinstance(self.output, RequestOutput) and isinstance(
+            output, RequestOutput
+        ):
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
-            if isinstance(self.output, RequestOutput) and isinstance(
-                output, RequestOutput
-            ):
-                self.output.add(output, aggregate=self.aggregate)
-            elif isinstance(self.output, PoolingRequestOutput) and isinstance(
-                output, PoolingRequestOutput
-            ):
-                self.output = output
+            self.output.add(output, aggregate=self.aggregate)
+        elif isinstance(self.output, PoolingRequestOutput) and isinstance(
+            output, PoolingRequestOutput
+        ):
+            self.output = output
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""

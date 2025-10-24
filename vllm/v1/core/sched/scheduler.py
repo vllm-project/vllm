@@ -396,7 +396,7 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.prepend_request(request)
                     continue
 
-                num_external_computed_tokens: int | None = 0
+                num_external_computed_tokens = 0
                 load_kv_async = False
 
                 # Get already-cached tokens.
@@ -408,13 +408,13 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_external_computed_tokens, load_kv_async = (
+                        ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
                             )
                         )
 
-                        if num_external_computed_tokens is None:
+                        if ext_tokens is None:
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
@@ -422,9 +422,11 @@ class Scheduler(SchedulerInterface):
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
+                        num_external_computed_tokens = ext_tokens
+
                     # Total computed tokens (local + external).
-                    num_computed_tokens = num_new_local_computed_tokens + (
-                        num_external_computed_tokens or 0
+                    num_computed_tokens = (
+                        num_new_local_computed_tokens + num_external_computed_tokens
                     )
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
@@ -438,7 +440,6 @@ class Scheduler(SchedulerInterface):
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
-                    assert isinstance(num_external_computed_tokens, int)
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
                 # Number of tokens to be scheduled.
@@ -508,7 +509,7 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens + (num_external_computed_tokens or 0),
+                    num_new_tokens + num_external_computed_tokens,
                     num_new_local_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
@@ -528,7 +529,7 @@ class Scheduler(SchedulerInterface):
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
-                        num_external_computed_tokens or 0,
+                        num_external_computed_tokens,
                     )
                     self._update_connector_prefix_cache_stats(
                         request, num_external_computed_tokens
