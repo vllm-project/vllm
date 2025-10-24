@@ -15,9 +15,8 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 else:
-    ModelConfig = None
     VllmConfig = None
     _Backend = None
 
@@ -62,21 +61,19 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import _Backend, backend_to_class_str
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
-        TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
-        FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
         if selected_backend == _Backend.TRITON_ATTN:
             logger.info_once("Using Triton backend on V1 engine.")
-            return TRITON_ATTN
+            return backend_to_class_str(_Backend.TRITON_ATTN)
         elif selected_backend == _Backend.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend on V1 engine.")
-            return FLASH_ATTN
+            return backend_to_class_str(_Backend.FLASH_ATTN)
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
@@ -84,7 +81,7 @@ class XPUPlatform(Platform):
             )
 
         logger.info("Using Flash Attention backend on V1 engine.")
-        return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        return backend_to_class_str(_Backend.FLASH_ATTN)
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

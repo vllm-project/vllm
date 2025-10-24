@@ -81,21 +81,9 @@ class XFormersAttentionBackend(AttentionBackend):
             256,
         ]
 
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
-
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
@@ -309,8 +297,6 @@ class XFormersAttentionImpl(AttentionImpl):
             # Setting logits_soft_cap to 0 means no soft cap.
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
-
-        XFormersAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(

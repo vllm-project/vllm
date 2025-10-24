@@ -13,7 +13,9 @@ from vllm.attention.backends.abstract import (
     MultipleOf,
     is_quantized_kv_cache,
 )
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
@@ -45,9 +47,25 @@ class CutlassMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
         return CutlassMLAMetadataBuilder
 
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+    @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
         return [128]
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto", "fp8", "fp8_e4m3"]
+
+    @classmethod
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(10, 0)
+
+    @classmethod
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(10, 3)
 
 
 class SM100Workspace:

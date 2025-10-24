@@ -3,8 +3,12 @@
 """Attention backend registry"""
 
 import enum
+from typing import TYPE_CHECKING
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 
 class _Backend(enum.Enum):
@@ -84,7 +88,7 @@ def backend_to_class_str(backend: _Backend) -> str:
     return BACKEND_MAP[backend]
 
 
-def backend_to_class(backend: _Backend) -> type:
+def backend_to_class(backend: _Backend) -> "type[AttentionBackend]":
     """Get the backend class.
 
     Args:
@@ -95,16 +99,3 @@ def backend_to_class(backend: _Backend) -> type:
     """
     backend_class_name = backend_to_class_str(backend)
     return resolve_obj_by_qualname(backend_class_name)
-
-
-def backend_name_to_enum(backend_name: str) -> _Backend | None:
-    """
-    Convert a string backend name to a _Backend enum value.
-
-    Returns:
-        _Backend: enum value if backend_name is a valid in-tree type
-        None: otherwise it's an invalid in-tree type or an out-of-tree platform
-              is loaded.
-    """
-    assert backend_name is not None
-    return _Backend[backend_name] if backend_name in _Backend.__members__ else None

@@ -164,12 +164,11 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
+        if not cls.supports_head_size(head_size):
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
+                f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )

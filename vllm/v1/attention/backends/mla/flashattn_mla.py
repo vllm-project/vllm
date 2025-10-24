@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.attention.utils.fa_utils import (
@@ -17,10 +18,12 @@ from vllm.attention.utils.fa_utils import (
     get_flash_attn_version,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -52,6 +55,42 @@ class FlashAttnMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashAttnMLAImpl"]:
         return FlashAttnMLAImpl
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        return ["auto"]
+
+    @classmethod
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(9, 0)
+
+    @classmethod
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(9, 0)
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if not flash_attn_supports_mla():
+            return "FlashAttention MLA not supported on this device"
+        return None
 
 
 @dataclass

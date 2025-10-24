@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast, get_args
 
 import torch
 
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
+if TYPE_CHECKING:
+    from vllm.config.cache import BlockSize, CacheDType
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
 class AttentionType:
@@ -57,8 +62,8 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
-        return cls.get_impl_cls().get_supported_kernel_block_size()
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @classmethod
     def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
@@ -87,6 +92,189 @@ class AttentionBackend(ABC):
     @classmethod
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        return (not supported_head_sizes) or head_size in supported_head_sizes
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def supports_dtype(cls, dtype: torch.dtype) -> bool:
+        supported_dtypes = cls.get_supported_dtypes()
+        return (not supported_dtypes) or dtype in supported_dtypes
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list["CacheDType"]:
+        return ["auto"]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
+        if kv_cache_dtype is None:
+            return True
+        supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
+        return (not supported_kv_cache_dtypes) or (
+            kv_cache_dtype in supported_kv_cache_dtypes
+        )
+
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        from vllm.config.cache import BlockSize
+
+        if block_size is None:
+            return True
+
+        valid_sizes = get_args(BlockSize)
+        if block_size not in valid_sizes:
+            return False
+
+        supported_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_block_sizes:
+            return True
+
+        for supported_size in supported_block_sizes:
+            is_multiple_of = (
+                isinstance(supported_size, MultipleOf)
+                and block_size % supported_size.base == 0
+            )
+            is_int_divisor = (
+                isinstance(supported_size, int) and block_size % supported_size == 0
+            )
+            if is_multiple_of or is_int_divisor:
+                return True
+        return False
+
+    @classmethod
+    def get_default_block_size(cls) -> "BlockSize":
+        from vllm.config.cache import BlockSize
+
+        supported_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_block_sizes:
+            raise ValueError(
+                f"Fallback failed, no explicitly supported block sizes for "
+                f"backend {cls.get_name()}"
+            )
+
+        block_size = supported_block_sizes[0]
+        if isinstance(block_size, MultipleOf):
+            block_size = block_size.base
+
+        valid_sizes = get_args(BlockSize)
+        if block_size not in valid_sizes:
+            raise ValueError(
+                f"Default block size {block_size} for backend {cls.get_name()} is not "
+                f"a valid BlockSize."
+            )
+
+        return cast(BlockSize, block_size)
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return False
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> "DeviceCapability | None":
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> "DeviceCapability | None":
+        return None
+
+    @classmethod
+    def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
+        min_capability = cls.get_min_compute_capability()
+        max_capability = cls.get_max_compute_capability()
+        return ((min_capability is None) or (capability >= min_capability)) and (
+            (max_capability is None) or (capability <= max_capability)
+        )
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: "DeviceCapability",
+    ) -> str | None:
+        return None
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: "DeviceCapability",
+    ) -> list[str]:
+        invalid_reasons = []
+        if not cls.supports_head_size(head_size):
+            invalid_reasons.append("head_size not supported")
+        if not cls.supports_dtype(dtype):
+            invalid_reasons.append("dtype not supported")
+        if not cls.supports_kv_cache_dtype(kv_cache_dtype):
+            invalid_reasons.append("kv_cache_dtype not supported")
+        if not cls.supports_block_size(block_size):
+            invalid_reasons.append("block_size not supported")
+        if use_mla != cls.is_mla():
+            if use_mla:
+                invalid_reasons.append("MLA not supported")
+            else:
+                invalid_reasons.append("non-MLA not supported")
+        if has_sink and not cls.supports_sink():
+            invalid_reasons.append("sink setting not supported")
+        if use_sparse != cls.is_sparse():
+            if use_sparse:
+                invalid_reasons.append("sparse not supported")
+            else:
+                invalid_reasons.append("non-sparse not supported")
+        if not cls.supports_compute_capability(device_capability):
+            invalid_reasons.append("compute capability not supported")
+        combination_reason = cls.supports_combination(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            device_capability,
+        )
+        if combination_reason is not None:
+            invalid_reasons.append(combination_reason)
+        return invalid_reasons
+
+    @classmethod
+    def get_required_kv_cache_layout(
+        cls, capability: "DeviceCapability"
+    ) -> "KVCacheLayoutType | None":
+        """
+        Some backends require a specific kv cache layout.
+        This function returns the required layout if any.
+        """
+        return None
 
 
 class AttentionMetadata:
@@ -159,11 +347,6 @@ class AttentionImpl(ABC, Generic[T]):
         kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         raise NotImplementedError
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        # TODO: implement this function for all backends.
-        return [MultipleOf(1)]
 
     @abstractmethod
     def forward(
