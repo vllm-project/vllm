@@ -76,7 +76,11 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
 
 @skip_unsupported
 @pytest.mark.timeout(1000)
-def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
+@pytest.mark.parametrize(
+    "backend",
+    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+)
+def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(backend):
     """
     Ensures that the same request (the 'needle' prompt) yields identical output
     whether run alone (bs=1) or mixed into a larger batch (e.g., bs=64),
@@ -101,6 +105,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
+    os.environ["VLLM_ATTENTION_BACKEND"] = backend
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
     model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
@@ -220,10 +225,12 @@ def _extract_step_logprobs(request_output):
 
 
 @skip_unsupported
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize(
+    "backend",
+    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+)
 @pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
-    backend = os.getenv("VLLM_ATTENTION_BACKEND", backend)
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
@@ -435,11 +442,16 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
 
 
 @skip_unsupported
-def test_simple_generation():
+@pytest.mark.parametrize(
+    "backend",
+    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+)
+def test_simple_generation(backend):
     """
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
+    os.environ["VLLM_ATTENTION_BACKEND"] = backend
     model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
 
     llm = LLM(
@@ -481,9 +493,12 @@ def test_simple_generation():
 
 
 @skip_unsupported
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize(
+    "backend",
+    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+)
 @pytest.mark.forked
-def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
+def test_logprobs_without_batch_invariance_should_fail(backend):
     """
     This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.
     It DISABLES batch invariance mode and expects to see non-deterministic behavior
@@ -493,7 +508,6 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
-    backend = os.getenv("VLLM_ATTENTION_BACKEND", backend)
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     # CRITICAL: Disable batch invariance for this test
@@ -724,7 +738,6 @@ def test_decode_logprobs_match_prefill_logprobs(backend):
     This ensures that the logprobs from decode are consistent with what
     we would get if we ran prefill on each prefix.
     """
-    backend = os.getenv("VLLM_ATTENTION_BACKEND", backend)
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
