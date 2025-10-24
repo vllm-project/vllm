@@ -379,16 +379,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.cuda.Event()
 
-        # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
-        # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
-        # The batch sizes in the config are in descending order.
         if (
             self.compilation_config.cudagraph_capture_sizes
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
-            self.cudagraph_batch_sizes = list(
-                reversed(self.compilation_config.cudagraph_capture_sizes)
+            self.cudagraph_batch_sizes = sorted(
+                self.compilation_config.cudagraph_capture_sizes
             )
 
         # Cache the device properties.
@@ -3791,7 +3788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
-
+                # make sure we capture the largest batch size first
                 compilation_cases = list(
                     product(reversed(self.cudagraph_batch_sizes), lora_cases)
                 )
