@@ -17,9 +17,12 @@ Usage:
 """
 
 import time
+from typing import Any
 
 # Import vLLM components
 from vllm import LLM, SamplingParams
+
+METRIC_NAME = "vllm:kv_cache_block_lifetime_seconds"
 
 
 def create_llm_with_lifetime_tracking():
@@ -51,6 +54,36 @@ def run_inference_workload(llm: LLM, prompts: list[str]) -> None:
     return outputs
 
 
+def _summarize_lifetime_metrics(llm: LLM, heading: str) -> None:
+    """Fetch and print KV cache lifetime histogram metrics."""
+    print(f"\n{heading}")
+    metrics = llm.get_metrics()
+    lifetime_metrics = [
+        metric
+        for metric in metrics
+        if getattr(metric, "name", "") == METRIC_NAME
+        and hasattr(metric, "count")
+        and hasattr(metric, "sum")
+    ]
+
+    if not lifetime_metrics:
+        print("  Lifetime histogram not available yet.")
+        print(
+            "  Ensure `log_stats=True` and run some generations before"
+            " collecting metrics."
+        )
+        return
+
+    for metric in lifetime_metrics:
+        labels: dict[str, Any] = getattr(metric, "labels", {})
+        engine_label = labels.get("engine", "0")
+        print(f"  Engine {engine_label}:")
+        print(f"    Samples observed: {metric.count}")
+        print(f"    Total lifetime seconds: {metric.sum:.4f}")
+        average = metric.sum / metric.count if metric.count else 0.0
+        print(f"    Average lifetime seconds: {average:.4f}")
+
+
 def demonstrate_lifetime_stats():
     """Demonstrate the KV cache lifetime tracking feature."""
     print("=" * 60)
@@ -77,51 +110,13 @@ def demonstrate_lifetime_stats():
     print("\n1. Running first batch of inference...")
     run_inference_workload(llm, prompts[:3])
 
-    # Get lifetime stats from the engine
-    try:
-        # Access the engine's metrics
-        engine = llm.llm_engine
+    _summarize_lifetime_metrics(llm, "Lifetime statistics after first batch:")
 
-        # Try to access lifetime statistics if available
-        if hasattr(engine, "scheduler") and hasattr(
-            engine.scheduler, "kv_cache_manager"
-        ):
-            kv_manager = engine.scheduler.kv_cache_manager
-            if hasattr(kv_manager, "get_kv_cache_lifetime_stats"):
-                stats = kv_manager.get_kv_cache_lifetime_stats()
-                print("\nLifetime Statistics after first batch:")
-                print(f"  Total blocks freed: {stats.total_blocks_freed}")
-                print(f"  Total lifetime: {stats.total_lifetime_seconds:.4f} seconds")
-                print(
-                    f"  Average lifetime: {stats.average_lifetime_seconds:.4f} seconds"
-                )
+    print("\n2. Running second batch of inference...")
+    time.sleep(1)  # Small delay to show time progression
+    run_inference_workload(llm, prompts[3:])
 
-        print("\n2. Running second batch of inference...")
-        time.sleep(1)  # Small delay to show time progression
-        run_inference_workload(llm, prompts[3:])
-
-        # Get updated stats
-        if hasattr(engine, "scheduler") and hasattr(
-            engine.scheduler, "kv_cache_manager"
-        ):
-            kv_manager = engine.scheduler.kv_cache_manager
-            if hasattr(kv_manager, "get_kv_cache_lifetime_stats"):
-                stats = kv_manager.get_kv_cache_lifetime_stats()
-                print("\nLifetime Statistics after second batch:")
-                print(f"  Total blocks freed: {stats.total_blocks_freed}")
-                print(f"  Total lifetime: {stats.total_lifetime_seconds:.4f} seconds")
-                print(
-                    f"  Average lifetime: {stats.average_lifetime_seconds:.4f} seconds"
-                )
-
-    except Exception as e:
-        print(
-            f"Note: Could not access detailed lifetime stats in this environment: {e}"
-        )
-        print(
-            "This is expected in some configurations - the feature is "
-            "still working internally."
-        )
+    _summarize_lifetime_metrics(llm, "Lifetime statistics after second batch:")
 
     print("\n3. Demonstrating Prometheus metric integration...")
 
