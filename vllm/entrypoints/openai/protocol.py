@@ -16,7 +16,6 @@ from openai.types.chat.chat_completion_audio import (
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from openai.types.responses import (
-    FunctionTool,
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
     ResponseCodeInterpreterCallCompletedEvent,
@@ -37,7 +36,6 @@ from openai.types.responses import (
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
-    ToolChoiceFunction,
 )
 from openai.types.responses import (
     ResponseCompletedEvent as OpenAIResponseCompletedEvent,
@@ -425,7 +423,18 @@ class ResponsesRequest(OpenAIBaseModel):
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        structured_outputs = self._get_structured_outputs()
+        structured_outputs = None
+        if self.text is not None and self.text.format is not None:
+            response_format = self.text.format
+            if (
+                response_format.type == "json_schema"
+                and response_format.schema_ is not None
+            ):
+                structured_outputs = StructuredOutputsParams(
+                    json=response_format.schema_
+                )
+            elif response_format.type == "json_object":
+                raise NotImplementedError("json_object is not supported")
 
         # TODO: add more parameters
         return SamplingParams.from_optional(
@@ -439,29 +448,6 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
         )
-
-    def _get_structured_outputs(self) -> StructuredOutputsParams | None:
-        # Structured output
-        structured_outputs = None
-        if self.text is not None and self.text.format is not None:
-            response_format = self.text.format
-            if (
-                response_format.type == "json_schema"
-                and response_format.schema_ is not None
-            ):
-                structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_
-                )
-            elif response_format.type == "json_object":
-                raise NotImplementedError("json_object is not supported")
-        # Function call
-        elif not (self.tool_choice == "none" or self.tools is None):
-            json_schema = get_json_schema_from_tool(
-                tools=self.tools, tool_choice=self.tool_choice
-            )
-            if json_schema is not None:
-                structured_outputs = StructuredOutputsParams(json=json_schema)
-        return structured_outputs
 
     def is_include_output_logprobs(self) -> bool:
         """Check if the request includes output logprobs."""
