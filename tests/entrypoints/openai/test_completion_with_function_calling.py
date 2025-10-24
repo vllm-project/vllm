@@ -389,10 +389,7 @@ async def test_named_tool_use(
 
     messages.append({"role": "assistant", "content": json_string})
     messages.append(
-        {
-            "role": "user",
-            "content": "Give me another one with a different name and age",
-        }
+        {"role": "user", "content": "Give me another one with a different name and age"}
     )
 
     # streaming
