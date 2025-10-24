@@ -205,8 +205,6 @@ class Worker(WorkerBase):
         else:
             self.profiler = None
 
-        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            self.worker_guard = WorkerGuard(vllm_config)
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -320,6 +318,9 @@ class Worker(WorkerBase):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.worker_guard = WorkerGuard(self.vllm_config)
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
