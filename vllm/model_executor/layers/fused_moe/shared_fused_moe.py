@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -18,25 +17,40 @@ class SharedFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        shared_experts: Optional[torch.nn.Module],
+        shared_experts: torch.nn.Module | None,
+        gate: torch.nn.Module | None = None,
         use_overlapped: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
+
         # Disable shared expert overlap if EP is disabled or we are not using
         # flashinfer + DP since there is nothing to be gained in this case.
         # Disabling the overlap optimization also prevents the shared experts
         # from being hidden from torch.compile.
         self.use_overlapped = (
             use_overlapped
-            and not (self.use_ep or self.use_flashinfer_cutlass_kernels)
+            and not (
+                self.use_ep
+                or (self.use_flashinfer_cutlass_kernels and self.dp_size > 1)
+            )
             and self._shared_experts is not None
         )
 
+        self._gate = gate
+
     @property
-    def shared_experts(self) -> Optional[torch.nn.Module]:
+    def shared_experts(self) -> torch.nn.Module | None:
         return self._shared_experts if self.use_overlapped else None
+
+    @property
+    def gate(self) -> torch.nn.Module | None:
+        return self._gate if self.use_overlapped else None
+
+    @property
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
 
     def forward(
         self,

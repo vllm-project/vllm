@@ -4,7 +4,7 @@
 import contextlib
 import json
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import regex as re
 
@@ -51,6 +51,7 @@ class Step3ToolParser(ToolParser):
         self.tool_block_finished = False
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             request.skip_special_tokens = False
         return request
@@ -58,7 +59,7 @@ class Step3ToolParser(ToolParser):
     @staticmethod
     def _parse_steptml_invoke(
         action_text: str,
-    ) -> tuple[Optional[str], Optional[dict[str, str]]]:
+    ) -> tuple[str | None, dict[str, str] | None]:
         func_name_match = re.search(r'<steptml:invoke name="([^"]+)">', action_text)
         if not func_name_match:
             return None, None
@@ -117,7 +118,7 @@ class Step3ToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         # The main loop processes the stream from the last known position.
         while True:
             if self.position >= len(current_text):

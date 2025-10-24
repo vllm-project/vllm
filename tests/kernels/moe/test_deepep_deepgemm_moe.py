@@ -7,7 +7,6 @@ fp8 block-quantized case.
 """
 
 import dataclasses
-from typing import Optional
 
 import pytest
 import torch.distributed
@@ -22,8 +21,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep, has_deep_gemm
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
+from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -92,13 +91,13 @@ class TestConfig:
     block_size: list[int]
     # configs for testing low-latency kernels
     low_latency: bool
-    use_fp8_dispatch: Optional[bool] = False
+    use_fp8_dispatch: bool | None = False
 
 
 @dataclasses.dataclass
 class TestTensors:
     rank_tokens: torch.Tensor  # all ranks make this many tokens
-    rank_token_scales: Optional[torch.Tensor]
+    rank_token_scales: torch.Tensor | None
     topk: torch.Tensor
     topk_weights: torch.Tensor
     config: TestConfig
@@ -143,7 +142,7 @@ def make_ll_modular_kernel(
     max_tokens_per_rank: int,
     dp_size: int,
     hidden_size: int,
-    q_dtype: Optional[torch.dtype],
+    q_dtype: torch.dtype | None,
     test_config: TestConfig,
     quant_config: FusedMoEQuantConfig,
 ) -> FusedMoEModularKernel:
@@ -179,7 +178,7 @@ def make_ht_modular_kernel(
     pgi: ProcessGroupInfo,
     dp_size: int,
     num_local_experts: int,
-    q_dtype: Optional[torch.dtype],
+    q_dtype: torch.dtype | None,
     test_config: TestConfig,
     quant_config: FusedMoEQuantConfig,
 ) -> FusedMoEModularKernel:
@@ -249,8 +248,8 @@ def deepep_deepgemm_moe_impl(
     test_tensors: TestTensors,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    w1_scale: Optional[torch.Tensor],
-    w2_scale: Optional[torch.Tensor],
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
 ) -> torch.Tensor:
     test_config = test_tensors.config
     num_experts = test_config.num_experts

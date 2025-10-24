@@ -210,7 +210,7 @@ def test_streaming_tool_call_with_large_steps():
 def test_regex_timeout_handling(streaming: bool):
     """test regex timeout is handled gracefully"""
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         mock_tokenizer
     )
 

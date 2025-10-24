@@ -3,14 +3,15 @@
 
 import hashlib
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, get_cpu_memory
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import get_cpu_memory
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
@@ -19,7 +20,7 @@ else:
 
 logger = init_logger(__name__)
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128]
+BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
@@ -58,13 +59,13 @@ class CacheConfig:
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    num_gpu_blocks_override: Optional[int] = None
+    num_gpu_blocks_override: int | None = None
     """Number of GPU blocks to use. This overrides the profiled `num_gpu_blocks`
     if specified. Does nothing if `None`. Used for testing preemption."""
-    sliding_window: Optional[int] = None
+    sliding_window: int | None = None
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    enable_prefix_caching: Optional[bool] = None
+    enable_prefix_caching: bool | None = None
     """Whether to enable prefix caching. Enabled by default for V1."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
@@ -84,12 +85,12 @@ class CacheConfig:
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
-    cpu_kvcache_space_bytes: Optional[int] = None
+    cpu_kvcache_space_bytes: int | None = None
     """(CPU backend only) CPU key-value cache space."""
-    mamba_page_size_padded: Optional[int] = None
+    mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-    mamba_block_size: Optional[int] = None
+    mamba_block_size: int | None = None
     """Size of a contiguous cache block in number of tokens for mamba cache."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
@@ -101,9 +102,9 @@ class CacheConfig:
     for the ssm state will be determined by mamba_cache_dtype."""
 
     # Will be set after profiling.
-    num_gpu_blocks: Optional[int] = field(default=None, init=False)
+    num_gpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for GPU memory."""
-    num_cpu_blocks: Optional[int] = field(default=None, init=False)
+    num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
     kv_sharing_fast_prefill: bool = False
@@ -116,7 +117,7 @@ class CacheConfig:
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
 
-    kv_cache_memory_bytes: Optional[int] = None
+    kv_cache_memory_bytes: int | None = None
     """Size of KV Cache per GPU in bytes. By default, this is set to None
     and vllm can automatically infer the kv cache size based on
     gpu_memory_utilization. However, users may want to manually specify
