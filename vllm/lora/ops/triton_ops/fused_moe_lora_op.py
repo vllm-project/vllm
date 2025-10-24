@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import triton
-import triton.language as tl
 
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
