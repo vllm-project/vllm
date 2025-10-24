@@ -8,11 +8,11 @@ from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ResponsesRequest,
 )
+from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
@@ -61,7 +61,8 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     ) -> DeltaMessage | None:
         logger.info(
             "extract_reasoning_content_streaming: delta_token_ids: %s, delta_text: %s",
-            delta_token_ids, delta_text
+            delta_token_ids,
+            delta_text,
         )
         if len(previous_token_ids) == 0:
             delta_text = "<think>" + delta_text
