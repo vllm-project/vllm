@@ -126,10 +126,6 @@ def create_lmcache_metadata(
                                           to vllm_config)
         cache_config (CacheConfig): Cache configuration (alternative to
                                     vllm_config)
-
-    Returns:
-        tuple[LMCacheEngineMetadata, LMCacheEngineConfig]: a tuple of
-            LMCacheEngineConfig and LMCacheEngineMetadata
     """
     # Third Party
     # First Party
