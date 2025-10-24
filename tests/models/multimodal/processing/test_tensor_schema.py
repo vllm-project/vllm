@@ -45,6 +45,18 @@ VideoInput: TypeAlias = (
 AudioInput = list[tuple[np.ndarray, int]]
 
 
+MM_OPTIONS_OVERRIDES = {
+    # Qwen3-VL's default profiling video size (64x64) can cause trouble
+    # after resizing, so we override it here for testing.
+    "qwen3_vl": dict(
+        video=VideoDummyOptions(num_frames=128, width=256, height=256),
+    ),
+    "qwen3_vl_moe": dict(
+        video=VideoDummyOptions(num_frames=128, width=256, height=256),
+    ),
+}
+
+
 def _resize_data(
     _data: Image.Image | np.ndarray, size_factor: float
 ) -> Image.Image | np.ndarray:
@@ -78,7 +90,7 @@ def resize_mm_data(
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]
     elif is_list_of(data, tuple):
-        return [(_resize_data(d, s), meta) for (d, meta), s in zip(data, size_factors)]
+        return [_resize_data(d, s) for (d, _), s in zip(data, size_factors)]
     raise ValueError("Unsupported multimodal data type.")
 
 
@@ -88,6 +100,8 @@ def create_batched_mm_kwargs(
     processor: BaseMultiModalProcessor,
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
+    model_type = model_config.hf_config.model_type
+
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
     supported_mm_limits = processing_info.get_supported_mm_limits()
@@ -98,6 +112,7 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
+        mm_options=MM_OPTIONS_OVERRIDES.get(model_type),
     )
     mm_data = processor_inputs.mm_data
     resized_mm_data = {
@@ -105,6 +120,7 @@ def create_batched_mm_kwargs(
         for modality, data in mm_data.items()
     }
 
+    # video metadata will be added back to the resized video data here.
     text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
 
     mm_kwargs = processor.apply(
