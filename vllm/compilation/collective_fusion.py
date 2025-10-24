@@ -50,7 +50,7 @@ if hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 
 class BasePattern:
-    def __init__(self, dtype: torch.dtype, device: str):
+    def __init__(self, dtype: torch.dtype, device: torch.types.Device):
         self.dtype = dtype
         self.device = device
         self.tp = get_tp_group()
@@ -664,7 +664,7 @@ class AllReduceRMSNormPattern(BasePattern):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: torch.types.Device,
         allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)
@@ -719,7 +719,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: torch.types.Device,
         allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)
@@ -786,7 +786,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: torch.types.Device,
         allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)
@@ -855,7 +855,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: torch.types.Device,
         allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)
@@ -929,7 +929,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: torch.types.Device,
         allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)
@@ -1015,7 +1015,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: torch.types.Device,
         allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)

@@ -9,7 +9,7 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -179,25 +179,24 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int | None = None
+    level: int = Field(default=None, ge=0, le=3)
     """
     Level is deprecated and will be removed in the next release,
     either 0.12.0 or 0.11.2 whichever is soonest.
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: int | None = None
-    """The compilation approach used for torch.compile-based compilation of the
-    model.
+    mode: int = Field(default=None, ge=0, le=3)
+    """
+    The compilation approach used for torch.compile-based compilation of the model.
+    If unset, we will select the default compilation mode. For V1 engine this is 3.
 
-    - None: If None, we will select the default compilation mode.
-      For V1 engine this is 3.
     - 0: NONE: No torch.compile compilation is applied, model runs in fully
-         eager pytorch mode. The model runs as-is.
-    - 1: STOCK_TORCH_COMPILE: The standard `torch.compile` compilation pipeline.
+         eager pytorch mode. The model runs as-is.\n
+    - 1: STOCK_TORCH_COMPILE: The standard `torch.compile` compilation pipeline.\n
     - 2: DYNAMO_TRACE_ONCE: Single Dynamo trace through the model, avoiding
          recompilation by removing guards.
-         Requires no dynamic-shape-dependent control-flow.
+         Requires no dynamic-shape-dependent control-flow.\n
     - 3: VLLM_COMPILE: Custom vLLM Inductor-based backend with caching,
          piecewise compilation, shape specialization, and custom passes."""
     debug_dump_path: Path | None = None
@@ -237,7 +236,7 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: mode>=VLLM_COMPILE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: list[str] | None = None
+    splitting_ops: list[str] = Field(default=None)
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
     The behavior depends on use_inductor_graph_partition:
@@ -275,10 +274,8 @@ class CompilationConfig:
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
     """
-    compile_sizes: list[int | str] | None = None
-    """Sizes to compile for inductor. In addition
-    to integers, it also supports "cudagraph_capture_sizes" to
-    specify the sizes for cudagraph capture."""
+    compile_sizes: list[int] = Field(default_factory=list)
+    """Sizes to compile for inductor."""
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
@@ -290,7 +287,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode | None = None
+    cudagraph_mode: CUDAGraphMode = Field(default=None)
     """
     The mode of the cudagraph:
 
@@ -495,12 +492,25 @@ class CompilationConfig:
 
     __str__ = __repr__
 
+    @field_validator("level", "mode", "splitting_ops", "cudagraph_mode", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
+
+    @field_validator("compile_sizes", mode="before")
+    @classmethod
+    def _validate_compile_sizes(cls, value: Any) -> Any:
+        """Deduplicate compile sizes."""
+        if isinstance(value, list):
+            return list(set(value))
+        return value
+
     @field_validator("cudagraph_mode", mode="before")
     @classmethod
     def validate_cudagraph_mode_before(cls, value: Any) -> Any:
-        """
-        enable parse the `cudagraph_mode` enum type from string
-        """
+        """Enable parsing the `cudagraph_mode` enum type from string."""
         if isinstance(value, str):
             return CUDAGraphMode[value.upper()]
         return value
@@ -691,22 +701,6 @@ class CompilationConfig:
                     dedup_sizes,
                 )
             self.cudagraph_capture_sizes = dedup_sizes
-
-        computed_compile_sizes = []
-        if self.compile_sizes is not None:
-            # de-duplicate the sizes provided by the config
-            self.compile_sizes = list(set(self.compile_sizes))
-            for x in self.compile_sizes:
-                if isinstance(x, str):
-                    assert x == "cudagraph_capture_sizes", (
-                        "Unrecognized size type in compile_sizes, "
-                        f"expect 'cudagraph_capture_sizes', got {x}"
-                    )
-                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
-                else:
-                    assert isinstance(x, int)
-                    computed_compile_sizes.append(x)
-        self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.cudagraph_capture_sizes.sort(reverse=True)
