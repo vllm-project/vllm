@@ -34,7 +34,7 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
-class OpenAIServingTokens(OpenAIServing):
+class ServingTokens(OpenAIServing):
     """Provides Tokens IN <> Tokens OUT functionality to vLLM API."""
 
     def __init__(

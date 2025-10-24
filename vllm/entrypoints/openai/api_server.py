@@ -93,7 +93,7 @@ from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
-from vllm.entrypoints.openai.serving_tokens import OpenAIServingTokens
+from vllm.entrypoints.openai.serving_tokens import ServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
@@ -353,7 +353,7 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-def generate_tokens(request: Request) -> OpenAIServingTokens | None:
+def generate_tokens(request: Request) -> ServingTokens | None:
     return request.app.state.openai_serving_tokens
 
 
@@ -1910,7 +1910,7 @@ async def init_app_state(
         else None
     )
     state.openai_serving_tokens = (
-        OpenAIServingTokens(
+        ServingTokens(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
