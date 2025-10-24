@@ -2124,22 +2124,21 @@ class GPUModelRunner(
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
-        if self.supports_mm_inputs:
-            with self.maybe_get_ec_connector_output(
-                scheduler_output,
-                encoder_cache=self.encoder_cache,
-            ) as ec_connector_output:
-                # Run the multimodal encoder if any.
-                self._execute_mm_encoder(scheduler_output)
-                mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
-        else:
-            mm_embeds, is_mm_embed = [], None
+        ec_connector_output = None
 
         if (
             self.supports_mm_inputs
             and is_first_rank
             and not self.model_config.is_encoder_decoder
         ):
+            # Run the multimodal encoder if any.
+            with self.maybe_get_ec_connector_output(
+                scheduler_output,
+                encoder_cache=self.encoder_cache,
+            ) as ec_connector_output:
+                self._execute_mm_encoder(scheduler_output)
+                mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
@@ -2219,7 +2218,7 @@ class GPUModelRunner(
             positions,
             intermediate_tensors,
             model_kwargs,
-            ec_connector_output if self.supports_mm_inputs else None,
+            ec_connector_output,
         )
 
     def _sample(
