@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+
 import pytest
 
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationMode
-from vllm.utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
+from vllm.utils.torch_utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
 
 
 def test_version():
@@ -23,6 +26,20 @@ def test_use_cudagraphs_dynamic():
     # engine decides when to capture based on runtime settings instead of a
     # blanket default.
     assert vllm_config.compilation_config.use_cudagraph
+
+
+def test_copy_pass():
+    vllm_config = VllmConfig()
+    inductor_pass = FixFunctionalizationPass(vllm_config)
+    copied_inductor_pass = copy.deepcopy(inductor_pass)
+    assert (
+        copied_inductor_pass.compilation_config.use_inductor_graph_partition
+        == vllm_config.compilation_config.use_inductor_graph_partition
+    )
+    assert (
+        copied_inductor_pass.compilation_config.splitting_ops
+        == vllm_config.compilation_config.splitting_ops
+    )
 
 
 def test_custom_op():
@@ -151,7 +168,7 @@ def test_splitting_ops_dynamic():
     if is_torch_equal_or_newer("2.9.0.dev"):
         config = VllmConfig(
             compilation_config=CompilationConfig(
-                level=CompilationMode.VLLM_COMPILE,
+                mode=CompilationMode.VLLM_COMPILE,
                 use_inductor_graph_partition=True,
                 splitting_ops=["vllm::unified_attention"],
             )
@@ -163,7 +180,7 @@ def test_splitting_ops_dynamic():
     # When attn_fusion pass enabled, splitting_ops now default to attention ops.
     config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.VLLM_COMPILE,
+            mode=CompilationMode.VLLM_COMPILE,
             pass_config={"enable_attn_fusion": True, "enable_noop": True},
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
@@ -178,7 +195,7 @@ def test_splitting_ops_dynamic():
     if is_torch_equal_or_newer("2.9.0.dev"):
         config = VllmConfig(
             compilation_config=CompilationConfig(
-                level=CompilationMode.VLLM_COMPILE,
+                mode=CompilationMode.VLLM_COMPILE,
                 use_inductor_graph_partition=True,
                 pass_config={"enable_attn_fusion": True, "enable_noop": True},
                 custom_ops=["+quant_fp8"],
