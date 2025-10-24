@@ -200,7 +200,10 @@ class TransformerBlock(torch.nn.Module):
 
         self.layer_idx = extract_layer_index(prefix)
         self.attn = OAIAttention(
-            config, prefix=f"{prefix}.attn", quant_config=quant_config, cache_config=cache_config
+            config,
+            prefix=f"{prefix}.attn",
+            quant_config=quant_config,
+            cache_config=cache_config,
         )
         self.mlp = MLPBlock(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
