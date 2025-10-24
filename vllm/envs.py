@@ -131,7 +131,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
-    VLLM_USE_STANDALONE_COMPILE: bool = False
+    VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -494,10 +494,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_FLASH_ATTN_VERSION", None)
     ),
     # Feature flag to enable/disable Inductor standalone compile.
-    # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
-    # disabled by default.
+    # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
+    # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE": lambda: os.environ.get(
-        "VLLM_USE_STANDALONE_COMPILE", "0"
+        "VLLM_USE_STANDALONE_COMPILE", "1"
     )
     == "1",
     # Debug pattern matching inside custom passes.
