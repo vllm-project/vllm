@@ -13,8 +13,6 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
-    from vllm.distributed.ec_transfer.ec_connector.base import (
-        ECConnectorMetadata)
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
@@ -22,14 +20,6 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
-else:
-    ECConnectorMetadata = object
-    KVConnectorMetadata = object
-    LoRARequest = object
-    MultiModalFeatureSpec = object
-    PoolingParams = object
-    SamplingParams = object
-    Request = object
 
 
 @bc_linter_include
@@ -173,7 +163,4 @@ class SchedulerOutput:
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
     # KV Cache Connector metadata.
-    kv_connector_metadata: KVConnectorMetadata | None = None
-
-    # EC Cache Connector metadata
-    ec_connector_metadata: ECConnectorMetadata | None = None
+    kv_connector_metadata: Optional[KVConnectorMetadata] = None
