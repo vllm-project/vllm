@@ -13,9 +13,10 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
-from .fusion import empty_bf16, empty_i64
+from .fusion import empty_bf16, empty_fp32, empty_i64
 from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -66,12 +67,13 @@ class QkNormRopePattern:
         self.eps = eps
         self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.is_neox = is_neox
+        self.rope_flashinfer = rope_flashinfer
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_dim,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
-            use_flashinfer=rope_flashinfer,
+            use_flashinfer=self.rope_flashinfer,
         )
 
     @staticmethod
@@ -153,7 +155,10 @@ class QkNormRopePattern:
         positions = empty_i64(T)
         q_weight = empty_bf16(1, self.head_dim)
         k_weight = empty_bf16(1, self.head_dim)
-        cos_sin_cache = empty_bf16(4096, self.head_dim)
+        if self.rope_flashinfer:
+            cos_sin_cache = empty_fp32(4096, self.head_dim)
+        else:
+            cos_sin_cache = empty_bf16(4096, self.head_dim)
         inputs = [
             qkv,
             positions,
@@ -190,9 +195,8 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             logger.warning_once("QK Norm+RoPE fusion not enabled: unsupported platform")
             return
 
-        # TODO: only bfloat16 is supported now, we may need to support float16
         dtype = config.model_config.dtype
-        if dtype not in (torch.bfloat16,):
+        if dtype not in (torch.bfloat16, torch.float16):
             logger.warning_once(
                 "QK Norm+RoPE fusion not enabled: unsupported dtype %s", dtype
             )
@@ -211,16 +215,24 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
 
         for epsilon in [1e-5, 1e-6]:
             for neox in [True, False]:
-                # TODO: Support rope_flashinfer=True by enabling direct use of
-                # float32 cos_sin_cache in the fused_qk_norm_rope operator.
-                QkNormRopePattern(
-                    head_dim=layer.head_size,
-                    num_heads=layer.num_heads,
-                    num_kv_heads=layer.num_kv_heads,
-                    eps=epsilon,
-                    is_neox=neox,
-                    rope_flashinfer=False,
-                ).register(self.patterns)
+                if RotaryEmbedding.enabled():
+                    for rope_flashinfer in [False, True]:
+                        QkNormRopePattern(
+                            head_dim=layer.head_size,
+                            num_heads=layer.num_heads,
+                            num_kv_heads=layer.num_kv_heads,
+                            eps=epsilon,
+                            is_neox=neox,
+                            rope_flashinfer=rope_flashinfer,
+                        ).register(self.patterns)
+                else:
+                    QkNormRopePattern(
+                        head_dim=layer.head_size,
+                        num_heads=layer.num_heads,
+                        num_kv_heads=layer.num_kv_heads,
+                        eps=epsilon,
+                        is_neox=neox,
+                    ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

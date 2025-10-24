@@ -6,7 +6,7 @@ import torch
 
 from tests.compile.backend import TestBackend
 from vllm.attention import Attention, AttentionType
-from vllm.compilation.matcher_utils import RMS_OP, ROTARY_OP
+from vllm.compilation.matcher_utils import FLASHINFER_ROTARY_OP, RMS_OP, ROTARY_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.compilation.qk_norm_rope_fusion import (
@@ -95,7 +95,10 @@ class QKNormRoPETestModel(torch.nn.Module):
             ops.append(RSQRT_OP)
 
         if self.enable_rope_custom_op:
-            ops.append(ROTARY_OP)
+            if self.rotary_emb.use_flashinfer:
+                ops.append(FLASHINFER_ROTARY_OP)
+            else:
+                ops.append(ROTARY_OP)
         else:
             ops.append(INDEX_SELECT_OP)
         return ops
@@ -108,7 +111,7 @@ class QKNormRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Only test on CUDA and ROCm",
