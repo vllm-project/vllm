@@ -12,6 +12,9 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParse
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
+from vllm.logger import init_logger
+logger = init_logger(__name__)
+
 
 @ReasoningParserManager.register_module("minimax_m2")
 class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
@@ -38,9 +41,11 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
 
     def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
+        self.end_token_id = self.vocab.get("</think>")
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return True
+        end_token_id = self.end_token_id
+        return any(input_id == end_token_id for input_id in reversed(input_ids))
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return input_ids
@@ -54,6 +59,10 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
+        logger.info(
+            "extract_reasoning_content_streaming: delta_token_ids: %s, delta_text: %s",
+            delta_token_ids, delta_text
+        )
         if len(previous_token_ids) == 0:
             delta_text = "<think>" + delta_text
         return DeltaMessage(content=delta_text)
