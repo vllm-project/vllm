@@ -10,8 +10,8 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+
 
 @ReasoningParserManager.register_module("minimax_m2")
 class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):

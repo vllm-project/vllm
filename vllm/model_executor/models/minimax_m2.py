@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -22,7 +23,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch import nn
@@ -31,41 +34,47 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_pp_group,
-                              get_tensor_model_parallel_world_size,
-                              get_tensor_model_parallel_rank,
-                              tensor_model_parallel_all_reduce)
-from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
-
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 
 class MiniMaxM2MoE(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -74,35 +83,43 @@ class MiniMaxM2MoE(nn.Module):
         if self.tp_size > config.num_local_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_local_experts}.")
+                f"the number of experts {config.num_local_experts}."
+            )
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
         if self.use_routing_bias:
             self.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.num_local_experts, dtype=torch.float32))
-            self.e_score_correction_bias.weight_loader = MiniMaxM2MoE.ebias_weight_loader
+                torch.empty(config.num_local_experts, dtype=torch.float32)
+            )
+            self.e_score_correction_bias.weight_loader = (
+                MiniMaxM2MoE.ebias_weight_loader
+            )
         else:
             self.e_score_correction_bias = None
 
-        self.experts = FusedMoE(num_experts=config.num_local_experts,
-                                top_k=config.num_experts_per_tok,
-                                scoring_func=config.scoring_func,
-                                use_grouped_topk=True,
-                                num_expert_group=1,
-                                topk_group=1,
-                                e_score_correction_bias=self.e_score_correction_bias,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.intermediate_size,
-                                reduce_results=False,
-                                renormalize=True,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.experts")
+        self.experts = FusedMoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            scoring_func=config.scoring_func,
+            use_grouped_topk=True,
+            num_expert_group=1,
+            topk_group=1,
+            e_score_correction_bias=self.e_score_correction_bias,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            reduce_results=False,
+            renormalize=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+        )
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.num_local_experts,
-                                     bias=False,
-                                     params_dtype=torch.float32,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_local_experts,
+            bias=False,
+            params_dtype=torch.float32,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
@@ -115,18 +132,17 @@ class MiniMaxM2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(torch.float32))
-        final_hidden_states = self.experts(hidden_states=hidden_states,
-                                           router_logits=router_logits)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
         final_hidden_states = final_hidden_states
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class MiniMaxM2Attention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -134,14 +150,14 @@ class MiniMaxM2Attention(nn.Module):
         num_kv_heads: int,
         rotary_dim: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        attn_window_size: Optional[int] = None,
+        rope_scaling: dict[str, Any] | None = None,
+        attn_window_size: int | None = None,
         max_position_embeddings: int = 8192,
-        head_dim: Optional[int] = None,
+        head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -167,19 +183,23 @@ class MiniMaxM2Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = QKVParallelLinear(hidden_size,
-                                          self.head_dim,
-                                          self.total_num_heads,
-                                          self.total_num_kv_heads,
-                                          bias=qkv_bias,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.qkv_proj")
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=qkv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
 
-        self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
-                                        hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -188,17 +208,23 @@ class MiniMaxM2Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              per_layer_sliding_window=attn_window_size,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            per_layer_sliding_window=attn_window_size,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
-        self.q_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_heads, eps=rms_norm_eps)
-        self.k_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps)
+        self.q_norm = MiniMaxText01RMSNormTP(
+            self.head_dim * self.total_num_heads, eps=rms_norm_eps
+        )
+        self.k_norm = MiniMaxText01RMSNormTP(
+            self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
+        )
 
     def forward(
         self,
@@ -221,21 +247,21 @@ class MiniMaxM2DecoderLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         model_config: ModelConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        if hasattr(config, "max_model_len") and isinstance(
-                config.max_model_len, int):
-            max_position_embeddings = max(config.max_position_embeddings,
-                                          config.max_model_len)
+        if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
+            max_position_embeddings = max(
+                config.max_position_embeddings, config.max_model_len
+            )
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
-        layer_idx = int(prefix.split(sep='.')[-1])
+        layer_idx = int(prefix.split(sep=".")[-1])
 
         # TODO: support MTP
         attn_window_size = getattr(config, "attn_window_size", None)
@@ -253,7 +279,9 @@ class MiniMaxM2DecoderLayer(nn.Module):
         # default to full rope theta
         swa_rope_theta = rope_theta if swa_rope_theta <= 0 else swa_rope_theta
         rope_theta = swa_rope_theta if attn_window_size is not None else rope_theta
-        print(f"[M2-Mini] layer_idx: {layer_idx}, attn_window_size: {attn_window_size}, rope_theta: {rope_theta}")
+        print(
+            f"[M2-Mini] layer_idx: {layer_idx}, attn_window_size: {attn_window_size}, rope_theta: {rope_theta}"
+        )
 
         self.layer_idx = layer_idx
         self.self_attn = MiniMaxM2Attention(
@@ -266,8 +294,8 @@ class MiniMaxM2DecoderLayer(nn.Module):
             attn_window_size=attn_window_size,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=getattr(config, 'attention_bias', False),
-            head_dim=getattr(config, 'head_dim', None),
+            qkv_bias=getattr(config, "attention_bias", False),
+            head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -278,32 +306,30 @@ class MiniMaxM2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         # if self.layer_idx == 61 and get_tensor_model_parallel_rank() == 0 and \
         #     hidden_states.shape[0] > 1:
         #     with open("/data/minimax-dialogue/users/neo/dumps/request_id.txt", "r") as f:
@@ -320,7 +346,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
 
 @support_torch_compile
 class MiniMaxM2Model(nn.Module):
-
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -339,7 +364,8 @@ class MiniMaxM2Model(nn.Module):
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=None,
-                prefix=f"{prefix}.embed_tokens")
+                prefix=f"{prefix}.embed_tokens",
+            )
         else:
             self.embed_tokens = PPMissingLayer()
 
@@ -352,15 +378,16 @@ class MiniMaxM2Model(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
             ),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -369,9 +396,9 @@ class MiniMaxM2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -383,14 +410,13 @@ class MiniMaxM2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
         # print(f"hidden_states.shape: {hidden_states.shape}")
         # if get_tensor_model_parallel_rank() == 0 and \
         #     hidden_states.shape[0] == 8191:
@@ -405,7 +431,6 @@ class MiniMaxM2Model(nn.Module):
 
 
 class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -415,17 +440,19 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         print(config)
-        self.model = MiniMaxM2Model(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(prefix, "model"))
+        self.model = MiniMaxM2Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size,
-                                          quant_config=None)
+            self.lm_head = ParallelLMHead(
+                config.vocab_size, config.hidden_size, quant_config=None
+            )
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -434,37 +461,37 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+    ) -> torch.Tensor | IntermediateTensors:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+                "residual": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+            }
+        )
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -480,10 +507,11 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts)
+            num_experts=self.config.num_local_experts,
+        )
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -492,7 +520,7 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
@@ -502,7 +530,7 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if (("mlp.experts." in name) and name not in params_dict):
+                if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
@@ -528,11 +556,13 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -548,20 +578,20 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
-def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
-                                        weight_name: str) -> Optional[int]:
-    if hasattr(config,
-               "num_mtp_modules") and (config.num_mtp_modules
-                                                > 0):
+def get_spec_layer_idx_from_weight_name(
+    config: PretrainedConfig, weight_name: str
+) -> int | None:
+    if hasattr(config, "num_mtp_modules") and (config.num_mtp_modules > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_mtp_modules):
-            if weight_name.startswith(f"model.layers.{layer_idx+i}."):
+            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
                 return layer_idx + i
     return None
