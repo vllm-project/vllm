@@ -28,14 +28,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import (
-    decorate_logs,
-    get_hash_fn_by_name,
-    make_zmq_socket,
-    resolve_obj_by_qualname,
-    set_process_title,
-)
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -60,7 +57,7 @@ from vllm.v1.engine.utils import (
     EngineZmqAddresses,
     get_device_indices,
 )
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -160,9 +157,7 @@ class EngineCore:
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(
-                self.scheduler.connector.get_finished_count()  # type: ignore
-            )
+            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
@@ -290,14 +285,11 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
-    def execute_model_with_error_logging(
-        self,
-        model_fn: Callable[[SchedulerOutput], ModelRunnerOutput],
-        scheduler_output: SchedulerOutput,
-    ) -> ModelRunnerOutput:
+    @contextmanager
+    def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
         try:
-            return model_fn(scheduler_output)
+            yield
         except Exception as err:
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
@@ -321,15 +313,15 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model_with_error_logging(
-            self.model_executor.execute_model,  # type: ignore
-            scheduler_output,
-        )
+
+        with self.log_error_detail(scheduler_output):
+            model_output = self.model_executor.execute_model(scheduler_output)
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
 
-        return (engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0)
+        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
         if self.use_spec_decode and model_executed:
@@ -366,7 +358,7 @@ class EngineCore:
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
             future = self.model_executor.execute_model(scheduler_output, non_block=True)
-            batch_queue.appendleft((future, scheduler_output))  # type: ignore[arg-type]
+            batch_queue.appendleft((future, scheduler_output))
 
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
             if (
@@ -386,14 +378,12 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output = batch_queue.pop()
-        model_output = self.execute_model_with_error_logging(
-            lambda _: future.result(), scheduler_output
-        )
+        with self.log_error_detail(scheduler_output):
+            model_output = future.result()
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-
         return engine_core_outputs, model_executed
 
     def shutdown(self):
@@ -466,14 +456,6 @@ class EngineCore:
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
-
-    def save_tensorized_model(
-        self,
-        tensorizer_config,
-    ) -> None:
-        self.model_executor.save_tensorized_model(
-            tensorizer_config=tensorizer_config,
-        )
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
