@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -14,15 +16,32 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils import has_triton_kernels
+from vllm.distributed import get_dp_group, get_ep_group
 
 logger = init_logger(__name__)
 
 if has_triton_kernels():
     try:
         import triton_kernels.swiglu
-        from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
-        from triton_kernels.routing import RoutingData, routing, routing_from_bitmatrix
-        from triton_kernels.tensor import Bitmatrix
+        from triton_kernels.matmul_ogs import (
+            FnSpecs,
+            FusedActivation,
+            GatherIndx,
+            RoutingData,
+            ScatterIndx,
+            matmul_ogs,
+        )
+        from triton_kernels.tensor import (
+            BIT,
+            Bitmatrix,
+            SparseMatrix,
+            Tensor,
+            make_ragged_tensor_metadata,
+            remap_ragged_tensor_metadata,
+        )
+        from triton_kernels.topk import topk as triton_topk
+        from triton_kernels.distributed import make_expt_dict_uniform, make_expt_assignment, convert_dp_to_ep, convert_ep_to_dp, ExptAssignment
+        from triton_kernels.reduce import reduce
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -70,6 +89,131 @@ def pack_bitmatrix(
         bitmatrix_ptrs = bitmatrix + offsets_m[:, None] * bm_cols + offs[None, :]
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
+@dataclass
+class ReduceScatterMetadata:
+    mode: str
+    active_indx: torch.Tensor | None = None
+    dispatch_indx: torch.Tensor | None = None
+    combine_indx: torch.Tensor | None = None
+
+def create_expt_assignment(EP: int, n_expts_tot: int, device: torch.device) -> ExptAssignment | None:
+    expt_dict = make_expt_dict_uniform(EP, n_expts_tot)
+    return make_expt_assignment(EP, n_expts_tot, expt_dict, device)
+
+
+def routing_from_bitmatrix(
+    bitmatrix: "Bitmatrix",
+    expt_scal: torch.Tensor,
+    expt_indx: torch.Tensor,
+    n_expts_tot: int,
+    n_expts_act: int,
+):
+    sparse_logits = SparseMatrix(
+        indx=expt_indx,
+        vals=expt_scal,
+        mask=bitmatrix,
+    )
+    dispatch_index = sparse_logits.mask_metadata.col_sorted_indx
+    combine_indx = sparse_logits.mask_metadata.row_sorted_indx
+    ragged_batch_metadata = make_ragged_tensor_metadata(
+        sparse_logits.mask_metadata.col_sum,
+        dispatch_index.shape[0],
+    )
+    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    routing_data = RoutingData(
+        gate_scal,
+        ragged_batch_metadata.slice_sizes,
+        n_expts_tot,
+        n_expts_act,
+        ragged_batch_metadata,
+    )
+    gather_idx = GatherIndx(combine_indx, dispatch_index)
+    scatter_idx = ScatterIndx(dispatch_index, combine_indx)
+    return routing_data, gather_idx, scatter_idx
+
+
+def routing(
+    logits: "torch.Tensor | Tensor",
+    n_expts_act: int,
+    sm_first: bool = False,
+    expt_indx: torch.Tensor | None = None,
+    n_rows: torch.Tensor | None = None,
+):
+    if sm_first:
+        logits = torch.softmax(logits, dim=-1)
+    sparse_logits = triton_topk(
+        logits,
+        n_expts_act,
+        apply_softmax=not sm_first,
+        y_indx=expt_indx,
+        n_rows=n_rows,
+    )
+    return routing_from_bitmatrix(
+        sparse_logits.mask,
+        sparse_logits.vals,
+        sparse_logits.indx,
+        logits.shape[-1],
+        n_expts_act,
+    )
+
+def ep_routing(
+    x,
+    gating_logits,
+    n_expts_act,
+    sm_first,
+    expt_indx: torch.Tensor | None = None,
+    n_rows: torch.Tensor | None = None,
+    expt_assignment: ExptAssignment | None = None,
+    group_name = None,
+): 
+    E = gating_logits.shape[-1]
+    EP = get_ep_group().world_size
+    rank = get_ep_group().rank
+    expt_map = expt_assignment.expt_map[rank, :]
+    logits_global = triton_topk(
+        gating_logits,
+        n_expts_act,
+        apply_softmax=not sm_first,
+        y_indx=expt_indx,
+        n_rows=n_rows,
+        all_gather=True,
+        group_name=group_name,
+    )
+    active_indx = logits_global.indx
+    expt_sizes = logits_global.mask_metadata.col_sum
+    dispatch_indx = logits_global.mask_metadata.col_sorted_indx
+    combine_indx = logits_global.mask_metadata.row_sorted_indx
+    logits_global_metadata = make_ragged_tensor_metadata(expt_sizes, dispatch_indx.shape[0])
+    x = convert_dp_to_ep(x, expt_assignment, active_indx, dispatch_indx)
+    logits_local_metadata = remap_ragged_tensor_metadata(logits_global_metadata, expt_map)
+    gate_scal = logits_global.vals.flatten()[combine_indx]
+    rdata = RoutingData(gate_scal, expt_sizes, E // EP, n_expts_act, logits_local_metadata)
+    reduce_scatter_metadata = ReduceScatterMetadata(
+        mode="ep_sharding",
+        active_indx=active_indx,
+        dispatch_indx=dispatch_indx,
+        combine_indx=combine_indx,
+    )
+    return x, rdata, None, None, reduce_scatter_metadata
+
+def reduce_scatter(
+    input_tensor: torch.Tensor,
+    n_expts_act: int,
+    metadata: ReduceScatterMetadata,
+    expt_assignment: ExptAssignment | None = None,
+    dim: int = 0,
+    op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
+) -> torch.Tensor:
+    if metadata.mode and metadata.mode == "ep_sharding":
+        if dim != 0 or op != dist.ReduceOp.SUM:
+            raise NotImplementedError("Only dim=0 and op=SUM are supported for MoE reduce_scatter.")
+        output = convert_ep_to_dp(input_tensor, expt_assignment, metadata.active_indx, metadata.combine_indx)
+        # weighted average of the output token from experts
+        output = output.view(-1, n_expts_act, output.shape[-1])
+        output, _ = reduce(output, dim=1)
+        return output
+    else:
+        raise NotImplementedError(f"Distributed reduce_scatter mode {metadata.mode} is not implemented yet.")
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
@@ -83,12 +227,21 @@ def triton_kernel_moe_forward(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
+    expt_assignment: ExptAssignment | None = None,
 ) -> torch.Tensor:
-    routing_data, gather_idx, scatter_idx = routing(
-        gating_output, topk, sm_first=not renormalize
-    )
+    if get_dp_group().world_size > 1:
+        print(f"device_group: {get_dp_group().device_group}")
+        print(f"hidden_states_dev:{hidden_states.device}")
+        hidden_states, routing_data, gather_idx, scatter_idx, rs_metadata = ep_routing(
+            hidden_states, gating_output, topk, sm_first=not renormalize, expt_assignment=expt_assignment,
+            group_name = get_dp_group().device_group,
+        )
+    else:
+        routing_data, gather_idx, scatter_idx = routing(
+            gating_output, topk, sm_first=not renormalize
+        )
 
-    return triton_kernel_fused_experts(
+    out = triton_kernel_fused_experts(
         None,
         hidden_states,
         w1,
@@ -102,7 +255,15 @@ def triton_kernel_moe_forward(
         global_num_experts=global_num_experts,
         expert_map=expert_map,
     )
-
+    if get_dp_group().world_size > 1:
+        return reduce_scatter(
+            out,
+            topk,
+            metadata=rs_metadata,
+            expt_assignment=expt_assignment,
+        )
+    else:
+        return out
 
 # This is a triton implementation of the fused_experts function
 def triton_kernel_fused_experts(
@@ -202,7 +363,10 @@ def make_routing_data(
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
     bitmatrix = Bitmatrix(
-        bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None
+        bitmatrix,
+        dtype=BIT,
+        shape=bitmatrix_shape,
+        shape_max=bitmatrix_shape_max,
     )
 
     # matmul_ogs expects invalid topk_weights to be -1s

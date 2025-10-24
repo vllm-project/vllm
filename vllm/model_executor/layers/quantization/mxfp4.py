@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
+    create_expt_assignment,
 )
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -195,6 +196,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        
+        if self.mxfp4_backend == Mxfp4Backend.TRITON and moe.dp_size != 0:
+            self.expt_assignment = create_expt_assignment(EP=moe.ep_size, n_expts_tot=moe.num_experts, device=torch.cuda.current_device())
 
     def create_weights(
         self,
@@ -1104,6 +1108,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 renormalize=renormalize,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                expt_assignment = self.expt_assignment,
                 quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
