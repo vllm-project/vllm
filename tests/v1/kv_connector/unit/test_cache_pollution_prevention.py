@@ -96,9 +96,17 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     # get the block object to verify eviction later
     block = recompute_scheduler.kv_cache_manager.block_pool.blocks[invalid_block_id]
 
-    # before failure: verify block has a hash (is cached)
-    # note: in real scenario block would be cached after compute,
-    # but for this test we're checking the eviction mechanism
+    # cache the blocks to simulate they've been computed and cached
+    # (in real scenario blocks would be cached after compute)
+    recompute_scheduler.kv_cache_manager.cache_blocks(
+        request1, num_external_computed_tokens
+    )
+
+    # verify block has a hash (is cached) before reporting invalid blocks
+    assert block.block_hash is not None, (
+        f"block {invalid_block_id} should be cached (have a hash) before "
+        f"eviction test, but hash is None"
+    )
 
     # report invalid blocks
     model_runner_output = create_model_runner_output(
@@ -112,22 +120,46 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     # verify request still running (recompute policy)
     assert request1.status == RequestStatus.RUNNING
 
-    # critical assertion: invalid block should be evicted from cache
-    # the block's hash should be None after eviction
-    assert block.block_hash is None, (
-        f"invalid block {invalid_block_id} should have been evicted "
-        f"(hash reset to None), but hash is {block.block_hash}"
-    )
+    # critical assertion: invalid block and all subsequent blocks should be evicted
+    # all blocks from invalid_block_idx onwards become invalid since they were
+    # computed based on the failed block
+    for idx in range(invalid_block_idx, len(req_block_ids)):
+        block_id = req_block_ids[idx]
+        block_obj = recompute_scheduler.kv_cache_manager.block_pool.blocks[block_id]
+        assert block_obj.block_hash is None, (
+            f"block {block_id} at index {idx} should have been evicted "
+            f"(hash reset to None), but hash is {block_obj.block_hash}. "
+            f"All blocks from index {invalid_block_idx} onwards should be evicted "
+            f"since they depend on the invalid block at index {invalid_block_idx}."
+        )
 
-    # verify the block is not in the cached_block_hash_to_block map
-    # try to look it up - should return None
+    # verify cache contains exactly the valid blocks (before first affected block)
+    # and none of the invalid blocks (from first affected block onwards)
+
+    # valid blocks: all blocks before invalid_block_idx should be cached
+    for idx in range(invalid_block_idx):
+        block_id = req_block_ids[idx]
+        block_obj = recompute_scheduler.kv_cache_manager.block_pool.blocks[block_id]
+        assert block_obj.block_hash is not None, (
+            f"valid block {block_id} at index {idx} should still be cached "
+            f"(have a hash), but hash is None. Only blocks from index "
+            f"{invalid_block_idx} onwards should be evicted."
+        )
+
+    # invalid blocks: verify they're not in the cached_block_hash_to_block map
     cached_blocks = (
         recompute_scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
     )
-    assert len(cached_blocks) == 0 or invalid_block_id not in [
+    cached_block_ids = {
         b.block_id
         for blocks_val in cached_blocks._cache.values()
         for b in (
             [blocks_val] if not isinstance(blocks_val, dict) else blocks_val.values()
         )
-    ], f"invalid block {invalid_block_id} should not be in cache hash table"
+    }
+
+    for idx in range(invalid_block_idx, len(req_block_ids)):
+        block_id = req_block_ids[idx]
+        assert block_id not in cached_block_ids, (
+            f"invalid block {block_id} at index {idx} should not be in cache hash table"
+        )

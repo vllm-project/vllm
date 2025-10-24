@@ -1530,29 +1530,35 @@ class Scheduler(SchedulerInterface):
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
-        self, requests: Iterable[Request], invalid_block_ids: set[int]
-    ) -> tuple[set[str], int]:
+        self,
+        requests: Iterable[Request],
+        invalid_block_ids: set[int],
+        evict_blocks: bool = True,
+    ) -> tuple[set[str], int, set[int]]:
         """
         Identify and update requests affected by invalid KV cache blocks.
 
         This method scans the given requests, detects those with invalid blocks
         and adjusts their `num_computed_tokens` to the longest valid prefix.
-        For observability, it also accumulates the total number of tokens that
-        will need to be recomputed across all affected requests.
 
         Args:
             requests: The set of requests to scan for invalid blocks.
             invalid_block_ids: IDs of invalid blocks.
+            evict_blocks: Whether to collect blocks for eviction (False for
+                async requests which aren't cached yet).
 
         Returns:
             tuple:
                 - affected_req_ids (set[str]): IDs of requests impacted by
                 invalid blocks.
                 - total_affected_tokens (int): Total number of tokens that must
-                be recomputed across all affected requests (for observability).
+                be recomputed across all affected requests.
+                - blocks_to_evict (set[int]): Block IDs to evict from cache,
+                including invalid blocks and downstream dependent blocks.
         """
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
+        blocks_to_evict: set[int] = set()
         # If a block is invalid and shared by multiple requests in the batch,
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
@@ -1560,6 +1566,7 @@ class Scheduler(SchedulerInterface):
         for request in requests:
             is_affected = False
             marked_invalid_block = False
+            first_affected_idx = None
             req_id = request.request_id
             # TODO (davidb): add support for hybrid memory allocator
             (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
@@ -1603,6 +1610,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 marked_invalid_block = True
+                first_affected_idx = idx
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
                 total_affected_tokens += (
@@ -1620,10 +1628,15 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - request.num_cached_tokens
                     )
                     request.num_computed_tokens = request.num_cached_tokens
+                else:
+                    # collect invalid block and all downstream dependent blocks
+                    # only if this request marked blocks for recomputation
+                    if evict_blocks and first_affected_idx is not None:
+                        blocks_to_evict.update(req_block_ids[first_affected_idx:])
 
                 affected_req_ids.add(request.request_id)
 
-        return affected_req_ids, total_affected_tokens
+        return affected_req_ids, total_affected_tokens, blocks_to_evict
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
         """
@@ -1637,23 +1650,26 @@ class Scheduler(SchedulerInterface):
             and self.vllm_config.kv_transfer_config.kv_load_failure_policy == "fail"
         )
 
-        # Handle async KV loads (WAITING_FOR_REMOTE_KVS)
+        # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (
             req
             for req in self.waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
-        async_failed_req_ids, num_failed_tokens = (
+        async_failed_req_ids, num_failed_tokens, _ = (
             self._update_requests_with_invalid_blocks(
-                async_load_reqs, invalid_block_ids
+                async_load_reqs, invalid_block_ids, evict_blocks=False
             )
         )
 
         total_failed_requests = len(async_failed_req_ids)
         total_failed_tokens = num_failed_tokens
 
-        sync_failed_req_ids, num_failed_tokens = (
-            self._update_requests_with_invalid_blocks(self.running, invalid_block_ids)
+        # handle sync loads (may be cached, collect blocks for eviction)
+        sync_failed_req_ids, num_failed_tokens, sync_blocks_to_evict = (
+            self._update_requests_with_invalid_blocks(
+                self.running, invalid_block_ids, evict_blocks=True
+            )
         )
 
         total_failed_requests += len(sync_failed_req_ids)
@@ -1662,14 +1678,13 @@ class Scheduler(SchedulerInterface):
         if not total_failed_requests:
             return set()
 
-        # invalidate cached blocks by eviction to prevent poisoning
-        # NOTE: this naturally excludes async requests, as they have no
-        # hash in the block table at this point
-        cached_invalid_blocks = self.kv_cache_manager.get_cached_block_ids(
-            invalid_block_ids
-        )
-        if cached_invalid_blocks:
-            self.kv_cache_manager.evict_blocks(cached_invalid_blocks)
+        # evict invalid blocks and downstream dependent blocks from cache
+        if sync_blocks_to_evict:
+            cached_blocks_to_evict = self.kv_cache_manager.get_cached_block_ids(
+                sync_blocks_to_evict
+            )
+            if cached_blocks_to_evict:
+                self.kv_cache_manager.evict_blocks(cached_blocks_to_evict)
 
         if should_fail:
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
