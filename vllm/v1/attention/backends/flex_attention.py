@@ -25,9 +25,6 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
@@ -539,6 +536,46 @@ class FlexAttentionMetadata:
             block_mask_kwargs["compute_q_blocks"] = False
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
+    def _build_dense_block_mask(
+        self,
+        q_len: int,
+        kv_len: int,
+        mask_mod: _mask_mod_signature | None,
+    ) -> BlockMask:
+        """Create a dense block mask covering the provided logical lengths.
+        This is used for warmup / dummy runs where we may not have meaningful
+        block-table metadata yet (e.g. CUDA graph captures with zero active
+        requests). The mask simply enables all KV blocks for the queried
+        sequence length without forcing additional allocations from PyTorch's
+        fallback implementations.
+        """
+
+        device = self.block_table.device
+        q_len = max(int(q_len), 1)
+        kv_len = max(int(kv_len), 1)
+
+        num_q_blocks = max(1, cdiv(q_len, self.q_block_size))
+        num_kv_blocks = max(1, cdiv(kv_len, self.kv_block_size))
+
+        kv_indices = torch.arange(num_kv_blocks, device=device, dtype=torch.int32)
+        kv_indices = kv_indices.repeat(num_q_blocks, 1)
+        kv_indices = kv_indices.unsqueeze(0).unsqueeze(0)
+
+        kv_num_blocks = torch.full(
+            (1, 1, num_q_blocks), num_kv_blocks, dtype=torch.int32, device=device
+        )
+
+        block_mask = BlockMask.from_kv_blocks(
+            seq_lengths=(q_len, kv_len),
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=None,
+            full_kv_indices=None,
+            BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
+            mask_mod=mask_mod,
+        )
+        return block_mask
+
     def build_block_mask(self) -> BlockMask:
         mask_mod = self.get_mask_mod()
         kv_len = self.total_cache_tokens if self.causal else self.num_actual_tokens
@@ -885,9 +922,18 @@ class FlexAttentionImpl(AttentionImpl):
         assert attn_metadata.block_mask is not None
         block_m, block_n = attn_metadata.block_mask.BLOCK_SIZE
 
-        kernel_options = get_kernel_options(
-            query, block_m, block_n, attn_metadata.direct_build
+        kernel_options = get_kernel_options(query, block_m, block_n, False)
+
+        # Align the cached block_mask with the actual query/KV lengths.
+        actual_q_len = query.size(-2)
+        actual_kv_len = key_tensor.size(-2)
+
+        block_mask = attn_metadata._build_dense_block_mask(
+            actual_q_len, actual_kv_len, attn_metadata.mask_mod
         )
+
+        if block_mask.seq_lengths != (actual_q_len, actual_kv_len):
+            block_mask = block_mask._adjust(actual_q_len, actual_kv_len)
 
         # Use flex_attention directly (no compilation for CUDA graph compat)
         out = flex_attention_compiled(
@@ -895,7 +941,7 @@ class FlexAttentionImpl(AttentionImpl):
             key_tensor,
             value_tensor,
             attn_metadata.transformed_score_mod,
-            attn_metadata.block_mask,
+            block_mask,
             self.scale,
             enable_gqa=enable_gqa,
             kernel_options=kernel_options,
@@ -914,7 +960,7 @@ def get_kernel_options(
     kernel_options: dict[str, int | bool] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
-    if vllm_is_batch_invariant():
+    if True:
         kernel_options["BLOCK_M"] = 16
         kernel_options["BLOCK_N"] = 16
         kernel_options["IS_DIVISIBLE"] = False
