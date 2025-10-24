@@ -361,7 +361,12 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
-
+                    if error_data := self._handle_streaming_error_finish_reason(
+                        output.finish_reason, request_id
+                    ):
+                        yield f"data: {error_data}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
                     # with the echo implementation.
@@ -505,7 +510,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> CompletionResponse:
+    ) -> CompletionResponse | ErrorResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
@@ -522,6 +527,10 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                # check for error finish reason and return error
+                error = self._handle_error_finish_reason(output, request_id)
+                if error:
+                    return error
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:

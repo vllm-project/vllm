@@ -1102,6 +1102,13 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
+                        # check for error finish reason and abort streaming
+                        if error_data := self._handle_streaming_error_finish_reason(
+                            output.finish_reason, request_id
+                        ):
+                            yield f"data: {error_data}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
@@ -1304,6 +1311,9 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            # Check for error finish reason and return error
+            if error := self._handle_error_finish_reason(output, request_id):
+                return error
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
