@@ -238,7 +238,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
                 identity = f"{tp_rank}_{pp_rank}".encode()
-                kwargs:dict[str, Any] = {}
+                kwargs: dict[str, Any] = {}
                 serialized_stop_worker = serialize_method_call("pause", **kwargs)
                 self.worker_cmd_socket.send_multipart(
                     [identity, b"", serialized_stop_worker.encode("utf-8")]
