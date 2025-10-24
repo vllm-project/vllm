@@ -108,7 +108,13 @@ class P2pNcclEngine:
             # the `http_port` must be consistent with the port of OpenAI.
             http_port = self.config.get_from_extra_config("http_port", None)
             if http_port is None:
-                raise ValueError("kv_connector_extra_config.http_port is required.")
+                raise ValueError(
+                    "kv_connector_extra_config.http_port is required. "
+                    "Example: --port=8000 --kv-transfer-config='{"
+                    'kv_connector":"P2pNcclConnector",'
+                    'kv_connector_extra_config":{'
+                    "http_port\":8000}}'"
+                )
             self.http_address = f"{self._hostname}:{http_port}"
 
         self.context = zmq.Context()
