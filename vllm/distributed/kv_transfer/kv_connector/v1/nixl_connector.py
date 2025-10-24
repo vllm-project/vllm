@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
+import heapq
 import logging
 import math
 import os
@@ -627,6 +628,9 @@ class NixlConnectorWorker:
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
         self.dst_block_size_ratio: dict[EngineId, float] = {}
+        self.block_allocator_for_hetero_blksize: (
+            BlockAllocatorForHeteroBlockSize | None
+        ) = None
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
@@ -925,6 +929,10 @@ class NixlConnectorWorker:
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
         assert self.num_blocks != 0
+
+        self.block_allocator_for_hetero_blksize = BlockAllocatorForHeteroBlockSize(
+            self.num_blocks
+        )
 
         self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
         self.num_regions = len(caches_data)
@@ -1355,7 +1363,6 @@ class NixlConnectorWorker:
             # 1. view => view remote as (-1, H, n_blocks, localN, D)
             # 2. permute => (-1, nblocks, H, localN, D)
             # 3. flatten => (-1, H, localN, D)
-            print(f"{blocks_to_update.shape=} {n_blocks=}")
             permuted_blocks = (
                 blocks_to_update.reshape(
                     -1, n_kv_heads, n_blocks, block_size, head_size
@@ -1370,13 +1377,21 @@ class NixlConnectorWorker:
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
             if block_size_ratio < 1:
                 fn = _process_local_gt_remote
+                block_ids_list = [
+                    [item for sublist in block_ids_list for item in sublist]
+                ]
             else:
                 fn = _process_local_lt_remote
-            block_ids_list = [[item for sublist in block_ids_list for item in sublist]]
-            if len(block_ids_list[0]) == 0:
-                continue
-            print(f"{block_ids_list=}")
+                assert self.block_allocator_for_hetero_blksize is not None
+                block_ids_list = [
+                    self.block_allocator_for_hetero_blksize.padding_block_ids(sublist)
+                    for sublist in block_ids_list
+                ]
+                # block_ids_list.sort(key=lambda sublist: sublist[0])
             for block_ids in block_ids_list:
+                if len(block_ids) == 0:
+                    # we don't need to do permute for this req
+                    continue
                 indices = torch.tensor(block_ids, device=sample_cache.device)
 
                 for _, cache_or_caches in self.device_kv_caches.items():
@@ -1430,6 +1445,10 @@ class NixlConnectorWorker:
                     meta.local_block_ids
                 )
         self.blocksize_post_process(block_ids_for_blocksize_post_process)
+        assert self.block_allocator_for_hetero_blksize is not None
+        self.block_allocator_for_hetero_blksize.free_block(
+            block_ids_for_blocksize_post_process
+        )
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
@@ -1612,16 +1631,22 @@ class NixlConnectorWorker:
             remote_block_ids = self.get_mapped_blocks(
                 remote_block_ids, block_size_ratio
             )
-            # NOTE(Chendi): over assigned local block_id here as temp buffer to receive
-            # remote data, the padding block_ids will be all zero-after we did permute
-            # so it will not impact exsiting kv block assign behaviour
-            if len(local_block_ids) < len(remote_block_ids):
+            # FIXME(Chendi): We need find free blocks to pad for local, because
+            # when we receive remote buffer with bigger blockSize, it might happen
+            # that local n_blocks scheduled less to match n*local_blksize=remote_blksize
+            # remote is  |h0-b0......|h1-b0......|h3-b0......|h4-b0......|
+            # local is   |h0-b0|h1-b0|h3-b0|h4-b0|no need                |
+            # In order to get entire buffer, we need to assign free blocks to local,
+            # so we can receive entire buffer from remote, And actually after permute
+            # done, the free blocks will be all zero and not needed.
+            if len(local_block_ids) < len(remote_block_ids) and block_size_ratio > 1:
+                assert self.block_allocator_for_hetero_blksize is not None
                 padding_needed = len(remote_block_ids) - len(local_block_ids)
-                pad_start = local_block_ids[-1] + 1
-                local_block_ids += [
-                    i for i in range(pad_start, padding_needed + pad_start)
-                ]
-
+                local_block_ids = (
+                    self.block_allocator_for_hetero_blksize.padding_block_ids(
+                        local_block_ids, padding_needed
+                    )
+                )
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
@@ -1718,7 +1743,6 @@ class NixlConnectorWorker:
             local_block_descs_ids = np.concatenate(local_descs_list)
             remote_block_descs_ids = np.concatenate(remote_descs_list)
 
-        # print(f"{local_block_descs_ids[:256]=}{remote_block_descs_ids[:256]=}")
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
@@ -1764,9 +1788,12 @@ class NixlConnectorWorker:
         block_ids -= 1
 
         if block_size_ratio < 1:
-            mapped_ids = (block_ids * block_size_ratio).astype(np.int64)
-
-            return np.unique(mapped_ids)
+            mapped_ids = [
+                int(i * block_size_ratio)
+                for i in block_ids
+                if float(i * block_size_ratio).is_integer()
+            ]
+            return np.array(mapped_ids)
 
         elif block_size_ratio > 1:
             start_ids = block_ids * block_size_ratio
@@ -1873,6 +1900,66 @@ class NixlConnectorWorker:
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
+
+
+class BlockAllocatorForHeteroBlockSize:
+    def __init__(self, num_blocks: int):
+        assert num_blocks > 0, "No Available blocks"
+        self.available_block_ids: list[int] = [-id for id in range(num_blocks)]
+
+        heapq.heapify(self.available_block_ids)
+
+        self.allocated_blocks: set[int] = set()
+        self.padding_cache: dict[int, list[int]] = {}
+
+    def padding_block_ids(
+        self, block_ids: list[int], to_pad_len: int = -1
+    ) -> list[int]:
+        if to_pad_len == 0:
+            return list(block_ids)
+
+        block_ids_tuple = tuple(block_ids)
+        key = hash(block_ids_tuple)
+
+        if key in self.padding_cache:
+            padding_blocks = self.padding_cache[key]
+
+            return block_ids + padding_blocks
+
+        # Check for available blocks
+        if len(self.available_block_ids) < to_pad_len:
+            raise ValueError(
+                f"Not enough available blocks for hash {key}. "
+                f"Requested {to_pad_len} padding blocks, "
+                f"but only {len(self.available_block_ids)} are available."
+            )
+
+        # Allocate new blocks
+        padding_blocks = []
+        for _ in range(to_pad_len):
+            negative_block_id = heapq.heappop(self.available_block_ids)
+            new_block = -negative_block_id
+
+            self.allocated_blocks.add(new_block)
+            padding_blocks.append(new_block)
+
+        self.padding_cache[key] = padding_blocks
+
+        return block_ids + padding_blocks
+
+    def free_block(self, block_ids_dict: dict[float, list[list[int]]]):
+        block_ids_list = [i for sublist in block_ids_dict.values() for i in sublist]
+        for block_ids in block_ids_list:
+            block_ids_tuple = tuple(block_ids)
+            key = hash(block_ids_tuple)
+            if key in self.padding_cache:
+                padding_blocks = self.padding_cache[key]
+                for block_id in padding_blocks:
+                    if block_id not in self.allocated_blocks:
+                        continue
+
+                    self.allocated_blocks.remove(block_id)
+                    heapq.heappush(self.available_block_ids, -block_id)
 
 
 @contextlib.contextmanager
