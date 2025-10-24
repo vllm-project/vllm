@@ -52,6 +52,7 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-2048}  # limit sequence length for fault injection tests
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -140,20 +141,6 @@ run_tests_for_model() {
   DECODE_HOSTS=()
   DECODE_PORTS=()
 
-  # Configure fault injection before starting decode instances
-  echo "Configuring fault injection pattern..."
-  FAULT_COMMANDS_FILE="/tmp/ucx-fault-commands"
-  rm -f "$FAULT_COMMANDS_FILE"
-
-  # Set fault pattern (fault every 16th operation)
-  echo '{"timestamp": '$(date +%s)', "command": "set_pattern", "pattern": "OOOOOOOOOOOOOOOX"}' >> "$FAULT_COMMANDS_FILE"
-
-  # Enable fault injection
-  echo '{"timestamp": '$(date +%s)', "command": "toggle"}' >> "$FAULT_COMMANDS_FILE"
-
-  echo "Fault injection configuration written to $FAULT_COMMANDS_FILE"
-  cat "$FAULT_COMMANDS_FILE"
-
   # Start prefill instances (without fault injection)
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     GPU_ID=$((i % $(get_num_gpus)))
@@ -176,6 +163,7 @@ run_tests_for_model() {
     --port $PORT \
     --enforce-eager \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+    --max-model-len $MAX_MODEL_LEN \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
 
@@ -221,6 +209,7 @@ run_tests_for_model() {
     --port $PORT \
     --enforce-eager \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+    --max-model-len $MAX_MODEL_LEN \
     --kv-transfer-config '$KV_CONFIG'"
 
   if [[ -z "$DP_EP" ]]; then
@@ -254,6 +243,21 @@ run_tests_for_model() {
     wait_for_server $PORT
   done
 
+  # Configure fault injection AFTER decode instances have started
+  # The fault injector clears the command file on startup and only watches for new commands
+  echo "Configuring fault injection pattern via ucx-fault-client..."
+  sleep 2  # give the file watcher time to fully initialize
+
+  # Set fault pattern (fault every 16th operation)
+  $UCX_FAULT_CLIENT set-pattern OOOOOOOOOOOOOOOX
+
+  # Enable fault injection
+  $UCX_FAULT_CLIENT toggle
+
+  # Verify configuration
+  echo "Fault injection status:"
+  $UCX_FAULT_CLIENT status
+
   # Build the command for the proxy server with all the hosts and ports
   PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
 
@@ -271,9 +275,6 @@ run_tests_for_model() {
 
   # Wait for the proxy to start
   sleep 5
-
-  # Fault injection was pre-configured via /tmp/ucx-fault-commands before decode instances started
-  echo "Decode instances are running with fault injection enabled (pattern: OOOOOOOOOOOOOOOX)"
 
   # Run tests for this model
   echo "Running fault injection tests for $model_name"
