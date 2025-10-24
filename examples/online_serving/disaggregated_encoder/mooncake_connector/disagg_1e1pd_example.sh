@@ -1,13 +1,15 @@
-#!/usr/bin/env bash
-# shellcheck disable=SC2086,SC2155
+#!/bin/bash
 set -euo pipefail
+
+declare -a PIDS=()
 
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
-MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
-
+MODEL="${MODEL:-/models/Qwen2.5-VL-3B-Instruct}"
 LOG_PATH="${LOG_PATH:-./logs}"
+mkdir -p $LOG_PATH
+
 ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19535}"
 PROXY_PORT="${PROXY_PORT:-10001}"
@@ -15,85 +17,70 @@ PROXY_PORT="${PROXY_PORT:-10001}"
 GPU_E="${GPU_E:-6}"
 GPU_PD="${GPU_PD:-7}"
 
-SHARED_STORAGE_PATH="${SHARED_STORAGE_PATH:-/tmp/}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
+NUM_PROMPTS="${NUM_PROMPTS:-100}"             # number of prompts to send in benchmark
 
 MOONCAKE_MASTER_PORT=50051
 MOONCAKE_METADATA_PORT=8080
 MOONCAKE_REPLICA_NUM=1
 MOONCAKE_FAST_TRANSFER=true
 MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=3 # GB
+
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 ###############################################################################
-# Dependencies check ##########################################################
-###############################################################################
-ensure_python_library_installed() {
-  local lib=$1
-  echo -n "[check] Python package '$lib' … "
-  if python3 - <<EOF >/dev/null 2>&1
-import importlib, sys
-sys.exit(0) if importlib.util.find_spec("${lib}") else sys.exit(1)
-EOF
-  then
-      echo "OK"
-  else
-      echo "NOT FOUND"
-      echo "Please install it, e.g.:  pip install $lib"
-      exit 1
-  fi
-}
-
-ensure_python_library_installed vllm
-ensure_python_library_installed pandas
-ensure_python_library_installed datasets
-
-###############################################################################
 # Helpers
 ###############################################################################
-mkdir -p "$LOG_PATH"
 START_TIME=$(date +"%Y%m%d_%H%M%S")
-ENC_LOG="$LOG_PATH/encoder_$START_TIME.log"
-PD_LOG="$LOG_PATH/pd_$START_TIME.log"
-PROXY_LOG="$LOG_PATH/proxy_$START_TIME.log"
+ENC_LOG=$LOG_PATH/encoder_${START_TIME}.log
+PD_LOG=$LOG_PATH/pd_${START_TIME}.log
+PROXY_LOG=$LOG_PATH/proxy_${START_TIME}.log
 MOONCAKE_MASTER_LOG="$LOG_PATH/mooncake_master_$START_TIME.log"
 MOONCAKE_METADATA_LOG="$LOG_PATH/mooncake_metadata_$START_TIME.log"
-BENCHMARK_LOG="$SCRIPT_DIR/logs/benchmark_$START_TIME.log"
 
 wait_for_server() {
-  local port=$1
-  timeout "$TIMEOUT_SECONDS" bash -c '
-    until curl -s "http://localhost:'"$port"'/v1/chat/completions" > /dev/null; do
-      sleep 1
-    done
-  '
+    local port=$1
+    timeout "$TIMEOUT_SECONDS" bash -c "
+        until curl -s localhost:$port/v1/chat/completions > /dev/null; do
+            sleep 1
+        done" && return 0 || return 1
 }
 
-# keep PIDs in memory
-declare -a PIDS=()
-CLEANED=0
+# Cleanup function
 cleanup() {
-  (( CLEANED )) && return        # run only once
-  CLEANED=1
-
-  echo "Cleaning up…"
-  # iterate backwards (proxy → PD → encoder)
-  for (( idx=${#PIDS[@]}-1 ; idx>=0 ; idx-- )); do
-    PID=${PIDS[idx]}
-    if kill -0 "$PID" 2>/dev/null; then
-      echo "  • Killing $PID"
-      kill "$PID"
-      sleep 2
-      kill -9 "$PID" 2>/dev/null || true
-    fi
-  done
-
-  kill -9 $(lsof -t -i :$MOONCAKE_MASTER_PORT)
-  echo "Done."
+    echo "Stopping everything…"
+    trap - INT TERM USR1   # prevent re-entrancy
+    
+    # Kill all tracked PIDs
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Killing process $pid"
+            kill "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Wait a moment for graceful shutdown
+    sleep 2
+    
+    # Force kill any remaining processes
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Force killing process $pid"
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Kill the entire process group as backup
+    kill -- -$$ 2>/dev/null
+    
+    echo "All processes stopped."
+    exit 0
 }
 
-trap cleanup EXIT INT TERM ERR
+trap cleanup INT
+trap cleanup USR1
+trap cleanup TERM
 
 ###############################################################################
 # Initialize Mooncake
@@ -131,13 +118,14 @@ sed -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
 # Encoder worker
 ###############################################################################
 CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-  --gpu-memory-utilization 0.0 \
-  --port "$ENCODE_PORT" \
-  --enable-request-id-headers \
-  --no-enable-prefix-caching \
-  --max-num-seqs 128 \
-  --enforce-eager \
-  --ec-transfer-config '{
+    --gpu-memory-utilization 0.7 \
+    --port "$ENCODE_PORT" \
+    --enforce-eager \
+    --enable-request-id-headers \
+    --no-enable-prefix-caching \
+    --max-num-batched-tokens 4096 \
+    --max-num-seqs 128 \
+    --ec-transfer-config '{
         "ec_connector":"ECMooncakeStorageConnector",
         "ec_role":"ec_producer",
         "ec_connector_extra_config": {
@@ -145,62 +133,90 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
             "ec_max_num_scheduled_tokens": "1000000000000000000"
         }
     }' \
-  >"$ENC_LOG" 2>&1 &
+    >"${ENC_LOG}" 2>&1 &
 
 PIDS+=($!)
 
 ###############################################################################
-# Prefill / decode worker
+# Prefill+Decode worker
 ###############################################################################
-CUDA_VISIBLE_DEVICES="$GPU_PD" vllm serve "$MODEL" \
-  --gpu-memory-utilization 0.7 \
-  --port "$PREFILL_DECODE_PORT" \
-  --enable-request-id-headers \
-  --max-num-seqs 128 \
-  --enforce-eager \
-  --ec-transfer-config '{
+CUDA_VISIBLE_DEVICES="$GPU_PD" VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve "$MODEL" \
+    --gpu-memory-utilization 0.7 \
+    --port "$PREFILL_DECODE_PORT" \
+    --enforce-eager \
+    --enable-request-id-headers \
+    --max-num-seqs 128 \
+    --ec-transfer-config '{
         "ec_connector":"ECMooncakeStorageConnector",
         "ec_role":"ec_consumer",
         "ec_connector_extra_config": {
             "ec_mooncake_config_file_path":"'${SCRIPT_DIR}'/consumer.json"
         }
     }' \
-  >"$PD_LOG" 2>&1 &
+    >"${PD_LOG}" 2>&1 &
 
 PIDS+=($!)
 
 # Wait for workers
-wait_for_server "$ENCODE_PORT"
-wait_for_server "$PREFILL_DECODE_PORT"
+wait_for_server $ENCODE_PORT
+wait_for_server $PREFILL_DECODE_PORT
 
 ###############################################################################
 # Proxy
 ###############################################################################
-python disagg_encoder_proxy.py \
-  --host "127.0.0.1" \
-  --port "$PROXY_PORT" \
-  --encode-servers-urls "http://localhost:$ENCODE_PORT" \
-  --prefill-decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
-  >"$PROXY_LOG" 2>&1 &
+python ../disagg_epd_proxy.py \
+    --host "0.0.0.0" \
+    --port "$PROXY_PORT" \
+    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
+    --prefill-servers-urls "disable" \
+    --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
+    >"${PROXY_LOG}" 2>&1 &
 
 PIDS+=($!)
 
-wait_for_server "$PROXY_PORT"
+wait_for_server $PROXY_PORT
 echo "All services are up!"
 
 ###############################################################################
 # Benchmark
-cd ../../../../benchmarks
-python benchmark_serving.py \
-  --backend           openai-chat \
-  --model             $MODEL \
-  --dataset-name      hf \
-  --dataset-path      /workspace/lmarena-ai/VisionArena-Chat \
-  --seed              40 \
-  --endpoint          /v1/chat/completions \
-  --num-prompts       100 \
-  --port              $PROXY_PORT \
-  --host              127.0.0.1 \
-  --request-rate      100 \
+# vllm bench serve \
+#   --model               $MODEL \
+#   --backend             openai-chat \
+#   --endpoint            /v1/chat/completions \
+#   --dataset-name        hf \
+#   --dataset-path        lmarena-ai/VisionArena-Chat \
+#   --seed                0 \
+#   --num-prompts         $NUM_PROMPTS \
+#   --port                $PROXY_PORT
+
+# vllm bench serve \
+#     --model $MODEL \
+#     --dataset-name random-mm \
+#     --num-prompts 100 \
+#     --random-input-len 100 \
+#     --random-output-len 128 \
+#     --random-range-ratio 0.0 \
+#     --random-mm-base-items-per-request 1 \
+#     --random-mm-num-mm-items-range-ratio 0 \
+#     --random-mm-limit-mm-per-prompt '{"image":2,"video":0}' \
+#     --random-mm-bucket-config '{(700, 728, 1): 1.0}' \
+#     --request-rate 32 \
+#     --ignore-eos \
+#     --backend openai-chat \
+#     --endpoint /v1/chat/completions \
+#     --seed 60 \
+#     --port $PROXY_PORT
+
+# PIDS+=($!)
+
+cd /workspace/mistral-evals/
+python -m eval.run eval_vllm \
+    --model_name $MODEL \
+    --url http://localhost:$PROXY_PORT \
+    --output_dir ./outputs \
+    --eval_name "chartqa"
 ###############################################################################
+
+# cleanup
+echo "cleanup..."
 cleanup

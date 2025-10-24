@@ -8,5 +8,5 @@
     "master_server_address": "localhost:50051",
     "replica_num": 1,
     "fast_transfer": true,
-    "fast_transfer_buffer_size": 1
+    "fast_transfer_buffer_size": 3
 }

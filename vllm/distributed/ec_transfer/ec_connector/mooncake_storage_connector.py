@@ -24,10 +24,7 @@ class MMMeta:
 
     @staticmethod
     def make_meta(mm_hash, num_token) -> "MMMeta":
-        return MMMeta(
-            mm_hash=mm_hash,
-            num_token=num_token,
-        )
+        return MMMeta(mm_hash=mm_hash, num_token=num_token)
 
 
 @dataclass
@@ -48,22 +45,32 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         self._mm_datas_need_loads: dict[str, int] = {}
         self.store = ECMooncakeStore(vllm_config)
 
-    def start_load_caches(self, **kwargs) -> None:
-        """Start loading the EC cache from the connector buffer to
-        worker encoder_cache
+    def start_load_caches(self, encoder_cache, **kwargs) -> None:
+        """
+        Start loading the cache from the connector into vLLM's encoder cache.
+
+        This method loads the encoder cache based on metadata provided by the scheduler.
+        It is called before `_gather_mm_embeddings` for the EC Connector. For EC,
+        the `encoder_cache` and `mm_hash` are stored in `kwargs`.
 
         Args:
-            **kwargs: additional arguments for the load operation
+            encoder_cache (dict[str, torch.Tensor]): A dictionary mapping multimodal
+                data hashes (`mm_hash`) to encoder cache tensors.
+            kwargs (dict): Additional keyword arguments for the connector.
         """
 
         # Get the metadata
         metadata: ECConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, ECMooncakeStorageConnectorMetadata)
-        if not metadata:
-            return
-
-        encoder_cache = kwargs.get("encoder_cache")   # returns None if missing
         assert encoder_cache is not None
+        if not metadata:
+            logger.warning(
+                (
+                    "In connector.start_load_caches, ",
+                    "but the connector metadata is None",
+                )
+            )
+            return
 
         mm_hashes = [mm_data.mm_hash for mm_data in metadata.mm_datas
                     if mm_data.mm_hash not in encoder_cache]
@@ -72,22 +79,24 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         for mm_hash, ec_cache in zip(mm_hashes, tensors):
             encoder_cache[mm_hash] = ec_cache
             if ec_cache is None:
-                logger.error(f"Load failed for {mm_hash}")
-            logger.debug(f"Load tensor for {mm_hash} successfully")
+                logger.error("Load failed for %s", mm_hash)
+            logger.debug("Load tensor for %s successfully", mm_hash)
 
-    def save_caches(self, **kwargs) -> None:
-        """Start saving the KV cache of the layer from encoder cache
-        
-        NOTE: this is for saving (mm_hash, torch.Tensor) into cache,
-        not (mm_hash, [torch.Tensor])
+    def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
+        """
+        Save the encoder cache to the connector.
+
+        This method saves the encoder cache from the worker's local storage
+        to shared storage or another external connector.
 
         Args:
-            **kwargs: additional arguments for the save operation.
+            encoder_cache (dict[str, torch.Tensor]): A dictionary mapping multimodal
+                data hashes (`mm_hash`) to encoder cache tensors.
+            mm_hash (str): The hash of the multimodal data whose cache is being saved.
+            kwargs (dict): Additional keyword arguments for the connector.
         """
         if not self.is_producer:
             return
-        encoder_cache = kwargs.get("encoder_cache")   # returns None if missing
-        mm_hash = kwargs.get("mm_hash")
         assert encoder_cache is not None
         assert mm_hash is not None
         self.store.batch_put([mm_hash], [encoder_cache[mm_hash]])
@@ -95,20 +104,21 @@ class ECMooncakeStorageConnector(ECConnectorBase):
     def wait_for_save(self):
         self.store.wait_for_put()
 
-    def check_caches_exist(
+    def has_caches(
         self,
         request: "Request",
     ) -> list[bool]:
         """
         Check if cache exist externally for each mm_data of request
-        
+
         Args:
             request (Request): the request object.
 
         Returns:
             List of bool indicate that ith mm_data exist in cache or not
         """
-        return self.store.batch_exists(request.mm_hashes)
+        mm_hashes = [feature.identifier for feature in request.mm_features]
+        return self.store.batch_exists(mm_hashes)
 
     def update_state_after_alloc(self, 
                                  request: "Request",
@@ -117,7 +127,7 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         """
         Update ECConnector state after encoder cache allocation.
         """
-        mm_hash = request.mm_hashes[index]
+        mm_hash = request.mm_features[index].identifier
         num_encoder_token = request.get_num_encoder_tokens(index)
         # Insert mm_hash only if this block has not been recorded yet.
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
