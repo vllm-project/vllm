@@ -76,6 +76,31 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   return VLLM_SHFL_SYNC(sum, 0);
 }
 
+template <int NUM_WARPS>
+inline __device__ float block_max(float* red_smem, float val) {
+  const int warp = threadIdx.x / WARP_SIZE;
+  const int lane = threadIdx.x % WARP_SIZE;
+
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+    val = fmaxf(val, VLLM_SHFL_XOR_SYNC(val, mask));
+  }
+
+  if (lane == 0) {
+    red_smem[warp] = val;
+  }
+  __syncthreads();
+
+  val = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
+
+#pragma unroll
+  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+    val = fmaxf(val, VLLM_SHFL_XOR_SYNC(val, mask));
+  }
+
+  return VLLM_SHFL_SYNC(val, 0);
+}
+
 // TODO(woosuk): Merge the last two dimensions of the grid.
 // Grid: (num_heads, num_seqs, max_num_partitions).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
@@ -302,27 +327,8 @@ __device__ void paged_attention_kernel(
     }
   }
 
-  // Perform reduction across the threads in the same warp to get the
-  // max qk value for each "warp" (not across the thread block yet).
-  // The 0-th thread of each thread group already has its max qk value.
-#pragma unroll
-  for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
-    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
-  }
-  if (lane == 0) {
-    red_smem[warp_idx] = qk_max;
-  }
-  __syncthreads();
-
-  // TODO(woosuk): Refactor this part.
-  // Get the max qk value for the sequence.
-  qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
-#pragma unroll
-  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
-  }
-  // Broadcast the max qk value to all threads.
-  qk_max = VLLM_SHFL_SYNC(qk_max, 0);
+  // Compute the max qk value for the sequence and broadcast it to all threads.
+  qk_max = block_max<NUM_WARPS>(red_smem, qk_max);
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -611,23 +617,7 @@ __global__ void paged_attention_v2_reduce_kernel(
   __syncthreads();
 
   // Get the global max logit.
-  // Reduce within the warp.
-#pragma unroll
-  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-    max_logit = fmaxf(max_logit, VLLM_SHFL_XOR_SYNC(max_logit, mask));
-  }
-  if (lane == 0) {
-    red_smem[warp_idx] = max_logit;
-  }
-  __syncthreads();
-  // Reduce across warps.
-  max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
-#pragma unroll
-  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    max_logit = fmaxf(max_logit, VLLM_SHFL_XOR_SYNC(max_logit, mask));
-  }
-  // Broadcast the max value to all threads.
-  max_logit = VLLM_SHFL_SYNC(max_logit, 0);
+  max_logit = block_max<NUM_WARPS>(red_smem, max_logit);
 
   // Load rescaled exp sums to shared memory.
   float* shared_exp_sums =
