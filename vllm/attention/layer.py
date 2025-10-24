@@ -636,10 +636,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
+
+        # The default k/v_scale is set to 1.0. This is ignored
+        # when kv-cache is not fp8, and should be used with
+        # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
+        # expect the pre-quantized k/v_scale to be loaded along
+        # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
         self._k_scale = torch.tensor(1.0, dtype=torch.float32)
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+        # FlashAttn doesn't support quantizing the kv-cache only
+        # but requires q to be quantized as well.
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
