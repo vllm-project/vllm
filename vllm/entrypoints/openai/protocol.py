@@ -3026,7 +3026,8 @@ class GenerateRequest(BaseModel):
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
+            "through out the inference process and return in response."
+        ),
     )
     token_ids: list[int]
     """The token ids to generate text from."""
@@ -3034,17 +3035,17 @@ class GenerateRequest(BaseModel):
     # features: MultiModalFeatureSpec
     # TODO: waiting on Renderer to be implemented and have a better idea of the
     # ser overhead here
-    features: Optional[str] = None
+    features: str | None = None
     """The processed MM inputs for the model."""
 
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
 
-    model: Optional[str] = None
+    model: str | None = None
 
-    stream: Optional[bool] = False
-    stream_options: Optional[StreamOptions] = None
-    cache_salt: Optional[str] = Field(
+    stream: bool | None = False
+    stream_options: StreamOptions | None = None
+    cache_salt: str | None = Field(
         default=None,
         description=(
             "If specified, the prefix cache will be salted with the provided "
@@ -3052,25 +3053,29 @@ class GenerateRequest(BaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit)."))
+            "to 256 bit)."
+        ),
+    )
     priority: int = Field(
         default=0,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
-    kv_transfer_params: Optional[dict[str, Any]] = Field(
+    kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
-        description="KVTransfer parameters used for disaggregated serving.")
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
 
 
 class GenerateResponseChoice(BaseModel):
     index: int
-    logprobs: Optional[ChatCompletionLogProbs] = None
+    logprobs: ChatCompletionLogProbs | None = None
     # per OpenAI spec this is the default
-    finish_reason: Optional[str] = "stop"
-    token_ids: list[int] = None
+    finish_reason: str | None = "stop"
+    token_ids: list[int] | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -3079,12 +3084,14 @@ class GenerateResponse(BaseModel):
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
+            "through out the inference process and return in response."
+        ),
     )
     choices: list[GenerateResponseChoice]
 
-    prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_logprobs: list[dict[int, Logprob] | None] | None = None
 
-    kv_transfer_params: Optional[dict[str, Any]] = Field(
+    kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
-        description="KVTransfer parameters used for disaggregated serving.")
+        description="KVTransfer parameters used for disaggregated serving.",
+    )

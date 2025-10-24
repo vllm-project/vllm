@@ -2,27 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
-from typing import Optional, Union
 
 from fastapi import Request
 
 # yapf: disable
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (ChatCompletionLogProb,
-                                              ChatCompletionLogProbs,
-                                              ChatCompletionLogProbsContent,
-                                              ErrorResponse, GenerateRequest,
-                                              GenerateResponse,
-                                              GenerateResponseChoice,
-                                              PromptTokenUsageInfo,
-                                              RequestResponseMetadata,
-                                              UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
-                                                    clamp_prompt_logprobs)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionLogProb,
+    ChatCompletionLogProbs,
+    ChatCompletionLogProbsContent,
+    ErrorResponse,
+    GenerateRequest,
+    GenerateResponse,
+    GenerateResponseChoice,
+    PromptTokenUsageInfo,
+    RequestResponseMetadata,
+    UsageInfo,
+)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
@@ -40,10 +40,9 @@ class OpenAIServingTokens(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
@@ -51,7 +50,6 @@ class OpenAIServingTokens(OpenAIServing):
         enable_log_outputs: bool = False,
     ):
         super().__init__(engine_client=engine_client,
-                         model_config=model_config,
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -66,8 +64,8 @@ class OpenAIServingTokens(OpenAIServing):
     async def serve_tokens(
         self,
         request: GenerateRequest,
-        raw_request: Optional[Request] = None
-    ) -> Union[GenerateResponse, ErrorResponse]:
+        raw_request: Request | None = None
+    ) -> GenerateResponse | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -97,15 +95,15 @@ class OpenAIServingTokens(OpenAIServing):
         if request.features is not None:
             # TODO we need the new asyncllm interface here to support
             # MultiModalFeatureSpec
-            engine_prompt["multi_modal_data"] = request.features
+            engine_prompt["multi_modal_data"] = None
 
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
         # Schedule the request and get the result generator.
-        result_generator: AsyncGenerator[RequestOutput, None] = None
+        result_generator: AsyncGenerator[RequestOutput, None] | None = None
         try:
-            sampling_params: SamplingParams = request.sampling_params
+            sampling_params = request.sampling_params
             if self.force_no_detokenize:
                 sampling_params.detokenize = False
 
@@ -132,6 +130,7 @@ class OpenAIServingTokens(OpenAIServing):
         # TODO Streaming response
 
         try:
+            assert result_generator is not None
             return await self.serve_tokens_full_generator(
                 request, result_generator, request_id, model_name,
                 request_metadata)
@@ -141,14 +140,14 @@ class OpenAIServingTokens(OpenAIServing):
     async def serve_tokens_full_generator(
         self,
         request: GenerateRequest,
-        result_generator: AsyncIterator[RequestOutput],
+        result_generator: AsyncGenerator[RequestOutput, None],
         request_id: str,
         model_name: str,
         request_metadata: RequestResponseMetadata,
-    ) -> Union[ErrorResponse, GenerateResponse]:
+    ) -> ErrorResponse | GenerateResponse:
 
         created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
+        final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
 
         try:
@@ -238,8 +237,8 @@ class OpenAIServingTokens(OpenAIServing):
     def _create_tokens_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
-        num_output_top_logprobs: Optional[int] = None,
+        top_logprobs: GenericSequence[dict[int, Logprob] | None],
+        num_output_top_logprobs: int | None = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []

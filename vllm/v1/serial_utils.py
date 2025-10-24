@@ -7,7 +7,7 @@ import pickle
 from collections.abc import Callable, Sequence
 from inspect import isclass
 from types import FunctionType
-from typing import Any, TypeAlias, Optional, Union, get_type_hints
+from typing import Any, TypeAlias, get_type_hints
 
 import cloudpickle
 import msgspec
@@ -32,7 +32,6 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.v1.engine import UtilityResult
 from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
@@ -102,6 +101,8 @@ def _decode_type_info_recursive(
             for ti, d in zip(type_info, data)
         ]
     return convert_fn(type_info, data)
+
+
 class UtilityResult:
     """Wrapper for special handling when serializing/deserializing."""
 
@@ -439,21 +440,17 @@ class MsgpackDecoder:
 
 
 class PydanticMsgspecMixin:
-
     @classmethod
     def __get_pydantic_core_schema__(
-            cls, source_type: Any,
-            handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
         """
         Make msgspec.Struct compatible with Pydantic, respecting defaults.
         Handle JSON=>msgspec.Struct. Used when exposing msgspec.Struct to the
         API as input or in `/docs`. Note this is cached by Pydantic and not
         called on every validation.
         """
-        msgspec_fields = {
-            f.name: f
-            for f in msgspec.structs.fields(source_type)
-        }
+        msgspec_fields = {f.name: f for f in msgspec.structs.fields(source_type)}
         type_hints = get_type_hints(source_type)
 
         # Build the Pydantic typed_dict_field for each msgspec field

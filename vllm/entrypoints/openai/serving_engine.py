@@ -49,6 +49,8 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
+    GenerateRequest,
+    GenerateResponse,
     IOProcessorRequest,
     PoolingResponse,
     RerankRequest,
@@ -122,6 +124,7 @@ AnyRequest: TypeAlias = (
     | SpeechToTextRequest
     | ResponsesRequest
     | IOProcessorRequest
+    | GenerateRequest
 )
 
 AnyResponse: TypeAlias = (
@@ -133,6 +136,7 @@ AnyResponse: TypeAlias = (
     | PoolingResponse
     | ClassificationResponse
     | ScoreResponse
+    | GenerateResponse
 )
 
 

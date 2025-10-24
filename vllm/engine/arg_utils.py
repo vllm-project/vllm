@@ -1482,8 +1482,7 @@ class EngineArgs:
 
         if self.tokens_only and not model_config.skip_tokenizer_init:
             model_config.skip_tokenizer_init = True
-            logger.info(
-                "Skipping tokenizer initialization for tokens-only mode.")
+            logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:

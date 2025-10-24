@@ -7,7 +7,7 @@ import warnings
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any, Optional, Union
+from typing import Annotated, Any
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -123,11 +123,12 @@ class RequestOutputKind(Enum):
 
 
 class SamplingParams(
-        PydanticMsgspecMixin,
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        # required for @cached_property.
-        dict=True):  # type: ignore[call-arg]
+    PydanticMsgspecMixin,
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    # required for @cached_property.
+    dict=True,
+):  # type: ignore[call-arg]
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion

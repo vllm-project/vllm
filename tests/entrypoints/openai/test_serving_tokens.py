@@ -5,9 +5,9 @@ import httpx
 import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
+from vllm.engine.output_processor.stop_checker import StopChecker
 
 from vllm.config import ModelConfig
-from vllm.engine.output_processor.stop_checker import StopChecker
 
 from ...utils import RemoteOpenAIServer
 
@@ -32,14 +32,8 @@ def tokenizer():
 @pytest.fixture(scope="module")
 def messages():
     return [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
-        {
-            "role": "user",
-            "content": "How many countries are in the EU?"
-        },
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "How many countries are in the EU?"},
     ]
 
 
@@ -55,8 +49,11 @@ def server(request):
 
     extra_args = getattr(request, "param", None)
     if extra_args is not None:
-        args = args + (list(extra_args) if isinstance(
-            extra_args, (list, tuple)) else [str(extra_args)])
+        args = args + (
+            list(extra_args)
+            if isinstance(extra_args, (list, tuple))
+            else [str(extra_args)]
+        )
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -64,14 +61,13 @@ def server(request):
 
 @pytest_asyncio.fixture
 async def client(server: RemoteOpenAIServer):
-    transport = httpx.AsyncHTTPTransport(
-        uds=server.uds) if server.uds else None
+    transport = httpx.AsyncHTTPTransport(uds=server.uds) if server.uds else None
     headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
     async with httpx.AsyncClient(
-            transport=transport,
-            base_url=server.url_root,
-            timeout=600,
-            headers=headers,
+        transport=transport,
+        base_url=server.url_root,
+        timeout=600,
+        headers=headers,
     ) as c:
         yield c
 
@@ -81,9 +77,7 @@ async def test_generate_endpoint(client):
     payload = {
         "model": MODEL_NAME,
         "token_ids": [1, 2, 3],
-        "sampling_params": {
-            "max_tokens": 5
-        },
+        "sampling_params": {"max_tokens": 5},
         "stream": False,
     }
     resp = await client.post(GEN_ENDPOINT, json=payload)
@@ -115,7 +109,8 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
         generate_resp = await client.post(GEN_ENDPOINT, json=payload)
         generate_data = generate_resp.json()
         generate_res = tokenizer.decode(
-            generate_data["choices"][0]["token_ids"], skip_special_tokens=True)
+            generate_data["choices"][0]["token_ids"], skip_special_tokens=True
+        )
 
         payload = {
             "model": MODEL_NAME,
@@ -124,10 +119,9 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             "temperature": 0.0,
             "stream": False,
             "ignore_eos": ignore_eos,
-            "chat_template_kwargs": dict(enable_thinking=False)
+            "chat_template_kwargs": dict(enable_thinking=False),
         }
-        completions_resp = await client.post("/v1/chat/completions",
-                                             json=payload)
+        completions_resp = await client.post("/v1/chat/completions", json=payload)
         completions_data = completions_resp.json()
         completions_res = completions_data["choices"][0]["message"]["content"]
 
@@ -159,18 +153,21 @@ async def test_stop_string_workflow(client, tokenizer, messages):
         generate_resp.raise_for_status()
 
     payload["sampling_params"]["stop"] = None
-    generate_resp = await client.post(GEN_ENDPOINT,
-                                      json=payload,
-                                      headers={"X-Request-Id": "42"})
+    generate_resp = await client.post(
+        GEN_ENDPOINT, json=payload, headers={"X-Request-Id": "42"}
+    )
     generate_data = generate_resp.json()
-    generate_res = tokenizer.decode(generate_data["choices"][0]["token_ids"],
-                                    skip_special_tokens=True)
+    generate_res = tokenizer.decode(
+        generate_data["choices"][0]["token_ids"], skip_special_tokens=True
+    )
 
     # NOTE This is under the responsibility of the coordinator
-    stop_checker = StopChecker(max_model_len=1024,
-                               get_tokenizer_for_seq=lambda _: tokenizer)
+    stop_checker = StopChecker(
+        max_model_len=1024, get_tokenizer_for_seq=lambda _: tokenizer
+    )
     stop_str, truncate_to = stop_checker.check_stop_strings(
-        generate_res, len(generate_res), ["27 member"], False)
+        generate_res, len(generate_res), ["27 member"], False
+    )
     assert stop_str == "27 member"
     # abort request that hit stop string (requires tokens-only mode)
     # res = await client.post("/abort_requests", json={"request_ids": ["generate-tokens-42"]}) # noqa: E501
@@ -185,7 +182,7 @@ async def test_stop_string_workflow(client, tokenizer, messages):
         "temperature": 0.0,
         "stream": False,
         "stop": ["27 member"],
-        "chat_template_kwargs": dict(enable_thinking=False)
+        "chat_template_kwargs": dict(enable_thinking=False),
     }
     completions_resp = await client.post("/v1/chat/completions", json=payload)
     completions_data = completions_resp.json()
@@ -196,16 +193,18 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "server",
-    [[
-        "--enable-lora",
-        "--lora-modules",
-        "Alice=charent/self_cognition_Alice",
-        "Bob=charent/self_cognition_Bob",
-        "--max-lora-rank",
-        "64",
-        "--max-cpu-loras",
-        "2",
-    ]],
+    [
+        [
+            "--enable-lora",
+            "--lora-modules",
+            "Alice=charent/self_cognition_Alice",
+            "Bob=charent/self_cognition_Bob",
+            "--max-lora-rank",
+            "64",
+            "--max-cpu-loras",
+            "2",
+        ]
+    ],
     indirect=True,
 )
 async def test_generate_with_lora_adapter(client, tokenizer, messages):
@@ -219,9 +218,7 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     payload = {
         "model": "Alice",
         "token_ids": [1, 2, 3],
-        "sampling_params": {
-            "max_tokens": 5
-        },
+        "sampling_params": {"max_tokens": 5},
         "stream": False,
     }
     resp = await client.post(GEN_ENDPOINT, json=payload)
@@ -246,8 +243,9 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     }
     generate_resp = await client.post(GEN_ENDPOINT, json=payload)
     generate_data = generate_resp.json()
-    generate_res = tokenizer.decode(generate_data["choices"][0]["token_ids"],
-                                    skip_special_tokens=True)
+    generate_res = tokenizer.decode(
+        generate_data["choices"][0]["token_ids"], skip_special_tokens=True
+    )
 
     payload = {
         "model": "Alice",
@@ -255,7 +253,7 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
         "max_tokens": 24,
         "temperature": 0.0,
         "stream": False,
-        "chat_template_kwargs": dict(enable_thinking=False)
+        "chat_template_kwargs": dict(enable_thinking=False),
     }
     completions_resp = await client.post("/v1/chat/completions", json=payload)
     completions_data = completions_resp.json()

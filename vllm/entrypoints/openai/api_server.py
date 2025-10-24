@@ -353,7 +353,7 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-def generate_tokens(request: Request) -> Optional[OpenAIServingTokens]:
+def generate_tokens(request: Request) -> OpenAIServingTokens | None:
     return request.app.state.openai_serving_tokens
 
 
@@ -1208,39 +1208,34 @@ async def invocations(raw_request: Request):
     return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
-@router.post("/inference/v1/generate",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.OK.value: {
-                     "content": {
-                         "text/event-stream": {}
-                     }
-                 },
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 }
-             })
+@router.post(
+    "/inference/v1/generate",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def generate(request: GenerateRequest, raw_request: Request):
     handler = generate_tokens(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support generate tokens API")
+            message="The model does not support generate tokens API"
+        )
     try:
         generator = await handler.serve_tokens(request, raw_request)
     except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                            detail=str(e)) from e
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.error.code)
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
 
     elif isinstance(generator, GenerateResponse):
         return JSONResponse(content=generator.model_dump())
@@ -1668,19 +1663,22 @@ def build_app(args: Namespace) -> FastAPI:
         @app.post("/abort_requests")
         async def abort_requests(raw_request: Request):
             """
-            Abort one or more requests. To be used in a 
+            Abort one or more requests. To be used in a
             Disaggregated Everything setup.
             """
             try:
                 body = await raw_request.json()
             except json.JSONDecodeError as e:
-                raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
-                                    detail=f"JSON decode error: {e}") from e
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail=f"JSON decode error: {e}",
+                ) from e
             request_ids = body.get("request_ids")
             if request_ids is None:
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail="Missing 'request_ids' in request body")
+                    detail="Missing 'request_ids' in request body",
+                )
             # Abort requests in background
             asyncio.create_task(engine_client(raw_request).abort(request_ids))
             return Response(status_code=200)
@@ -1891,31 +1889,40 @@ async def init_app_state(
         else None
     )
     # TODO remove oai prefix
-    state.openai_serving_transcription = OpenAIServingTranscription(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-        log_error_stack=args.log_error_stack,
-    ) if "transcription" in supported_tasks else None
-    state.openai_serving_translation = OpenAIServingTranslation(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-        log_error_stack=args.log_error_stack,
-    ) if "transcription" in supported_tasks else None
-    state.openai_serving_tokens = OpenAIServingTokens(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-        log_error_stack=args.log_error_stack,
-        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-        enable_log_outputs=args.enable_log_outputs,
-        force_no_detokenize=args.tokens_only,
-    ) if "generate" in supported_tasks else None
+    state.openai_serving_transcription = (
+        OpenAIServingTranscription(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )
+    state.openai_serving_translation = (
+        OpenAIServingTranslation(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )
+    state.openai_serving_tokens = (
+        OpenAIServingTokens(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            log_error_stack=args.log_error_stack,
+            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_log_outputs=args.enable_log_outputs,
+            force_no_detokenize=args.tokens_only,
+        )
+        if "generate" in supported_tasks
+        else None
+    )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
