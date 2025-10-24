@@ -1019,6 +1019,7 @@ def test_kv_connector_basic():
         scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == NUM_TOTAL_BLOCKS
     )
 
+
 def test_external_prefix_cache_metrics():
     """
     Verify connector prefix cache metrics are updated
@@ -1077,6 +1078,7 @@ def test_external_prefix_cache_metrics():
     assert external_stats.hits == NUM_MATCHED_NEW_TOKENS * NUM_REQUESTS
     assert external_stats.requests == NUM_REQUESTS
     assert external_stats.preempted_requests == 0
+
 
 @pytest.mark.parametrize(
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
