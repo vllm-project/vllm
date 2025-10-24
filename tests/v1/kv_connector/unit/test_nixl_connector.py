@@ -284,6 +284,10 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_kv_transfer_handshake(dist_init):
     """Unit test for basic NixlConnector interface functionality."""
 
