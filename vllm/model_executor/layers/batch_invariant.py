@@ -492,15 +492,10 @@ def matmul_batch_invariant(a, b, *, out=None):
         return result
     elif a.ndim == 2 and b.ndim == 3:
         # Handle 2D x 3D: (M, K) @ (B, K, N) -> (B, M, N)
-        # Process each batch separately
-        results = []
-        for i in range(b.shape[0]):
-            results.append(matmul_persistent(a, b[i]))
-        result = torch.stack(results, dim=0)
-        if out is not None:
-            out.copy_(result)
-            return out
-        return result
+        # By broadcasting `a` to 3D, we can reuse the batched matrix
+        # multiplication logic.
+        a_expanded = a.unsqueeze(0).expand(b.shape[0], -1, -1)
+        return bmm_batch_invariant(a_expanded, b, out=out)
     elif a.ndim == 4 and b.ndim == 4:
         # Handle 4D attention tensors: [batch, heads, seq, dim]
         # Reshape to 3D, process, reshape back
