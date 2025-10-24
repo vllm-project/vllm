@@ -912,22 +912,45 @@ async def test_function_call_with_previous_input_messages(
                 "role": "tool",
                 "name": "functions.get_horoscope",
                 "content": [{"type": "text", "text": str(result)}],
-                "content_type": "<|constrain|>json",
             }
         ]
     )
 
     # Step 4: Make another responses.create() call with previous_input_messages
-    response_2 = await client.responses.create(
+    stream_response_2 = await client.responses.create(
         model=model_name,
         tools=tools,
         input="",
-        extra_body={"previous_input_messages": previous_messages},
+        extra_body={
+            "previous_input_messages": previous_messages,
+            "enable_response_messages": True,
+        },
+        stream=True,
     )
+
+    async for event in stream_response_2:
+        if event.type == "response.completed":
+            response_2 = event.response
 
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
+
+    # verify only one system message / developer message
+    num_system_messages_input = 0
+    num_developer_messages_input = 0
+    num_function_call_input = 0
+    for message_dict in response_2.input_messages:
+        message = Message.from_dict(message_dict)
+        if message.author.role == "system":
+            num_system_messages_input += 1
+        elif message.author.role == "developer":
+            num_developer_messages_input += 1
+        elif message.author.role == "tool":
+            num_function_call_input += 1
+    assert num_system_messages_input == 1
+    assert num_developer_messages_input == 1
+    assert num_function_call_input == 1
 
     # Verify the output makes sense - should contain information about the horoscope
     output_text = response_2.output_text.lower()

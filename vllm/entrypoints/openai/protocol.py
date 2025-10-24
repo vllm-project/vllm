@@ -47,6 +47,7 @@ from openai.types.responses import (
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai_harmony import Message as OpenAIHarmonyMessage
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -382,7 +383,8 @@ class ResponsesRequest(OpenAIBaseModel):
     # similar to input_messages / output_messages in ResponsesResponse
     # we take in previous_input_messages (ie in harmony format)
     # this cannot be used in conjunction with previous_response_id
-    previous_input_messages: list[Any] | None = None
+    # TODO: consider supporting non harmony messages as well
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
