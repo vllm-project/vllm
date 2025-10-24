@@ -561,13 +561,16 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE8M0fnu.id()>(
   frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
 };
 
+// subtract zero point in quanted format and then dequant
 template <typename scalar_t2, vllm::ScalarTypeId w_type_id,
           bool skip_flop = false>
-__device__ inline void dequant_and_sub_zp(int q, scalar_t2* frag_b, int zp);
+__device__ inline void sub_zp_and_dequant(int q, scalar_t2* frag_b, int zp);
 
 template <>
-__device__ inline void dequant_and_sub_zp<int32_t, vllm::kU4.id(), true>(
+__device__ inline void sub_zp_and_dequant<int32_t, vllm::kU4.id(), true>(
     int q, int32_t* frag_b, int zp) {
+  // INT4 with zp -> INT8
+  // see https://github.com/vllm-project/vllm/pull/24722
   int repeated_zp = 0x01010101 * zp;
   int MASK = 0x80808080;
 
@@ -577,9 +580,11 @@ __device__ inline void dequant_and_sub_zp<int32_t, vllm::kU4.id(), true>(
 }
 
 template <>
-__device__ inline void dequant_and_sub_zp<__nv_fp8x4_e4m3, vllm::kU4.id(),
+__device__ inline void sub_zp_and_dequant<__nv_fp8x4_e4m3, vllm::kU4.id(),
                                           true>(int q, __nv_fp8x4_e4m3* frag_b,
                                                 int zp) {
+  // INT4 with zp -> FP8
+  // see https://github.com/vllm-project/vllm/pull/24722
   uint32_t u_q = *reinterpret_cast<uint32_t*>(&q);
   uint32_t u_zp = *reinterpret_cast<uint32_t*>(&zp);
   uint32_t u_zp1 = u_zp + 1;

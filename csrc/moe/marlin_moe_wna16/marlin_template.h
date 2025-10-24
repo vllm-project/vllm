@@ -521,6 +521,10 @@ __global__ void Marlin(
   int part1_mn_iters = 0;
   bool in_part2 = false;
 
+  // we use DP + two-tile SK here
+  // part1: DP
+  // part2: two-tile SK
+  // see https://github.com/vllm-project/vllm/pull/24722 for more details
   if (global_mn_tiles > gridDim.x) {
     part2_mn_tiles = global_mn_tiles % gridDim.x;
     if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
@@ -601,16 +605,24 @@ __global__ void Marlin(
 
     __syncthreads();
 
-    if (threadIdx.x == blockDim.x - 1) {
+    if (threadIdx.x >= threads - 32) {
+      constexpr int size_per_thread = div_ceil(moe_block_size, 32);
+      int lane_id = threadIdx.x - (threads - 32);
+
+      int local_count = 0;
   #pragma unroll
-      for (int i = 0; i < moe_block_size; i++) {
-        int idx = sh_block_sorted_ids[i];
-        if (idx >= prob_m_top_k) {
-          block_num_valid_tokens = i;
-          break;
+      for (int i = 0; i < size_per_thread; i++) {
+        int j = lane_id * size_per_thread + i;
+        if (j < moe_block_size) {
+          int idx = sh_block_sorted_ids[j];
+          if (idx < prob_m_top_k) local_count++;
         }
       }
-      reinterpret_cast<int*>(sh_new)[0] = block_num_valid_tokens;
+
+      block_num_valid_tokens = __reduce_add_sync(0xffffffff, local_count);
+
+      if (lane_id == 0)
+        reinterpret_cast<int*>(sh_new)[0] = block_num_valid_tokens;
     }
 
     if (threadIdx.x < moe_block_size) {
@@ -1417,7 +1429,7 @@ __global__ void Marlin(
   auto dequant_data = [&](int q, scalar_32bit_t* frag_b_ptr, int zp = 0) {
     if constexpr (a_type.size_bits() != b_type.size_bits()) {
       if constexpr (is_a_8bit && has_zp) {
-        dequant_and_sub_zp<scalar_32bit_t, b_type_id, dequant_skip_flop>(
+        sub_zp_and_dequant<scalar_32bit_t, b_type_id, dequant_skip_flop>(
             q, frag_b_ptr, zp);
       } else {
         dequant<scalar_32bit_t, b_type_id, dequant_skip_flop>(q, frag_b_ptr);
