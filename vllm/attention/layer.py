@@ -637,6 +637,41 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             block_size = 16
             calculate_kv_scales = False
         self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
+        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
+
+        # We also keep q/k/v_scale on host (cpu) memory for attention
+        # backends that require the scales to be on host instead of on device.
+        # e.g. Flashinfer
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+
+        # The output scale on host memory. This should be the input scale of
+        # the quant op after this attention layer.
+        self._o_scale_float: float | None = None
+        quant_method = (
+            quant_config.get_quant_method(self, prefix=prefix) if quant_config else None
+        )
+        if quant_method is not None and not isinstance(
+            quant_method, UnquantizedLinearMethod
+        ):
+            assert isinstance(quant_method, BaseKVCacheMethod)
+            # TODO (mgoin): kv cache dtype should be specified in the FP8
+            # checkpoint config and become the "auto" behavior
+            if self.kv_cache_dtype == "fp8_e5m2":
+                raise ValueError(
+                    "fp8_e5m2 kv-cache is not supported with fp8 checkpoints."
+                )
+            # If quantization is enabled, we make "k_scale" and "v_scale"
+            # parameters so that it can be loaded from the model checkpoint.
+            # The k/v_scale will then be converted back to native float32
+            # values after weight loading.
+            self.quant_method = quant_method
+            self.quant_method.create_weights(self)
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
@@ -684,20 +719,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 get_current_vllm_config().parallel_config.pipeline_parallel_size
             )
         ]
-
-        # Align with Attention's scale attributes for MLA backends.
-
-        self.calculate_kv_scales = calculate_kv_scales
-        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
-
-        # Host-side mirrors used by some attention backends
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-        self._o_scale_float: float | None = None
 
         self.use_sparse = use_sparse
 
