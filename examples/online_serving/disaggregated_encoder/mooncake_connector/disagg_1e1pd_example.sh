@@ -6,7 +6,7 @@ declare -a PIDS=()
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
-MODEL="${MODEL:-/models/Qwen2.5-VL-3B-Instruct}"
+MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 LOG_PATH="${LOG_PATH:-./logs}"
 mkdir -p $LOG_PATH
 
@@ -14,17 +14,21 @@ ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19535}"
 PROXY_PORT="${PROXY_PORT:-10001}"
 
-GPU_E="${GPU_E:-6}"
-GPU_PD="${GPU_PD:-7}"
+GPU_E="${GPU_E:-0}"
+GPU_PD="${GPU_PD:-1}"
 
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 NUM_PROMPTS="${NUM_PROMPTS:-100}"             # number of prompts to send in benchmark
 
 MOONCAKE_MASTER_PORT=50051
 MOONCAKE_METADATA_PORT=8080
+MOONCAKE_MASTER_IP="localhost"                      # producer
+MOONCAKE_STORE_INSTANCE_IP="localhost"              # consumer
+MOONCAKE_GLOBAL_SEGMENT_SIZE=$((30 * 1073741824))   # 30 GB
+MOONCAKE_LOCAL_BUFFER_SIZE=$((1 * 1073741824))      # 1 GB
 MOONCAKE_REPLICA_NUM=1
 MOONCAKE_FAST_TRANSFER=true
-MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=3 # GB
+MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=3                # 3 GB
 
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -101,13 +105,19 @@ PIDS+=($!)
 
 export MC_MS_AUTO_DISC=0
 
-sed -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
+sed -e "s/\${MOONCAKE_MASTER_IP}/$MOONCAKE_MASTER_IP/"\
+    -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
+    -e "s/\${MOONCAKE_GLOBAL_SEGMENT_SIZE}/$MOONCAKE_GLOBAL_SEGMENT_SIZE/"\
+    -e "s/\${MOONCAKE_LOCAL_BUFFER_SIZE}/$MOONCAKE_LOCAL_BUFFER_SIZE/"\
     -e "s/\${MOONCAKE_METADATA_PORT}/$MOONCAKE_METADATA_PORT/"\
     -e "s/\${MOONCAKE_REPLICA_NUM}/$MOONCAKE_REPLICA_NUM/"\
     -e "s/\${MOONCAKE_FAST_TRANSFER}/$MOONCAKE_FAST_TRANSFER/"\
     -e "s/\${MOONCAKE_FAST_TRANSFER_BUFFER_SIZE}/$MOONCAKE_FAST_TRANSFER_BUFFER_SIZE/"\
     mooncake_config/producer_template.json > producer.json
-sed -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
+sed -e "s/\${MOONCAKE_MASTER_IP}/$MOONCAKE_MASTER_IP/"\
+    -e "s/\${MOONCAKE_STORE_INSTANCE_IP}/$MOONCAKE_STORE_INSTANCE_IP/"\
+    -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
+    -e "s/\${MOONCAKE_LOCAL_BUFFER_SIZE}/$MOONCAKE_LOCAL_BUFFER_SIZE/"\
     -e "s/\${MOONCAKE_METADATA_PORT}/$MOONCAKE_METADATA_PORT/"\
     -e "s/\${MOONCAKE_REPLICA_NUM}/$MOONCAKE_REPLICA_NUM/"\
     -e "s/\${MOONCAKE_FAST_TRANSFER}/$MOONCAKE_FAST_TRANSFER/"\
@@ -179,42 +189,17 @@ echo "All services are up!"
 
 ###############################################################################
 # Benchmark
-# vllm bench serve \
-#   --model               $MODEL \
-#   --backend             openai-chat \
-#   --endpoint            /v1/chat/completions \
-#   --dataset-name        hf \
-#   --dataset-path        lmarena-ai/VisionArena-Chat \
-#   --seed                0 \
-#   --num-prompts         $NUM_PROMPTS \
-#   --port                $PROXY_PORT
+vllm bench serve \
+  --model               $MODEL \
+  --backend             openai-chat \
+  --endpoint            /v1/chat/completions \
+  --dataset-name        hf \
+  --dataset-path        lmarena-ai/VisionArena-Chat \
+  --seed                0 \
+  --num-prompts         $NUM_PROMPTS \
+  --port                $PROXY_PORT
 
-# vllm bench serve \
-#     --model $MODEL \
-#     --dataset-name random-mm \
-#     --num-prompts 100 \
-#     --random-input-len 100 \
-#     --random-output-len 128 \
-#     --random-range-ratio 0.0 \
-#     --random-mm-base-items-per-request 1 \
-#     --random-mm-num-mm-items-range-ratio 0 \
-#     --random-mm-limit-mm-per-prompt '{"image":2,"video":0}' \
-#     --random-mm-bucket-config '{(700, 728, 1): 1.0}' \
-#     --request-rate 32 \
-#     --ignore-eos \
-#     --backend openai-chat \
-#     --endpoint /v1/chat/completions \
-#     --seed 60 \
-#     --port $PROXY_PORT
-
-# PIDS+=($!)
-
-cd /workspace/mistral-evals/
-python -m eval.run eval_vllm \
-    --model_name $MODEL \
-    --url http://localhost:$PROXY_PORT \
-    --output_dir ./outputs \
-    --eval_name "chartqa"
+PIDS+=($!)
 ###############################################################################
 
 # cleanup

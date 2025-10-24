@@ -1,11 +1,11 @@
 {
-    "local_hostname": "localhost",
-    "metadata_server": "http://localhost:${MOONCAKE_METADATA_PORT}/metadata",
-    "global_segment_size": 32212254720,
-    "local_buffer_size": 1073741824,
+    "local_hostname": "${MOONCAKE_MASTER_IP}",
+    "metadata_server": "http://${MOONCAKE_MASTER_IP}:${MOONCAKE_METADATA_PORT}/metadata",
+    "global_segment_size": ${MOONCAKE_GLOBAL_SEGMENT_SIZE},
+    "local_buffer_size": ${MOONCAKE_LOCAL_BUFFER_SIZE},
     "protocol": "tcp",
     "device_name": "",
-    "master_server_address": "localhost:${MOONCAKE_MASTER_PORT}",
+    "master_server_address": "${MOONCAKE_MASTER_IP}:${MOONCAKE_MASTER_PORT}",
     "replica_num": ${MOONCAKE_REPLICA_NUM},
     "fast_transfer": ${MOONCAKE_FAST_TRANSFER},
     "fast_transfer_buffer_size": ${MOONCAKE_FAST_TRANSFER_BUFFER_SIZE}
