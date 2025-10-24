@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from functools import lru_cache
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from transformers import (
@@ -18,6 +16,7 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
+from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
@@ -315,16 +314,3 @@ def cached_video_processor_from_config(
         processor_cls_overrides=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, AutoVideoProcessor, **kwargs),
     )
-
-
-def convert_model_repo_to_path(model_repo: str) -> str:
-    """When VLLM_USE_MODELSCOPE is True convert a model
-    repository string to a Path str."""
-    if (
-        os.getenv("VLLM_USE_MODELSCOPE", "False").lower() == "false"
-        or Path(model_repo).exists()
-    ):
-        return model_repo
-    from modelscope.utils.file_utils import get_model_cache_root
-
-    return os.path.join(get_model_cache_root(), model_repo)
