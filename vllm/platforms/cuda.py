@@ -289,17 +289,12 @@ class CudaPlatformBase(Platform):
             except ImportError:
                 invalid_reasons = ["ImportError"]
             if invalid_reasons:
-                logger.warning(
-                    "Selected backend %s is not valid for this configuration. "
-                    "Reason: %s",
-                    selected_backend,
-                    invalid_reasons,
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {invalid_reasons}"
                 )
             else:
-                engine_version = "V1" if use_v1 else "V0"
-                logger.info(
-                    "Using %s backend on %s engine.", selected_backend, engine_version
-                )
+                logger.info("Using %s backend.", selected_backend)
                 return backend_class_str
 
         # No selected backend or the selected backend is invalid,
