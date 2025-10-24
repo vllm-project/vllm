@@ -422,7 +422,6 @@ async def test_named_tool_use(
     # finish reason should only return in last block
     assert finish_reason_count == 1
     json2 = json.loads("".join(output))
-    print(f"------------{json2}---------{json1}------")
     jsonschema.validate(instance=json2, schema=sample_json_schema)
     assert json1["name"] != json2["name"]
     assert json1["age"] != json2["age"]
