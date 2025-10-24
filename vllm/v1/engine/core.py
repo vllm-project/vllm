@@ -112,10 +112,10 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.tp_size = tp_size
         self.pp_size = pp_size
 
-        ctx = zmq.Context()
+        self.ctx = zmq.Context()
         # Client <-> EngineCoreGuard sockets
         self.fault_report_socket = make_zmq_socket(
-            ctx,
+            self.ctx,
             fault_report_addr,
             zmq.DEALER,
             bind=False,
@@ -123,11 +123,11 @@ class EngineCoreGuard(threading.Thread):  # changed
         )
 
         self.client_cmd_socket = make_zmq_socket(
-            ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=guard_identity
+            self.ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=guard_identity
         )
         # EngineCoreGuard <-> WorkerGuard sockets
         self.worker_cmd_socket = make_zmq_socket(
-            ctx, worker_cmd_addr, zmq.ROUTER, bind=True
+            self.ctx, worker_cmd_addr, zmq.ROUTER, bind=True
         )
         self.poller = zmq.Poller()
 
@@ -326,6 +326,8 @@ class EngineCoreGuard(threading.Thread):  # changed
             self.client_cmd_socket.close()
         if self.worker_cmd_socket is not None:
             self.worker_cmd_socket.close()
+        if self.ctx is not None:
+            self.ctx.term()
 
 
 def busy_loop_wrapper(busy_loop_func):
