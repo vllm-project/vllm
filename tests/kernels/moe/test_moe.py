@@ -664,6 +664,13 @@ class MarlinMoEWeightData:
         has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
         k = w.shape[-1]
 
+        if input_type == scalar_types.int8:
+            input_dtype = torch.int8
+        elif input_type == scalar_types.float8_e4m3fn:
+            input_dtype = torch.float8_e4m3fn
+        else:
+            input_dtype = input_type
+
         w_ref_l: list[torch.Tensor] = []
         qweight_l: list[torch.Tensor] = []
         scales_l: list[torch.Tensor] = []
@@ -677,11 +684,13 @@ class MarlinMoEWeightData:
             if quant_type == scalar_types.float4_e2m1f:
                 if group_size == 16:
                     w_ref, qweight, scales, global_scale = (
-                        rand_marlin_weight_nvfp4_like(w[i], group_size)
+                        rand_marlin_weight_nvfp4_like(
+                            w[i], group_size, input_dtype=input_dtype
+                        )
                     )
                 else:
                     w_ref, qweight, scales = rand_marlin_weight_mxfp4_like(
-                        w[i], group_size
+                        w[i], group_size, input_dtype=input_dtype
                     )
                     global_scale = None
 
@@ -691,13 +700,18 @@ class MarlinMoEWeightData:
                 if global_scale is not None:
                     global_scale_l.append(global_scale)
             elif quant_type == scalar_types.float8_e4m3fn:
-                w_ref, qweight, scales = marlin_quant_fp8_torch(w[i], group_size)
+                w_ref, qweight, scales = marlin_quant_fp8_torch(
+                    w[i], group_size, input_dtype=input_dtype
+                )
                 w_ref_l.append(w_ref.T)
                 qweight_l.append(qweight)
                 scales_l.append(scales)
             elif has_zp:
                 w_ref, qweight, scales, zeros = awq_marlin_quantize(
-                    w[i].transpose(1, 0), quant_type, group_size
+                    w[i].transpose(1, 0),
+                    quant_type,
+                    group_size,
+                    input_dtype=input_dtype,
                 )
 
                 w_ref_l.append(w_ref.T)
@@ -707,7 +721,12 @@ class MarlinMoEWeightData:
             else:
                 test_perm = torch.randperm(k)
                 w_ref, qweight, scales, g_idx, sort_indices, _ = marlin_quantize(
-                    w[i].transpose(1, 0), quant_type, group_size, act_order, test_perm
+                    w[i].transpose(1, 0),
+                    quant_type,
+                    group_size,
+                    act_order,
+                    test_perm,
+                    input_dtype=input_dtype,
                 )
 
                 w_ref_l.append(w_ref.T)
