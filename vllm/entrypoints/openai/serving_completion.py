@@ -538,17 +538,20 @@ class OpenAIServingCompletion(OpenAIServing):
                         else:
                             assert prompt_logprobs is not None
                             assert output.logprobs is not None
-                            # Filter out None values from prompt_logprobs for decode servers
-                            filtered_prompt_logprobs = [lp for lp in prompt_logprobs if lp is not None] if prompt_logprobs else []
+                            # Check if all prompt logprobs are None (PD decode server case)
+                            # In PD mode, decode servers receive all-None prompt_logprobs
+                            all_prompt_logprobs_none = all(lp is None for lp in prompt_logprobs)
 
-                            # If all prompt logprobs were None (decode server), only use output tokens
-                            if not filtered_prompt_logprobs:
+                            # If all prompt logprobs are None (decode server), only use output tokens
+                            if all_prompt_logprobs_none:
                                 token_ids = output.token_ids
                                 out_logprobs = output.logprobs
                             else:
+                                # Keep prompt_logprobs as-is (including None entries for BOS token)
+                                # to maintain alignment with prompt_token_ids
                                 token_ids = [*prompt_token_ids, *output.token_ids]
                                 out_logprobs = [
-                                    *filtered_prompt_logprobs,
+                                    *prompt_logprobs,
                                     *output.logprobs,
                                 ]
 
