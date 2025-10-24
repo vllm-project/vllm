@@ -216,8 +216,8 @@ def extract_mm_features(
         if modify:
             return (
                 request.mm_hashes.copy(),  # type: ignore
-                request.mm_positions.copy(),
-            )  # type: ignore
+                request.mm_positions.copy(),  # type: ignore
+            )
         else:
             return (request.mm_hashes, request.mm_positions)  # type: ignore
     else:

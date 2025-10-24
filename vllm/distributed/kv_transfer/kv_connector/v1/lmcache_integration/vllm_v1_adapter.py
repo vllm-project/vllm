@@ -1134,7 +1134,6 @@ class LMCacheConnectorV1Impl:
         self._requests_priority[request.request_id] = request.priority
 
         token_ids = request.prompt_token_ids
-        assert token_ids is not None
 
         # If the request has multimodal hashes, apply them to the token ids
         mm_hashes, mm_positions = extract_mm_features(request)
@@ -1150,6 +1149,7 @@ class LMCacheConnectorV1Impl:
             request_configs = None
 
         if self.skip_last_n_tokens > 0:
+            assert token_ids is not None
             token_ids = token_ids[: -self.skip_last_n_tokens]
         lookup_id = request.request_id if self.async_loading else str(uuid.uuid4())
 
