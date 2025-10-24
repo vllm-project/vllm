@@ -179,17 +179,29 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
-    def _has_decode_requests(self) -> bool:
-        """Check if there are any requests in the decode phase in the running queue.
+        # Track whether there are any decode requests in the running queue
+        self._has_decode_reqs: bool = False
+
+    def _check_request_is_decode(self, request: Request) -> bool:
+        """Check if a request is in the decode phase.
 
         Criteria:
         The request has completed prompt computation and is generating output tokens
         i.e., num_computed_tokens >= num_prompt_tokens
         """
+        return request.num_computed_tokens >= request.num_prompt_tokens
+
+    def _update_has_decode_requests_flag(self) -> None:
+        """Update the _has_decode_reqs flag by checking all running requests.
+
+        This should only be called when we're uncertain about the flag's state,
+        such as after a batch of requests are preempted or resumed.
+        """
         for request in self.running:
-            if request.num_computed_tokens >= request.num_prompt_tokens:
-                return True
-        return False
+            if self._check_request_is_decode(request):
+                self._has_decode_reqs = True
+                return
+        self._has_decode_reqs = False
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -216,9 +228,20 @@ class Scheduler(SchedulerInterface):
         # when hybrid chunked prefill is enabled.
         has_decode_requests = True
         if self.scheduler_config.enable_hybrid_chunked_prefill:
-            has_decode_requests = self._has_decode_requests()
+            has_decode_requests = self._has_decode_reqs
             if not has_decode_requests:
                 token_budget = self.prefill_max_num_scheduled_tokens
+                logger.info(
+                    "No decode requests in the running queue, "
+                    "using prefill token budget: %s",
+                    token_budget,
+                )
+            else:
+                logger.info(
+                    "Decode requests in the running queue, "
+                    "using normal token budget: %s",
+                    token_budget,
+                )
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -357,6 +380,10 @@ class Scheduler(SchedulerInterface):
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
+
+        # Update decode flag after preemptions if any decode requests were preempted
+        if preempted_reqs and self._has_decode_reqs:
+            self._update_has_decode_requests_flag()
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -716,6 +743,13 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+
+            # Check if any request transitioned to decode phase
+            if (
+                not self._has_decode_reqs
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                self._has_decode_reqs = True
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
@@ -1082,6 +1116,13 @@ class Scheduler(SchedulerInterface):
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
+            # Update decode flag if we removed any decode requests
+            if self._has_decode_reqs:
+                for req in stopped_running_reqs:
+                    if self._check_request_is_decode(req):
+                        # A decode request was removed, need to re-check the flag
+                        self._update_has_decode_requests_flag()
+                        break
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
