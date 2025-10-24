@@ -15,7 +15,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 else:
     _Backend = None
 
@@ -59,6 +59,9 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
     "Qwen2ForCausalLM": _ROCM_SWA_REASON,
     "MistralForCausalLM": _ROCM_SWA_REASON,
     "MixtralForCausalLM": _ROCM_SWA_REASON,
+    "PaliGemmaForConditionalGeneration": (
+        "ROCm flash attention does not yet fully support 32-bit precision on PaliGemma"
+    ),
     "Phi3VForCausalLM": (
         "ROCm Triton flash attention may run into compilation errors due to "
         "excessive use of shared memory. If this happens, disable Triton FA "
@@ -473,12 +476,6 @@ class RocmPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        return True
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

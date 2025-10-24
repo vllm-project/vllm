@@ -21,11 +21,11 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe,
 )
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
+from vllm.utils.import_utils import has_deep_gemm
 
 dg_available = has_deep_gemm()
 
