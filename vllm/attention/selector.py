@@ -4,14 +4,13 @@
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from functools import cache
 
 import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.backends.registry import _Backend
 from vllm.logger import init_logger
 from vllm.utils import STR_BACKEND_ENV_VAR
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -30,7 +29,7 @@ def get_env_variable_attn_backend() -> _Backend | None:
     * None otherwise
     """
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return None if backend_name is None else backend_name_to_enum(backend_name)
+    return None if backend_name is None else _Backend[backend_name]
 
 
 # Global state allows a particular choice of backend
@@ -64,64 +63,6 @@ def get_global_forced_attn_backend() -> _Backend | None:
     or None if auto-selection is currently enabled.
     """
     return forced_attn_backend
-
-
-@dataclass(frozen=True)
-class _IsSupported:
-    can_import: bool
-    head_size: bool
-    dtype: bool
-
-    def __bool__(self) -> bool:
-        return self.can_import and self.head_size and self.dtype
-
-
-def is_attn_backend_supported(
-    attn_backend: str | type[AttentionBackend],
-    head_size: int,
-    dtype: torch.dtype,
-    *,
-    allow_import_error: bool = True,
-) -> _IsSupported:
-    if isinstance(attn_backend, str):
-        try:
-            attn_backend = resolve_obj_by_qualname(attn_backend)
-        except ImportError:
-            if not allow_import_error:
-                raise
-
-            return _IsSupported(can_import=False, head_size=False, dtype=False)
-
-    assert isinstance(attn_backend, type)
-
-    # TODO: Update the interface once V0 is removed
-    if get_supported_head_sizes := getattr(
-        attn_backend, "get_supported_head_sizes", None
-    ):
-        is_head_size_supported = head_size in get_supported_head_sizes()
-    elif validate_head_size := getattr(attn_backend, "validate_head_size", None):
-        try:
-            validate_head_size(head_size)
-            is_head_size_supported = True
-        except Exception:
-            is_head_size_supported = False
-    else:
-        raise NotImplementedError(
-            f"{attn_backend.__name__} does not support head size validation"
-        )
-
-    if get_supported_dtypes := getattr(attn_backend, "get_supported_dtypes", None):
-        is_dtype_supported = dtype in get_supported_dtypes()
-    else:
-        raise NotImplementedError(
-            f"{attn_backend.__name__} does not support dtype validation"
-        )
-
-    return _IsSupported(
-        can_import=True,
-        head_size=is_head_size_supported,
-        dtype=is_dtype_supported,
-    )
 
 
 def get_attn_backend(
@@ -183,12 +124,13 @@ def _cached_get_attn_backend(
                     STR_BACKEND_ENV_VAR,
                 )
                 backend_by_env_var = backend_by_env_var.removesuffix("_VLLM_V1")
-            selected_backend = backend_name_to_enum(backend_by_env_var)
-            if selected_backend is None:
+            try:
+                selected_backend = _Backend[backend_by_env_var]
+            except KeyError as e:
                 raise ValueError(
                     f"Invalid attention backend: '{backend_by_env_var}'. "
                     f"Valid backends are: {list(_Backend.__members__.keys())}"
-                )
+                ) from e
 
     # get device-specific attn_backend
     from vllm.platforms import current_platform
@@ -208,7 +150,38 @@ def _cached_get_attn_backend(
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}"
         )
-    return resolve_obj_by_qualname(attention_cls)
+    backend = resolve_obj_by_qualname(attention_cls)
+
+    # Adjust block size if the selected backend doesn't support it
+    # TODO: per-layer block size configuration
+    if not backend.supports_block_size(block_size):
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        if vllm_config and vllm_config.cache_config:
+            new_block_size = backend.get_default_block_size()
+            logger.info(
+                "Adjusting kv cache block size from %d to %d for %s backend.",
+                block_size,
+                new_block_size,
+                backend.get_name(),
+            )
+            vllm_config.cache_config.block_size = new_block_size
+
+    # Adjust kv cache layout if the selected backend requires a specific one
+    device_capability = current_platform.get_device_capability()
+    required_layout = backend.get_required_kv_cache_layout(device_capability)
+    if required_layout is not None:
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+        set_kv_cache_layout(required_layout)
+        logger.info(
+            "Using %s KV cache layout for %s backend.",
+            required_layout,
+            backend.get_name(),
+        )
+
+    return backend
 
 
 @contextmanager
