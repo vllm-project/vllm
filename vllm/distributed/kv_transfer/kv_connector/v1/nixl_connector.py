@@ -1787,7 +1787,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         nixl_histogram_xfer_time = self._histogram_cls(
             name="vllm:nixl_xfer_time_seconds",
             documentation="Histogram of transfer duration for NIXL KV Cache transfers.",
-            buckets=buckets,
+            buckets=buckets[1:],
             labelnames=labelnames,
         )
         self.nixl_histogram_xfer_time = self.make_per_engine(nixl_histogram_xfer_time)
@@ -1795,12 +1795,12 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             name="vllm:nixl_post_time_seconds",
             documentation="Histogram of transfer post time for NIXL KV"
             " Cache transfers.",
-            buckets=buckets[1:],
+            buckets=buckets,
             labelnames=labelnames,
         )
         self.nixl_histogram_post_time = self.make_per_engine(nixl_histogram_post_time)
         # uniform 2kb to 16gb range
-        buckets = [2**10 + i for i in range(1, 24, 2)]
+        buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
         nixl_histogram_bytes_transferred = self._histogram_cls(
             name="vllm:nixl_bytes_transferred",
             documentation="Histogram of bytes transferred per NIXL KV Cache transfers.",
