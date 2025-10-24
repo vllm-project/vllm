@@ -35,11 +35,9 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     """
     Reasoning parser for MiniMax M2 model.
     """
-    is_first_token: bool
 
     def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
-        self.is_first_token = True
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return True
@@ -56,9 +54,8 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        if self.is_first_token:
+        if len(previous_token_ids) == 0:
             delta_text = "<think>" + delta_text
-            self.is_first_token = False
         return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
