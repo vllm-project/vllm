@@ -65,7 +65,7 @@ cd "${UCX_INJECTOR_DIR}"
 # Download and extract the latest release
 TARBALL="ucx-fault-injector-linux-amd64.tar.gz"
 curl -LO "https://github.com/wseaton/ucx-fault-injector/releases/latest/download/${TARBALL}"
-tar xzf "${TARBALL}"
+tar xzf "${TARBALL}" --strip-components=1
 rm "${TARBALL}"
 
 # Set path to the shared library
