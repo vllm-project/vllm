@@ -1866,7 +1866,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 context_output = context_output[..., : v.shape[-1]]
                 suffix_output = suffix_output[..., : v.shape[-1]]
 
-            # output = torch.empty_like(suffix_output)
             output = output.view(-1, self.num_heads, self.v_head_dim)
             merge_attn_states(
                 output=output,
