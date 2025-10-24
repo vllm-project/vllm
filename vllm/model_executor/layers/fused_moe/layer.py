@@ -979,7 +979,7 @@ def maybe_roundup_hidden_size(
     hidden_size: int,
     act_dtype: torch.dtype,
     quant_config: QuantizationConfig | None,
-    moe_parallel_config: FusedMoEParallelConfig,
+    moe_config: FusedMoEConfig,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -996,12 +996,12 @@ def maybe_roundup_hidden_size(
         Original hidden size otherwise.
     """
 
-    if moe_parallel_config.use_deepep_ht_kernels:
+    if moe_config.use_deepep_ht_kernels:
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
 
-    if moe_parallel_config.use_deepep_ll_kernels:
+    if moe_config.use_deepep_ll_kernels:
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
@@ -1013,7 +1013,7 @@ def maybe_roundup_hidden_size(
             get_mxfp4_backend,
         )
 
-        current_mxfp4_backend = get_mxfp4_backend()
+        current_mxfp4_backend = get_mxfp4_backend(moe_config.is_lora_enabled)
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
@@ -1137,7 +1137,7 @@ class FusedMoE(CustomOp):
 
         # Round up hidden size if needed.
         hidden_size = maybe_roundup_hidden_size(
-            hidden_size, moe_in_dtype, quant_config, self.moe_parallel_config
+            hidden_size, moe_in_dtype, quant_config, self.moe_config
         )
 
         # For smuggling this layer into the fused moe custom op
@@ -1268,8 +1268,9 @@ class FusedMoE(CustomOp):
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
+            is_lora_enabled=vllm_config.lora_config is not None,
         )
-        self.moe_config = moe
+        self.moe_config: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
