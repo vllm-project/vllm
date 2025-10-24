@@ -333,7 +333,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # marlin arches with fp16 output
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   # marlin arches with bf16 output (we need 9.0 for bf16 atomicAdd PTX)
-  cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   # marlin arches with fp16 output and fp8 input
   cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0" "${CUDA_ARCHS}")
   # marlin arches with bf16 output and fp8 input (we need 9.0 for bf16 atomicAdd PTX)
