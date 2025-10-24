@@ -219,9 +219,9 @@ class InternSdpaAttention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
 
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim)
+        v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim)
 
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
