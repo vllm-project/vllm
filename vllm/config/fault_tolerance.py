@@ -27,9 +27,22 @@ class FaultToleranceConfig:
     time, the original error is raised.
     """
 
-    fault_report_port: int = 22866
+    internal_fault_report_port: int = 22866
     """
-    The port to use for fault reporting.
+    The port to use for internal fault reporting.
+    """
+
+    external_fault_notify_port: int = 22867
+    """
+    The port to use for external fault notify.
+    """
+
+    engine_core_cmd_addr: str = ""
+    """
+    The ZMQ address between engine_core_guard and worker_guard.
+    It will be initialized and assigned in EngineCore, then passed
+    to the Worker via vllm_config—this is required for the Worker
+    to spin up the WorkerGuard.
     """
 
     def compute_hash(self) -> str:

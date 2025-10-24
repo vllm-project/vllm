@@ -6,6 +6,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
+from threading import Thread
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -29,6 +30,7 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils import run_method
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.network_utils import make_zmq_socket
@@ -40,6 +42,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
+from vllm.v1.serial_utils import deserialize_method_call
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
@@ -53,9 +56,13 @@ if TYPE_CHECKING:
 
 
 class WorkerGuard:
-    def __init__(self, tp_rank, worker_cmd_addr):
+    def __init__(self, vllm_config: VllmConfig):
         zmq_ctx = zmq.Context()
-        identity = tp_rank.tobytes().decode("utf8")
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.tp_rank = get_tp_group().rank
+        self.pp_rank = get_pp_group().rank
+        identity = f"{self.tp_rank}_{self.pp_rank}".encode()
+        worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
         self.cmd_socket = make_zmq_socket(
             ctx=zmq_ctx,
             path=worker_cmd_addr,
@@ -63,8 +70,80 @@ class WorkerGuard:
             bind=False,
             identity=identity,
         )
+        Thread(target=self.run, daemon=True, name="WorkerGuardCmdReceiver").start()
+
+    def _recv_cmd(self) -> tuple[bool, None | str]:
+        """
+        Receives engine core guard commands in blocking mode via ZMQ.
+        Returns (False, None) on format error, or exception.
+        Message must follow DEALER format: [empty frame, content].
+
+        Args:
+            N/A
+        Returns:
+            (Whether reception succeeded, decoded message string/None)
+        """
+        try:
+            # DEALER message format: [empty frame, message content]
+            parts = self.cmd_socket.recv_multipart()
+
+            # Validate message format
+            assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
+
+            empty_frame, message_bytes = parts
+
+            # Validate empty frame
+            assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+
+            # Decode message content
+            message = message_bytes.decode("utf-8")
+            return (True, message)
+
+        except (zmq.ZMQError, UnicodeDecodeError) as e:
+            logger.error("error occurred while receiving message: %s", e)
+            return (False, None)
+        except Exception as e:
+            logger.error("Unexpected error occurred while receiving message: %s", e)
+            return (False, None)
 
     def run(self):
+        """Run the message receiving loop and handle control commands"""
+        while True:
+            # Use blocking receive - will wait until a message arrives
+            has_msg, cmd_str = self._recv_cmd()
+            if has_msg:
+                assert cmd_str is not None
+                method, method_params = deserialize_method_call(cmd_str)
+                logger.info(
+                    "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s] Executing command: %s",
+                    self.dp_rank,
+                    self.tp_rank,
+                    self.pp_rank,
+                    method,
+                )
+                try:
+                    run_method(self, method, args=(), kwargs=method_params)
+                    logger.info(
+                        "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s]"
+                        " Command succeeded: %s",
+                        self.dp_rank,
+                        self.tp_rank,
+                        self.pp_rank,
+                        method,
+                    )
+
+                except Exception as e:
+                    logger.error(
+                        "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s]"
+                        " Error executing method %s: %s",
+                        self.dp_rank,
+                        self.tp_rank,
+                        self.pp_rank,
+                        method,
+                        e,
+                    )
+
+    def pause(self):
         pass
 
 
@@ -85,6 +164,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        self.worker_guard: WorkerGuard | None = None
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -239,6 +319,9 @@ class Worker(WorkerBase):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.worker_guard = WorkerGuard(self.vllm_config)
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.

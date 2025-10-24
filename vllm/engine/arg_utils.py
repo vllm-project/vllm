@@ -551,7 +551,8 @@ class EngineArgs:
     # fault tolerance fields
     enable_fault_tolerance: bool = FaultToleranceConfig.enable_fault_tolerance
     engine_recovery_timeout: int = FaultToleranceConfig.engine_recovery_timeout
-    fault_report_port: int = FaultToleranceConfig.fault_report_port
+    internal_fault_report_port: int = FaultToleranceConfig.internal_fault_report_port
+    external_fault_notify_port: int = FaultToleranceConfig.external_fault_notify_port
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1087,8 +1088,12 @@ class EngineArgs:
             **fault_tolerance_kwargs["engine_recovery_timeout"],
         )
         fault_tolerance_group.add_argument(
-            "--fault-report-port",
-            **fault_tolerance_kwargs["fault_report_port"],
+            "--internal-fault-report-port",
+            **fault_tolerance_kwargs["internal_fault_report_port"],
+        )
+        fault_tolerance_group.add_argument(
+            "--external-fault-notify-port",
+            **fault_tolerance_kwargs["external_fault_notify_port"],
         )
         # Other arguments
         parser.add_argument(
@@ -1643,7 +1648,10 @@ class EngineArgs:
         fault_tolerance_config = FaultToleranceConfig(
             enable_fault_tolerance=self.enable_fault_tolerance,
             engine_recovery_timeout=self.engine_recovery_timeout,
-            fault_report_port=self.fault_report_port,
+            internal_fault_report_port=self.internal_fault_report_port
+            or FaultToleranceConfig.internal_fault_report_port,
+            external_fault_notify_port=self.external_fault_notify_port
+            or FaultToleranceConfig.external_fault_notify_port,
         )
 
         config = VllmConfig(

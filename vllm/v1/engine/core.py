@@ -65,7 +65,12 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, deserialize_method_call
+from vllm.v1.serial_utils import (
+    MsgpackDecoder,
+    MsgpackEncoder,
+    deserialize_method_call,
+    serialize_method_call,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -96,6 +101,8 @@ class EngineCoreGuard(threading.Thread):  # changed
         worker_cmd_addr: str,
         fault_report_addr: str,
         guard_identity: bytes,
+        tp_size: int,
+        pp_size: int,
     ):
         super().__init__(daemon=True)
         self.engine_index = engine_index
@@ -103,6 +110,8 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.cmd_q = cmd_q
         self.busy_loop_active = busy_loop_active
         self.engine_input_q = engine_input_q
+        self.tp_size = tp_size
+        self.pp_size = pp_size
 
         ctx = zmq.Context()
         # Client <-> EngineCoreGuard sockets
@@ -226,7 +235,14 @@ class EngineCoreGuard(threading.Thread):  # changed
             return (False, None)
 
     def _stop_worker_execution(self):
-        pass
+        for tp_rank in range(self.tp_size):
+            for pp_rank in range(self.pp_size):
+                identity = f"{tp_rank}_{pp_rank}".encode()
+                kwargs: dict[str, Any] = {}
+                serialized_stop_worker = serialize_method_call("pause", **kwargs)
+                self.worker_cmd_socket.send_multipart(
+                    [identity, b"", serialized_stop_worker.encode("utf-8")]
+                )
 
     def _report_client_exception(self, exception: Exception) -> None:
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
@@ -851,8 +867,13 @@ class EngineCoreProc(EngineCore):
                     client_cmd_addr=addresses.client_cmd_addr,
                     worker_cmd_addr=addresses.engine_core_cmd_addr,
                     guard_identity=engine_core_guard_ids[self.engine_index],
+                    tp_size=vllm_config.parallel_config.tensor_parallel_size,
+                    pp_size=vllm_config.parallel_config.pipeline_parallel_size,
                 )
                 self.engine_core_guard.start()
+                vllm_config.fault_tolerance_config.engine_core_cmd_addr = (
+                    addresses.engine_core_cmd_addr
+                )
                 # Do not shut down the engine immediately upon failure.
                 executor_fail_callback = lambda: self.fault_signal_q.put(
                     RuntimeError(f"Executor on EngineCore {self.engine_index} failed.")
