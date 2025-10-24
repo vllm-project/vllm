@@ -16,6 +16,7 @@ from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
 from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
@@ -92,12 +93,15 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: _Backend, use_upstream_fa: bool
+    attn_backend: _Backend,
+    use_upstream_fa: bool,
+    attn_backend_override: _Backend | None = None,
 ) -> tuple[_Backend, Callable]:
     if (
         attn_backend != _Backend.FLASH_ATTN
         and attn_backend != _Backend.ROCM_AITER_FA
         and check_upstream_fa_availability(torch.get_default_dtype())
+        and attn_backend_override is None
     ):
         attn_backend = _Backend.FLASH_ATTN
         use_upstream_fa = True
@@ -443,6 +447,7 @@ class MultiHeadAttention(nn.Module):
         # This has no effect, it is only here to make it easier to swap
         # between Attention and MultiHeadAttention
         prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -462,7 +467,14 @@ class MultiHeadAttention(nn.Module):
         dtype = torch.get_default_dtype()
 
         # Determine the attention backend
-        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+        attn_backend_override = None
+        if multimodal_config is not None:
+            attn_backend_override = multimodal_config.mm_encoder_attn_backend
+        backend = get_vit_attn_backend(
+            head_size=head_size,
+            dtype=dtype,
+            attn_backend_override=attn_backend_override,
+        )
 
         # Some auto-selected backends can be upgraded
         # to upstream flash attention if available.
@@ -490,6 +502,7 @@ class MultiHeadAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
