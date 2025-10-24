@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import threading
+import time
+from typing import Any
 
 import requests
 import torch
@@ -14,7 +17,38 @@ from vllm.distributed.kv_transfer.kv_connector.v1.weight_transfer_connector impo
 
 logger = logging.getLogger(__name__)
 
-_weights_send_group = {}
+# Dictionary to store process groups
+# Format: {group_name: process_group}
+_weights_send_group: dict[str, Any] = {}
+
+
+def cleanup_thread(group_name: str, delay: float = 60.0):
+    # Create a thread to clean up the process group
+    # if it's not used within delay seconds
+    cleanup_thread = threading.Thread(
+        target=_cleanup_stale_group, args=(group_name, delay)
+    )
+    cleanup_thread.daemon = (
+        True  # Set as daemon thread so it doesn't prevent program exit
+    )
+    cleanup_thread.start()
+
+
+def _cleanup_stale_group(group_name: str, delay: float = 60.0):
+    """Clean up a stale process group that has timed out."""
+    try:
+        # Sleep for the specified delay
+        time.sleep(delay)
+
+        # Check if the group still exists and clean it up
+        process_group = _weights_send_group.get(group_name)
+        if process_group is not None:
+            torch.distributed.distributed_c10d.destroy_process_group(process_group)
+            del _weights_send_group[group_name]
+            logger.info("Cleaned up stale process group: %s", group_name)
+
+    except Exception as e:
+        logger.warning("Failed to clean up stale process group %s: %s", group_name, e)
 
 
 def trigger_init_weights_send_group_for_remote_instance_request(
@@ -154,6 +188,7 @@ def init_weights_send_group_for_remote_instance(
             group_name=group_name,
             device_id=torch.device("cuda", gpu_id),
         )
+        cleanup_thread(group_name, 60)
 
         message = (
             f"Succeeded to init group through {master_address}:{group_port} group."
@@ -168,7 +203,11 @@ def init_weights_send_group_for_remote_instance(
 
 
 def send_weights_to_remote_instance(
-    master_address: str, ports: str, group_name: str, tensor_nums: int, model: nn.Module
+    master_address: str,
+    ports: str,
+    group_name: str,
+    remote_tensor_nums: int,
+    model: nn.Module,
 ):
     assert torch.distributed.is_initialized(), (
         "Default torch process group must be initialized"
@@ -203,7 +242,7 @@ def send_weights_to_remote_instance(
 
         # Safety check: Only worker0 validates tensor count
         validation_passed = True
-        if global_rank == 0 and tensor_nums != non_empty_count:
+        if global_rank == 0 and remote_tensor_nums != non_empty_count:
             validation_passed = False
             logger.error(
                 "[Worker0] Tensor count mismatch between local and remote instances. "
@@ -211,7 +250,7 @@ def send_weights_to_remote_instance(
                 "Remote tensor count: %s. "
                 "Aborting weight broadcast for all workers.",
                 non_empty_count,
-                tensor_nums,
+                remote_tensor_nums,
             )
 
         # Broadcast validation result from worker0 to all workers
@@ -231,6 +270,7 @@ def send_weights_to_remote_instance(
             logger.error(message)
             return {"success": False, "message": message}
 
+        # Get the process group
         send_group = _weights_send_group.get(group_name)
         if send_group is None:
             message = (

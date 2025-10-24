@@ -778,7 +778,7 @@ class Worker(WorkerBase):
             master_address=config["master_address"],
             ports=config["ports"],
             group_name=config.get("group_name", "weight_send_group"),
-            tensor_nums=config.get("state_dict", -1),
+            remote_tensor_nums=config.get("state_dict", -1),
             model=self.model_runner.model,
         )
 
