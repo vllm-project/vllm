@@ -81,7 +81,6 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     if not current_platform.is_cuda():
         return Mxfp4Backend.NONE
 
-    # TODO (varun): Check B200
     logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
     return Mxfp4Backend.MARLIN
 
