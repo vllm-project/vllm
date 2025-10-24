@@ -789,7 +789,7 @@ class NixlConnectorWorker:
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
         self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
-        self.device_id: dict[EngineId, int] = {}
+        self.device_id: int = 0
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -855,6 +855,7 @@ class NixlConnectorWorker:
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER
         self._use_pallas = attn_backend == _Backend.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()
+        self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
@@ -940,6 +941,20 @@ class NixlConnectorWorker:
             for layer_name, kv_cache in kv_caches.items():
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
+                if (
+                    self.kv_cache_layout == "NHD"
+                    and self.vllm_config.kv_transfer_config is not None
+                    and self.vllm_config.kv_transfer_config.enable_permute_local_kv
+                ):
+                    logger.info_once(
+                        "'enable_permute_local_kv' flag is enabled while "
+                        "device KV Layout is NHD. Init host buffer with"
+                        " HND to better support Decode/Prefill TP_ratio > 1."
+                    )
+                    # Since NHD will not support Decode/Prefill TP_ratio > 1,
+                    # we can leverage host_buffer for permute
+                    self.host_buffer_kv_cache_layout = "HND"
+                    kv_shape = tuple(kv_shape[i] for i in [0, 1, 3, 2, 4])
                 xfer_buffers[layer_name] = torch.empty(
                     kv_shape, dtype=kv_dtype, device="cpu"
                 )
@@ -1027,7 +1042,6 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
-        device_id = 0
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -1076,8 +1090,10 @@ class NixlConnectorWorker:
                 # Need to make sure the device ID is non-negative for NIXL,
                 # Torch uses -1 to indicate CPU tensors while NIXL uses explicit
                 # memory type.
-                device_id = max(cache.get_device(), 0)
-                caches_data.append((base_addr, curr_tensor_size_bytes, device_id, ""))
+                self.device_id = max(cache.get_device(), 0)
+                caches_data.append(
+                    (base_addr, curr_tensor_size_bytes, self.device_id, "")
+                )
 
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
@@ -1086,7 +1102,6 @@ class NixlConnectorWorker:
         assert self.num_blocks != 0
 
         self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
-        self.device_id[self.engine_id] = device_id
         self.num_regions = len(caches_data)
         self.num_layers = len(xfer_buffers.keys())
 
@@ -1124,7 +1139,7 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len_per_layer[i]
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, device_id))
+                blocks_data.append((addr, kv_block_len, self.device_id))
 
             if self._use_flashinfer:
                 # Separate and interleave K/V regions to maintain the same
@@ -1135,12 +1150,13 @@ class NixlConnectorWorker:
                     addr = base_addr + block_offset
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
-                    blocks_data.append((v_addr, kv_block_len, device_id))
+                    blocks_data.append((v_addr, kv_block_len, self.device_id))
         logger.debug(
-            "Created %s blocks for src engine %s and rank %s",
+            "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
             self.engine_id,
             self.tp_rank,
+            self.device_id,
         )
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -1176,11 +1192,13 @@ class NixlConnectorWorker:
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
-            device_id=self.device_id[self.engine_id],
+            device_id=self.device_id,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
             attn_backend_name=self.backend_name,
-            kv_cache_layout=self.kv_cache_layout,
+            kv_cache_layout=self.kv_cache_layout
+            if not self.use_host_buffer
+            else self.host_buffer_kv_cache_layout,
         )
 
     def add_remote_agent(
@@ -1256,7 +1274,6 @@ class NixlConnectorWorker:
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id] = nixl_agent_meta.kv_caches_base_addr
-        self.device_id[engine_id] = nixl_agent_meta.device_id
 
         self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
 
@@ -1330,7 +1347,12 @@ class NixlConnectorWorker:
         assert not self._use_pallas or tp_ratio == 1, (
             "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
         )
-        if not self.use_mla and nixl_agent_meta.kv_cache_layout != self.kv_cache_layout:
+        kv_cache_layout = (
+            self.kv_cache_layout
+            if not self.use_host_buffer
+            else self.host_buffer_kv_cache_layout
+        )
+        if not self.use_mla and nixl_agent_meta.kv_cache_layout != kv_cache_layout:
             if (
                 self.kv_transfer_config.enable_permute_local_kv
                 and nixl_agent_meta.kv_cache_layout == "HND"
@@ -1356,9 +1378,6 @@ class NixlConnectorWorker:
             )
             remote_block_size = remote_block_len // (self.slot_size_per_layer[0])
         else:
-            if tp_ratio > 1 and self.device_type == "xpu":
-                # XPU uses NHD, hence it does not support splitting on H
-                raise ValueError("Heterogeneous TP is not supported on XPU")
             # When MLA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:
                 assert block_len == remote_block_len, (
@@ -1857,6 +1876,9 @@ class NixlConnectorWorker:
         result = self._invalid_block_ids
         self._invalid_block_ids = set()
         return result
+
+    def __del__(self):
+        self.shutdown()
 
     def shutdown(self):
         """Shutdown the connector worker."""

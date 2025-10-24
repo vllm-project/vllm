@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -21,6 +21,9 @@ from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 
@@ -241,10 +244,10 @@ class Executor(ABC):
         """Shutdown the executor."""
         self.collective_rpc("shutdown")
 
-    def init_kv_output_aggregator(self, finished_count: int | None) -> None:
+    def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
         """Init KVOutputAggregator"""
-        self.kv_output_aggregator = KVOutputAggregator(
-            finished_count or self.parallel_config.world_size
+        self.kv_output_aggregator = KVOutputAggregator.from_connector(
+            connector, self.parallel_config.world_size
         )
 
     @cached_property  # Avoid unnecessary RPC calls
