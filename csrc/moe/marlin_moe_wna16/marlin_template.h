@@ -521,11 +521,11 @@ __global__ void Marlin(
   int part1_mn_iters = 0;
   bool in_part2 = false;
 
-  // if (global_mn_tiles > gridDim.x) {
-  //   part2_mn_tiles = global_mn_tiles % gridDim.x;
-  //   if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
-  //   part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
-  // }
+  if (global_mn_tiles > gridDim.x) {
+    part2_mn_tiles = global_mn_tiles % gridDim.x;
+    if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
+    part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
+  }
 
   int iters = div_ceil(k_tiles * part2_mn_tiles, gridDim.x);
 
