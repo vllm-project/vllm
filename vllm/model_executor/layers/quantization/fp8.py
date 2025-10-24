@@ -167,14 +167,14 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
             logger.info_once("Using DeepGEMM backend for FP8 MoE")
             return Fp8MoeBackend.DEEPGEMM
 
-    # # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
-    # if (
-    #     current_platform.is_cuda()
-    #     and current_platform.is_device_capability(100)
-    #     and block_quant
-    # ):
-    #     logger.info_once("Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE")
-    #     return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
+    # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability(100)
+        and block_quant
+    ):
+        logger.info_once("Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE")
+        return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
 
     # default to Triton
     logger.info_once("Using Triton backend for FP8 MoE")
@@ -1242,7 +1242,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
                 routing_method_type = getattr(layer, "routing_method_type", 2)
                 return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                    routing_logits=router_logits.to(torch.float32) if routing_method_type == 2 else router_logits,
+                    routing_logits=router_logits.to(torch.float32)
+                    if routing_method_type == 2
+                    else router_logits,
                     routing_bias=e_score_correction_bias,
                     x=x,
                     w13_weight=layer.w13_weight,
@@ -1256,7 +1258,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     intermediate_size=layer.intermediate_size_per_partition,
                     expert_offset=layer.ep_rank * layer.local_num_experts,
                     local_num_experts=layer.local_num_experts,
-                    block_shape=self.weight_block_size, 
+                    block_shape=self.weight_block_size,
                     routed_scaling=routed_scaling_factor,
                     routing_method_type=routing_method_type,
                 )

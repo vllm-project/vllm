@@ -916,7 +916,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
         **kwargs: object,
-    ):  
+    ):
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)

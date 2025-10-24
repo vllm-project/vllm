@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import torch
-from typing import Optional
+
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim,
@@ -23,16 +24,17 @@ def flashinfer_fused_moe_blockscale_fp8(
     w2_weight_scale_inv: torch.Tensor,
     global_num_experts: int,
     top_k: int,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
+    num_expert_group: int | None,
+    topk_group: int | None,
     intermediate_size: int,
     expert_offset: int,
     local_num_experts: int,
     block_shape: list[int],
-    routed_scaling: Optional[float] = 1.0,
+    routed_scaling: float | None = 1.0,
     routing_method_type: int = 2,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
+
     topk_group = topk_group if topk_group is not None else 0
     assert top_k <= global_num_experts
     assert top_k <= 10
@@ -49,7 +51,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     # NOTE: scales of hidden states have to be transposed!
     a_sf_t = a_sf.t().contiguous()
     return flashinfer_trtllm_fp8_block_scale_moe(
-        routing_logits=routing_logits, 
+        routing_logits=routing_logits,
         routing_bias=routing_bias,
         hidden_states=a_q,
         hidden_states_scale=a_sf_t,

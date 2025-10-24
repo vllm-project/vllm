@@ -1341,7 +1341,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ):
         from flashinfer import nvfp4_block_scale_interleave
         from flashinfer.fused_moe.core import (
-            get_w2_permute_indices_with_cache,
             _maybe_get_cached_w3_w1_permute_indices,
             get_w2_permute_indices_with_cache,
         )
