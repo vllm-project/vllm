@@ -52,7 +52,7 @@ th:not(:first-child) {
 | [mm](multimodal_inputs.md) | ✅ | ✅ | [🟠](https://github.com/vllm-project/vllm/pull/4194)<sup>^</sup> | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | | | |
 | best-of | ✅ | ✅ | ✅ | [❌](https://github.com/vllm-project/vllm/issues/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://github.com/vllm-project/vllm/issues/7968) | ✅ | ✅ | | |
 | beam-search | ✅ | ✅ | ✅ | [❌](https://github.com/vllm-project/vllm/issues/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://github.com/vllm-project/vllm/issues/7968) | ❔ | ✅ | ✅ | |
-| [prompt-embeds](prompt_embeds.md) | ✅ | [❌](https://github.com/vllm-project/vllm/issues/25096) | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ❌ | ❔ | ❔ | ✅ |
+| [prompt-embeds](prompt_embeds.md) | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ❌ | ❔ | ❔ | ✅ |
 
 \* Chunked prefill and prefix caching are only applicable to last-token pooling.  
 <sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.
@@ -64,7 +64,7 @@ th:not(:first-child) {
 | [CP](../configuration/optimization.md#chunked-prefill)                                     | [❌](https://github.com/vllm-project/vllm/issues/2729) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ | ✅        |
 | [APC](automatic_prefix_caching.md)                        | [❌](https://github.com/vllm-project/vllm/issues/3687) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ | ✅        |
 | [LoRA](lora.md)                                           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ | ✅        |
-| [SD](spec_decode.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | [🟠](https://github.com/vllm-project/vllm/issues/26963)       |
+| [SD](spec_decode.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ❌ | [🟠](https://github.com/vllm-project/vllm/issues/26963)       |
 | CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ❌ | [❌](https://github.com/vllm-project/vllm/issues/26970)        |
 | [pooling](../models/pooling_models.md)                    | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr>       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     | ❌ | ✅        |
@@ -75,4 +75,4 @@ th:not(:first-child) {
 | multi-step                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](https://github.com/vllm-project/vllm/issues/8477) | ✅     | ❌ | ✅        |
 | best-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
 | beam-search                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
-| [prompt-embeds](prompt_embeds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ?     | [❌](https://github.com/vllm-project/vllm/issues/25097) | ✅       |
+| [prompt-embeds](prompt_embeds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❔     | [❌](https://github.com/vllm-project/vllm/issues/25097) | ✅       |

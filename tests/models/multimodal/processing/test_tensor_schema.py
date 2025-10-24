@@ -26,7 +26,6 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     supports_multimodal,
@@ -35,7 +34,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
@@ -48,6 +48,7 @@ ARCH_NEEDS_EXTRAS = [
     "Idefics3ForConditionalGeneration",
     "LlavaForConditionalGeneration",
     "MiniCPMV",
+    "PaliGemmaForConditionalGeneration",
 ]
 REPO_ID_TO_SKIP = {
     "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
@@ -217,7 +218,9 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=hf_overrides_fn,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )

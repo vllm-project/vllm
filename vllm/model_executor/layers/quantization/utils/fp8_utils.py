@@ -28,13 +28,13 @@ from vllm.model_executor.parameter import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
