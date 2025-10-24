@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from transformers import (
@@ -94,8 +96,8 @@ def get_processor(
     """Load a processor for the given model name via HuggingFace."""
     if revision is None:
         revision = "main"
-
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
             processor = AutoProcessor.from_pretrained(
                 processor_name,
@@ -168,6 +170,7 @@ def get_feature_extractor(
     """Load an audio feature extractor for the given model name
     via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             processor_name,
             *args,
@@ -217,6 +220,7 @@ def get_image_processor(
 ):
     """Load an image processor for the given model name via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         processor = AutoImageProcessor.from_pretrained(
             processor_name,
             *args,
@@ -268,6 +272,7 @@ def get_video_processor(
 ):
     """Load a video processor for the given model name via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         processor_cls = processor_cls_overrides or AutoVideoProcessor
         processor = processor_cls.from_pretrained(
             processor_name,
@@ -310,3 +315,16 @@ def cached_video_processor_from_config(
         processor_cls_overrides=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, AutoVideoProcessor, **kwargs),
     )
+
+
+def convert_model_repo_to_path(model_repo: str) -> str:
+    """When VLLM_USE_MODELSCOPE is True convert a model
+    repository string to a Path str."""
+    if (
+        os.getenv("VLLM_USE_MODELSCOPE", "False").lower() == "false"
+        or Path(model_repo).exists()
+    ):
+        return model_repo
+    from modelscope.utils.file_utils import get_model_cache_root
+
+    return os.path.join(get_model_cache_root(), model_repo)
