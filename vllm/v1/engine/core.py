@@ -32,7 +32,6 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.utils import (
     decorate_logs,
     run_method,
-    serialize_method_call,
     set_process_title,
 )
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
@@ -69,7 +68,12 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, deserialize_method_call
+from vllm.v1.serial_utils import (
+    MsgpackDecoder,
+    MsgpackEncoder,
+    deserialize_method_call,
+    serialize_method_call,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -237,7 +241,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
                 identity = f"{tp_rank}_{pp_rank}".encode()
-                kwargs:dict[str, Any] = {}
+                kwargs: dict[str, Any] = {}
                 serialized_stop_worker = serialize_method_call("pause", **kwargs)
                 self.worker_cmd_socket.send_multipart(
                     [identity, b"", serialized_stop_worker.encode("utf-8")]
