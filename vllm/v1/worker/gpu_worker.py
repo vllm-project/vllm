@@ -30,10 +30,7 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils import (
-    deserialize_method_call,
-    run_method,
-)
+from vllm.utils import run_method
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.network_utils import make_zmq_socket
@@ -45,6 +42,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
+from vllm.v1.serial_utils import deserialize_method_call
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
@@ -165,6 +163,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        self.worker_guard = None
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -206,9 +205,6 @@ class Worker(WorkerBase):
             )
         else:
             self.profiler = None
-
-        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            self.worker_guard = WorkerGuard(vllm_config)
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -322,6 +318,9 @@ class Worker(WorkerBase):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.worker_guard = WorkerGuard(self.vllm_config)
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
