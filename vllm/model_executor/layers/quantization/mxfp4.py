@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from enum import Enum
 from typing import Optional
-
+import triton.profiler as proton
 import torch
 from torch.nn.parameter import Parameter
 
@@ -1123,20 +1123,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
             )
-
-            return triton_kernel_moe_forward(
-                hidden_states=x,
-                w1=self.w13_weight_triton_tensor,
-                w2=self.w2_weight_triton_tensor,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                expt_assignment = self.expt_assignment,
-                symm_mem_pool = self.symm_mem_pool,
-                quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+            
+            with proton.cpu_timed_scope("triton_kernel_moe_forward"):
+                return triton_kernel_moe_forward(
+                    hidden_states=x,
+                    w1=self.w13_weight_triton_tensor,
+                    w2=self.w2_weight_triton_tensor,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    expt_assignment = self.expt_assignment,
+                    symm_mem_pool = self.symm_mem_pool,
+                    quant_config=self.moe_quant_config,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")

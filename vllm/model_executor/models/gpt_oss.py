@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.distributed as dist
+import triton.profiler as proton
 from torch import nn
 from transformers import GptOssConfig
 
@@ -127,12 +128,16 @@ class OAIAttention(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
-        qkv, _ = self.qkv(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        with proton.cpu_timed_scope("OAIAttention-qkv_transformation"):
+            qkv, _ = self.qkv(hidden_states)
+        with proton.cpu_timed_scope("OAIAttention-qkv.split"):
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        with proton.cpu_timed_scope("OAIAttention-attention"):
+            attn_output = self.attn(q, k, v)
+        with proton.cpu_timed_scope("OAIAttention-o_project"):
+            output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -176,9 +181,10 @@ class MLPBlock(torch.nn.Module):
         num_tokens = x.shape[0]
         if self.is_sequence_parallel:
             x = sequence_parallel_chunk(x)
-
-        g = self.router(x)
-        x = self.experts(hidden_states=x, router_logits=g)
+        with proton.cpu_timed_scope("MLPBlock-router"):
+            g = self.router(x)
+        with proton.cpu_timed_scope("MLPBlock-experts_FusedMoE"):
+            x = self.experts(hidden_states=x, router_logits=g)
 
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x.contiguous(), 0)

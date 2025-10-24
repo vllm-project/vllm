@@ -93,6 +93,14 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
+    USE_PROTON: bool = False
+    PROTON_PROFILE_NAME: str | None = None
+    PROTON_PROFILE_NAME_PREFIX: str | None = None
+    PROTON_PROFILE_CONTEXT: str | None = None
+    PROTON_PROFILE_DATA: str | None = None
+    PROTON_PROFILE_BACKEND: str | None = None
+    PROTON_PROFILE_MODE: str | None = None
+    PROTON_PROFILE_HOOK: str | None = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -803,6 +811,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: bool(
         os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"
     ),
+    "USE_PROTON": lambda: bool(
+        os.getenv("USE_PROTON", "0").lower() not in ("0", "false")
+    ),
+    "PROTON_PROFILE_NAME": lambda: os.getenv("PROTON_PROFILE_NAME"),
+    "PROTON_PROFILE_NAME_PREFIX": lambda: os.getenv("PROTON_PROFILE_NAME_PREFIX"),
+    "PROTON_PROFILE_CONTEXT": lambda: os.getenv("PROTON_PROFILE_CONTEXT"),
+    "PROTON_PROFILE_DATA": lambda: os.getenv("PROTON_PROFILE_DATA"),
+    "PROTON_PROFILE_BACKEND": lambda: os.getenv("PROTON_PROFILE_BACKEND"),
+    "PROTON_PROFILE_MODE": lambda: os.getenv("PROTON_PROFILE_MODE"),
+    "PROTON_PROFILE_HOOK": lambda: os.getenv("PROTON_PROFILE_HOOK"),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 import torch
+import triton.profiler as proton
 import torch.distributed as dist
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -305,28 +306,50 @@ def triton_kernel_fused_experts(
         2,
     )
     gammas = routing_data.gate_scal if routing_data else None
+    tokens_involved = int(routing_data.expt_hist.sum().item()) if routing_data else 0
+    hidden_dim = hidden_states.shape[-1]
+    interm_dim = w1.shape[-1]
+    flops_matmul_ogs = 2 * tokens_involved * hidden_dim * interm_dim
+    token_num_bytes = hidden_states.element_size() * tokens_involved * hidden_dim
+    
+    def num_bytes(tensor):
+        return tensor.numel() * tensor.element_size()
 
-    intermediate_cache1 = matmul_ogs(
-        hidden_states,
-        w1,
-        quant_config.w1_bias,
-        routing_data,
-        gather_indx=gather_indx,
-        precision_config=quant_config.w1_precision,
-        gammas=gammas if apply_router_weight_on_input else None,
-        fused_activation=act,
-    )
+    with proton.cpu_timed_scope(
+        name="matmul_ogs-w1",
+        metrics={
+            "flops": flops_matmul_ogs, 
+            "bytes": num_bytes(w1) + token_num_bytes
+            }
+        ):
+        intermediate_cache1 = matmul_ogs(
+            hidden_states,
+            w1,
+            quant_config.w1_bias,
+            routing_data,
+            gather_indx=gather_indx,
+            precision_config=quant_config.w1_precision,
+            gammas=gammas if apply_router_weight_on_input else None,
+            fused_activation=act,
+        )
 
-    intermediate_cache3 = matmul_ogs(
-        intermediate_cache1,
-        w2,
-        quant_config.w2_bias,
-        routing_data,
-        scatter_indx=scatter_indx,
-        precision_config=quant_config.w2_precision,
-        gammas=None if apply_router_weight_on_input else gammas,
-        y=output_tensor,
-    )
+    with proton.cpu_timed_scope(
+        name="matmul_ogs-w2",
+        metrics={
+            "flops": flops_matmul_ogs, 
+            "bytes": num_bytes(w1) + token_num_bytes
+            }
+        ):
+        intermediate_cache3 = matmul_ogs(
+            intermediate_cache1,
+            w2,
+            quant_config.w2_bias,
+            routing_data,
+            scatter_indx=scatter_indx,
+            precision_config=quant_config.w2_precision,
+            gammas=None if apply_router_weight_on_input else gammas,
+            y=output_tensor,
+        )
     return intermediate_cache3
 
 
@@ -459,21 +482,22 @@ class OAITritonExperts(BaseOAITritonExperts):
         routing_data, gather_indx, scatter_indx = self._make_routing_data(
             topk_ids, topk_weights, local_num_experts
         )
-
-        experts_output = triton_kernel_fused_experts(
-            None,
-            hidden_states,
-            w1,
-            w2,
-            routing_data,
-            gather_indx,
-            scatter_indx,
-            activation=activation,
-            quant_config=self.quant_config,
-            apply_router_weight_on_input=False,
-            global_num_experts=local_num_experts,
-            expert_map=None,  # applied already
-            a1q_scale=a1q_scale,
-        )
+        
+        with proton.cpu_timed_scope("OAITritonExperts-triton_kernel_fused_experts"):
+            experts_output = triton_kernel_fused_experts(
+                None,
+                hidden_states,
+                w1,
+                w2,
+                routing_data,
+                gather_indx,
+                scatter_indx,
+                activation=activation,
+                quant_config=self.quant_config,
+                apply_router_weight_on_input=False,
+                global_num_experts=local_num_experts,
+                expert_map=None,  # applied already
+                a1q_scale=a1q_scale,
+            )
 
         output.copy_(experts_output, non_blocking=True)

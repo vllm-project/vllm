@@ -5,12 +5,14 @@
 import copy
 import gc
 import os
+import time
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed
 import torch.nn as nn
+import triton.profiler as proton
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -45,6 +47,16 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
+
+def _normalize_proton_option(value: Any) -> str | None:
+    """Normalize Proton profiler options from env or overrides."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    return value or None
+
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -76,9 +88,35 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        # Profiler configuration
+        self.profiler = None
+        self.profiler_type: str | None = None
+        self._proton_active = False
+        self._proton_base_config: dict[str, str | None] | None = None
+        self._proton_active_config: dict[str, str | None] | None = None
+
+        if envs.USE_PROTON:
+            import importlib
+
+            try:
+                importlib.import_module("triton.profiler")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "USE_PROTON is set but Triton Proton profiler is unavailable."
+                ) from exc
+
+            self.profiler_type = "proton"
+            self._proton_base_config = {
+                "name": _normalize_proton_option(envs.PROTON_PROFILE_NAME),
+                "name_prefix": _normalize_proton_option(envs.PROTON_PROFILE_NAME_PREFIX),
+                "context": _normalize_proton_option(envs.PROTON_PROFILE_CONTEXT),
+                "data": _normalize_proton_option(envs.PROTON_PROFILE_DATA),
+                "backend": _normalize_proton_option(envs.PROTON_PROFILE_BACKEND),
+                "mode": _normalize_proton_option(envs.PROTON_PROFILE_MODE),
+                "hook": _normalize_proton_option(envs.PROTON_PROFILE_HOOK),
+            }
+            logger.info("Proton profiler enabled.")
+        elif envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
             logger.info(
@@ -106,6 +144,7 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
                 ),
             )
+            self.profiler_type = "torch"
         else:
             self.profiler = None
 
@@ -529,18 +568,58 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True):
-        if self.profiler is None:
+    def profile(self, is_start: bool = True, profile_options: dict[str, Any] | None = None):
+        if self.profiler_type is None:
             raise RuntimeError("Profiler is not enabled.")
-        if is_start:
-            self.profiler.start()
+
+        if self.profiler_type == "torch":
+            if is_start:
+                self.profiler.start()
+            else:
+                self.profiler.stop()
+                # only print profiler results on rank 0
+                if self.local_rank == 0:
+                    print(
+                        self.profiler.key_averages().table(
+                            sort_by="self_cuda_time_total"
+                        )
+                    )
+        elif self.profiler_type == "proton":
+            if is_start:
+                if not self._proton_active:
+                    import triton.profiler as proton
+
+                    config = dict(self._proton_base_config or {})
+                    if profile_options:
+                        for key in ("name", "name_prefix", "context", "data", "backend", "mode", "hook"):
+                            if key in profile_options:
+                                config[key] = _normalize_proton_option(profile_options[key])
+
+                    name_prefix = config.get("name_prefix") or "proton_profile"
+                    timestamp = int(time.time() * 1_000_000)
+                    final_name = config.get("name") or f"{name_prefix}_{os.getpid()}_{timestamp}"
+                    kwargs = {}
+                    for key in ("context", "data", "backend", "mode", "hook"):
+                        value = config.get(key)
+                        if value is not None:
+                            kwargs[key] = value
+
+                    logger.info("Starting Proton profiler with name: %s", final_name)
+                    if kwargs:
+                        logger.debug("Proton profiler options: %s", kwargs)
+                    proton.start(name=final_name, **kwargs)
+                    self._proton_active = True
+                    self._proton_active_config = config
+            else:
+                if self._proton_active:
+                    logger.info("Finalizing Proton profiler...")
+                    import triton.profiler as proton
+
+                    proton.finalize()
+                    self._proton_active = False
+                    self._proton_active_config = None
         else:
-            self.profiler.stop()
-            # only print profiler results on rank 0
-            if self.local_rank == 0:
-                print(
-                    self.profiler.key_averages().table(sort_by="self_cuda_time_total")
-                )
+            raise RuntimeError(f"Unknown profiler type {self.profiler_type}")
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
