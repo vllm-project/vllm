@@ -3,7 +3,7 @@
 # Standard
 import os
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 import torch
 from lmcache.config import LMCacheEngineConfig as Config
@@ -13,6 +13,7 @@ from lmcache.v1.config import LMCacheEngineConfig as V1Config
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -179,7 +180,7 @@ def create_lmcache_metadata(
 
 
 def extract_mm_features(
-    request: "Request", modify: bool = False
+    request: Union["Request", "NewRequestData"], modify: bool = False
 ) -> tuple[list[str], list["PlaceholderRange"]]:
     """
     Normalize multimodal information from a Request into parallel lists.
@@ -213,8 +214,11 @@ def extract_mm_features(
         return (list(mm_hashes), list(mm_positions))
     elif getattr(request, "mm_hashes", None):
         if modify:
-            return (request.mm_hashes.copy(), request.mm_positions.copy())
+            return (
+                request.mm_hashes.copy(),  # type: ignore
+                request.mm_positions.copy(),
+            )  # type: ignore
         else:
-            return (request.mm_hashes, request.mm_positions)
+            return (request.mm_hashes, request.mm_positions)  # type: ignore
     else:
         return ([], [])

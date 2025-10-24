@@ -98,6 +98,9 @@ def extract_request_configs(sampling_params: SamplingParams) -> dict | None:
         and "kv_transfer_params" in sampling_params.extra_args
     ):
         kv_transfer_params = sampling_params.extra_args.get("kv_transfer_params")
+        if kv_transfer_params is None:
+            return None
+        assert isinstance(kv_transfer_params, dict)
         for k, v in kv_transfer_params.items():
             if k.startswith("lmcache."):
                 if request_configs is None:
@@ -179,10 +182,14 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        request_configs = extract_request_configs(new_request.sampling_params)
+        if new_request.sampling_params:
+            request_configs = extract_request_configs(new_request.sampling_params)
+        else:
+            request_configs = None
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
+        assert new_request.prompt_token_ids is not None
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -542,6 +549,7 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        assert vllm_config.kv_transfer_config is not None
         self._parent = parent
         self._vllm_config = vllm_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
@@ -1126,16 +1134,21 @@ class LMCacheConnectorV1Impl:
         self._requests_priority[request.request_id] = request.priority
 
         token_ids = request.prompt_token_ids
+        assert token_ids is not None
 
         # If the request has multimodal hashes, apply them to the token ids
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
-            token_ids = torch.tensor(request.prompt_token_ids)
-            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
-            token_ids = token_ids.tolist()
+            token_ids_tensor = torch.tensor(request.prompt_token_ids)
+            apply_mm_hashes_to_token_ids(token_ids_tensor, mm_hashes, mm_positions)
+            token_ids = token_ids_tensor.tolist()
 
-        request_configs = extract_request_configs(request.sampling_params)
+        if request.sampling_params:
+            request_configs = extract_request_configs(request.sampling_params)
+        else:
+            request_configs = None
+
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
         lookup_id = request.request_id if self.async_loading else str(uuid.uuid4())
@@ -1333,9 +1346,9 @@ class LMCacheConnectorV1Impl:
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if request := self._unfinished_requests.get(req_id):
+            if cached_request := self._unfinished_requests.get(req_id):
                 num_current_tokens = len(request_tracker.token_ids)
-                new_token_ids = request.all_token_ids[
+                new_token_ids = cached_request.all_token_ids[
                     num_current_tokens : num_current_tokens + num_new_tokens
                 ]
             else:
