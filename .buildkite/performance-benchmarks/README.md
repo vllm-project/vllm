@@ -8,7 +8,7 @@ vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](http
 
 ## Performance benchmark quick overview
 
-**Benchmarking Coverage**: latency, throughput and fix-qps serving on A100, H100 and Intel® Xeon® Processors, with different models.
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on B200, A100, H100 and Intel® Xeon® Processors, with different models.
 
 **Benchmarking Duration**: about 1hr.
 
