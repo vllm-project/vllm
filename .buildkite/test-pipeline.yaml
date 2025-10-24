@@ -553,7 +553,6 @@ steps:
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
-  num_gpus: 4
   fast_check: false
   source_file_dependencies:
     - vllm/

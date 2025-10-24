@@ -164,6 +164,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "call the tool. Otherwise, answer the user's query directly "
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally.",
+        "extended": True,
     },
     # V1 Test: Passing locally but failing in CI. This runs the
     # V0 Engine because of CPU offloading. Need to debug why.
