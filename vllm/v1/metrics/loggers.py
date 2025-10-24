@@ -110,6 +110,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_generation_throughput: float = 0.0
         self.engine_is_idle = False
         self.aggregated = False
+        # Corrupted requests metric. This should not be reset.
+        self.num_corrupted_reqs: int = 0
 
     def _reset(self, now):
         self.last_log_time = now
@@ -950,7 +952,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs
             )
-
             if self.show_hidden_metrics:
                 self.gauge_gpu_cache_usage[engine_idx].set(
                     scheduler_stats.kv_cache_usage
