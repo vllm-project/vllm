@@ -663,7 +663,7 @@ class MPClient(EngineCoreClient):
                     self.engine_registry,
                     self.engine_exception_q,
                     self.engine_exception_q_lock,
-                    addresses.fault_pub_addr,
+                    addresses.fault_pub_socket_addr,
                 )
                 self.resources.client_guard = self.client_guard
             success = True
