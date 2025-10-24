@@ -532,17 +532,25 @@ class OpenAIServingCompletion(OpenAIServing):
                         out_logprobs = prompt_logprobs
                         output_text = prompt_text
                     else:
-                        token_ids = [*prompt_token_ids, *output.token_ids]
-
                         if request.logprobs is None:
+                            token_ids = [*prompt_token_ids, *output.token_ids]
                             out_logprobs = None
                         else:
                             assert prompt_logprobs is not None
                             assert output.logprobs is not None
-                            out_logprobs = [
-                                *prompt_logprobs,
-                                *output.logprobs,
-                            ]
+                            # Filter out None values from prompt_logprobs for decode servers
+                            filtered_prompt_logprobs = [lp for lp in prompt_logprobs if lp is not None] if prompt_logprobs else []
+
+                            # If all prompt logprobs were None (decode server), only use output tokens
+                            if not filtered_prompt_logprobs:
+                                token_ids = output.token_ids
+                                out_logprobs = output.logprobs
+                            else:
+                                token_ids = [*prompt_token_ids, *output.token_ids]
+                                out_logprobs = [
+                                    *filtered_prompt_logprobs,
+                                    *output.logprobs,
+                                ]
 
                         output_text = prompt_text + output.text
                 else:
