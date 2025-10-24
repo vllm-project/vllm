@@ -59,92 +59,9 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     maybe_prefix)
 
 
-class RMSNormTP(CustomOp):
-    name = "RMSNormTP"
+from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.tp_world = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(int(hidden_size /
-                                                  self.tp_world)))
-
-        self.weight.weight_loader = self.weight_loader
-        self.variance_epsilon = eps
-
-    @staticmethod
-    def weight_loader(
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-    ) -> None:
-        tp_world = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-
-        shard_size = loaded_weight.shape[0] // tp_world
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard])
-        return
-
-    def _forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
-        if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(
-                variance) / self.tp_world
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype) * self.weight
-        return x
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        assert residual is None, "RMSNorm does not support residual connection."
-        return self._forward(x)
-
-
-class MLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
-        reduce_results: bool = True,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           reduce_results=reduce_results,
-                                           prefix=f"{prefix}.down_proj")
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
-
-class MoE(nn.Module):
-
+class MiniMaxM2MoE(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -162,7 +79,7 @@ class MoE(nn.Module):
         if self.use_routing_bias:
             self.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.num_local_experts, dtype=torch.float32))
-            self.e_score_correction_bias.weight_loader = MoE.ebias_weight_loader
+            self.e_score_correction_bias.weight_loader = MiniMaxM2MoE.ebias_weight_loader
         else:
             self.e_score_correction_bias = None
 
@@ -208,7 +125,7 @@ class MoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
-class SelfAttention(nn.Module):
+class MiniMaxM2Attention(nn.Module):
 
     def __init__(
         self,
@@ -280,8 +197,8 @@ class SelfAttention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn")
 
-        self.q_norm = RMSNormTP(self.head_dim * self.total_num_heads, eps=rms_norm_eps)
-        self.k_norm = RMSNormTP(self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps)
+        self.q_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_heads, eps=rms_norm_eps)
+        self.k_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -298,8 +215,7 @@ class SelfAttention(nn.Module):
         return output
 
 
-class DecoderLayer(nn.Module):
-
+class MiniMaxM2DecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -340,7 +256,7 @@ class DecoderLayer(nn.Module):
         print(f"[M2-Mini] layer_idx: {layer_idx}, attn_window_size: {attn_window_size}, rope_theta: {rope_theta}")
 
         self.layer_idx = layer_idx
-        self.self_attn = SelfAttention(
+        self.self_attn = MiniMaxM2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -357,7 +273,7 @@ class DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        self.block_sparse_moe = MoE(
+        self.block_sparse_moe = MiniMaxM2MoE(
             config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
@@ -403,7 +319,7 @@ class DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class MiniMaxM2MiniModel(nn.Module):
+class MiniMaxM2Model(nn.Module):
 
     fall_back_to_pt_during_load = False
 
@@ -429,7 +345,7 @@ class MiniMaxM2MiniModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DecoderLayer(
+            lambda prefix: MiniMaxM2DecoderLayer(
                 config,
                 prefix,
                 model_config=model_config,
@@ -488,7 +404,7 @@ class MiniMaxM2MiniModel(nn.Module):
         return hidden_states
 
 
-class MiniMaxM2MiniForCausalLM(nn.Module, SupportsPP):
+class MiniMaxM2ForCausalLM(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -499,7 +415,7 @@ class MiniMaxM2MiniForCausalLM(nn.Module, SupportsPP):
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         print(config)
-        self.model = MiniMaxM2MiniModel(vllm_config=vllm_config,
+        self.model = MiniMaxM2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
