@@ -1631,6 +1631,12 @@ class NixlConnectorWorker:
             remote_block_ids = self.get_mapped_blocks(
                 remote_block_ids, block_size_ratio
             )
+            # FIXME(Chendi): This is not right, remote with small blocksize
+            # block id will not be contiguous, in that case, we should always
+            # copy with small block size, but that will lead to local nixl_register
+            # using remote block_len, need to double think on how to.
+            if len(local_block_ids) > len(remote_block_ids):
+                local_block_ids = local_block_ids[: len(remote_block_ids)]
             # FIXME(Chendi): We need find free blocks to pad for local, because
             # when we receive remote buffer with bigger blockSize, it might happen
             # that local n_blocks scheduled less to match n*local_blksize=remote_blksize
@@ -1788,12 +1794,11 @@ class NixlConnectorWorker:
         block_ids -= 1
 
         if block_size_ratio < 1:
-            mapped_ids = [
-                int(i * block_size_ratio)
-                for i in block_ids
-                if float(i * block_size_ratio).is_integer()
-            ]
-            return np.array(mapped_ids)
+            start_id = block_ids[0]
+            shift = start_id - int(int(start_id * block_size_ratio) / block_size_ratio)
+            block_ids += shift
+            mapped_ids = np.unique((block_ids * block_size_ratio).astype(np.int64))
+            return mapped_ids
 
         elif block_size_ratio > 1:
             start_ids = block_ids * block_size_ratio
