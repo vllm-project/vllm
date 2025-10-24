@@ -233,8 +233,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        self.dcp_kv_cache_interleave_size = \
+        self.dcp_kv_cache_interleave_size = (
             self.parallel_config.dcp_kv_cache_interleave_size
+        )
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
