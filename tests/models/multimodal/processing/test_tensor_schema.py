@@ -9,9 +9,6 @@ from typing import Any, TypeAlias
 import numpy as np
 import pytest
 import torch.nn as nn
-from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
@@ -37,22 +34,9 @@ from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
-
-ARCH_TO_SKIP = {
-    "MolmoForCausalLM": "incompatible requirements",
-}
-ARCH_NEEDS_EXTRAS = [
-    "InternVLChatModel",
-    "Idefics3ForConditionalGeneration",
-    "LlavaForConditionalGeneration",
-    "MiniCPMV",
-    "PaliGemmaForConditionalGeneration",
-]
-REPO_ID_TO_SKIP = {
-    "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
-}
+from .test_common import get_model_ids_to_test, get_text_token_prompts
 
 ImageInput = list[Image.Image]
 VideoInput: TypeAlias = (
@@ -64,7 +48,6 @@ AudioInput = list[tuple[np.ndarray, int]]
 def _resize_data(
     _data: Image.Image | np.ndarray, size_factor: float
 ) -> Image.Image | np.ndarray:
-    assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
         W, H = _data.width, _data.height
@@ -102,10 +85,13 @@ def create_batched_mm_kwargs(
     model_cls: type[SupportsMultiModal],
     model_config: ModelConfig,
     processor: BaseMultiModalProcessor,
-    size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
+    # NOTE: Use increasing size factors to avoid items being too small
+    # (e.g. for Qwen3-VL)
+    size_factors: tuple[float, ...] = (1.0, 1.5, 2.5),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
+    tokenizer = processor.info.get_tokenizer()
     supported_mm_limits = processing_info.get_supported_mm_limits()
     mm_counts = {
         modality: 3 if limit is None else limit
@@ -120,26 +106,16 @@ def create_batched_mm_kwargs(
         modality: resize_mm_data(data, size_factors)
         for modality, data in mm_data.items()
     }
-    # Mistral chat outputs tokens directly, rather than text prompts
-    if model_config.tokenizer_mode == "mistral":
-        images = resized_mm_data.get("image", [])
-        request = ChatCompletionRequest(
-            messages=[
-                UserMessage(
-                    content=[
-                        TextChunk(text=""),
-                        *(ImageChunk(image=image) for image in images),
-                    ]
-                ),
-            ]
-        )
-        tokenizer = processing_info.get_tokenizer()
-        res = tokenizer.mistral.encode_chat_completion(request)
-        prompt = res.tokens
-    else:
-        prompt = processor_inputs.prompt
+
+    text_prompt, token_prompt = get_text_token_prompts(
+        model_config,
+        resized_mm_data,
+        tokenizer,
+        dummy_inputs,
+    )
+
     mm_kwargs = processor.apply(
-        prompt=prompt,
+        prompt=token_prompt if text_prompt is None else text_prompt,
         mm_data=resized_mm_data,
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
@@ -175,35 +151,15 @@ def initialize_dummy_model(
     cleanup_dist_env_and_memory()
 
 
-def get_model_id_to_test(model_arch_list: Iterable[str]) -> list[tuple[str, str]]:
-    filtered_results = []
-    for model_arch in model_arch_list:
-        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-        if model_info.extras and model_arch in ARCH_NEEDS_EXTRAS:
-            available_repos = list(
-                map(
-                    lambda model_id: (model_arch, model_id),
-                    [model_info.default, *model_info.extras.values()],
-                )
-            )
-            filtered_results.extend(available_repos)
-        else:
-            filtered_results.append((model_arch, model_info.default))
-    return filtered_results
-
-
-@pytest.mark.parametrize(
-    "model_arch, model_id", get_model_id_to_test(_MULTIMODAL_EXAMPLE_MODELS.keys())
-)
-def test_model_tensor_schema(model_arch: str, model_id: str):
-    if model_arch in ARCH_TO_SKIP:
-        pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
-    if model_id in REPO_ID_TO_SKIP:
-        pytest.skip(f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_id]}")
-
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
+@pytest.mark.parametrize("model_id", get_model_ids_to_test())
+def test_model_tensor_schema(model_id: str):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip", check_max_version=False)
+
+    model_arch = next(
+        arch for arch, info in HF_EXAMPLE_MODELS.hf_models.items() if info == model_info
+    )
 
     hf_overrides_fn = partial(
         dummy_hf_overrides,
