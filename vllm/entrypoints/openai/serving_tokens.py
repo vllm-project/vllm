@@ -29,7 +29,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.utils import as_list
+from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 

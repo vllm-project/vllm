@@ -5,9 +5,9 @@ import httpx
 import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
-from vllm.engine.output_processor.stop_checker import StopChecker
 
 from vllm.config import ModelConfig
+from vllm.v1.engine.detokenizer import check_stop_strings
 
 from ...utils import RemoteOpenAIServer
 
@@ -162,10 +162,10 @@ async def test_stop_string_workflow(client, tokenizer, messages):
     )
 
     # NOTE This is under the responsibility of the coordinator
-    stop_checker = StopChecker(
-        max_model_len=1024, get_tokenizer_for_seq=lambda _: tokenizer
-    )
-    stop_str, truncate_to = stop_checker.check_stop_strings(
+    # stop_checker = StopChecker(
+    #     max_model_len=1024, get_tokenizer_for_seq=lambda _: tokenizer
+    # )
+    stop_str, truncate_to = check_stop_strings(
         generate_res, len(generate_res), ["27 member"], False
     )
     assert stop_str == "27 member"
