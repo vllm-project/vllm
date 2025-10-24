@@ -3,6 +3,7 @@
 """Attention layer."""
 
 from collections.abc import Callable
+import os
 from typing import cast
 
 import torch
@@ -706,6 +707,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
+        self._use_compiled_split = TRUE
+
     def forward(
         self,
         q: torch.Tensor,
@@ -728,19 +731,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.impl.forward(
-                    self,
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                     output=output,
                 )
-                return output
             else:
-                return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                 )
         else:
             if self.attn_backend.accept_output_buffer:
@@ -768,6 +773,94 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     self.layer_name,
                 )
+
+    def forward_impl(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: list[torch.Tensor] | torch.Tensor,
+        attn_metadata: object,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        allow_compiled_split: bool = True,
+    ) -> torch.Tensor:
+        """Common MLA orchestration entry point.
+
+        """
+        # compiled-region split path
+        if self._use_compiled_split and allow_compiled_split:
+            # Determine dynamic split using a custom op 
+            n_decode_tokens = int(torch.ops.vllm.mla_split_batch(q, self.layer_name))
+
+            # Fast path for trivial cases
+            if n_decode_tokens <= 0:
+                prefill_q = q
+                prefill_k_c = kv_c_normed
+                prefill_k_pe = k_pe
+                prefill_out = self.impl.forward_prefill(
+                    self, prefill_q, prefill_k_c, prefill_k_pe, kv_cache, attn_metadata
+                )
+                if output is not None:
+                    output[: prefill_out.shape[0]].copy_(prefill_out)
+                    return output
+                return prefill_out
+            if n_decode_tokens >= q.shape[0]:
+                decode_q = q[:n_decode_tokens]
+                decode_out = self.impl.forward_decode(
+                    self, decode_q, kv_cache, attn_metadata
+                )
+                if output is not None:
+                    output[: decode_out.shape[0]].copy_(decode_out)
+                    return output
+                return decode_out
+
+            # Mixed batch: split and process
+            decode_q = q[:n_decode_tokens]
+            prefill_q = q[n_decode_tokens:]
+            prefill_k_c = kv_c_normed[n_decode_tokens:]
+            prefill_k_pe = k_pe[n_decode_tokens:]
+
+            prefill_out = None
+            if prefill_q.shape[0] > 0:
+                prefill_out = self.impl.forward_prefill(
+                    self, prefill_q, prefill_k_c, prefill_k_pe, kv_cache, attn_metadata
+                )
+            decode_out = None
+            if decode_q.shape[0] > 0:
+                decode_out = self.impl.forward_decode(self, decode_q, kv_cache, attn_metadata)
+
+            if output is None:
+                total = q.shape[0]
+                out = torch.empty(
+                    (total, self.num_heads * self.v_head_dim), dtype=q.dtype, device=q.device
+                )
+            else:
+                out = output
+
+            if decode_out is not None:
+                out[: n_decode_tokens].copy_(decode_out)
+            if prefill_out is not None:
+                out[n_decode_tokens : n_decode_tokens + prefill_out.shape[0]].copy_(prefill_out)
+            return out
+
+        # Default path: delegate to backend unified forward
+        if self.attn_backend.accept_output_buffer:
+            assert output is not None
+            self.impl.forward(
+                self,
+                q,
+                kv_c_normed,
+                k_pe,
+                kv_cache,
+                attn_metadata,
+                output=output,
+                output_scale=output_scale,
+                output_block_scale=output_block_scale,
+            )
+            return output
+        return self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
@@ -880,6 +973,28 @@ direct_register_custom_op(
 )
 
 
+def mla_split_batch(q: torch.Tensor, layer_name: str) -> torch.Tensor:
+    """Returns number of decode tokens at the front of the varlen batch.
+    """
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    if attn_metadata is None:
+        return torch.zeros((), dtype=torch.int64, device=q.device)
+    return torch.tensor(attn_metadata.num_decode_tokens, device=q.device, dtype=torch.int64)
+
+
+def mla_split_batch_fake(q: torch.Tensor, layer_name: str) -> torch.Tensor:
+    return torch.zeros((), dtype=torch.int64, device=q.device)
+
+
+direct_register_custom_op(
+    op_name="mla_split_batch",
+    op_func=mla_split_batch,
+    fake_impl=mla_split_batch_fake,
+)
+
 def unified_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -981,7 +1096,17 @@ def unified_mla_attention(
         attn_metadata = attn_metadata[layer_name]
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    # NOTE: This unified op remains a cudagraph-captured boundary. The
+    # compiled split path is disabled when entering via the custom op to
+    # preserve piecewise cudagraph behavior.
+    output = self.forward_impl(
+        q=q,
+        kv_c_normed=kv_c_normed,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        allow_compiled_split=False,
+    )
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
@@ -1021,16 +1146,16 @@ def unified_mla_attention_with_output(
         attn_metadata = attn_metadata[layer_name]
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(
-        self,
-        q,
-        kv_c_normed,
-        k_pe,
-        kv_cache,
-        attn_metadata,
+    self.forward_impl(
+        q=q,
+        kv_c_normed=kv_c_normed,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
+        allow_compiled_split=False,
     )
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
