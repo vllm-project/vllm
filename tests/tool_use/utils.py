@@ -155,8 +155,6 @@ CONFIGS: dict[str, ServerConfig] = {
             "mistral",
             "--tensor-parallel-size",
             "4",
-            "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
             '--ignore-patterns="consolidated.safetensors"',
         ],
         "system_prompt": "You are a helpful assistant with access to tools. If a tool"
