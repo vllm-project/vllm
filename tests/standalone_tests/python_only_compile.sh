@@ -23,7 +23,7 @@ VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL=1 VLLM_USE_PRECOMPILED=1 pip3 install -v
 # Run the script
 python3 -c 'import vllm'
 
-# Check if the changed log file was created
+# Check if the marker file was created
 if [ ! -f /tmp/changed.file ]; then
     echo "changed.file was not created, python only compilation failed"
     exit 1
