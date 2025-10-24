@@ -34,13 +34,6 @@ class LegacyMixin:
             # Handle BERT-like models
             "roberta": "model",
             "bert": "model",
-            # Add `model.` prefix for base model checkpoints
-            "": "model.",
-            # Remove `model.` prefix if it was already there
-            "model.model.": "model.",
-            # Classifier/scoring heads will be adjacent to `model`
-            "model.score": "classifier",
-            "model.classifier": "classifier",
         },
         orig_to_new_suffix={
             # Replace legacy suffixes used for norms
