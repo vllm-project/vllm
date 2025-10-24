@@ -45,7 +45,7 @@ vllm serve s3://core-llm/Llama-3-8b \
 
 You can tune parameters using `--model-loader-extra-config`:
 
-You can tune `distributed` that controls whether distributed streaming should be used. This is currently only possible on CUDA devices. This can significantly improve loading times from object storage or high-throughput network fileshares.
+You can tune `distributed` that controls whether distributed streaming should be used. This is currently only possible on CUDA and ROCM devices. This can significantly improve loading times from object storage or high-throughput network fileshares.
 You can read further about Distributed streaming [here](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/usage.md#distributed-streaming)
 
 ```bash
