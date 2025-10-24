@@ -262,11 +262,14 @@ class NixlConnector(KVConnectorBase_V1):
     @classmethod
     def build_prom_metrics(
         cls,
+        vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[str]],
     ) -> KVConnectorPromMetrics:
-        return NixlPromMetrics(metric_types, labelnames, per_engine_labelvalues)
+        return NixlPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1763,11 +1766,12 @@ class NixlKVConnectorStats(KVConnectorStats):
 class NixlPromMetrics(KVConnectorPromMetrics):
     def __init__(
         self,
+        vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[str]],
     ):
-        super().__init__(metric_types, labelnames, per_engine_labelvalues)
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
         buckets = [
             0.001,

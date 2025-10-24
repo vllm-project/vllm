@@ -5,7 +5,7 @@ from typing import Any, TypeAlias, TypeVar
 
 from prometheus_client import Counter, Gauge, Histogram
 
-from vllm.config.kv_transfer import KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_transfer_state import has_kv_transfer_group
 from vllm.logger import init_logger
@@ -117,10 +117,12 @@ class KVConnectorPromMetrics:
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[str]],
     ):
+        self._kv_transfer_config = vllm_config.kv_transfer_config
         self._gauge_cls = metric_types[Gauge]
         self._counter_cls = metric_types[Counter]
         self._histogram_cls = metric_types[Histogram]
@@ -161,11 +163,12 @@ class KVConnectorPrometheus:
 
     def __init__(
         self,
-        kv_transfer_config: KVTransferConfig | None,
+        vllm_config: VllmConfig,
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[str]],
     ):
         self.prom_metrics: KVConnectorPromMetrics | None = None
+        kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config and kv_transfer_config.kv_connector:
             connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
             metric_types = {
@@ -174,6 +177,7 @@ class KVConnectorPrometheus:
                 Histogram: self._histogram_cls,
             }
             self.prom_metrics = connector_cls.build_prom_metrics(
+                vllm_config,
                 metric_types,
                 labelnames,
                 per_engine_labelvalues,

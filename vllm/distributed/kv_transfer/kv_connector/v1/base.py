@@ -440,6 +440,7 @@ class KVConnectorBase_V1(ABC):
     @classmethod
     def build_prom_metrics(
         cls,
+        vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[str]],
