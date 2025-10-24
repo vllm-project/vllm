@@ -413,7 +413,8 @@ class KVConnectorBase_V1(ABC):
     def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations
-        via this connector.
+        via this connector. This method is used to initialize the
+        KVOutputAggregator, overwriting the default world_size.
 
         Returns:
             int: expected sending or receiving completion count.
