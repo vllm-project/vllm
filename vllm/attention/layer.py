@@ -93,12 +93,15 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: _Backend, use_upstream_fa: bool
+    attn_backend: _Backend,
+    use_upstream_fa: bool,
+    attn_backend_override: _Backend | None = None,
 ) -> tuple[_Backend, Callable]:
     if (
         attn_backend != _Backend.FLASH_ATTN
         and attn_backend != _Backend.ROCM_AITER_FA
         and check_upstream_fa_availability(torch.get_default_dtype())
+        and attn_backend_override is None
     ):
         attn_backend = _Backend.FLASH_ATTN
         use_upstream_fa = True
@@ -499,6 +502,7 @@ class MultiHeadAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
