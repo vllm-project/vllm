@@ -13,7 +13,7 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "/home/jovyan/qwen3-06b"
 
 tools = [
     {
@@ -378,6 +378,7 @@ async def test_named_tool_use(
         messages=messages,
         max_completion_tokens=1000,
         tools=tools,
+        temperature=0.0,
         tool_choice=tool_choice,
     )
     message = chat_completion.choices[0].message
@@ -388,7 +389,11 @@ async def test_named_tool_use(
 
     messages.append({"role": "assistant", "content": json_string})
     messages.append(
-        {"role": "user", "content": "Give me another one with a different name and age"}
+        {
+            "role": "user",
+            "content": f"{json_string}"
+            "Give me another one with a different name and age",
+        }
     )
 
     # streaming
@@ -399,6 +404,7 @@ async def test_named_tool_use(
         max_completion_tokens=1000,
         tools=tools,
         tool_choice=tool_choice,
+        temperature=0.0,
         stream=True,
     )
 
@@ -416,6 +422,7 @@ async def test_named_tool_use(
     # finish reason should only return in last block
     assert finish_reason_count == 1
     json2 = json.loads("".join(output))
+    print(f"------------{json2}---------{json1}------")
     jsonschema.validate(instance=json2, schema=sample_json_schema)
     assert json1["name"] != json2["name"]
     assert json1["age"] != json2["age"]
