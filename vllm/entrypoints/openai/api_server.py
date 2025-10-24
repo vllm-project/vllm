@@ -1155,7 +1155,7 @@ INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
 
 
 @router.post(
-    "/fault_tolerance/send_fault_tolerance_instruction",
+    "/fault_tolerance/apply",
     dependencies=[Depends(validate_json_request)],
     responses={
         HTTPStatus.OK.value: {"model": dict},
@@ -1212,7 +1212,7 @@ async def send_fault_tolerance_instruction(raw_request: Request):
         ) from e
 
 
-@router.get("/fault_tolerance/get_fault_info")
+@router.get("/fault_tolerance/status")
 async def get_fault_info(
     raw_request: Request,
 ):

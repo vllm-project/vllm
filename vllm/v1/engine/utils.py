@@ -76,11 +76,16 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
-    #
+    # ZMQ engine_core_cmd socket address of client guard
     engine_core_cmd_addr: str | None = None
+    # ZMQ fault_report socket address of client guard
     fault_report_addr: str | None = None
+    # ZMQ client_cmd socket address of client guard
     client_cmd_addr: str | None = None
+    # identities of engine_core_guard
     engine_core_guard_identities: dict[int, bytes] | None = None
+    # ZMQ fault_pub_socket address of client guard
+    fault_pub_socket_addr: str | None = None
 
 
 @dataclass
@@ -893,6 +898,11 @@ def launch_core_engines(
         )
         addresses.engine_core_guard_identities = dict(
             zip(engine_ids, engine_core_identities)
+        )
+        addresses.fault_pub_socket_addr = get_engine_client_zmq_addr(
+            local_only=False,
+            host="0.0.0.0",
+            port=vllm_config.fault_tolerance_config.fault_pub_port,
         )
 
     # Run the DP Coordinator process with rank 0 when in

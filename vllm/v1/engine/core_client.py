@@ -353,6 +353,7 @@ class ClientGuard:
         engine_registry: dict[int, bytes],
         engine_exception_q: asyncio.Queue[FaultInfo],
         engine_exception_q_lock: asyncio.Lock,
+        fault_pub_addr: str,
     ):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
@@ -364,6 +365,10 @@ class ClientGuard:
         )
         self.cmd_socket = make_zmq_socket(
             ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
+        )
+
+        self.fault_pub_socket = make_zmq_socket(
+            ctx=self.zmq_ctx, path=fault_pub_addr, socket_type=zmq.PUB, bind=True
         )
 
         self.engine_exception_q: asyncio.Queue[FaultInfo] = engine_exception_q
@@ -416,6 +421,9 @@ class ClientGuard:
             # TODO Asynchronous issuance of pause commands and design of engine
             #  core status
             self.engine_exception_q.put_nowait(FaultInfo.from_json(message))
+            self.fault_pub_socket.send_string(
+                f"vllm_fault|{FaultInfo.from_json(message).serialize()}"
+            )
 
     def shutdown_guard(self):
         self.client_guard_dead = True
@@ -649,12 +657,17 @@ class MPClient(EngineCoreClient):
                 self.engine_registry = addresses.engine_core_guard_identities
                 self.engine_exception_q_lock = asyncio.Lock()
                 assert self.engine_registry is not None
+                assert addresses.fault_pub_socket_addr is not None, (
+                    "addresses.fault_pub_socket_addr should not be None at"
+                    "fault tolerance scenario"
+                )
                 self.client_guard = ClientGuard(
                     addresses.fault_report_addr,
                     addresses.client_cmd_addr,
                     self.engine_registry,
                     self.engine_exception_q,
                     self.engine_exception_q_lock,
+                    addresses.fault_pub_socket_addr,
                 )
                 self.resources.client_guard = self.client_guard
             success = True
