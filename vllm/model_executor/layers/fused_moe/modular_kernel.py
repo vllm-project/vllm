@@ -709,12 +709,9 @@ class FusedMoEModularKernel(torch.nn.Module):
 
     def supports_expert_map(self) -> bool:
         """
-        A flag indicating whether or not this class supports expert maps
+        A flag indicating whether or not this class supports expert maps.
         """
-        return (
-            self.prepare_finalize.num_dispatchers() <= 1
-            and self.fused_experts.supports_expert_map()
-        )
+        return self.fused_experts.supports_expert_map()
 
     def output_is_reduced(self) -> bool:
         """

@@ -119,7 +119,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.topk_indices_dtype = None
 
     @abstractmethod
     def create_weights(
@@ -244,7 +243,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         else:
             return None
 
-    def init_prepare_finalize(
+    def maybe_init_modular_kernel(
         self, layer: torch.nn.Module
     ) -> FusedMoEModularKernel | None:
         assert self.moe is not None
@@ -260,8 +259,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
-            assert self.topk_indices_dtype is None
-            self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, layer)
             return FusedMoEModularKernel(
                 prepare_finalize,
@@ -288,6 +285,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         raise NotImplementedError
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        return None
 
     @property
     def supports_eplb(self) -> bool:
@@ -328,31 +329,33 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def __init__(
         self,
-        old_moe_method: FusedMoEMethodBase,
+        old_quant_method: FusedMoEMethodBase,
         fused_experts: FusedMoEModularKernel,
     ):
-        super().__init__(old_moe_method.moe)
-        # Find better way to copy attributes?
-        # self.__dict__.update(old_moe_method.__dict__)
-
-        self.moe_quant_config = old_moe_method.moe_quant_config
+        super().__init__(old_quant_method.moe)
+        # Find better way to copy attributes?  Should we even copy attributes?
+        # self.__dict__.update(old_quant_method.__dict__)
+        self.moe_quant_config = old_quant_method.moe_quant_config
         self.fused_experts = fused_experts
-        self.topk_indices_dtype = old_moe_method.topk_indices_dtype
-        self.disable_expert_map = not fused_experts.supports_expert_map()
-        self.old_method_name = old_moe_method.__class__.__name__
-        self._supports_eplb = old_moe_method.supports_eplb
-        self._allow_inplace = old_moe_method.allow_inplace
-        if isinstance(old_moe_method, torch.nn.Module):
-            self.load_state_dict(old_moe_method.state_dict())
-        logger.debug("Swapping out %s", self.old_method_name)
+        self.disable_expert_map = getattr(
+            old_quant_method,
+            "disable_expert_map",
+            not fused_experts.supports_expert_map(),
+        )
+        self.old_quant_method = old_quant_method
+        logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        return self.fused_experts.prepare_finalize.topk_indices_dtype()
 
     @property
     def supports_eplb(self) -> bool:
-        return self._supports_eplb
+        return self.old_quant_method.supports_eplb
 
     @property
     def allow_inplace(self) -> bool:
-        return self._allow_inplace
+        return self.old_quant_method.allow_inplace
 
     def create_weights(
         self,
@@ -405,10 +408,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 assert isinstance(layer, FusedMoE)
             else:
                 raise NotImplementedError(
-                    f"EPLB is not supported for {self.old_method_name}"
+                    "EPLB is not supported for "
+                    f"{self.old_quant_method.__class__.__name__}."
                 )
 
-        select_result = FusedMoE.select_experts(
+        topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -430,8 +434,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
         )
-
-        topk_weights, topk_ids, zero_expert_result = select_result
 
         result = self.fused_experts(
             hidden_states=x,
@@ -1433,7 +1435,7 @@ class FusedMoE(CustomOp):
             )
 
             if not isinstance(
-                quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
+                self.quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
@@ -1453,6 +1455,7 @@ class FusedMoE(CustomOp):
             # If you plan to add support for more quantization methods,
             # please refer to the implementation in `Fp8MoEMethod`.
             raise NotImplementedError(
+                f"EPLB is not supported {self.quant_method.__class__.__name__}. "
                 "EPLB is only supported for FP8 quantization for now."
             )
 
@@ -1478,12 +1481,12 @@ class FusedMoE(CustomOp):
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
 
-    # Note: init_prepare_finalize should only be called by
+    # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
-    def init_prepare_finalize(self) -> None:
-        mk = self.quant_method.init_prepare_finalize(self)
+    def maybe_init_modular_kernel(self) -> None:
+        mk = self.quant_method.maybe_init_modular_kernel(self)
         if mk is not None:
             self.quant_method = FusedMoEModularMethod(self.quant_method, mk)
 
