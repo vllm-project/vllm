@@ -117,7 +117,7 @@ class FusedMoeWeightScaleSupported(Enum):
 class FusedMoEMethodBase(QuantizeMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
-        self.moe = moe
+        self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
 
     @abstractmethod
