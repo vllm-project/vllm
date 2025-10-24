@@ -285,6 +285,16 @@ class LLM:
         else:
             structured_outputs_instance = StructuredOutputsConfig()
 
+        # warn about single-process data parallel usage.
+        _dps = int(kwargs.get("data_parallel_size", 1))
+        if _dps > 1:
+            raise ValueError(
+                f"LLM(data_parallel_size={_dps}) is not supported for single-"
+                "process usage and may hang. Please use "
+                "the explicit multi-process data-parallel example at "
+                "'examples/offline_inference/data_parallel.py'."
+            )
+
         engine_args = EngineArgs(
             model=model,
             runner=runner,
@@ -1068,6 +1078,9 @@ class LLM:
                 PoolingRequestOutput[Any](
                     request_id="",
                     outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
                     prompt_token_ids=[],
                     finished=True,
                 )

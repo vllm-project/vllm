@@ -32,6 +32,7 @@ from vllm.multimodal.inputs import (
     NestedTensors,
 )
 from vllm.v1.engine import UtilityResult
+from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
 
@@ -219,14 +220,14 @@ class MsgpackEncoder:
     ) -> tuple[str, tuple[int, ...], int | memoryview]:
         assert self.aux_buffers is not None
         # view the tensor as a contiguous 1D array of bytes
-        arr = obj.flatten().contiguous().view(torch.uint8).numpy()
+        arr_data = tensor_data(obj)
         if obj.nbytes < self.size_threshold:
             # Smaller tensors are encoded inline, just like ndarrays.
-            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr_data)
         else:
             # Otherwise encode index of backing buffer to avoid copy.
             data = len(self.aux_buffers)
-            self.aux_buffers.append(arr.data)
+            self.aux_buffers.append(arr_data)
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 

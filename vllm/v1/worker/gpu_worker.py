@@ -112,6 +112,7 @@ class WorkerGuard:
             # Use blocking receive - will wait until a message arrives
             has_msg, cmd_str = self._recv_cmd()
             if has_msg:
+                assert cmd_str is not None
                 method, method_params = deserialize_method_call(cmd_str)
                 logger.info(
                     "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s] Executing command: %s",
@@ -163,6 +164,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        self.worker_guard: WorkerGuard | None = None
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -204,7 +206,6 @@ class Worker(WorkerBase):
             )
         else:
             self.profiler = None
-
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
