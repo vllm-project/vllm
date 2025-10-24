@@ -164,7 +164,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        self.worker_guard: WorkerGuard|None = None
+        self.worker_guard: WorkerGuard | None = None
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
