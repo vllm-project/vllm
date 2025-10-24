@@ -3,7 +3,6 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
 
 import torch
 import torch._dynamo.decorators
@@ -32,7 +31,6 @@ from vllm.model_executor.layers.batch_invariant import (
 from vllm.utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
@@ -541,39 +539,13 @@ class FlexAttentionMetadata:
             block_mask_kwargs["compute_q_blocks"] = False
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
-    def _get_effective_mask_mod(self) -> Optional[_mask_mod_signature]:
-        """Return the mask_mod to use for block-mask materialization."""
-
-        mask_mod = self.mask_mod
-        if mask_mod is None:
-            return None
-        if self.causal and (self.doc_ids is None or self.doc_ids.numel() == 0):
-            return None
-        return mask_mod
-
     def build_block_mask(self) -> BlockMask:
-        mask_mod = self._get_effective_mask_mod()
+        mask_mod = self.get_mask_mod()
         kv_len = self.total_cache_tokens if self.causal else self.num_actual_tokens
-
-        if (
-            self.num_reqs == 0
-            or self.num_actual_tokens == 0
-            or kv_len == 0
-            or self.doc_ids is None
-            or self.doc_ids.numel() == 0
-        ):
-            # Build a dense fallback block mask with capacity for the full
-            # KV cache. This is essential for multimodal models (e.g. Gemma3)
-            # where image tokens can result in very large KV cache sizes.
-            # During CUDA graph capture, the KV cache is pre-allocated at
-            # full capacity, so the block_mask must be large enough to cover it.
-            dummy_q_len = max(self.q_block_size, 1)
-            dummy_kv_len = max(self.total_cache_tokens, self.kv_block_size, 1)
-            return self._build_dense_block_mask(dummy_q_len, dummy_kv_len, mask_mod)
 
         # NOTE: torch.compile(create_block_mask, ...) intermittently hits
         # illegal memory access on large multi-GPU captures; stick to eager.
-        block_mask = create_block_mask_compiled(
+        return create_block_mask_compiled(
             mask_mod,
             None,
             None,
@@ -582,107 +554,6 @@ class FlexAttentionMetadata:
             device=self.block_table.device,
             BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
         )
-        return block_mask
-
-    def _build_dense_block_mask(
-        self,
-        q_len: int,
-        kv_len: int,
-        mask_mod: Optional[_mask_mod_signature],
-    ) -> BlockMask:
-        """Create a dense block mask covering the provided logical lengths.
-
-        This is used for warmup / dummy runs where we may not have meaningful
-        block-table metadata yet (e.g. CUDA graph captures with zero active
-        requests). The mask simply enables all KV blocks for the queried
-        sequence length without forcing additional allocations from PyTorch's
-        fallback implementations.
-        """
-
-        device = self.block_table.device
-        q_len = max(int(q_len), 1)
-        kv_len = max(int(kv_len), 1)
-
-        num_q_blocks = max(1, cdiv(q_len, self.q_block_size))
-        num_kv_blocks = max(1, cdiv(kv_len, self.kv_block_size))
-
-        kv_indices = torch.arange(num_kv_blocks, device=device, dtype=torch.int32)
-        kv_indices = kv_indices.repeat(num_q_blocks, 1)
-        kv_indices = kv_indices.unsqueeze(0).unsqueeze(0)
-
-        kv_num_blocks = torch.full(
-            (1, 1, num_q_blocks), num_kv_blocks, dtype=torch.int32, device=device
-        )
-
-        block_mask = BlockMask.from_kv_blocks(
-            seq_lengths=(q_len, kv_len),
-            kv_num_blocks=kv_num_blocks,
-            kv_indices=kv_indices,
-            full_kv_num_blocks=None,
-            full_kv_indices=None,
-            BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
-            mask_mod=mask_mod,
-        )
-        return block_mask
-
-    def ensure_block_mask_capacity(self, q_len: int, kv_len: int) -> BlockMask:
-        """Ensure block_mask can cover the provided query/KV lengths."""
-
-        q_len = max(int(q_len), 1)
-        kv_len = max(int(kv_len), 1)
-
-        current = self.block_mask
-
-        # Check if we can use a sparse (properly built) block mask now
-        # can_build_sparse = (
-        #     self.doc_ids is not None
-        #     and self.doc_ids.numel() > 0
-        #     and self.num_actual_tokens > 0
-        #     and self.total_cache_tokens > 0
-        # )
-        can_build_sparse = False
-
-        # Force rebuild if we now have doc_ids but current mask doesn't have
-        # the correct mask_mod (transition from dummy run to real inference)
-        # needs_rebuild = can_build_sparse and (
-        #     current is None
-        #     or (current.mask_mod is None and self._get_effective_mask_mod() is not None)
-        # )
-        needs_rebuild = True
-
-        if (
-            current is not None
-            and current.seq_lengths[0] >= q_len
-            and current.seq_lengths[1] >= kv_len
-            and not needs_rebuild
-        ):
-            return current
-
-        rebuilt: Optional[BlockMask] = None
-        if can_build_sparse:
-            try:
-                if self.direct_build and self.causal:
-                    rebuilt = self._build_block_mask_direct()
-                else:
-                    rebuilt = self.build_block_mask()
-            except Exception as e:
-                logger.warning(
-                    "Failed to build block mask due to: %s. "
-                    "Falling back to a dense block mask. "
-                    "This may impact performance.",
-                    e,
-                )
-                rebuilt = None
-
-        if rebuilt is None:
-            rebuilt = self._build_dense_block_mask(
-                q_len,
-                kv_len,
-                self._get_effective_mask_mod(),
-            )
-
-        self.block_mask = rebuilt
-        return rebuilt
 
     def __post_init__(self):
         assert self.use_cascade is False, "Not implemented yet."
@@ -705,13 +576,6 @@ class FlexAttentionMetadata:
 
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
-    # CUDA graphs are supported when we can stay on the direct mask build path.
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.ALWAYS
-        if is_torch_equal_or_newer("2.9.0.dev0")
-        else AttentionCGSupport.NEVER
-    )
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -811,7 +675,8 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             # FIXME(Isotr0py): direct build has issue to build bidirectional
             # attention block mask for encoder-only models, disable it temporarily.
             # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
-            direct_build=(self.direct_build and common_attn_metadata.causal),
+            # direct_build=(self.direct_build and common_attn_metadata.causal),
+            direct_build=False,
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
         )
@@ -931,14 +796,6 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        doc_ids = attn_metadata.doc_ids
-        is_dummy_run = (
-            attn_metadata.num_reqs == 0
-            or num_actual_tokens == 0
-            or doc_ids is None
-            or doc_ids.numel() == 0
-        )
-
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
@@ -954,13 +811,19 @@ class FlexAttentionImpl(AttentionImpl):
             else:
                 attn_metadata.block_mask = attn_metadata.build_block_mask()
 
-        if self.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_DECODER, AttentionType.ENCODER_ONLY) and attn_metadata.causal:
+        if (
+            self.attn_type
+            in (
+                AttentionType.ENCODER,
+                AttentionType.ENCODER_DECODER,
+                AttentionType.ENCODER_ONLY,
+            )
+            and attn_metadata.causal
+        ):
             attn_metadata.causal = False
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
-        elif (
-            self.attn_type == AttentionType.DECODER
-            and not attn_metadata.causal
-        ):
+            attn_metadata.block_mask = attn_metadata.build_block_mask()
+        elif self.attn_type == AttentionType.DECODER and not attn_metadata.causal:
             attn_metadata.causal = True
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
 
@@ -1010,41 +873,15 @@ class FlexAttentionImpl(AttentionImpl):
             )
 
             if self.attn_type == AttentionType.ENCODER_DECODER:
-                query = query[:, :, :attn_metadata.max_query_len, :]
-                key_tensor = key_tensor[:, :, :attn_metadata.max_seq_len, :]
-                value_tensor = value_tensor[:, :, :attn_metadata.max_seq_len, :]
+                query = query[:, :, : attn_metadata.max_query_len, :]
+                key_tensor = key_tensor[:, :, : attn_metadata.max_seq_len, :]
+                value_tensor = value_tensor[:, :, : attn_metadata.max_seq_len, :]
             else:
                 query = query[:, :, :num_actual_tokens, :]
 
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
-        if is_dummy_run:
-            # During CUDA graph warmup there are no real tokens yet. Keeping
-            # tensors sized to the full KV cache capacity would explode memory
-            # usage, so shrink them to a minimal representative shape.
-            q_block = getattr(attn_metadata, "q_block_size", 1) or 1
-            kv_block = getattr(attn_metadata, "kv_block_size", 1) or 1
-            dummy_q_len = max(1, min(query.size(-2), q_block))
-            dummy_kv_len = max(1, min(key_tensor.size(-2), kv_block))
-
-            query = query[:, :, :dummy_q_len, :]
-            key_tensor = key_tensor[:, :, :dummy_kv_len, :]
-            value_tensor = value_tensor[:, :, :dummy_kv_len, :]
-            num_actual_tokens = dummy_q_len
-
-        # Align the cached block_mask with the actual query/KV lengths.
-        actual_q_len = query.size(-2)
-        actual_kv_len = key_tensor.size(-2)
-
-        block_mask = attn_metadata.ensure_block_mask_capacity(
-            actual_q_len, actual_kv_len
-        )
-
-        if block_mask.seq_lengths != (actual_q_len, actual_kv_len):
-            block_mask = block_mask._adjust(actual_q_len, actual_kv_len)
-
-        attn_metadata.block_mask = block_mask
         assert attn_metadata.block_mask is not None
         block_m, block_n = attn_metadata.block_mask.BLOCK_SIZE
 
