@@ -139,6 +139,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "call the tool. Otherwise, answer the user's query directly "
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally.",
+        "supports_parallel": True,
     },
     "mistral-small-3.2": {
         "model": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
@@ -162,6 +163,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "call the tool. Otherwise, answer the user's query directly "
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally.",
+        "supports_parallel": True,
         "extended": True,
     },
     # V1 Test: Passing locally but failing in CI. This runs the
