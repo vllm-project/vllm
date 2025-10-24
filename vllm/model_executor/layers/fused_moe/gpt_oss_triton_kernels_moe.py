@@ -228,10 +228,9 @@ def triton_kernel_moe_forward(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     expt_assignment: ExptAssignment | None = None,
+    symm_mem_pool = None,
 ) -> torch.Tensor:
     if get_dp_group().world_size > 1:
-        print(f"device_group: {get_dp_group().device_group}")
-        print(f"hidden_states_dev:{hidden_states.device}")
         hidden_states, routing_data, gather_idx, scatter_idx, rs_metadata = ep_routing(
             hidden_states, gating_output, topk, sm_first=not renormalize, expt_assignment=expt_assignment,
             group_name = get_dp_group().device_group,

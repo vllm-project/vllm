@@ -53,6 +53,7 @@ from vllm.utils import round_up
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.distributed import get_dp_group, get_ep_group
 
 logger = init_logger(__name__)
 
@@ -197,7 +198,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         
         if self.mxfp4_backend == Mxfp4Backend.TRITON and moe.dp_size != 0:
+            import torch.distributed._symmetric_memory as torch_symm_mem
             self.expt_assignment = create_expt_assignment(EP=moe.ep_size, n_expts_tot=moe.num_experts, device=torch.cuda.current_device())
+            self.symm_mem_pool = torch_symm_mem.empty(
+                1024 * 1024 * 1024,
+                dtype=torch.uint8,
+                device=torch.cuda.current_device(),
+            )
+            self.symm_handle = torch_symm_mem.rendezvous(self.symm_mem_pool, get_dp_group().device_group)
+
 
     def create_weights(
         self,
@@ -1125,6 +1134,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 expt_assignment = self.expt_assignment,
+                symm_mem_pool = self.symm_mem_pool,
                 quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
