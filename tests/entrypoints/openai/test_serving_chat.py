@@ -655,7 +655,8 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
 @pytest.mark.asyncio
 async def test_serving_chat_data_parallel_rank_extraction():
-    """Test that data_parallel_rank is properly extracted from header and passed to engine."""
+    """Test that data_parallel_rank is properly extracted from header and
+    passed to engine."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
@@ -668,10 +669,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
     # Test when data_parallel_rank is present in header
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
     )
 
     # Mock request with X-data-parallel-rank header
@@ -683,16 +681,13 @@ async def test_serving_chat_data_parallel_rank_extraction():
         await serving_chat.create_chat_completion(req, mock_raw_request)
 
     # Verify that data_parallel_rank was passed to engine.generate
-    assert 'data_parallel_rank' in mock_engine.generate.call_args.kwargs
-    assert mock_engine.generate.call_args.kwargs['data_parallel_rank'] == 2
+    assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
+    assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] == 2
 
     # Test when data_parallel_rank is not present (defaults to None)
     req_no_dp = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 2+2?"
-        }],
+        messages=[{"role": "user", "content": "what is 2+2?"}],
     )
 
     # Mock request with no header
@@ -704,5 +699,5 @@ async def test_serving_chat_data_parallel_rank_extraction():
         await serving_chat.create_chat_completion(req_no_dp, mock_raw_request_no_dp)
 
     # Verify that data_parallel_rank defaults to None
-    assert 'data_parallel_rank' in mock_engine.generate.call_args.kwargs
-    assert mock_engine.generate.call_args.kwargs['data_parallel_rank'] is None
+    assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
+    assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
