@@ -553,6 +553,8 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
+    tokens_only: bool = False
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1503,6 +1505,10 @@ class EngineArgs:
                     "Currently, speculative decoding is not supported with "
                     "async scheduling."
                 )
+
+        if self.tokens_only and not model_config.skip_tokenizer_init:
+            model_config.skip_tokenizer_init = True
+            logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
