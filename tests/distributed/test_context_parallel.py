@@ -37,6 +37,7 @@ class ParallelSetup(NamedTuple):
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: str | None = None
+    attn_backend: str = "FLASH_ATTN"
 
 
 @dataclass
@@ -55,6 +56,7 @@ class CPTestSettings:
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: str | None = None,
+        attn_backend: str = "FLASH_ATTN",
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
@@ -75,7 +77,9 @@ class CPTestSettings:
             distributed_backends=["mp"],
             runner=runner,
             test_options=CPTestOptions(
-                multi_node_only=multi_node_only, load_format=load_format
+                multi_node_only=multi_node_only,
+                load_format=load_format,
+                attn_backend=attn_backend,
             ),
         )
 
@@ -112,7 +116,7 @@ def _compare_cp_with_tp(
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, load_format = test_options
+    multi_node_only, load_format, attn_backend = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -172,6 +176,10 @@ def _compare_cp_with_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
+    cp_env = tp_env = {
+        "VLLM_ATTENTION_BACKEND": attn_backend,
+    }
+
     cp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -198,6 +206,8 @@ def _compare_cp_with_tp(
         model_id,
         cp_args,
         tp_args,
+        cp_env,
+        tp_env,
         method=method,
         max_wait_seconds=720,
     )
@@ -209,8 +219,8 @@ CP_TEXT_GENERATION_MODELS = {
         CPTestSettings.detailed(tp_base=2),
     ],
     "bigcode/gpt_bigcode-santacoder": [
-        CPTestSettings.detailed(),
-        CPTestSettings.detailed(tp_base=2),
+        CPTestSettings.detailed(attn_backend="FLASHINFER"),
+        CPTestSettings.detailed(tp_base=2, attn_backend="FLASHINFER"),
     ],
 }
 
