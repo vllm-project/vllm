@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from itertools import islice
@@ -56,7 +57,11 @@ from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -107,7 +112,11 @@ from .utils import (
     _merge_multimodal_embeddings,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
+from .vision import (
+    conv3d_to_linear_weight,
+    get_vit_attn_backend,
+    run_dp_sharded_mrope_vision_model,
+)
 
 logger = init_logger(__name__)
 
@@ -129,18 +138,15 @@ class Qwen3_VisionPatchEmbed(nn.Module):
         self.hidden_size = hidden_size
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = nn.Conv3d(
-            in_channels,
+        self.proj = ReplicatedLinear(
+            in_channels * math.prod(kernel_size),
             hidden_size,
-            kernel_size=kernel_size,
-            stride=kernel_size,
             bias=True,
+            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
-        x = self.proj(x).view(L, self.hidden_size)
+        x = self.proj(x)
         return x
 
 
@@ -576,6 +582,9 @@ class Qwen3_VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            if name.endswith("patch_embed.proj.weight"):
+                loaded_weight = conv3d_to_linear_weight(loaded_weight)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -889,16 +898,12 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Separate video processing from image processing. Because the videos
-        # are processed into serval image patches
-        if (
-            "videos" in mm_data
-            and isinstance(mm_data["videos"], list)
-            and len(mm_data["videos"]) > 0
-        ):
+        # are processed into several image patches
+        if videos := mm_data.pop("videos", []):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
 
-            for item_idx, item in enumerate(mm_data.pop("videos", [])):
+            for item in videos:
                 video_array, metadata = item
 
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
