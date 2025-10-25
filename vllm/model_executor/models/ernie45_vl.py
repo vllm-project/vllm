@@ -1171,7 +1171,7 @@ class Ernie4_5_VLMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         before_placeholder = {
             "image": "<|image@placeholder|>",

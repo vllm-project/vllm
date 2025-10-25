@@ -299,7 +299,7 @@ class DeepseekOCRMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token_id = hf_processor.image_token_id
         assert isinstance(image_token_id, int)
@@ -314,7 +314,7 @@ class DeepseekOCRMultiModalProcessor(
             else:
                 size = images.get_image_size(item_idx)
 
-                num_image_tokens = self.info.get_num_image_tokens(
+                num_image_tokens = self.processing_info.get_num_image_tokens(
                     image_width=size.width,
                     image_height=size.height,
                     cropping=CROP_MODE,

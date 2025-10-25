@@ -292,7 +292,7 @@ class Gemma3nMultiModalProcessor(
             audio_token = hf_processor.audio_token
 
             def get_replacement_audio(item_idx: int):
-                return self.info.get_audio_repl(
+                return self.processing_info.get_audio_repl(
                     processor=hf_processor,
                 )
 

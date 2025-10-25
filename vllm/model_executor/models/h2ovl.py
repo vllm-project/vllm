@@ -471,7 +471,7 @@ class H2OVLMultiModalProcessor(
                 feature_size = images.get_feature_size(item_idx)
             else:
                 image_size = images.get_image_size(item_idx)
-                feature_size = self.info.get_num_image_tokens(
+                feature_size = self.processing_info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     processor=hf_processor,

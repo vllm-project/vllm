@@ -375,9 +375,11 @@ class KeyeVL1_5MultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.processing_info.get_image_processor(
+            **hf_processor_mm_kwargs
+        )
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         image_token_id = vocab[hf_processor.image_token]
         video_token_id = vocab[hf_processor.video_token]

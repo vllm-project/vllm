@@ -297,7 +297,7 @@ class DeepseekVL2MultiModalProcessor(
             else:
                 image_size = images.get_image_size(item_idx)
 
-                num_image_tokens = self.info.get_num_image_tokens(
+                num_image_tokens = self.processing_info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     cropping=len(images) <= 2,

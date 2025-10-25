@@ -195,7 +195,7 @@ class CLIPDummyInputsBuilder(
 class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
     @cached_property
     def image_token_id(self) -> int:
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         dummy_token_id = 0
 
         assert dummy_token_id not in tokenizer.all_special_ids
@@ -262,7 +262,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            num_image_tokens = self.info.get_num_image_tokens(
+            num_image_tokens = self.processing_info.get_num_image_tokens(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )

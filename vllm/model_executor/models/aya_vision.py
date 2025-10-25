@@ -269,7 +269,7 @@ class AyaVisionMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
         img_patch_token = hf_processor.img_patch_token
         image_processor = hf_processor.image_processor
