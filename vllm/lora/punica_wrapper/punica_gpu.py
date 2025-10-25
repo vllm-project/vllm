@@ -308,6 +308,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         adapter_enabled: torch.Tensor,
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
+        lora_token_mapping_offset: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
@@ -333,8 +334,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
 
         (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
-            num_tokens
+            lora_token_mapping_offset + num_tokens
         )
+        token_lora_mapping = token_lora_mapping[lora_token_mapping_offset:]
+        assert topk_ids.size(0) == token_lora_mapping.size(0)
 
         ops.moe_lora_align_block_size(
             topk_ids,
