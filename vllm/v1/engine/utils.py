@@ -79,7 +79,6 @@ class EngineZmqAddresses:
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
     #
-    # engine_core_cmd_addr: str | None = None
     fault_report_addr: str | None = None
     client_cmd_addr: str | None = None
     engine_core_guard_identities: dict[int, bytes] | None = None
