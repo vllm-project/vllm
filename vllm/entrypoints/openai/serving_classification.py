@@ -80,7 +80,7 @@ class ClassificationMixin(OpenAIServing):
                 ctx.engine_prompts = engine_prompts
             else:
                 input_data = ctx.request.input
-                if input_data is None or (isinstance(input_data, str) and not input_data):
+                if input_data in (None, ""):
                     return self.create_error_response(
                         "Input or messages must be provided",
                         status_code=HTTPStatus.BAD_REQUEST,
