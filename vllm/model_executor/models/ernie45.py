@@ -22,14 +22,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Erine model compatible with HuggingFace weights."""
+
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .utils import PPMissingLayer
 
 
-class Ernie4_5_ForCausalLM(LlamaForCausalLM):
-
+class Ernie4_5ForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # Hack Llama model to fit HF format Ernie4.5 dense implementation

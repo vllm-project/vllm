@@ -3,17 +3,16 @@
 import dataclasses
 import os
 import traceback
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any, Concatenate
 
 import torch
-from torch.multiprocessing import (
-    spawn)  # pyright: ignore[reportPrivateImportUsage]
-from typing_extensions import Concatenate, ParamSpec
+from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
+from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed import (init_distributed_environment,
-                              initialize_model_parallel)
-from vllm.utils import get_open_port
+from vllm.distributed import init_distributed_environment, initialize_model_parallel
+from vllm.utils.network_utils import get_open_port
 
 ## Parallel Processes Utils
 
@@ -30,13 +29,13 @@ class ProcessGroupInfo:
     device: torch.device
 
 
-def _set_vllm_config(vllm_config: VllmConfig, world_size: int, rank: int,
-                     local_rank: int):
-
+def _set_vllm_config(
+    vllm_config: VllmConfig, world_size: int, rank: int, local_rank: int
+):
     import tempfile
+
     temp_file = tempfile.mkstemp()[1]
 
-    set_current_vllm_config(vllm_config)
     with set_current_vllm_config(vllm_config):
         init_distributed_environment(
             world_size=world_size,
@@ -47,13 +46,10 @@ def _set_vllm_config(vllm_config: VllmConfig, world_size: int, rank: int,
         )
 
         initialize_model_parallel(
-            tensor_model_parallel_size=vllm_config.parallel_config.
-            tensor_parallel_size,
-            pipeline_model_parallel_size=vllm_config.parallel_config.
-            pipeline_parallel_size,
+            tensor_model_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
+            pipeline_model_parallel_size=vllm_config.parallel_config.pipeline_parallel_size,
         )
-        cpu_group = torch.distributed.new_group(list(range(world_size)),
-                                                backend="gloo")
+        cpu_group = torch.distributed.new_group(list(range(world_size)), backend="gloo")
     return cpu_group
 
 
@@ -63,10 +59,9 @@ def _worker_parallel_launch(
     world_local_size: int,
     node_rank: int,
     init_method: str,
-    worker: Callable[Concatenate[ProcessGroupInfo, Optional[VllmConfig], Any,
-                                 P], None],
-    vllm_config: Optional[VllmConfig],
-    env_dict: Optional[dict],
+    worker: Callable[Concatenate[ProcessGroupInfo, VllmConfig | None, Any, P], None],
+    vllm_config: VllmConfig | None,
+    env_dict: dict | None,
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> None:
@@ -132,7 +127,8 @@ def parallel_launch_with_config(
             worker,
             vllm_config,
             env_dict,
-        ) + args,
+        )
+        + args,
         nprocs=world_size,
         join=True,
     )

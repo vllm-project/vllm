@@ -24,9 +24,10 @@ from ...utils import check_embeddings_close
 #    built with LAPACK support.
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
-    reason="Llava Next model uses op that is only supported in CUDA")
+    reason="Llava Next model uses op that is only supported in CUDA",
+)
 
-llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
+llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
 
 HF_TEXT_PROMPTS = [
     # T -> X
@@ -34,18 +35,21 @@ HF_TEXT_PROMPTS = [
         "The label of the object is stop sign\nSummary above sentence in one word: "  # noqa: E501
     ),
     # T -> X
-    llama3_template.format(
-        "cherry blossom\nSummary above sentence in one word: "),
+    llama3_template.format("cherry blossom\nSummary above sentence in one word: "),
 ]
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    # I -> X
-    "stop_sign":
-    llama3_template.format("<image>\nSummary above image in one word: "),
-    # I -> X
-    "cherry_blossom":
-    llama3_template.format("<image>\nSummary above image in one word: "),
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        # I -> X
+        "stop_sign": llama3_template.format(
+            "<image>\nSummary above image in one word: "
+        ),
+        # I -> X
+        "cherry_blossom": llama3_template.format(
+            "<image>\nSummary above image in one word: "
+        ),
+    }
+)
 
 MODELS = ["royokong/e5-v"]
 
@@ -63,23 +67,22 @@ def _run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model,
-                     task="embed",
-                     dtype=dtype,
-                     max_model_len=4096,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+        model, runner="pooling", dtype=dtype, max_model_len=4096, enforce_eager=True
+    ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
-    with hf_runner(model, dtype=dtype,
-                   auto_cls=AutoModelForImageTextToText) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, auto_cls=AutoModelForImageTextToText
+    ) as hf_model:
         # Patch the issue where generation_config.json is missing
-        hf_model.processor.patch_size = \
-            hf_model.model.config.vision_config.patch_size
+        hf_model.processor.patch_size = hf_model.model.config.vision_config.patch_size
 
         # Patch the issue where image_token_id
         # exceeds the maximum allowed vocab size
         hf_model.model.resize_token_embeddings(
-            hf_model.model.language_model.vocab_size + 1)
+            hf_model.model.language_model.vocab_size + 1
+        )
 
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
@@ -91,8 +94,7 @@ def _run_test(
                 return_dict=True,
                 output_hidden_states=True,
             )
-            pooled_output = F.normalize(outputs.hidden_states[-1][0, -1, :],
-                                        dim=-1)
+            pooled_output = F.normalize(outputs.hidden_states[-1][0, -1, :], dim=-1)
 
             all_outputs.append(pooled_output.tolist())
 
@@ -142,8 +144,7 @@ def test_models_image(
     dtype: str,
 ) -> None:
     input_texts_images = [
-        (text, asset.pil_image)
-        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
+        (text, asset.pil_image) for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]

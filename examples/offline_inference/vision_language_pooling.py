@@ -10,7 +10,8 @@ on HuggingFace model repository.
 
 from argparse import Namespace
 from dataclasses import asdict
-from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
+from pathlib import Path
+from typing import Literal, NamedTuple, TypeAlias, TypedDict, get_args
 
 from PIL.Image import Image
 
@@ -18,6 +19,9 @@ from vllm import LLM, EngineArgs
 from vllm.entrypoints.score_utils import ScoreMultiModalParam
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
+
+ROOT_DIR = Path(__file__).parent.parent.parent
+EXAMPLES_DIR = ROOT_DIR / "examples"
 
 
 class TextQuery(TypedDict):
@@ -43,15 +47,39 @@ class TextImagesQuery(TypedDict):
 
 
 QueryModality = Literal["text", "image", "text+image", "text+images"]
-Query = Union[TextQuery, ImageQuery, TextImageQuery, TextImagesQuery]
+Query: TypeAlias = TextQuery | ImageQuery | TextImageQuery | TextImagesQuery
 
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    image: Optional[Image] = None
-    query: Optional[str] = None
-    documents: Optional[ScoreMultiModalParam] = None
+    prompt: str | None = None
+    image: Image | None = None
+    query: str | None = None
+    documents: ScoreMultiModalParam | None = None
+
+
+def run_clip(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""  # For image input, make sure that the prompt text is empty
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="openai/clip-vit-base-patch32",
+        runner="pooling",
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
 
 
 def run_e5_v(query: Query) -> ModelRequestData:
@@ -70,42 +98,8 @@ def run_e5_v(query: Query) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="royokong/e5-v",
-        task="embed",
+        runner="pooling",
         max_model_len=4096,
-        limit_mm_per_prompt={"image": 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image=image,
-    )
-
-
-def run_vlm2vec(query: Query) -> ModelRequestData:
-    if query["modality"] == "text":
-        text = query["text"]
-        prompt = f"Find me an everyday image that matches the given caption: {text}"  # noqa: E501
-        image = None
-    elif query["modality"] == "image":
-        prompt = "<|image_1|> Find a day-to-day image that looks similar to the provided image."  # noqa: E501
-        image = query["image"]
-    elif query["modality"] == "text+image":
-        text = query["text"]
-        prompt = (
-            f"<|image_1|> Represent the given image with the following question: {text}"  # noqa: E501
-        )
-        image = query["image"]
-    else:
-        modality = query["modality"]
-        raise ValueError(f"Unsupported query modality: '{modality}'")
-
-    engine_args = EngineArgs(
-        model="TIGER-Lab/VLM2Vec-Full",
-        task="embed",
-        max_model_len=4096,
-        trust_remote_code=True,
-        mm_processor_kwargs={"num_crops": 4},
         limit_mm_per_prompt={"image": 1},
     )
 
@@ -122,7 +116,7 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="jinaai/jina-reranker-m0",
-        task="score",
+        runner="pooling",
         max_model_len=32768,
         trust_remote_code=True,
         mm_processor_kwargs={
@@ -136,6 +130,131 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         query=query["text"],
         documents=query["image"],
+    )
+
+
+def run_siglip(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""  # For image input, make sure that the prompt text is empty
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="google/siglip-base-patch16-224",
+        runner="pooling",
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
+
+
+def _get_vlm2vec_prompt_image(query: Query, image_token: str):
+    if query["modality"] == "text":
+        text = query["text"]
+        prompt = f"Find me an everyday image that matches the given caption: {text}"
+        image = None
+    elif query["modality"] == "image":
+        prompt = f"{image_token} Find a day-to-day image that looks similar to the provided image."  # noqa: E501
+        image = query["image"]
+    elif query["modality"] == "text+image":
+        text = query["text"]
+        prompt = f"{image_token} Represent the given image with the following question: {text}"  # noqa: E501
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: {modality!r}")
+
+    return prompt, image
+
+
+def run_vlm2vec_phi3v(query: Query) -> ModelRequestData:
+    prompt, image = _get_vlm2vec_prompt_image(query, "<|image_1|>")
+
+    engine_args = EngineArgs(
+        model="TIGER-Lab/VLM2Vec-Full",
+        runner="pooling",
+        max_model_len=4096,
+        trust_remote_code=True,
+        mm_processor_kwargs={"num_crops": 4},
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
+
+
+def run_vlm2vec_qwen2vl(query: Query) -> ModelRequestData:
+    # vLLM does not support LoRA adapters on multi-modal encoder,
+    # so we merge the weights first
+    from huggingface_hub.constants import HF_HUB_CACHE
+    from peft import PeftConfig, PeftModel
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    from vllm.entrypoints.chat_utils import load_chat_template
+
+    model_id = "TIGER-Lab/VLM2Vec-Qwen2VL-2B"
+
+    base_model = AutoModelForImageTextToText.from_pretrained(model_id)
+    lora_model = PeftModel.from_pretrained(
+        base_model,
+        model_id,
+        config=PeftConfig.from_pretrained(model_id),
+    )
+    model = lora_model.merge_and_unload().to(dtype=base_model.dtype)
+    model._hf_peft_config_loaded = False  # Needed to save the merged model
+
+    processor = AutoProcessor.from_pretrained(
+        model_id,
+        # `min_pixels` and `max_pixels` are deprecated for
+        # transformers `preprocessor_config.json`
+        size={"shortest_edge": 3136, "longest_edge": 12845056},
+    )
+    processor.chat_template = load_chat_template(
+        # The original chat template is not correct
+        EXAMPLES_DIR / "template_vlm2vec_qwen2vl.jinja",
+    )
+
+    merged_path = str(
+        Path(HF_HUB_CACHE) / ("models--" + model_id.replace("/", "--") + "-vllm")
+    )
+    print(f"Saving merged model to {merged_path}...")
+    print(
+        "NOTE: This directory is not tracked by `huggingface_hub` "
+        "so you have to delete this manually if you don't want it anymore."
+    )
+    model.save_pretrained(merged_path)
+    processor.save_pretrained(merged_path)
+    print("Done!")
+
+    prompt, image = _get_vlm2vec_prompt_image(query, "<|image_pad|>")
+
+    engine_args = EngineArgs(
+        model=merged_path,
+        runner="pooling",
+        max_model_len=4096,
+        mm_processor_kwargs={
+            "min_pixels": 3136,
+            "max_pixels": 12845056,
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
     )
 
 
@@ -186,7 +305,7 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
+def run_encode(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -216,7 +335,7 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         print("-" * 50)
 
 
-def run_score(model: str, modality: QueryModality, seed: Optional[int]):
+def run_score(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -231,9 +350,12 @@ def run_score(model: str, modality: QueryModality, seed: Optional[int]):
 
 
 model_example_map = {
+    "clip": run_clip,
     "e5_v": run_e5_v,
-    "vlm2vec": run_vlm2vec,
     "jinavl_reranker": run_jinavl_reranker,
+    "siglip": run_siglip,
+    "vlm2vec_phi3v": run_vlm2vec_phi3v,
+    "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,
 }
 
 
@@ -246,7 +368,7 @@ def parse_args():
         "--model-name",
         "-m",
         type=str,
-        default="vlm2vec",
+        default="vlm2vec_phi3v",
         choices=model_example_map.keys(),
         help="The name of the embedding model.",
     )

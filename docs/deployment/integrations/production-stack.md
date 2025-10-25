@@ -55,7 +55,7 @@ sudo kubectl port-forward svc/vllm-router-service 30080:80
 And then you can send out a query to the OpenAI-compatible API to check the available models:
 
 ```bash
-curl -o- http://localhost:30080/models
+curl -o- http://localhost:30080/v1/models
 ```
 
 ??? console "Output"
@@ -78,7 +78,7 @@ curl -o- http://localhost:30080/models
 To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
 
 ```bash
-curl -X POST http://localhost:30080/completions \
+curl -X POST http://localhost:30080/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "facebook/opt-125m",
@@ -140,11 +140,12 @@ The core vLLM production stack configuration is managed with YAML. Here is the e
     ```
 
 In this YAML configuration:
+
 * **`modelSpec`** includes:
-  * `name`: A nickname that you prefer to call the model.
-  * `repository`: Docker repository of vLLM.
-  * `tag`: Docker image tag.
-  * `modelURL`: The LLM model that you want to use.
+    * `name`: A nickname that you prefer to call the model.
+    * `repository`: Docker repository of vLLM.
+    * `tag`: Docker image tag.
+    * `modelURL`: The LLM model that you want to use.
 * **`replicaCount`**: Number of replicas.
 * **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
 * **`requestGPU`**: Specifies the number of GPUs required.

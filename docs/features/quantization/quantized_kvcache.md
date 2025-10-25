@@ -41,15 +41,18 @@ Here is an example of how to enable FP8 quantization:
     from vllm import LLM, SamplingParams
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
-    llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
-            kv_cache_dtype="fp8",
-            calculate_kv_scales=True)
+    llm = LLM(
+        model="meta-llama/Llama-2-7b-chat-hf",
+        kv_cache_dtype="fp8",
+        calculate_kv_scales=True,
+    )
     prompt = "London is the capital of"
     out = llm.generate(prompt, sampling_params)[0].outputs[0].text
     print(out)
     ```
 
 The `kv_cache_dtype` argument specifies the data type for KV cache storage:
+
 - `"auto"`: Uses the model's default "unquantized" data type
 - `"fp8"` or `"fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPU)
 - `"fp8_e5m2"`: Supported on CUDA 11.8+
@@ -79,7 +82,7 @@ Here's a complete example using `meta-llama/Llama-3.1-8B-Instruct` (most models 
 
     # Select model and load it
     MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", dtype="auto")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
     # Select calibration dataset

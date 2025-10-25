@@ -15,10 +15,6 @@ MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 def get_vocab_size(model_name):
     config = ModelConfig(
         model=model_name,
-        task="auto",
-        tokenizer=model_name,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
         seed=0,
         dtype="bfloat16",
     )
@@ -53,10 +49,7 @@ async def test_chat_logit_bias_valid(client):
 
     completion = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "Testing valid logit bias"
-        }],
+        messages=[{"role": "user", "content": "Testing valid logit bias"}],
         max_tokens=5,
         logit_bias={str(valid_token_id): 1.0},
     )
@@ -73,10 +66,7 @@ async def test_chat_logit_bias_invalid(client):
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[{
-                "role": "user",
-                "content": "Testing invalid logit bias"
-            }],
+            messages=[{"role": "user", "content": "Testing invalid logit bias"}],
             max_tokens=5,
             logit_bias={str(invalid_token_id): 1.0},
         )

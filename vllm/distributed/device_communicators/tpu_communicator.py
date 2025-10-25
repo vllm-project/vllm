@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -10,33 +9,39 @@ from torch.distributed import ProcessGroup
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.tpu import USE_TPU_INFERENCE
 
 from .base_device_communicator import DeviceCommunicatorBase
 
-USE_RAY = parallel_config = get_current_vllm_config(
-).parallel_config.distributed_executor_backend == "ray"
+USE_RAY = parallel_config = (
+    get_current_vllm_config().parallel_config.distributed_executor_backend == "ray"
+)
 
 logger = init_logger(__name__)
 
-if current_platform.is_tpu():
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    import torch_xla.runtime as xr
-    from torch_xla._internal import pjrt
-    from torch_xla.distributed.xla_multiprocessing import (
-        create_optimized_replica_groups)
+if not USE_TPU_INFERENCE:
+    logger.info("tpu_inference not found, using vLLM's TpuCommunicator")
+    if current_platform.is_tpu():
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+        import torch_xla.runtime as xr
+        from torch_xla._internal import pjrt
+        from torch_xla.distributed.xla_multiprocessing import (
+            create_optimized_replica_groups,
+        )
 
-    if USE_RAY:
-        from vllm.executor import ray_utils
+        if USE_RAY:
+            from vllm.v1.executor import ray_utils
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
-
-    def __init__(self,
-                 cpu_group: ProcessGroup,
-                 device: Optional[torch.device] = None,
-                 device_group: Optional[ProcessGroup] = None,
-                 unique_name: str = ""):
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        device: torch.device | None = None,
+        device_group: ProcessGroup | None = None,
+        unique_name: str = "",
+    ):
         super().__init__(cpu_group, device, device_group, unique_name)
 
         # NOTE(woosuk): When using TP > 1 on TPUs, every TPU on the same node
@@ -94,10 +99,9 @@ class TpuCommunicator(DeviceCommunicatorBase):
         return xm.all_gather(input_, dim=dim)
 
 
-try:
-    from tpu_commons.distributed.device_communicators import (
-        TpuCommunicator as TpuCommonsCommunicator)
-    TpuCommunicator = TpuCommonsCommunicator  # type: ignore
-except ImportError:
-    logger.info("tpu_commons not found, using vLLM's TpuCommunicator")
-    pass
+if USE_TPU_INFERENCE:
+    from tpu_inference.distributed.device_communicators import (
+        TpuCommunicator as TpuInferenceCommunicator,
+    )
+
+    TpuCommunicator = TpuInferenceCommunicator  # type: ignore

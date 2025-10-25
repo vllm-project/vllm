@@ -13,27 +13,25 @@
 #   vllm-dev: used for development
 #
 # Build arguments:
-#   PYTHON_VERSION=3.12 (default)|3.11|3.10|3.9
+#   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
 #   VLLM_CPU_DISABLE_AVX512=false (default)|true
 #   VLLM_CPU_AVX512BF16=false (default)|true
 #   VLLM_CPU_AVX512VNNI=false (default)|true
 #
 
-######################### BASE IMAGE #########################
-FROM ubuntu:22.04 AS base
+######################### COMMON BASE IMAGE #########################
+FROM ubuntu:22.04 AS base-common
 
 WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
-ENV LD_PRELOAD=""
-
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
-    && apt-get install -y --no-install-recommends ccache git curl wget ca-certificates \
+    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
         gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -49,7 +47,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 ENV UV_HTTP_TIMEOUT=500
 
-# Install Python dependencies 
+# Install Python dependencies
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
@@ -63,22 +61,26 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
 
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        PRELOAD_PATH="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"; \
-    else \
-        PRELOAD_PATH="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"; \
-    fi && \
-    echo "export LD_PRELOAD=$PRELOAD_PATH" >> ~/.bashrc
+######################### x86_64 BASE IMAGE #########################
+FROM base-common AS base-amd64
 
-# Ensure that the LD_PRELOAD environment variable for export is in effect.
-SHELL ["/bin/bash", "-c"]
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
 
-ENV LD_PRELOAD=${LD_PRELOAD}
+######################### arm64 BASE IMAGE #########################
+FROM base-common AS base-arm64
+
+ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
+
+######################### BASE IMAGE #########################
+FROM base-${TARGETARCH} AS base
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
+
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
 
 ARG GIT_REPO_CHECK=0
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
@@ -105,23 +107,24 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel 
+    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
 
 WORKDIR /workspace/vllm
 
+# TODO: Update to 2.9.0 when there is a new build for intel_extension_for_pytorch for that version
 RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
     cp requirements/test.in requirements/cpu-test.in && \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
-    sed -i 's/^torch==.*/torch==2.6.0/g' requirements/cpu-test.in && \
+    sed -i 's/^torch==.*/torch==2.8.0/g' requirements/cpu-test.in && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
     uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/cpu-test.txt 
+    uv pip install -r requirements/cpu-test.txt
 
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
@@ -134,12 +137,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e tests/vllm_test_utils 
+    uv pip install -e tests/vllm_test_utils
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py develop 
+    VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 
 COPY --from=vllm-test-deps /workspace/vllm/requirements/cpu-test.txt requirements/test.txt
 
@@ -164,11 +167,12 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./.buildkite/ ./.buildkite/
 
+# Create symlink for vllm-workspace to maintain CI compatibility
+RUN ln -sf /workspace /vllm-workspace
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e tests/vllm_test_utils 
-
-ENTRYPOINT ["bash"]
+    uv pip install -e tests/vllm_test_utils
 
 ######################### RELEASE IMAGE #########################
 FROM base AS vllm-openai
@@ -180,4 +184,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
     uv pip install dist/*.whl
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["vllm", "serve"]

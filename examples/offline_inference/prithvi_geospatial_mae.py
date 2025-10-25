@@ -3,12 +3,11 @@
 import argparse
 import datetime
 import os
-import re
-from typing import Union
 
 import albumentations
 import numpy as np
 import rasterio
+import regex as re
 import torch
 from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
@@ -45,7 +44,12 @@ datamodule_config = {
 class PrithviMAE:
     def __init__(self, model):
         self.model = LLM(
-            model=model, skip_tokenizer_init=True, dtype="float16", enforce_eager=True
+            model=model,
+            skip_tokenizer_init=True,
+            dtype="float16",
+            enforce_eager=True,
+            model_impl="terratorch",
+            enable_mm_embeds=True,
         )
 
     def run(self, input_data, location_coords):
@@ -60,7 +64,7 @@ class PrithviMAE:
         }
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
-        outputs = self.model.encode(prompt, use_tqdm=False)
+        outputs = self.model.encode(prompt, pooling_task="plugin", use_tqdm=False)
 
         return outputs[0].outputs.data
 
@@ -156,7 +160,7 @@ def load_example(
     file_paths: list[str],
     mean: list[float] = None,
     std: list[float] = None,
-    indices: Union[list[int], None] = None,
+    indices: list[int] | None = None,
 ):
     """Build an input example by loading images in *file_paths*.
 

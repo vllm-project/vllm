@@ -17,11 +17,35 @@ Two main reasons:
 
 ## Usage example
 
-Please refer to <gh-file:examples/online_serving/disaggregated_prefill.sh> for the example usage of disaggregated prefilling.
+Please refer to [examples/online_serving/disaggregated_prefill.sh](../../examples/online_serving/disaggregated_prefill.sh) for the example usage of disaggregated prefilling.
+
+Now supports 5 types of connectors:
+
+- **SharedStorageConnector**: refer to [examples/offline_inference/disaggregated-prefill-v1/run.sh](../../examples/offline_inference/disaggregated-prefill-v1/run.sh) for the example usage of SharedStorageConnector disaggregated prefilling.
+- **LMCacheConnectorV1**: refer to [examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh](../../examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh) for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission.
+- **NixlConnector**: refer to [tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh) for the example usage of NixlConnector disaggregated prefilling which support fully async send/recv. For detailed usage guide, see [NixlConnector Usage Guide](nixl_connector_usage.md).
+- **P2pNcclConnector**: refer to [examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh](../../examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh) for the example usage of P2pNcclConnector disaggregated prefilling.
+- **MultiConnector**: take advantage of the kv_connector_extra_config: dict[str, Any] already present in KVTransferConfig to stash all the connectors we want in an ordered list of kwargs.such as:
+
+  ```bash
+  --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both"},{"kv_connector":"SharedStorageConnector","kv_role":"kv_both","kv_connector_extra_config":{"shared_storage_path":"local_storage"}}]}}'
+  ```
+
+For NixlConnector, you may also specify one or multiple NIXL_Backend. Such as:
+
+  ```bash
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both", "kv_buffer_device":"cuda", "kv_connector_extra_config":{"backends":["UCX", "GDS"]}}'
+  ```
+
+- **OffloadingConnector**: enable offloading of KV data to CPU memory, customizing the CPU block size (in tokens) and number of blocks to allocate (per worker):
+
+  ```bash
+  --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"block_size": 64, "num_cpu_blocks": 1000}}'
+  ```
 
 ## Benchmarks
 
-Please refer to <gh-file:benchmarks/disagg_benchmarks> for disaggregated prefilling benchmarks.
+Please refer to [benchmarks/disagg_benchmarks](../../benchmarks/disagg_benchmarks) for disaggregated prefilling benchmarks.
 
 ## Development
 
@@ -47,6 +71,19 @@ The workflow of disaggregated prefilling is as follows:
 ![Disaggregated prefilling workflow](../assets/features/disagg_prefill/overview.jpg)
 
 The `buffer` corresponds to `insert` API in LookupBuffer, and the `drop_select` corresponds to `drop_select` API in LookupBuffer.
+
+Now every process in vLLM will have a corresponding connector. Specifically, we have:
+
+- Scheduler connector: the connector that locates in the same process as the scheduler process. It schedules the KV cache transfer ops.
+- Worker connectors: the connectors that locate in the worker processes. They execute KV cache transfer ops.
+
+Here is a figure illustrating how the above 2 connectors are organized:
+
+![Disaggregated prefilling high level design](../assets/features/disagg_prefill/high_level_design.png)
+
+The figure below shows how the worker connector works with the attention module to achieve layer-by-layer KV cache store and load:
+
+![Disaggregated prefilling workflow](../assets/features/disagg_prefill/workflow.png)
 
 ## Third-party contributions
 

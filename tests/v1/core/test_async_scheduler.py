@@ -7,21 +7,21 @@ import pytest
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
+from vllm.v1.utils import ConstantList
 
 from .utils import create_requests, create_scheduler
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _make_model_runner_output(
-    scheduler_output: SchedulerOutput, ) -> ModelRunnerOutput:
+    scheduler_output: SchedulerOutput,
+) -> ModelRunnerOutput:
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={
-            req_id: i
-            for i, req_id in enumerate(req_ids)
-        },
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=[[i] for i in range(len(req_ids))],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -73,8 +73,7 @@ def test_abort():
         if not abort_order:
             return
         req = requests[abort_order.pop(0)]
-        scheduler.finish_requests(req.request_id,
-                                  RequestStatus.FINISHED_ABORTED)
+        scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
 
     while sched_outputs:
         # Abort a scheduled request.
@@ -110,8 +109,7 @@ def test_preempt():
         if not abort_order:
             return
         req = requests[abort_order.pop(0)]
-        scheduler.finish_requests(req.request_id,
-                                  RequestStatus.FINISHED_ABORTED)
+        scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
 
     while sched_outputs:
         # Abort a scheduled request.
@@ -133,14 +131,19 @@ def test_prefix_caching_for_prefill_dedup():
     CHUNK_SIZE = 1000
     BLOCK_SIZE = 16
     num_prompt_tokens = 100
-    scheduler = create_scheduler(async_scheduling=True,
-                                 max_num_batched_tokens=CHUNK_SIZE,
-                                 enable_prefix_caching=True,
-                                 block_size=BLOCK_SIZE)
-    requests = create_requests(num_requests=5,
-                               num_tokens=num_prompt_tokens,
-                               max_tokens=3,
-                               same_prompt=True)
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_batched_tokens=CHUNK_SIZE,
+        enable_prefix_caching=True,
+        block_size=BLOCK_SIZE,
+    )
+    requests = create_requests(
+        num_requests=5,
+        num_tokens=num_prompt_tokens,
+        max_tokens=3,
+        same_prompt=True,
+        block_size=BLOCK_SIZE,
+    )
     requests_copy = requests.copy()
 
     # Two requests with the same prompt.
@@ -182,13 +185,18 @@ def test_prefix_caching_for_multi_turn():
     BLOCK_SIZE = 16
     num_prompt_tokens = 100
     num_output_tokens = 200
-    scheduler = create_scheduler(async_scheduling=True,
-                                 max_num_batched_tokens=CHUNK_SIZE,
-                                 enable_prefix_caching=True,
-                                 block_size=BLOCK_SIZE)
-    requests = create_requests(num_requests=5,
-                               num_tokens=num_prompt_tokens,
-                               max_tokens=num_output_tokens)
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_batched_tokens=CHUNK_SIZE,
+        enable_prefix_caching=True,
+        block_size=BLOCK_SIZE,
+    )
+    requests = create_requests(
+        num_requests=5,
+        num_tokens=num_prompt_tokens,
+        max_tokens=num_output_tokens,
+        block_size=BLOCK_SIZE,
+    )
 
     for req in requests:
         scheduler.add_request(req)
@@ -212,10 +220,17 @@ def test_prefix_caching_for_multi_turn():
         num_requests=5,
         num_tokens=num_prompt_tokens + num_output_tokens,
         max_tokens=num_output_tokens,
+        block_size=BLOCK_SIZE,
     )
     for i, req in enumerate(next_turn_requests):
-        req.prompt_token_ids = (requests[i].prompt_token_ids +
-                                list(requests[i].output_token_ids))
+        req.prompt_token_ids = requests[i].prompt_token_ids + list(
+            requests[i].output_token_ids
+        )
+        req._all_token_ids = req.prompt_token_ids.copy()
+        req.all_token_ids = ConstantList(req._all_token_ids)
+        req.block_hashes = []
+        req.block_hashes = req.get_hash_new_full_blocks()
+
     # Schedule the next-turn requests.
     for req in next_turn_requests:
         scheduler.add_request(req)
@@ -224,5 +239,4 @@ def test_prefix_caching_for_multi_turn():
     # Make sure the next-turn requests get prefix cache hit by the previous
     # requests.
     for req in next_turn_requests:
-        assert (req.num_cached_tokens == req.num_prompt_tokens // BLOCK_SIZE *
-                BLOCK_SIZE)
+        assert req.num_cached_tokens == req.num_prompt_tokens // BLOCK_SIZE * BLOCK_SIZE

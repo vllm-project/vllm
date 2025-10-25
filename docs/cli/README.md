@@ -1,54 +1,59 @@
----
-toc_depth: 4
----
-
 # vLLM CLI Guide
 
 The vllm command-line tool is used to run and manage vLLM models. You can start by viewing the help message with:
 
-```
+```bash
 vllm --help
 ```
 
 Available Commands:
 
-```
+```bash
 vllm {chat,complete,serve,bench,collect-env,run-batch}
 ```
 
 ## serve
 
-Start the vLLM OpenAI Compatible API server.
+Starts the vLLM OpenAI Compatible API server.
 
-??? console "Examples"
+Start with a model:
 
-    ```bash
-    # Start with a model
-    vllm serve meta-llama/Llama-2-7b-hf
+```bash
+vllm serve meta-llama/Llama-2-7b-hf
+```
 
-    # Specify the port
-    vllm serve meta-llama/Llama-2-7b-hf --port 8100
+Specify the port:
 
-    # Check with --help for more options
-    # To list all groups
-    vllm serve --help=listgroup
+```bash
+vllm serve meta-llama/Llama-2-7b-hf --port 8100
+```
 
-    # To view a argument group
-    vllm serve --help=ModelConfig
+Serve over a Unix domain socket:
 
-    # To view a single argument
-    vllm serve --help=max-num-seqs
+```bash
+vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
+```
 
-    # To search by keyword
-    vllm serve --help=max
+Check with --help for more options:
 
-    # To view full help with pager (less/more)
-    vllm serve --help=page
-    ```
+```bash
+# To list all groups
+vllm serve --help=listgroup
 
-### Options
+# To view a argument group
+vllm serve --help=ModelConfig
 
---8<-- "docs/argparse/serve.md"
+# To view a single argument
+vllm serve --help=max-num-seqs
+
+# To search by keyword
+vllm serve --help=max
+
+# To view full help with pager (less/more)
+vllm serve --help=page
+```
+
+See [vllm serve](./serve.md) for the full reference of all available arguments.
 
 ## chat
 
@@ -65,6 +70,8 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 vllm chat --quick "hi"
 ```
 
+See [vllm chat](./chat.md) for the full reference of all available arguments.
+
 ## complete
 
 Generate text completions based on the given prompt via the running API server.
@@ -80,7 +87,7 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 vllm complete --quick "The future of AI is"
 ```
 
-</details>
+See [vllm complete](./complete.md) for the full reference of all available arguments.
 
 ## bench
 
@@ -107,6 +114,8 @@ vllm bench latency \
     --load-format dummy
 ```
 
+See [vllm bench latency](./bench/latency.md) for the full reference of all available arguments.
+
 ### serve
 
 Benchmark the online serving throughput.
@@ -121,6 +130,8 @@ vllm bench serve \
     --num-prompts  5
 ```
 
+See [vllm bench serve](./bench/serve.md) for the full reference of all available arguments.
+
 ### throughput
 
 Benchmark offline inference throughput.
@@ -134,6 +145,8 @@ vllm bench throughput \
     --load-format dummy
 ```
 
+See [vllm bench throughput](./bench/throughput.md) for the full reference of all available arguments.
+
 ## collect-env
 
 Start collecting environment information.
@@ -146,24 +159,25 @@ vllm collect-env
 
 Run batch prompts and write results to file.
 
-<details>
-<summary>Examples</summary>
+Running with a local file:
 
 ```bash
-# Running with a local file
 vllm run-batch \
     -i offline_inference/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
+```
 
-# Using remote file
+Using remote file:
+
+```bash
 vllm run-batch \
     -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
-</details>
+See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
 
 ## More Help
 

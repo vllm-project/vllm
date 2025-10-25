@@ -7,9 +7,13 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.12"
+  jobs:
+    post_checkout:
+      - git fetch --unshallow || true
 
 mkdocs:
   configuration: mkdocs.yaml
+  fail_on_warning: true
 
 # Optionally declare the Python requirements required to build your docs
 python:

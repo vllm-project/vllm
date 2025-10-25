@@ -8,44 +8,29 @@ This is a tractable model, the weights and computation are specially designed
 if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
+
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 import torch
 from torch import nn
-from torch.library import Library
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
-                         set_current_vllm_config)
-from vllm.forward_context import set_forward_context
-from vllm.utils import direct_register_custom_op
-
-# create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    set_current_vllm_config,
 )
+from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+# This import automatically registers `torch.ops.silly.attention`
+from .. import silly_attention  # noqa: F401
 
 
 @dataclass
@@ -66,15 +51,14 @@ class LlamaConfig:
             factors.append((k, v))
         factors.sort()
         import hashlib
-        return hashlib.md5(str(factors).encode(),
-                           usedforsecurity=False).hexdigest()
+
+        return hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
 
 
 class LlamaMLP(nn.Module):
-
     def __init__(self, config: LlamaConfig) -> None:
         super().__init__()
         self.gate_up_projection = nn.Linear(
@@ -89,31 +73,31 @@ class LlamaMLP(nn.Module):
         )
 
         if config.tractable_init:
-            nn.init.eye_(self.gate_up_projection.weight.data[:config.mlp_size])
-            nn.init.eye_(self.gate_up_projection.weight.data[config.mlp_size:])
+            nn.init.eye_(self.gate_up_projection.weight.data[: config.mlp_size])
+            nn.init.eye_(self.gate_up_projection.weight.data[config.mlp_size :])
             nn.init.eye_(self.down_projection.weight.data)
         else:
-            nn.init.xavier_normal_(self.gate_up_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
-            nn.init.xavier_normal_(self.down_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
+            nn.init.xavier_normal_(
+                self.gate_up_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
+            nn.init.xavier_normal_(
+                self.down_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
 
     def forward(self, x):
         # for tractable_init and positive input, this is
         # essentially an elementwise-square
         x = self.gate_up_projection(x)
-        x = x[:, :x.size(1) // 2] * torch.nn.functional.relu(
-            x[:, x.size(1) // 2:])
+        x = x[:, : x.size(1) // 2] * torch.nn.functional.relu(x[:, x.size(1) // 2 :])
         x = self.down_projection(x)
         return x
 
 
 class LlamaAttention(nn.Module):
-
     def __init__(self, config: LlamaConfig) -> None:
         super().__init__()
         self.qkv_projection = nn.Linear(
@@ -129,21 +113,25 @@ class LlamaAttention(nn.Module):
         )
 
         if config.tractable_init:
-            nn.init.eye_(self.qkv_projection.weight.data[:config.hidden_size])
-            nn.init.eye_(self.qkv_projection.weight.data[config.hidden_size:2 *
-                                                         config.hidden_size])
-            nn.init.eye_(self.qkv_projection.weight.data[2 *
-                                                         config.hidden_size:])
+            nn.init.eye_(self.qkv_projection.weight.data[: config.hidden_size])
+            nn.init.eye_(
+                self.qkv_projection.weight.data[
+                    config.hidden_size : 2 * config.hidden_size
+                ]
+            )
+            nn.init.eye_(self.qkv_projection.weight.data[2 * config.hidden_size :])
             nn.init.eye_(self.output_projection.weight.data)
         else:
-            nn.init.xavier_normal_(self.qkv_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
-            nn.init.xavier_normal_(self.output_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
+            nn.init.xavier_normal_(
+                self.qkv_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
+            nn.init.xavier_normal_(
+                self.output_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
 
     def forward(
         self,
@@ -167,7 +155,6 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-
     def __init__(self, config: LlamaConfig) -> None:
         super().__init__()
         self.self_attention = LlamaAttention(config)
@@ -177,7 +164,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         For tractable computation:
@@ -187,7 +174,7 @@ class LlamaDecoderLayer(nn.Module):
         - if residual is not None, the outputs are:
             - residual = (hidden_states + residual + 1) * 3 + positions * 2 + hidden_states + residual = (hidden_states + residual) * 4 + positions * 2 + 3
             - hidden_states = (residual + 1) ** 2
-        """ # noqa
+        """  # noqa
         if residual is None:
             residual = hidden_states
             hidden_states = hidden_states + 1
@@ -196,8 +183,9 @@ class LlamaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = hidden_states + 1
 
-        hidden_states = self.self_attention(positions=positions,
-                                            hidden_states=hidden_states)
+        hidden_states = self.self_attention(
+            positions=positions, hidden_states=hidden_states
+        )
 
         hidden_states = hidden_states + residual
         residual = hidden_states
@@ -209,27 +197,29 @@ class LlamaDecoderLayer(nn.Module):
 
 @support_torch_compile
 class LlamaModel(nn.Module):
-
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 config: LlamaConfig,
-                 prefix: str = '',
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config: LlamaConfig,
+        prefix: str = "",
+        **kwargs,
+    ) -> None:
         super().__init__()
         self.embedding_tokens = nn.Embedding(
             num_embeddings=config.vocab_size,
             embedding_dim=config.hidden_size,
         )
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config) for _ in range(config.num_layers)])
+            [LlamaDecoderLayer(config) for _ in range(config.num_layers)]
+        )
 
         # this is the initial value of the hidden states
         self.embedding_tokens.weight.data.fill_(config.init_value)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.embedding_tokens(input_ids)
@@ -239,146 +229,194 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-def tractable_computation(input_ids: torch.Tensor,
-                          positions: torch.Tensor,
-                          config: LlamaConfig,
-                          init_value: float = 1.0) -> torch.Tensor:
-    hidden_states = torch.ones(input_ids.size(0),
-                               config.hidden_size,
-                               device=input_ids.device,
-                               dtype=input_ids.dtype) * init_value
+def tractable_computation(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    config: LlamaConfig,
+    init_value: float = 1.0,
+) -> torch.Tensor:
+    hidden_states = (
+        torch.ones(
+            input_ids.size(0),
+            config.hidden_size,
+            device=input_ids.device,
+            dtype=input_ids.dtype,
+        )
+        * init_value
+    )
 
     # first layer
     residual = hidden_states * 4 + positions.unsqueeze(1) * 2 + 3
-    hidden_states = (residual + 1)**2
+    hidden_states = (residual + 1) ** 2
 
     # following layers
     for _ in range(config.num_layers - 1):
         hidden_states = hidden_states + residual
         residual = hidden_states * 4 + positions.unsqueeze(1) * 2 + 3
-        hidden_states = (residual + 1)**2
+        hidden_states = (residual + 1) ** 2
 
     return hidden_states
 
 
 @torch.inference_mode
-def run_model(llama_config,
-              use_compile: bool,
-              use_inductor: bool,
-              split_attn: bool = False) -> torch.Tensor:
+def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
+    # Start with a fresh copy to make sure there's no cache dir sharing
+    compile_config = deepcopy(compile_config)
+    cudagraph_runtime_mode = compile_config.cudagraph_mode
 
-    if use_compile:
-        compilation_config = CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
-            use_cudagraph=True,
-            use_inductor=use_inductor,
-            cudagraph_capture_sizes=[1, 2],
-        )
-        if split_attn:
-            compilation_config.splitting_ops = ["silly.attention"]
-    else:
-        compilation_config = CompilationConfig(
-            level=CompilationLevel.NO_COMPILATION, )
-
-    vllm_config = VllmConfig(compilation_config=compilation_config,
-                             additional_config=llama_config)
+    vllm_config = VllmConfig(
+        compilation_config=compile_config, additional_config=llama_config
+    )
     with set_current_vllm_config(vllm_config):
-        model = LlamaModel(config=llama_config,
-                           vllm_config=vllm_config,
-                           prefix="").eval().cuda()
+        model = (
+            LlamaModel(config=llama_config, vllm_config=vllm_config, prefix="")
+            .eval()
+            .cuda()
+        )
 
-    with set_forward_context({}, vllm_config=vllm_config):
+    with set_forward_context({}, vllm_config=vllm_config):  # background context
         B = 16  # max batch size
-        input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
+        input_ids = torch.randint(0, llama_config.vocab_size, (B,)).cuda()
         positions = torch.arange(B).cuda()
 
+        # warmup for the model with cudagraph_mode NONE
         model(input_ids, positions)
-        model(input_ids[:2], positions[:2])
-        model(input_ids[:1], positions[:1])
+
+        # simulate cudagraphs capturing
+        with set_forward_context(
+            {},
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=BatchDescriptor(
+                num_tokens=2,
+            ),
+        ):
+            model(input_ids[:2], positions[:2])
+        with set_forward_context(
+            {},
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=BatchDescriptor(
+                num_tokens=1,
+            ),
+        ):
+            model(input_ids[:1], positions[:1])
 
         input_ids[:2].zero_()
-        output = model(input_ids[:2], positions[:2])
+        # simulate cudagraphs replay
+        with set_forward_context(
+            {},
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=BatchDescriptor(
+                num_tokens=2,
+            ),
+        ):
+            output = model(input_ids[:2], positions[:2])
 
         output = output.cpu()
 
         if llama_config.tractable_init:
-            expected_output = tractable_computation(input_ids[:2],
-                                                    positions[:2],
-                                                    llama_config).cpu()
+            expected_output = tractable_computation(
+                input_ids[:2], positions[:2], llama_config
+            ).cpu()
 
             assert torch.allclose(output, expected_output)
         else:
             return output.cpu()
 
 
-@pytest.mark.parametrize("use_inductor", [True, False])
-def test_toy_llama(use_inductor: bool):
+@pytest.mark.parametrize(
+    "backend, use_inductor_graph_partition",
+    [
+        ("eager", False),  # No inductor
+        ("inductor", False),  # Inductor, Dynamo partition
+        ("inductor", True),  # Inductor, Inductor partition
+    ],
+)
+def test_toy_llama(
+    backend: str, use_inductor_graph_partition: bool, monkeypatch, tmp_path
+):
+    # We disable the vLLM compile cache into a new tmp dir for 1 reason:
+    # 1. To make sure we can properly track the number of Inductor compilations.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition only supported in torch>=2.9")
+
     # compare output with and without piecewise compilation
 
-    llama_config = LlamaConfig(hidden_size=128,
-                               mlp_size=256,
-                               vocab_size=128,
-                               num_layers=12)
+    llama_config = LlamaConfig(
+        hidden_size=128, mlp_size=256, vocab_size=128, num_layers=12
+    )
 
-    tractable_config = LlamaConfig(hidden_size=128,
-                                   mlp_size=256,
-                                   vocab_size=128,
-                                   num_layers=2,
-                                   tractable_init=True)
+    tractable_config = LlamaConfig(
+        hidden_size=128, mlp_size=256, vocab_size=128, num_layers=2, tractable_init=True
+    )
+
+    compile_config_no_compile = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        backend="eager",
+    )
+
+    compile_config_no_split = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        use_inductor_graph_partition=use_inductor_graph_partition,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        backend=backend,
+        cudagraph_capture_sizes=[1, 2],
+    )
+
+    compile_config_split = deepcopy(compile_config_no_split)
+    compile_config_split.splitting_ops = ["silly::attention"]
 
     outputs = []
     with compilation_counter.expect(
-            num_graphs_seen=0,
-            num_piecewise_graphs_seen=0,
-            num_piecewise_capturable_graphs_seen=0,
-            num_backend_compilations=0,
-            num_cudagraph_captured=0,
+        num_graphs_seen=0,
+        num_piecewise_graphs_seen=0,
+        num_piecewise_capturable_graphs_seen=0,
+        num_backend_compilations=0,
+        num_cudagraph_captured=0,
     ):
-        outputs.append(
-            run_model(llama_config, use_inductor=False, use_compile=False))
-    run_model(tractable_config, use_inductor=False, use_compile=False)
+        outputs.append(run_model(llama_config, compile_config_no_compile))
 
-    if use_inductor:
+    run_model(tractable_config, compile_config_no_compile)
+
+    if backend == "inductor":
         kwargs = {"num_inductor_compiles": 1, "num_eager_compiles": 0}
     else:
         kwargs = {"num_eager_compiles": 1, "num_inductor_compiles": 0}
 
     with compilation_counter.expect(
-            num_graphs_seen=1,  # one graph for the model
-            num_piecewise_graphs_seen=1,
-            num_piecewise_capturable_graphs_seen=1,
-            num_backend_compilations=1,  # num_piecewise_capturable_graphs_seen
-            num_cudagraph_captured=
-            2,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
-            **kwargs,
+        num_graphs_seen=1,  # one graph for the model
+        num_piecewise_graphs_seen=1,
+        num_piecewise_capturable_graphs_seen=1,
+        num_backend_compilations=1,  # num_piecewise_capturable_graphs_seen
+        num_cudagraph_captured=2,
+        **kwargs,
     ):
-        outputs.append(
-            run_model(llama_config,
-                      use_inductor=use_inductor,
-                      use_compile=True))
-    run_model(tractable_config, use_inductor=use_inductor, use_compile=True)
+        outputs.append(run_model(llama_config, compile_config_no_split))
+
+    run_model(tractable_config, compile_config_no_split)
+
+    if use_inductor_graph_partition:
+        num_piecewise_fx = 1
+        num_piecewise_capturable_fx = 1
+    else:
+        num_piecewise_fx = 2 * llama_config.num_layers + 1
+        num_piecewise_capturable_fx = 1 + llama_config.num_layers
 
     with compilation_counter.expect(
-            num_graphs_seen=1,  # one graph for the model
-            num_piecewise_graphs_seen=2 * llama_config.num_layers +
-            1,  # 2 * num_layers + 1
-            num_piecewise_capturable_graphs_seen=1 +
-            llama_config.num_layers,  # 1 + num_layers
-            num_backend_compilations=1 +
-            llama_config.num_layers,  # num_piecewise_capturable_graphs_seen
-            num_cudagraph_captured=2 *
-        (1 + llama_config.num_layers
-         ),  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_graphs_seen=1,  # one graph for the model
+        num_piecewise_graphs_seen=num_piecewise_fx,
+        num_piecewise_capturable_graphs_seen=num_piecewise_capturable_fx,
+        num_backend_compilations=num_piecewise_capturable_fx,
+        # num_cudagraph_sizes * num_partitions
+        num_cudagraph_captured=2 * (1 + llama_config.num_layers),
     ):
-        outputs.append(
-            run_model(llama_config,
-                      use_inductor=use_inductor,
-                      use_compile=True,
-                      split_attn=True))
-    run_model(tractable_config,
-              use_inductor=use_inductor,
-              use_compile=True,
-              split_attn=True)
+        outputs.append(run_model(llama_config, compile_config_split))
+    run_model(tractable_config, compile_config_split)
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])
@@ -389,17 +427,15 @@ def benchmark():
     from triton.testing import do_bench
 
     # similar to llama 3.1-8B
-    llama_config = LlamaConfig(hidden_size=4096,
-                               mlp_size=14336,
-                               vocab_size=128 * 1024,
-                               num_layers=32)
+    llama_config = LlamaConfig(
+        hidden_size=4096, mlp_size=14336, vocab_size=128 * 1024, num_layers=32
+    )
 
     # a tiny model to measure the overhead
     # of piecewise cudagraph
-    llama_config = LlamaConfig(hidden_size=40,
-                               mlp_size=80,
-                               vocab_size=128,
-                               num_layers=2)
+    llama_config = LlamaConfig(
+        hidden_size=40, mlp_size=80, vocab_size=128, num_layers=2
+    )
 
     cudagraph_sizes = [1, 2, 4] + [i * 8 for i in range(1, 33)]
 
@@ -412,25 +448,28 @@ def benchmark():
     for piecewise in [False, True]:
         if piecewise:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 use_cudagraph=True,
-                splitting_ops=["silly.attention"],
+                splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                mode=CompilationMode.VLLM_COMPILE,
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
 
         vllm_config = VllmConfig(compilation_config=compilation_config)
         with set_current_vllm_config(vllm_config):
-            model = LlamaModel(config=llama_config,
-                               vllm_config=vllm_config,
-                               prefix="").eval().cuda().to(torch.bfloat16)
+            model = (
+                LlamaModel(config=llama_config, vllm_config=vllm_config, prefix="")
+                .eval()
+                .cuda()
+                .to(torch.bfloat16)
+            )
 
         B = 256  # max batch size
-        input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
+        input_ids = torch.randint(0, llama_config.vocab_size, (B,)).cuda()
         positions = torch.arange(B).cuda().to(torch.bfloat16)
 
         graphs = {}
@@ -452,21 +491,26 @@ def benchmark():
                 # and use it later, because it will look up the name `b` in the
                 # enclosing scope, and the value of `b` will always be 256.
                 # it is fine here, because we only use the lambda function once.
-                runtime = do_bench(lambda: graphs[b][0]  # noqa
-                                   (input_ids[:b], positions[:b]))  # noqa
+                runtime = do_bench(
+                    lambda: graphs[b][0](  # noqa
+                        input_ids[:b],  # noqa
+                        positions[:b],  # noqa
+                    )
+                )
                 piecewise_cudagraph_time[b] = runtime
             else:
                 runtime = do_bench(lambda: graphs[b][0].replay())  # noqa
-                eager_runtime = do_bench(
-                    lambda: model(input_ids[:b], positions[:b]))  # noqa
+                eager_runtime = do_bench(lambda: model(input_ids[:b], positions[:b]))  # noqa
                 full_cudagraph_time[b] = runtime
                 eager_time[b] = eager_runtime
 
     # print in tabular format
     print("batch size\teager mode\tfull cudagraph\tpiecewise cudagraph")
     for b in cudagraph_sizes:
-        print(f"{b}\t{eager_time[b]:.3f}\t{full_cudagraph_time[b]:.3f}"
-              f"\t{piecewise_cudagraph_time[b]:.3f}")
+        print(
+            f"{b}\t{eager_time[b]:.3f}\t{full_cudagraph_time[b]:.3f}"
+            f"\t{piecewise_cudagraph_time[b]:.3f}"
+        )
 
 
 if __name__ == "__main__":

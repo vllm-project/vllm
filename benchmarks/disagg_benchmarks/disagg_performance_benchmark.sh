@@ -18,6 +18,8 @@ kill_gpu_processes() {
   # kill all processes on GPU.
   pgrep pt_main_thread | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
+  # vLLM now names the process with VLLM prefix after https://github.com/vllm-project/vllm/pull/21445
+  pgrep VLLM | xargs -r kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
 }
@@ -36,16 +38,12 @@ wait_for_server() {
 launch_chunked_prefill() {
   model="meta-llama/Meta-Llama-3.1-8B-Instruct"
   # disagg prefill
-  CUDA_VISIBLE_DEVICES=0 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
+  CUDA_VISIBLE_DEVICES=0 vllm serve $model \
     --port 8100 \
     --max-model-len 10000 \
     --enable-chunked-prefill \
     --gpu-memory-utilization 0.6 &
-  CUDA_VISIBLE_DEVICES=1 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
+  CUDA_VISIBLE_DEVICES=1 vllm serve $model \
     --port 8200 \
     --max-model-len 10000 \
     --enable-chunked-prefill \
@@ -58,25 +56,21 @@ launch_chunked_prefill() {
 
 
 launch_disagg_prefill() {
-  model="meta-llama/Meta-Llama-3.1-8B-Instruct" 
+  model="meta-llama/Meta-Llama-3.1-8B-Instruct"
   # disagg prefill
-  CUDA_VISIBLE_DEVICES=0 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
+  CUDA_VISIBLE_DEVICES=0 vllm serve $model \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
 
-  CUDA_VISIBLE_DEVICES=1 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
+  CUDA_VISIBLE_DEVICES=1 vllm serve $model \
     --port 8200 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
 
   wait_for_server 8100
   wait_for_server 8200
@@ -97,20 +91,20 @@ benchmark() {
   output_len=$2
   tag=$3
 
-  python3 ../benchmark_serving.py \
-          --backend vllm \
-          --model $model \
-          --dataset-name $dataset_name \
-          --dataset-path $dataset_path \
-          --sonnet-input-len $input_len \
-          --sonnet-output-len "$output_len" \
-          --sonnet-prefix-len $prefix_len \
-          --num-prompts $num_prompts \
-          --port 8000 \
-          --save-result \
-          --result-dir $results_folder \
-          --result-filename "$tag"-qps-"$qps".json \
-          --request-rate "$qps"
+  vllm bench serve \
+    --backend vllm \
+    --model $model \
+    --dataset-name $dataset_name \
+    --dataset-path $dataset_path \
+    --sonnet-input-len $input_len \
+    --sonnet-output-len "$output_len" \
+    --sonnet-prefix-len $prefix_len \
+    --num-prompts $num_prompts \
+    --port 8000 \
+    --save-result \
+    --result-dir $results_folder \
+    --result-filename "$tag"-qps-"$qps".json \
+    --request-rate "$qps"
 
   sleep 2
 }
