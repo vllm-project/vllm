@@ -357,8 +357,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
                 chunk_seq_lens = prefill_seq_lens[chunk_start:chunk_end]
                 chunk_size = int(prefill_seq_lens_cpu[chunk_start:chunk_end].sum())
-                token_start = query_start_loc_cpu[chunk_start].item()
-                token_end = query_start_loc_cpu[chunk_end].item()
+                token_start = query_start_loc_cpu[num_decode_reqs + chunk_start].item()
+                token_end = query_start_loc_cpu[num_decode_reqs + chunk_end].item()
                 tokens_slice = slice(token_start, token_end)
 
                 # Create chunk view of gpu tensor
