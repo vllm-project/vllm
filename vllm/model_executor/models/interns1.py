@@ -241,7 +241,7 @@ class InternS1ProfilingInfo(BaseProfilingInfo[InternS1ProcessingInfo]):
         for wr, hr in target_ratios:
             width, height = base_width * wr, base_height * hr
 
-            feat_size = self.rocessing_info.get_num_image_tokens(
+            feat_size = self.processing_info.get_num_image_tokens(
                 image_width=width,
                 image_height=height,
                 processor=processor.image_processor,
@@ -257,10 +257,10 @@ class InternS1ProfilingInfo(BaseProfilingInfo[InternS1ProcessingInfo]):
         return largest_feature_pinpoint
 
     def get_max_image_tokens(self) -> int:
-        processor = self.rocessing_info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.rocessing_info.get_num_image_tokens(
+        return self.processing_info.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
             processor=processor.image_processor,
@@ -274,7 +274,7 @@ class InternS1ProfilingInfo(BaseProfilingInfo[InternS1ProcessingInfo]):
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
 
-        processor = self.rocessing_info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
 
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = (seq_len - max_image_tokens) // processor.image_seq_length
