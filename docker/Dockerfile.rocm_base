@@ -120,6 +120,8 @@ FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl
 
+RUN ln -sf $(ls ${ROCM_PATH}/lib/libamdhip64.so) /usr/lib/libamdhip64.so
+
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
 ARG TRITON_REPO
