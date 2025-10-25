@@ -68,7 +68,7 @@ def split_prefill_chunks(
     """
     chunk_bounds = []
     i, n = 0, len(seq_lens_cpu)
-    assert np.all(seq_lens_cpu <= workspace_size)
+    assert torch.all(seq_lens_cpu <= workspace_size).item()
 
     while i < n:
         start, total = i, 0
