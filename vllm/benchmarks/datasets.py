@@ -75,9 +75,10 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[str]
+    prompt: str | list[str] | None
     prompt_len: int
     expected_output_len: int
+    prompt_token_ids: list[int] | None = None
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
@@ -385,7 +386,7 @@ def gen_prompt_decode_to_target_len(
     max_retry: int = 10,
     add_special_tokens: bool = False,
     rng: np.random.Generator | None = None,
-) -> tuple[str, list[int]]:
+) -> tuple[str, list[int], int]:
     """
     Ensure decoded-then-encoded prompt length matches the target token length.
 
@@ -438,9 +439,10 @@ def gen_prompt_decode_to_target_len(
 # -----------------------------------------------------------------------------
 
 
-class RandomDataset(BenchmarkDataset):
+class RandomTokenIDDataset(BenchmarkDataset):
     """
-    Synthetic text-only dataset for serving/throughput benchmarks.
+    Synthetic token-id-only dataset for serving/throughput benchmarks.
+    No need to use a tokenizer with this dataset.
 
     Strategy:
     - Sample input/output token lengths per request from integer-uniform ranges
@@ -448,7 +450,6 @@ class RandomDataset(BenchmarkDataset):
     - Prepend a fixed random prefix of length prefix_len.
     - Generate the remaining tokens as a reproducible sequence:
       (offset + index + arange(input_len)) % vocab_size.
-    - Decode then re-encode/truncate to ensure prompt token counts match.
     - Uses numpy.default_rng seeded with random_seed for reproducible sampling.
     """
 
@@ -467,14 +468,155 @@ class RandomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         request_id_prefix: str = "",
-        no_oversample: bool = False,
         prefix_len: int = DEFAULT_PREFIX_LEN,
         range_ratio: float = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
+        vocab_size: int = 1,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # validate total input tokens (prefix + sampled) is at least 1.
+        min_sampled_input = math.floor(input_len * (1.0 - float(range_ratio)))
+        min_total_input = int(prefix_len) + min_sampled_input
+        if min_total_input < 1:
+            raise ValueError(
+                f"--random-input-len is too small: with --random-range-ratio "
+                f"{range_ratio}, the minimum possible total input tokens (prefix "
+                f"+ sampled) is {min_total_input}. Increase --random-input-len and/or "
+                "--random-prefix-len, or decrease --random-range-ratio so that "
+                "prefix_len + floor(random_input_len * (1 - range_ratio)) >= 1."
+            )
+
+        input_lens, output_lens, offsets = self.get_sampling_params(
+            num_requests, range_ratio, input_len, output_len, vocab_size
+        )
+
+        # Generate prefix once
+        prefix_token_ids = self.get_prefix(vocab_size, prefix_len)
+
+        requests = []
+        for i in range(num_requests):
+            prompt_token_ids, total_input_len = self.generate_token_id_sequence(
+                prefix_token_ids=prefix_token_ids,
+                prefix_len=prefix_len,
+                vocab_size=vocab_size,
+                input_len=int(input_lens[i]),
+                offset=int(offsets[i]),
+                index=i,
+            )
+            requests.append(
+                SampleRequest(
+                    prompt=None,
+                    prompt_token_ids=prompt_token_ids,
+                    prompt_len=total_input_len,
+                    expected_output_len=int(output_lens[i]),
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+
+        return requests
+
+    def get_prefix(self, vocab_size: int, prefix_len: int) -> list[int]:
+        """
+        Get the prefix for the dataset.
+        """
+        return (
+            self._rng.integers(0, vocab_size, size=prefix_len).tolist()
+            if prefix_len > 0
+            else []
+        )
+
+    def get_sampling_params(
+        self,
+        num_requests: int,
+        range_ratio: float,
+        input_len: int,
+        output_len: int,
+        vocab_size: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get the sampling parameters for the dataset.
+        """
+        # Enforce range_ratio < 1
+        if not (0.0 <= range_ratio < 1.0):
+            raise ValueError("range_ratio must be in [0, 1).")
+        # Bounds use floor for low and ceil for high
+        input_low = math.floor(input_len * (1 - range_ratio))
+        input_high = math.ceil(input_len * (1 + range_ratio))
+        output_low = math.floor(output_len * (1 - range_ratio))
+        output_high = math.ceil(output_len * (1 + range_ratio))
+        # Ensure the lower bound for output length is at least 1 to
+        # prevent sampling 0 tokens.
+        output_low = max(output_low, 1)
+        output_high = max(output_high, 1)
+
+        if input_low > input_high:
+            raise ValueError(
+                f"Invalid input sampling interval: low={input_low} > high={input_high}"
+            )
+        if output_low > output_high:
+            raise ValueError(
+                "Invalid output sampling interval: "
+                f"low={output_low} > high={output_high}"
+            )
+
+        logger.info(
+            "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
+            input_low,
+            input_high,
+            output_low,
+            output_high,
+        )
+
+        input_lens = self._rng.integers(input_low, input_high + 1, size=num_requests)
+        output_lens = self._rng.integers(output_low, output_high + 1, size=num_requests)
+        offsets = self._rng.integers(0, vocab_size, size=num_requests)
+        return input_lens, output_lens, offsets
+
+    def generate_token_id_sequence(
+        self,
+        *,
+        prefix_token_ids: list[int],
+        prefix_len: int,
+        vocab_size: int,
+        input_len: int,
+        offset: int,
+        index: int,
+    ) -> tuple[list[int], int]:
+        """
+        Returns (token_sequence, total_input_len).
+        """
+        # Build the inner sequence by sampling sequentially from the vocab
+        inner_seq = ((offset + index + np.arange(input_len)) % vocab_size).tolist()
+        token_sequence = prefix_token_ids + inner_seq
+        total_input_len = prefix_len + int(input_len)
+        return token_sequence, total_input_len
+
+
+# -----------------------------------------------------------------------------
+# Random Dataset Implementation (Synthetic Data)
+# -----------------------------------------------------------------------------
+
+
+class RandomDataset(RandomTokenIDDataset):
+    """
+    Synthetic text-only dataset for serving/throughput benchmarks.
+    Addtionally to RandomTokenIDDataset, we perform a decode then re-encode/truncate
+    to ensure prompt token counts match.
+    """
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        prefix_len: int = RandomTokenIDDataset.DEFAULT_PREFIX_LEN,
+        range_ratio: float = RandomTokenIDDataset.DEFAULT_RANGE_RATIO,
+        input_len: int = RandomTokenIDDataset.DEFAULT_INPUT_LEN,
+        output_len: int = RandomTokenIDDataset.DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
         **kwargs,
     ) -> list[SampleRequest]:
@@ -490,17 +632,17 @@ class RandomDataset(BenchmarkDataset):
                 "the minimum possible total input tokens (prefix + sampled) is "
                 f"{min_total_input}. Increase --random-input-len and/or "
                 "--random-prefix-len, or decrease --random-range-ratio so that "
-                "prefix_len + floor(max(0, random_input_len - num_special)) "
-                "* (1 - range_ratio) >= 1."
+                "prefix_len + floor(max(0, random_input_len - num_special) "
+                "* (1 - range_ratio)) >= 1."
             )
 
+        vocab_size = tokenizer.vocab_size
         input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+            num_requests, range_ratio, input_len, output_len, vocab_size
         )
 
         # Generate prefix once
-        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
-        vocab_size = tokenizer.vocab_size
+        prefix_token_ids = self.get_prefix(vocab_size, prefix_len)
 
         requests = []
         token_mismatch_total = 0
@@ -552,67 +694,6 @@ class RandomDataset(BenchmarkDataset):
 
         return requests
 
-    def get_prefix(
-        self, tokenizer: PreTrainedTokenizerBase, prefix_len: int
-    ) -> list[int]:
-        """
-        Get the prefix for the dataset.
-        """
-        return (
-            self._rng.integers(0, tokenizer.vocab_size, size=prefix_len).tolist()
-            if prefix_len > 0
-            else []
-        )
-
-    def get_sampling_params(
-        self,
-        num_requests: int,
-        range_ratio: float,
-        input_len: int,
-        output_len: int,
-        tokenizer: PreTrainedTokenizerBase,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Get the sampling parameters for the dataset.
-        """
-        # Enforce range_ratio < 1
-        if not (0.0 <= range_ratio < 1.0):
-            raise ValueError("range_ratio must be in [0, 1).")
-        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
-        real_input_len = max(0, int(input_len) - num_special_tokens)
-        # Bounds use floor for low and ceil for high
-        input_low = math.floor(real_input_len * (1 - range_ratio))
-        input_high = math.ceil(real_input_len * (1 + range_ratio))
-        output_low = math.floor(output_len * (1 - range_ratio))
-        output_high = math.ceil(output_len * (1 + range_ratio))
-        # Ensure the lower bound for output length is at least 1 to
-        # prevent sampling 0 tokens.
-        output_low = max(output_low, 1)
-        output_high = max(output_high, 1)
-
-        if input_low > input_high:
-            raise ValueError(
-                f"Invalid input sampling interval: low={input_low} > high={input_high}"
-            )
-        if output_low > output_high:
-            raise ValueError(
-                "Invalid output sampling interval: "
-                f"low={output_low} > high={output_high}"
-            )
-
-        logger.info(
-            "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
-            input_low,
-            input_high,
-            output_low,
-            output_high,
-        )
-
-        input_lens = self._rng.integers(input_low, input_high + 1, size=num_requests)
-        output_lens = self._rng.integers(output_low, output_high + 1, size=num_requests)
-        offsets = self._rng.integers(0, tokenizer.vocab_size, size=num_requests)
-        return input_lens, output_lens, offsets
-
     def generate_token_sequence(
         self,
         *,
@@ -656,7 +737,7 @@ class RandomDataset(BenchmarkDataset):
 
 
 # -----------------------------------------------------------------------------
-# Random Dataset Implementation (Synthetic Data)
+# Random Dataset Implementation (Reranking)
 # -----------------------------------------------------------------------------
 
 
@@ -684,9 +765,10 @@ class RandomDatasetForReranking(RandomDataset):
         n_sep_tokens = int(is_reranker)
 
         query_len_param = (input_len // 2) - n_sep_tokens if is_reranker else input_len
+        vocab_size = tokenizer.vocab_size
 
         query_lens, _, query_offsets = self.get_sampling_params(
-            1, range_ratio, query_len_param, 0, tokenizer
+            1, range_ratio, query_len_param, 0, vocab_size
         )
 
         query_len = int(query_lens[0])
@@ -700,9 +782,8 @@ class RandomDatasetForReranking(RandomDataset):
             doc_len_param = input_len - query_len - n_sep_tokens
 
         doc_lens, _, doc_offsets = self.get_sampling_params(
-            num_requests, range_ratio, doc_len_param, 0, tokenizer
+            num_requests, range_ratio, doc_len_param, 0, vocab_size
         )
-        vocab_size = tokenizer.vocab_size
 
         query_prompt, query_input_len, token_mismatch_total = (
             self.generate_token_sequence(
@@ -1054,9 +1135,11 @@ class RandomMultiModalDataset(RandomDataset):
                 "Video sampling not implemented; set its probability to 0."
             )
 
+        vocab_size = tokenizer.vocab_size
+
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+            num_requests, range_ratio, input_len, output_len, vocab_size
         )
 
         (
@@ -1072,8 +1155,8 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         # Generate prefix once
-        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
-        vocab_size = tokenizer.vocab_size
+        prefix_token_ids = self.get_prefix(vocab_size, prefix_len)
+
         # Add synthetic multimodal items to each request
         mm_requests = []
         token_mismatch_total = 0

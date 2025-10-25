@@ -23,6 +23,7 @@ from vllm.benchmarks.datasets import (
     InstructCoderDataset,
     PrefixRepetitionRandomDataset,
     RandomDataset,
+    RandomTokenIDDataset,
     SampleRequest,
     ShareGPTDataset,
     SonnetDataset,
@@ -340,6 +341,10 @@ def get_requests(args, tokenizer):
         "output_len": args.output_len,
     }
 
+    if args.dataset_name == "random_token_id":
+        sample_kwargs["range_ratio"] = args.random_range_ratio
+        sample_kwargs["prefix_len"] = args.prefix_len
+        dataset_cls = RandomTokenIDDataset
     if args.dataset_path is None or args.dataset_name == "random":
         sample_kwargs["range_ratio"] = args.random_range_ratio
         sample_kwargs["prefix_len"] = args.prefix_len
@@ -691,9 +696,14 @@ def main(args: argparse.Namespace):
         args.seed = 0
     random.seed(args.seed)
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code
+    tokenizer = (
+        AutoTokenizer.from_pretrained(
+            args.tokenizer, trust_remote_code=args.trust_remote_code
+        )
+        if args.skip_tokenizer_init
+        else None
     )
+
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None for request in requests)
     request_outputs: list[RequestOutput] | None = None
