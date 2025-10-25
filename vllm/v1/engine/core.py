@@ -857,8 +857,10 @@ class EngineCoreProc(EngineCore):
                 assert engine_core_guard_ids is not None
                 assert addresses.fault_report_addr is not None
                 assert addresses.client_cmd_addr is not None
-                assert addresses.engine_core_cmd_addr is not None
-
+                assert addresses.engine_core_cmd_addrs is not None
+                engine_core_cmd_addr = addresses.engine_core_cmd_addrs[
+                    vllm_config.parallel_config.data_parallel_rank
+                ]
                 self.engine_core_guard = EngineCoreGuard(
                     engine_index=self.engine_index,
                     fault_signal_q=self.fault_signal_q,
@@ -867,14 +869,14 @@ class EngineCoreProc(EngineCore):
                     engine_input_q=self.input_queue,
                     fault_report_addr=addresses.fault_report_addr,
                     client_cmd_addr=addresses.client_cmd_addr,
-                    worker_cmd_addr=addresses.engine_core_cmd_addr,
+                    worker_cmd_addr=engine_core_cmd_addr,
                     guard_identity=engine_core_guard_ids[self.engine_index],
                     tp_size=vllm_config.parallel_config.tensor_parallel_size,
                     pp_size=vllm_config.parallel_config.pipeline_parallel_size,
                 )
                 self.engine_core_guard.start()
                 vllm_config.fault_tolerance_config.engine_core_cmd_addr = (
-                    addresses.engine_core_cmd_addr
+                    engine_core_cmd_addr
                 )
                 # Do not shut down the engine immediately upon failure.
                 executor_fail_callback = lambda: self.fault_signal_q.put(
