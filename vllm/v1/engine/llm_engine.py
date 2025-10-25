@@ -318,8 +318,8 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
-    def start_profile(self):
-        self.engine_core.profile(True)
+    def start_profile(self, profile_options: dict[str, Any] | None = None):
+        self.engine_core.profile(True, profile_options)
 
     def stop_profile(self):
         self.engine_core.profile(False)

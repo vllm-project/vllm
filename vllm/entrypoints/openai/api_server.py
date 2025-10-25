@@ -1201,16 +1201,32 @@ async def invocations(raw_request: Request):
     return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
-if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning(
-        "Torch Profiler is enabled in the API server. This should ONLY be "
-        "used for local development!"
-    )
+if envs.VLLM_TORCH_PROFILER_DIR or envs.USE_PROTON:
+    if envs.VLLM_TORCH_PROFILER_DIR:
+        logger.warning(
+            "Torch Profiler is enabled in the API server. This should ONLY be "
+            "used for local development!"
+        )
+    if envs.USE_PROTON:
+        logger.warning(
+            "Proton profiler is enabled in the API server. This should ONLY be "
+            "used for local development!"
+        )
 
     @router.post("/start_profile")
     async def start_profile(raw_request: Request):
         logger.info("Starting profiler...")
-        await engine_client(raw_request).start_profile()
+        profile_options = None
+        try:
+            payload = await raw_request.json()
+        except json.JSONDecodeError:
+            payload = None
+        except Exception:
+            payload = None
+        else:
+            if isinstance(payload, dict):
+                profile_options = payload
+        await engine_client(raw_request).start_profile(profile_options=profile_options)
         logger.info("Profiler started.")
         return Response(status_code=200)
 

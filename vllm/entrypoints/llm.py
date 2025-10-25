@@ -1484,8 +1484,8 @@ class LLM:
                 lora_request,
             )
 
-    def start_profile(self) -> None:
-        self.llm_engine.start_profile()
+    def start_profile(self, profile_options: dict[str, Any] | None = None) -> None:
+        self.llm_engine.start_profile(profile_options=profile_options)
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()

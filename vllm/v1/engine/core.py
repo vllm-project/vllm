@@ -393,8 +393,8 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+    def profile(self, is_start: bool = True, profile_options: dict[str, Any] | None = None):
+        self.model_executor.profile(is_start, profile_options=profile_options)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
