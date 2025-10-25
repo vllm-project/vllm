@@ -9,15 +9,10 @@ with the standard CUDA-based implementation to ensure numerical accuracy.
 
 import pytest
 import torch
+from utils import skip_unsupported
 
 from vllm.model_executor.layers.batch_invariant import rms_norm as triton_rms_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.platforms import current_platform
-
-skip_unsupported = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="Requires CUDA and >= Hopper (SM90)",
-)
 
 
 @skip_unsupported

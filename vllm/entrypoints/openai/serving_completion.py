@@ -206,6 +206,19 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    # TODO: optimize the performance here
+                    # in batch invariance mode, force routing to DP rank 0.
+                    data_parallel_rank = None
+                    from vllm.model_executor.layers.batch_invariant import (
+                        vllm_is_batch_invariant,
+                    )
+
+                    if vllm_is_batch_invariant():
+                        config = self.engine_client.vllm_config
+                        dp_size = config.parallel_config.data_parallel_size
+                        if dp_size and dp_size > 1:
+                            data_parallel_rank = 0
+
                     engine_request, tokenization_kwargs = await self._process_inputs(
                         request_id_item,
                         engine_prompt,
@@ -213,6 +226,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                     generator = self.engine_client.generate(

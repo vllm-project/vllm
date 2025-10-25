@@ -8,6 +8,9 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
@@ -127,19 +130,43 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
-        o = trtllm_batch_decode_with_kv_cache_mla(
-            query=q,
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=attn_metadata.decode.block_table,
-            seq_lens=attn_metadata.decode.seq_lens,
-            max_seq_len=attn_metadata.max_seq_len,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
-        )
+        if vllm_is_batch_invariant():
+            # execute per-request to eliminate batch-shape-dependent kernel paths.
+            num = q.shape[0]
+            outs = []
+            for i in range(num):
+                qi = q[i : i + 1]
+                bt_i = attn_metadata.decode.block_table[i : i + 1]
+                sl_i = attn_metadata.decode.seq_lens[i : i + 1]
+                oi = trtllm_batch_decode_with_kv_cache_mla(
+                    query=qi,
+                    kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+                    workspace_buffer=self._workspace_buffer,
+                    qk_nope_head_dim=self.qk_nope_head_dim,
+                    kv_lora_rank=self.kv_lora_rank,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    block_tables=bt_i,
+                    seq_lens=sl_i,
+                    max_seq_len=attn_metadata.max_seq_len,
+                    bmm1_scale=self.bmm1_scale,
+                    bmm2_scale=self.bmm2_scale,
+                )
+                outs.append(oi)
+            o = torch.cat(outs, dim=0)
+        else:
+            o = trtllm_batch_decode_with_kv_cache_mla(
+                query=q,
+                kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+                workspace_buffer=self._workspace_buffer,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                block_tables=attn_metadata.decode.block_table,
+                seq_lens=attn_metadata.decode.seq_lens,
+                max_seq_len=attn_metadata.max_seq_len,
+                bmm1_scale=self.bmm1_scale,
+                bmm2_scale=self.bmm2_scale,
+            )
 
         # Flatten the output for consistent shape
         o = o.view(-1, o.shape[-2], o.shape[-1])
