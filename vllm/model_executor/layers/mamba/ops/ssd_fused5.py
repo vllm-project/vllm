@@ -950,100 +950,102 @@ def _fused5_ssd(
     )
 
     nheads_ngroups_ratio = nheads // ngroups
-    _fused5_ssd_kernel[grid](
-        # Synchronization
-        # bmm_wait_ptr, bmm_wait_stride_chunk,
-        sync_atomic[
-            states_ready_size + grid_atomic_size : states_ready_size
-            + grid_atomic_size
-            + 1
-        ],
-        32,
-        # grid_atomic, use_atomic_pid
-        # sync_atomic, sync_atomic.stride(0), sync_atomic.stride(1), sync_atomic.stride(2), sync_atomic.stride(3),
-        sync_atomic[states_ready_size : states_ready_size + 1],
-        use_atomic_pid,
-        sync_atomic,
-        hdim * dstate,
-        dstate,
-        1,
-        # Matrix dimensions
-        hdim,
-        dstate,
-        chunk_size,
-        seqlen,
-        nheads_ngroups_ratio,
-        nheads,
-        nchunks,
-        ngroups,
-        # Tensor ptrs
-        x,
-        B,
-        dt_out,
-        dA_cumsum,
-        seq_idx,
-        states_G,
-        initial_states,
-        cu_chunk_seqlens,
-        CB,
-        out,
-        out_x,
-        C,
-        D,
-        A,
-        dt_bias,
-        dt,
-        # Tensor strides
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),  # stride_x_seqlen, stride_x_head, stride_x_hdim,
-        B.stride(0),
-        B.stride(1),
-        B.stride(-1),  # stride_b_seqlen, stride_b_head, stride_b_dstate,
-        dt_out.stride(1),
-        dt_out.stride(0),
-        dt_out.stride(2),  # stride_dt_chunk, stride_dt_head, stride_dt_csize,
-        dA_cumsum.stride(1),
-        dA_cumsum.stride(0),
-        dA_cumsum.stride(
-            2
-        ),  # stride_dA_cs_chunk, stride_dA_cs_head, stride_dA_cs_csize,
-        seq_idx.stride(0),  # stride_seq_idx_chunk
-        states_G.stride(0),
-        states_G.stride(1),
-        states_G.stride(2),
-        states_G.stride(3),
-        *initial_states_strides,
-        CB.stride(0),
-        CB.stride(1),
-        CB.stride(2),
-        CB.stride(3),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        C.stride(0),
-        C.stride(1),
-        C.stride(2),
-        D.stride(0) if D is not None else 0,
-        dt.stride(0),
-        dt.stride(1),
-        A.stride(0),
-        dt_bias.stride(0) if dt_bias is not None else 0,
-        # dt limits
-        dt_limit[0],
-        dt_limit[1],
-        # Meta-parameters
-        IS_CAUSAL=True,
-        HAS_D=D is not None,
-        D_HAS_HDIM=D.dim() == 2 if D is not None else True,
-        BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
-        BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
-        DT_SOFTPLUS=dt_softplus,
-        HAS_DT_BIAS=dt_bias is not None,
-        HAS_INITSTATES=initial_states is not None,
-        CB_SCALE_FP32=cb_scale_fp32,
-        CS_ACC_FP32=cs_acc_fp32,
-        CB_COMP_FP32=cb_comp_fp32,
-    )
+
+    with torch.cuda.device(x.device.index):
+        _fused5_ssd_kernel[grid](
+            # Synchronization
+            # bmm_wait_ptr, bmm_wait_stride_chunk,
+            sync_atomic[
+                states_ready_size + grid_atomic_size : states_ready_size
+                + grid_atomic_size
+                + 1
+            ],
+            32,
+            # grid_atomic, use_atomic_pid
+            # sync_atomic, sync_atomic.stride(0), sync_atomic.stride(1), sync_atomic.stride(2), sync_atomic.stride(3),
+            sync_atomic[states_ready_size : states_ready_size + 1],
+            use_atomic_pid,
+            sync_atomic,
+            hdim * dstate,
+            dstate,
+            1,
+            # Matrix dimensions
+            hdim,
+            dstate,
+            chunk_size,
+            seqlen,
+            nheads_ngroups_ratio,
+            nheads,
+            nchunks,
+            ngroups,
+            # Tensor ptrs
+            x,
+            B,
+            dt_out,
+            dA_cumsum,
+            seq_idx,
+            states_G,
+            initial_states,
+            cu_chunk_seqlens,
+            CB,
+            out,
+            out_x,
+            C,
+            D,
+            A,
+            dt_bias,
+            dt,
+            # Tensor strides
+            x.stride(0),
+            x.stride(1),
+            x.stride(2),  # stride_x_seqlen, stride_x_head, stride_x_hdim,
+            B.stride(0),
+            B.stride(1),
+            B.stride(-1),  # stride_b_seqlen, stride_b_head, stride_b_dstate,
+            dt_out.stride(1),
+            dt_out.stride(0),
+            dt_out.stride(2),  # stride_dt_chunk, stride_dt_head, stride_dt_csize,
+            dA_cumsum.stride(1),
+            dA_cumsum.stride(0),
+            dA_cumsum.stride(
+                2
+            ),  # stride_dA_cs_chunk, stride_dA_cs_head, stride_dA_cs_csize,
+            seq_idx.stride(0),  # stride_seq_idx_chunk
+            states_G.stride(0),
+            states_G.stride(1),
+            states_G.stride(2),
+            states_G.stride(3),
+            *initial_states_strides,
+            CB.stride(0),
+            CB.stride(1),
+            CB.stride(2),
+            CB.stride(3),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            C.stride(0),
+            C.stride(1),
+            C.stride(2),
+            D.stride(0) if D is not None else 0,
+            dt.stride(0),
+            dt.stride(1),
+            A.stride(0),
+            dt_bias.stride(0) if dt_bias is not None else 0,
+            # dt limits
+            dt_limit[0],
+            dt_limit[1],
+            # Meta-parameters
+            IS_CAUSAL=True,
+            HAS_D=D is not None,
+            D_HAS_HDIM=D.dim() == 2 if D is not None else True,
+            BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
+            BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
+            DT_SOFTPLUS=dt_softplus,
+            HAS_DT_BIAS=dt_bias is not None,
+            HAS_INITSTATES=initial_states is not None,
+            CB_SCALE_FP32=cb_scale_fp32,
+            CS_ACC_FP32=cs_acc_fp32,
+            CB_COMP_FP32=cb_comp_fp32,
+        )
 
     return out_x, states_G, dA_cumsum, dt_out
