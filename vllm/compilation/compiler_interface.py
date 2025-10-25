@@ -12,6 +12,7 @@ from unittest.mock import patch
 import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
+from torch._inductor.standalone_compile import AOTCompiledArtifact
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
@@ -200,21 +201,47 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if compiler_config is not None:
             current_config.update(compiler_config)
         set_inductor_config(current_config, runtime_shape)
-        set_functorch_config()
 
         if isinstance(runtime_shape, int):
             dynamic_shapes = "from_example_inputs"
         else:
             dynamic_shapes = "from_tracing_context"
 
+        # Check if standalone_compile supports 'aot' parameter
+        # This was added in PyTorch 2.10+
+        import inspect
+
         from torch._inductor import standalone_compile
 
-        compiled_graph = standalone_compile(
-            graph,
-            example_inputs,
-            dynamic_shapes=dynamic_shapes,
-            options={"config_patches": current_config},
-        )
+        standalone_compile_sig = inspect.signature(standalone_compile)
+        supports_aot = "aot" in standalone_compile_sig.parameters
+
+        if not supports_aot and envs.VLLM_USE_BACKEND_WITH_INDUCTOR_CACHE:
+            logger.error(
+                "CRITICAL: VLLM_USE_BACKEND_WITH_INDUCTOR_CACHE is enabled but "
+                "standalone_compile does not support 'aot' parameter. "
+                "This requires PyTorch 2.10.0+. Falling back to non-AOT mode."
+            )
+
+        compile_kwargs = {
+            "dynamic_shapes": dynamic_shapes,
+            "options": {
+                "config_patches": current_config,
+            },
+        }
+
+        # Only add 'aot' parameter if supported
+        if supports_aot:
+            compile_kwargs["aot"] = envs.VLLM_USE_BACKEND_WITH_INDUCTOR_CACHE
+
+        compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
+
+        if supports_aot:
+            assert isinstance(compiled_graph, AOTCompiledArtifact)
+            # just return the compiled graph and a key
+            # since we can serialize the bytes using to_bytes
+            # and reload it using the key when reading
+            return compiled_graph, None
 
         # Save the compiled artifact to disk in the specified path
         assert key is not None
@@ -309,7 +336,6 @@ class InductorAdaptor(CompilerInterface):
         current_config["fx_graph_remote_cache"] = False
 
         set_inductor_config(current_config, runtime_shape)
-        set_functorch_config()
 
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
@@ -597,10 +623,6 @@ def set_inductor_config(config, runtime_shape):
         config["coordinate_descent_tuning"] = (
             envs.VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING
         )
-
-
-def set_functorch_config():
-    torch._functorch.config.bundled_autograd_cache = False
 
 
 class EagerAdaptor(CompilerInterface):
