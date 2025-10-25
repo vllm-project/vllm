@@ -8,6 +8,9 @@ import numpy as np
 from fastapi import Request
 from typing_extensions import override
 
+import jinja2
+
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -42,27 +45,64 @@ class ClassificationMixin(OpenAIServing):
         and prepare model-specific inputs.
         """
         ctx = cast(ClassificationServeContext, ctx)
-        if isinstance(ctx.request.input, str) and not ctx.request.input:
-            return self.create_error_response(
-                "Input cannot be empty for classification",
-                status_code=HTTPStatus.BAD_REQUEST,
-            )
-
-        if isinstance(ctx.request.input, list) and len(ctx.request.input) == 0:
-            return None
-
         try:
             ctx.tokenizer = await self.engine_client.get_tokenizer()
 
-            renderer = self._get_renderer(ctx.tokenizer)
-            ctx.engine_prompts = await renderer.render_prompt(
-                prompt_or_prompts=ctx.request.input,
-                config=self._build_render_config(ctx.request),
-            )
+            messages = getattr(ctx.request, "messages", None)
+            if messages:
+                error_check_ret = self._validate_chat_template(
+                    request_chat_template=getattr(ctx.request, "chat_template", None),
+                    chat_template_kwargs=getattr(
+                        ctx.request, "chat_template_kwargs", None
+                    ),
+                    trust_request_chat_template=self.trust_request_chat_template,
+                )
+                if error_check_ret is not None:
+                    return error_check_ret
+
+                (
+                    _,
+                    _,
+                    engine_prompts,
+                ) = await self._preprocess_chat(
+                    ctx.request,
+                    ctx.tokenizer,
+                    messages,
+                    chat_template=(
+                        getattr(ctx.request, "chat_template", None)
+                        or self.chat_template
+                    ),
+                    chat_template_content_format=self.chat_template_content_format,
+                    add_generation_prompt=False,
+                    continue_final_message=False,
+                    add_special_tokens=getattr(
+                        ctx.request, "add_special_tokens", False
+                    ),
+                )
+                ctx.engine_prompts = engine_prompts
+            else:
+                if ctx.request.input is None or (
+                    isinstance(ctx.request.input, str) and not ctx.request.input
+                ):
+                    return self.create_error_response(
+                        "Input or messages must be provided",
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                if (
+                    isinstance(ctx.request.input, list)
+                    and len(ctx.request.input) == 0
+                ):
+                    return None
+
+                renderer = self._get_renderer(ctx.tokenizer)
+                ctx.engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=ctx.request.input,
+                    config=self._build_render_config(ctx.request),
+                )
 
             return None
 
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
@@ -130,6 +170,9 @@ class ServingClassification(ClassificationMixin):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
+        chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
@@ -138,6 +181,10 @@ class ServingClassification(ClassificationMixin):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
+
+        self.chat_template = chat_template
+        self.chat_template_content_format = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
 
     async def create_classify(
         self,
