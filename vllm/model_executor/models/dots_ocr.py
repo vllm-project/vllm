@@ -52,8 +52,8 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import get_vit_attn_backend
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict
+from vllm.multimodal.profiling import BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -95,34 +95,6 @@ class DotsOCRImageEmbeddingInputs(TensorSchema):
 DotsOCRImageInputs: TypeAlias = DotsOCRImagePixelInputs | DotsOCRImageEmbeddingInputs
 
 
-class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
-        return IMAGE_TOKEN * num_images
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
-        target_width, target_height = self.info.get_image_size_with_most_features(  # noqa: E501
-        )
-
-        image_overrides = mm_options.get("image") if mm_options else None
-
-        return {
-            "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
-            ),
-        }
-
-
 class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self) -> DotsOCRConfig:
         config = self.ctx.get_hf_config()
@@ -133,17 +105,6 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
             config.vision_config = DotsVisionConfig(**config.vision_config)
 
         return config
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        max_image_tokens = self.get_max_image_tokens()
-        return {"image": max_image_tokens}
 
     def get_hf_processor(
         self,
@@ -157,6 +118,48 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
         processor.image_token = IMAGE_TOKEN
         processor.video_token = "<|video_pad|>"
         return processor
+
+
+class DotsOCRProfilingInfo(BaseProfilingInfo[DotsOCRProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_image_tokens = self.processing_info.get_max_image_tokens()
+        return {"image": max_image_tokens}
+
+
+class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+        return IMAGE_TOKEN * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = (
+            self.processing_info.get_image_size_with_most_features()
+        )
+
+        image_overrides = mm_options.get("image") if mm_options else None
+
+        return {
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=image_overrides,
+            ),
+        }
 
 
 def rotate_half(x):
@@ -709,13 +712,13 @@ class DotsVisionTransformer(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Qwen2VLMultiModalProcessor,
-    info=DotsOCRProcessingInfo,
-    dummy_inputs=DotsOCRDummyInputsBuilder,
-)
 class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     merge_by_field_config = True
+
+    processor_info = DotsOCRProcessingInfo
+    profiling_info = DotsOCRProfilingInfo
+    dummy_builder = DotsOCRDummyInputsBuilder
+    processor = Qwen2VLMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={

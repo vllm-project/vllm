@@ -33,7 +33,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
@@ -1284,6 +1283,11 @@ class KeyeMultiModalProcessor(
 class BaseKeyeModule(nn.Module):
     merge_by_field_config = True
 
+    processor_info = KeyeProcessingInfo
+    profiling_info = KeyeProfilingInfo
+    dummy_builder = KeyeDummyInputsBuilder
+    processor = KeyeMultiModalProcessor
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1550,11 +1554,6 @@ class BaseKeyeModule(nn.Module):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    KeyeMultiModalProcessor,
-    info=KeyeProcessingInfo,
-    dummy_inputs=KeyeDummyInputsBuilder,
-)
 class KeyeForConditionalGeneration(
     BaseKeyeModule, SupportsMultiModal, SupportsLoRA, SupportsPP
 ):

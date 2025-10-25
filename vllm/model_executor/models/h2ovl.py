@@ -15,7 +15,6 @@ from PIL import Image
 from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems, MultiModalUUIDDict
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -39,6 +38,7 @@ from .internvl import (
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
     BaseInternVLProcessor,
+    BaseInternVLProfilingInfo,
     InternVLChatModel,
     build_transform,
     find_closest_aspect_ratio,
@@ -437,14 +437,16 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
+class H2OVLMultiModalProcessor(
+    BaseInternVLMultiModalProcessor[H2OVLProcessingInfo, BaseInternVLProfilingInfo]
+):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         out_mm_data = out_mm_kwargs.get_data()
         if "image_num_patches" in out_mm_data:
@@ -520,12 +522,12 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    H2OVLMultiModalProcessor,
-    info=H2OVLProcessingInfo,
-    dummy_inputs=BaseInternVLDummyInputsBuilder,
-)
 class H2OVLChatModel(InternVLChatModel):
+    processor_info = H2OVLProcessingInfo
+    profiling_info = BaseInternVLProfilingInfo
+    dummy_builder = BaseInternVLDummyInputsBuilder
+    processor = H2OVLMultiModalProcessor
+
     def _init_vision_model(
         self,
         config: PretrainedConfig,
