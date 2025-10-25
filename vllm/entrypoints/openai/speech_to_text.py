@@ -193,7 +193,8 @@ class OpenAISpeechToText(OpenAIServing):
                 # It will not display special tokens like <|startoftranscript|>
                 request.prompt,
                 params=sampling_params,
-                lora_request=lora_request)
+                lora_request=lora_request,
+            )
 
             list_result_generator = [
                 self.engine_client.generate(
@@ -201,7 +202,8 @@ class OpenAISpeechToText(OpenAIServing):
                     sampling_params,
                     request_id,
                     lora_request=lora_request,
-                ) for prompt in prompts
+                )
+                for prompt in prompts
             ]
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error

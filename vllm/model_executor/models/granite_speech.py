@@ -26,7 +26,7 @@
 
 import math
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal, Optional, Union, cast
+from typing import Annotated, Literal, cast
 
 import numpy as np
 import torch
@@ -34,11 +34,10 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
-from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
-                         VllmConfig)
+from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -65,10 +64,14 @@ from vllm.transformers_utils.tokenizer import cached_get_tokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .blip2 import Blip2QFormerModel
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsPP, SupportsTranscription)
-from .utils import (AutoWeightsLoader, embed_multimodal,
-                    init_vllm_registered_model, maybe_prefix)
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsTranscription,
+)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 # NOTE lang support is based on what is written here:
 # https://huggingface.co/ibm-granite/granite-speech-3.3-2b
@@ -835,23 +838,27 @@ class GraniteSpeechForConditionalGeneration(
 
     ### Support for speech-to-text Transcription
     @classmethod
-    def get_generation_prompt(cls, audio: np.ndarray,
-                              model_config: ModelConfig,
-                              stt_config: SpeechToTextConfig,
-                              language: Optional[str],
-                              task_type: Literal["transcribe", "translate"],
-                              request_prompt: str,
-                              to_language: Optional[str]) -> PromptType:
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        model_config: ModelConfig,
+        stt_config: SpeechToTextConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
+    ) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
         # Audio placeholders don't use an index, so value doesn't matter
         audio_tok = cls.get_placeholder_str("audio", 0)
 
         if task_type == "translate":
-            full_lang_name_to = cls.supported_languages.get(
-                to_language, to_language)
+            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
             user_prompt = f"{audio_tok}translate the speech to {full_lang_name_to}"  # noqa: E501
         elif task_type == "transcribe":
-            user_prompt = f"{audio_tok}can you transcribe the speech into a written format?"  # noqa: E501
+            user_prompt = (
+                f"{audio_tok}can you transcribe the speech into a written format?"  # noqa: E501
+            )
         else:
             raise ValueError(f"Unsupported task type {task_type}")
 
@@ -866,17 +873,18 @@ class GraniteSpeechForConditionalGeneration(
         prompt_token_ids = tokenizer.encode(prompt)
         prompt = {
             "prompt_token_ids": prompt_token_ids,
-            "multi_modal_data": {
-                "audio": audio
-            }
+            "multi_modal_data": {"audio": audio},
         }
         return cast(PromptType, prompt)
 
     # Adapted from https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/models/granite_speech/feature_extraction_granite_speech.py#L122 # noqa: E501
     @classmethod
-    def get_num_audio_tokens(cls, audio_duration_s: float,
-                             stt_config: SpeechToTextConfig,
-                             model_config: ModelConfig) -> Optional[int]:
+    def get_num_audio_tokens(
+        cls,
+        audio_duration_s: float,
+        stt_config: SpeechToTextConfig,
+        model_config: ModelConfig,
+    ) -> int | None:
         """Get the number of audio tokens for an audio duration in sec."""
         processor = cached_get_processor(model_config.model)
         hop_length = processor.audio_processor.melspec_kwargs["hop_length"]
@@ -895,8 +903,9 @@ class GraniteSpeechForConditionalGeneration(
         return nblocks * effective_window_size
 
     @classmethod
-    def get_speech_to_text_config(cls, model_config: ModelConfig,
-                                  task_type: str) -> SpeechToTextConfig:
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
         """Get the stt config for this model."""
         # Default settings are reasonable for this model and we don't currently
         # expose this information in the model configs, but this may change in

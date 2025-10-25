@@ -90,8 +90,9 @@ async def test_basic_audio_with_lora(mary_had_lamb):
             file=mary_had_lamb,
             extra_body=dict(language="en", to_language="es"),
             response_format="text",
-            temperature=0.0)
-    out = json.loads(translation)['text'].strip().lower()
+            temperature=0.0,
+        )
+    out = json.loads(translation)["text"].strip().lower()
     assert "mary tenía un pequeño cordero" in out
 
 
