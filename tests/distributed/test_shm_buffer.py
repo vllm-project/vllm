@@ -4,6 +4,8 @@
 import traceback
 import unittest
 
+import numpy as np
+
 from vllm.distributed.device_communicators.shm_object_storage import (
     SingleWriterShmRingBuffer,
 )
