@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1.base import DUMMY_CONNECTOR_METADATA
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
     SharedStorageConnector,
 )
@@ -297,6 +298,8 @@ class TestSharedStorageConnector(SharedStorageConnector):
                         to_log.append(str(arg))
                     elif isinstance(arg, KVCacheBlocks):
                         to_log.append(f"num_blocks={[len(b) for b in arg.blocks]}")
+                    elif arg is DUMMY_CONNECTOR_METADATA:
+                        to_log.append("dummy_metadata")
 
                 # Log the event as a line to the file
                 try:

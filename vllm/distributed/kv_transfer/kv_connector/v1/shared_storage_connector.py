@@ -146,14 +146,11 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
+        if self._is_dummy_run():
+            return
+
         metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, SharedStorageConnectorMetadata)
-
-        if metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the connector metadata is None"
-            )
-            return
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
@@ -229,6 +226,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
+
+        if self._is_dummy_run():
+            return
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
