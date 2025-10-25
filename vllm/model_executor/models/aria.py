@@ -480,7 +480,7 @@ class AriaMultiModalProcessor(
         hf_config = self.processing_info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        num_image_tokens = self.profiling_info.get_num_image_tokens()
+        num_image_tokens = self.processing_info.get_num_image_tokens()
 
         return [
             PromptReplacement(
