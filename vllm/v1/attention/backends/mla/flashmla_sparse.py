@@ -329,7 +329,9 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             prefill_workspace_starts_cpu = torch.zeros(
                 num_prefill_reqs, dtype=torch.int32, pin_memory=True
             )
-            torch.cumsum(prefill_seq_lens[1:], out=prefill_workspace_starts_cpu)
+            prefill_workspace_starts_cpu[1:] = torch.cumsum(
+                prefill_seq_lens_cpu[:-1], dim=0
+            )
             # populated by non-blocking copy after prefill_workspace_starts_cpu is
             # updated by each chunk
             prefill_workspace_starts = torch.empty(
