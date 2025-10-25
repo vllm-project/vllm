@@ -139,7 +139,14 @@ class CoreEngineProcManager:
                 # processes affects NCCL init performance.
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (data_parallel and not current_platform.is_cuda_alike())
+                    if (
+                        data_parallel
+                        and (
+                            not current_platform.is_cuda_alike()
+                            or vllm_config.parallel_config.data_parallel_backend
+                            in ["ray", "external_launcher"]
+                        )
+                    )
                     else contextlib.nullcontext()
                 ):
                     proc.start()
