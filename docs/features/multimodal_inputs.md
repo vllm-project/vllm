@@ -1,9 +1,9 @@
 # Multimodal Inputs
 
-This page teaches you how to pass multi-modal inputs to [multi-modal models][supported-mm-models] in vLLM.
+This page teaches you how to pass multi-modal inputs to [multi-modal models](../models/supported_models.md#list-of-multimodal-language-models) in vLLM.
 
 !!! note
-    We are actively iterating on multi-modal support. See [this RFC](gh-issue:4194) for upcoming changes,
+    We are actively iterating on multi-modal support. See [this RFC](https://github.com/vllm-project/vllm/issues/4194) for upcoming changes,
     and [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) if you have any feedback or feature requests.
 
 !!! tip
@@ -129,7 +129,7 @@ You can pass a single image to the `'image'` field of the multi-modal dictionary
         print(generated_text)
     ```
 
-Full example: <gh-file:examples/offline_inference/vision_language.py>
+Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -162,7 +162,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
         print(generated_text)
     ```
 
-Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
+Full example: [examples/offline_inference/vision_language_multi_image.py](../../examples/offline_inference/vision_language_multi_image.py)
 
 If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
@@ -346,18 +346,24 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     !!! note
         'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
 
-Full example: <gh-file:examples/offline_inference/vision_language.py>
+Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
 
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
-Full example: <gh-file:examples/offline_inference/audio_language.py>
+Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
 
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+
+You must enable this feature via `enable_mm_embeds=True`.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
 
 ??? code
 
@@ -365,7 +371,7 @@ pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the cor
     from vllm import LLM
 
     # Inference with image embeddings as input
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf", enable_mm_embeds=True)
 
     # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
@@ -397,7 +403,11 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     image_embeds = torch.load(...)
 
     # Qwen2-VL
-    llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
+    llm = LLM(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        limit_mm_per_prompt={"image": 4},
+        enable_mm_embeds=True,
+    )
     mm_data = {
         "image": {
             "image_embeds": image_embeds,
@@ -407,7 +417,12 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     }
 
     # MiniCPM-V
-    llm = LLM("openbmb/MiniCPM-V-2_6", trust_remote_code=True, limit_mm_per_prompt={"image": 4})
+    llm = LLM(
+        "openbmb/MiniCPM-V-2_6",
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 4},
+        enable_mm_embeds=True,
+    )
     mm_data = {
         "image": {
             "image_embeds": image_embeds,
@@ -434,11 +449,11 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     A chat template is **required** to use Chat Completions API.
     For HF format models, the default chat template is defined inside `chat_template.json` or `tokenizer_config.json`.
 
-    If no default chat template is available, we will first look for a built-in fallback in <gh-file:vllm/transformers_utils/chat_templates/registry.py>.
+    If no default chat template is available, we will first look for a built-in fallback in [vllm/transformers_utils/chat_templates/registry.py](../../vllm/transformers_utils/chat_templates/registry.py).
     If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
 
-    For certain models, we provide alternative chat templates inside <gh-dir:examples>.
-    For example, VLM2Vec uses <gh-file:examples/template_vlm2vec_phi3v.jinja> which is different from the default one for Phi-3-Vision.
+    For certain models, we provide alternative chat templates inside [examples](../../examples).
+    For example, VLM2Vec uses [examples/template_vlm2vec_phi3v.jinja](../../examples/template_vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
 
 ### Image Inputs
 
@@ -524,7 +539,7 @@ Then, you can use the OpenAI client as follows:
     print("Chat completion output:", chat_response.choices[0].message.content)
     ```
 
-Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
+Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
 
 !!! tip
     Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via `--allowed-local-media-path` when launching the API server/engine,
@@ -595,7 +610,7 @@ Then, you can use the OpenAI client as follows:
     print("Chat completion output from image url:", result)
     ```
 
-Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
+Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
 
 !!! note
     By default, the timeout for fetching videos through HTTP URL is `30` seconds.
@@ -719,7 +734,7 @@ Alternatively, you can pass `audio_url`, which is the audio counterpart of `imag
     print("Chat completion output from audio url:", result)
     ```
 
-Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
+Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
 
 !!! note
     By default, the timeout for fetching audios through HTTP URL is `10` seconds.
@@ -732,7 +747,13 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape to the corresponding field of the multi-modal dictionary.
+pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+
+You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
 
 #### Image Embedding Inputs
 

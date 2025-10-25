@@ -10,23 +10,23 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-hopper_only = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
-    reason="Requires CUDA and Hopper (SM90)",
+skip_unsupported = pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    reason="Requires CUDA and >= Hopper (SM90)",
 )
 
 
 @pytest.fixture(autouse=True)
 def enable_batch_invariant_mode():
     """Automatically enable batch invariant kernel overrides for all tests."""
-    old_value = os.environ.get("VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT")
-    os.environ["VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT"] = "1"
+    old_value = os.environ.get("VLLM_BATCH_INVARIANT")
+    os.environ["VLLM_BATCH_INVARIANT"] = "1"
     yield
     # Restore original value after test
     if old_value is None:
-        os.environ.pop("VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT", None)
+        os.environ.pop("VLLM_BATCH_INVARIANT", None)
     else:
-        os.environ["VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT"] = old_value
+        os.environ["VLLM_BATCH_INVARIANT"] = old_value
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
@@ -59,19 +59,22 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     # Pick a random template
     base_prompt = random.choice(prompt_templates)
 
-    # Add some padding to vary the length if needed
-    if min_words > 50:
+    if max_words < min_words:
+        max_words = min_words
+    target_words = random.randint(min_words, max_words)
+
+    if target_words > 50:
         # For longer prompts, repeat context
         padding_text = (
             " This is an interesting topic that deserves more explanation. "
-            * (min_words // 50)
+            * (target_words // 50)
         )
         base_prompt = base_prompt + padding_text
 
     return base_prompt
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.timeout(1000)
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
     """
@@ -216,7 +219,7 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
@@ -231,10 +234,10 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
     from vllm.model_executor.layers.batch_invariant import (
-        vllm_kernel_override_batch_invariant,
+        vllm_is_batch_invariant,
     )
 
-    disable_custom_ar = vllm_kernel_override_batch_invariant()
+    disable_custom_ar = vllm_is_batch_invariant()
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -431,7 +434,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
         pytest.fail(msg)
 
 
-@hopper_only
+@skip_unsupported
 def test_simple_generation():
     """
     Simple test that runs the model with a basic prompt and prints the output.
@@ -477,7 +480,7 @@ def test_simple_generation():
             llm.shutdown()
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.forked
 def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
@@ -494,8 +497,8 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     # CRITICAL: Disable batch invariance for this test
-    old_value = os.environ.get("VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT")
-    os.environ["VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT"] = "0"
+    old_value = os.environ.get("VLLM_BATCH_INVARIANT")
+    os.environ["VLLM_BATCH_INVARIANT"] = "0"
 
     try:
         seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
@@ -516,8 +519,20 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
             dtype="bfloat16",
         )
 
-        # Use more realistic prompts for better token generation
-        prompts = [_random_prompt(10, 50) for i in range(32)]
+        # build ragged prompts to change shapes significantly across BS=1 vs BS=N
+        long_min = int(os.getenv("VLLM_MIN_PROMPT", "768"))
+        long_max = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
+        prompts: list[str] = []
+        options = [
+            (max(long_min, 1536), max(long_max, 3072)),  # very long
+            (max(1024, long_min), max(2048, long_max)),  # long
+            (256, 512),  # mid
+            (10, 20),  # short
+        ]
+
+        for _ in range(32):
+            lo, hi = random.choice(options)
+            prompts.append(_random_prompt(lo, hi))
 
         sp = SamplingParams(
             temperature=0.6,
@@ -687,12 +702,12 @@ def test_logprobs_WITHOUT_batch_invariance_should_FAIL(backend):
     finally:
         # Restore original value
         if old_value is None:
-            os.environ.pop("VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT", None)
+            os.environ.pop("VLLM_BATCH_INVARIANT", None)
         else:
-            os.environ["VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT"] = old_value
+            os.environ["VLLM_BATCH_INVARIANT"] = old_value
 
 
-@hopper_only
+@skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.forked
 def test_decode_logprobs_match_prefill_logprobs(backend):
@@ -718,10 +733,10 @@ def test_decode_logprobs_match_prefill_logprobs(backend):
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     from vllm.model_executor.layers.batch_invariant import (
-        vllm_kernel_override_batch_invariant,
+        vllm_is_batch_invariant,
     )
 
-    disable_custom_ar = vllm_kernel_override_batch_invariant()
+    disable_custom_ar = vllm_is_batch_invariant()
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
