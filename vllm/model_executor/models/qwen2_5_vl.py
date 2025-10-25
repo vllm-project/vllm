@@ -424,6 +424,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             from vllm.platforms import current_platform
+
             if current_platform.is_rocm():
                 q = q.contiguous()
                 k = k.contiguous()
