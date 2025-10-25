@@ -203,7 +203,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
-
+        print(f"vllm config is {get_current_vllm_config()}")
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
             f"get_mxfp4_backend(with_lora_support={moe.is_lora_enabled}) found"
             "no compatible MXFP4 MoE backend (FlashInfer/Marlin/Triton)."
@@ -1043,7 +1043,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self.intermediate_size,  # padded to multiple of 256
                 layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
-                None,
                 None,
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
