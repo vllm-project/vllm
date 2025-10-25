@@ -920,6 +920,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
+    
+    def to_streaming_params(self, ) -> StreamingParams:
+        stream_n = None
+        if self.stream_options is not None and \
+            self.stream_options.stream_n is not None:
+            stream_n = self.stream_options.stream_n
+        return StreamingParams(stream_n=stream_n)
 
     @model_validator(mode="before")
     @classmethod
