@@ -628,7 +628,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_counts["audio"] -= mm_counts["video"]
 
         _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
-            prompt_text=self.profiling_info.dummy_builder.get_dummy_text(mm_counts),
+            prompt_text=self.dummy_builder.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
