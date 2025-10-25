@@ -55,7 +55,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -1009,29 +1009,8 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
 
 
 class KeyeProcessingInfo(BaseProcessingInfo):
-    def get_max_image_size(self) -> int:
-        return 9999999  # _MAX_IMAGE_SIZE
-
-    def get_max_frame_per_video(self) -> int:
-        return 16  # _MAX_FRAMES_PER_VIDEO
-
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
-
-    def get_supported_mm_limits(
-        self,
-    ) -> Mapping[str, int | None]:
-        return {"image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {
-            "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len),
-        }
 
     def _get_vision_info(
         self,
@@ -1104,10 +1083,34 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         )
         return num_video_tokens
 
+
+_Proc = TypeVar("_Proc", bound=KeyeProcessingInfo)
+
+
+class KeyeProfilingInfo(BaseProfilingInfo[_Proc]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None, "video": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(seq_len),
+        }
+
+    def get_max_image_size(self) -> int:
+        return 9999999  # _MAX_IMAGE_SIZE
+
+    def get_max_frame_per_video(self) -> int:
+        return 16  # _MAX_FRAMES_PER_VIDEO
+
     def get_image_size_with_most_features(
         self,
     ) -> ImageSize:
-        max_image_size, _ = self._get_vision_info(
+        max_image_size, _ = self.processing_info._get_vision_info(
             image_width=self.get_max_image_size(),
             image_height=self.get_max_image_size(),
             image_processor=None,
@@ -1117,7 +1120,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
+        return self.processing_info.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
             image_processor=None,
@@ -1130,7 +1133,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
+            next_max_tokens = self.processing_info.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -1145,7 +1148,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def get_num_frames_with_most_features(self, seq_len: int) -> int:
-        mm_config = self.ctx.get_mm_config()
+        mm_config = self.processing_info.ctx.get_mm_config()
         max_images = mm_config.get_limit_per_prompt("image")
         max_videos = mm_config.get_limit_per_prompt("video")
 
@@ -1169,15 +1172,15 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         )
 
 
-_I = TypeVar("_I", bound=KeyeProcessingInfo)
+_Prof = TypeVar("_Prof", bound=KeyeProfilingInfo)
 
 
-class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_Proc, _Prof]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        hf_processor = self.info.get_hf_processor()
+        hf_processor = self.processing_info.get_hf_processor()
         image_token: str = hf_processor.image_token
         video_token: str = hf_processor.video_token
 
@@ -1192,8 +1195,12 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(seq_len)
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
+        target_num_frames = self.profiling_info.get_num_frames_with_most_features(
+            seq_len
+        )
 
         image_overrides = mm_options.get("image") if mm_options else None
         video_overrides = mm_options.get("video") if mm_options else None
@@ -1217,10 +1224,15 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         return mm_data
 
 
-class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]): ...
+class KeyeDummyInputsBuilder(
+    KeyeBaseDummyInputsBuilder[KeyeProcessingInfo, KeyeProfilingInfo]
+):
+    pass
 
 
-class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
+class KeyeMultiModalProcessor(
+    BaseMultiModalProcessor[KeyeProcessingInfo, KeyeProfilingInfo]
+):
     def _get_data_parser(self) -> MultiModalDataParser:
         return KeyeMultiModalDataParser()
 
@@ -1230,9 +1242,11 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.processing_info.get_image_processor(
+            **hf_processor_mm_kwargs
+        )
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         placeholder = {

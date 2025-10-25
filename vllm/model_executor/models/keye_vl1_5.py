@@ -17,7 +17,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
@@ -42,8 +41,8 @@ from .interfaces import SupportsLoRA, SupportsMRoPE, SupportsMultiModal, Support
 from .keye import (
     BaseKeyeModule,
     BaseMultiModalProcessor,
-    KeyeBaseDummyInputsBuilder,
     KeyeProcessingInfo,
+    KeyeProfilingInfo,
 )
 
 logger = init_logger(__name__)
@@ -273,7 +272,7 @@ class KeyeVL1_5Projector(nn.Module):
         return hidden_states.view(*dims, -1)
 
 
-class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
+class KeyeVL1_5ProfilingInfo(KeyeProfilingInfo[KeyeProcessingInfo]):
     def get_max_frame_per_video(self) -> int:
         return 2048
 
@@ -364,7 +363,9 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
-class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):
+class KeyeVL1_5MultiModalProcessor(
+    BaseMultiModalProcessor[KeyeProcessingInfo, KeyeVL1_5ProfilingInfo]
+):
     def _get_data_parser(self) -> MultiModalDataParser:
         return KeyeVL1_5MultiModalDataParser()
 
@@ -486,19 +487,12 @@ class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingIn
         return _keye_field_config(hf_inputs)
 
 
-class KeyeVL1_5DummyInputsBuilder(
-    KeyeBaseDummyInputsBuilder[KeyeVL1_5ProcessingInfo]
-): ...
-
-
-@MULTIMODAL_REGISTRY.register_processor(
-    KeyeVL1_5MultiModalProcessor,
-    info=KeyeVL1_5ProcessingInfo,
-    dummy_inputs=KeyeVL1_5DummyInputsBuilder,
-)
 class KeyeVL1_5ForConditionalGeneration(
     BaseKeyeModule, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
+    profiling_info = KeyeVL1_5ProfilingInfo
+    processor = KeyeVL1_5MultiModalProcessor
+
     def _build_projector(
         self,
         text_config: PretrainedConfig,

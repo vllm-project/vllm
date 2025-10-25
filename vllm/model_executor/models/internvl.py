@@ -28,7 +28,6 @@ from vllm.model_executor.models.intern_vit import (
     InternVisionPatchModel,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -48,7 +47,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -711,9 +710,6 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> BaseInternVLProcessor:
         raise NotImplementedError
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
     def get_num_image_tokens(
         self,
         *,
@@ -729,8 +725,16 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
             image_height=image_height,
         )
 
+
+_Proc = TypeVar("_Proc", bound=BaseInternVLProcessingInfo)
+
+
+class BaseInternVLProfilingInfo(BaseProfilingInfo[_Proc]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
     def get_image_size_with_most_features(self) -> ImageSize:
-        processor = self.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
 
         base_size = processor.image_size
         target_ratios = processor.resolve_target_ratios()
@@ -739,7 +743,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         for wr, hr in target_ratios:
             width, height = base_size * wr, base_size * hr
 
-            feat_size = self.get_num_image_tokens(
+            feat_size = self.processing_info.get_num_image_tokens(
                 image_width=width,
                 image_height=height,
                 processor=processor,
@@ -754,20 +758,20 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         return largest_feature_pinpoint
 
     def get_max_image_tokens(self) -> int:
-        processor = self.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
+        return self.processing_info.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
             processor=processor,
         )
 
 
-_I = TypeVar("_I", bound=BaseInternVLProcessingInfo)
+_Prof = TypeVar("_Prof", bound=BaseInternVLProfilingInfo)
 
 
-class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_Proc, _Prof]):
     """Basic image-only DummyInputsBuilder for InternVL-style models."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -781,7 +785,9 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
         num_images = mm_counts.get("image", 0)
 
         image_overrides = mm_options.get("image") if mm_options else None
@@ -796,7 +802,7 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         }
 
 
-class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
+class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_Proc, _Prof]):
     """Basic image-only MultiModalProcessor for InternVL-style models."""
 
     def _call_hf_processor(
@@ -813,7 +819,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             tok_kwargs=tok_kwargs,
         )
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**mm_kwargs)
         image_token_id = hf_processor.image_token_id
 
         # Since there may be extra tokens in the feature placeholders,
@@ -846,7 +852,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         out_mm_data = out_mm_kwargs.get_data()
         if "image_num_patches" in out_mm_data:
@@ -869,7 +875,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 feature_size = images.get_feature_size(item_idx)
             else:
                 image_size = images.get_image_size(item_idx)
-                feature_size = self.info.get_num_image_tokens(
+                feature_size = self.processing_info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     processor=hf_processor,
@@ -897,10 +903,6 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def supports_video(self):
         return self.get_hf_processor().supports_video
 
-    def get_supported_mm_limits(self):
-        video_limit = {"video": None} if self.supports_video else {}
-        return {**super().get_supported_mm_limits(), **video_limit}
-
     def get_video_token(self) -> str | None:
         text_model_type = self.get_hf_config().get_text_config().model_type
         video_token_map = {
@@ -910,22 +912,6 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             "gpt_oss": "<|reserved_200000|>",
         }
         return video_token_map.get(text_model_type)
-
-    def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        processor = self.get_hf_processor()
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // processor.num_image_token
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
-
-        return max(max_frames_per_video, 1)
 
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         return self.ctx.init_processor(
@@ -937,8 +923,30 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
+class InternVLProfilingInfo(BaseInternVLProfilingInfo):
+    def get_supported_mm_limits(self):
+        video_limit = {"video": None} if self.processing_info.supports_video else {}
+        return {**super().get_supported_mm_limits(), **video_limit}
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_images = mm_counts.get("image", 0)
+        max_videos = mm_counts.get("video", 0)
+
+        processor = self.processing_info.get_hf_processor()
+
+        max_image_tokens = self.get_max_image_tokens() * max_images
+        max_total_frames = (seq_len - max_image_tokens) // processor.num_image_token
+        max_frames_per_video = max_total_frames // max(max_videos, 1)
+
+        return max(max_frames_per_video, 1)
+
+
 class InternVLDummyInputsBuilder(
-    BaseInternVLDummyInputsBuilder[InternVLProcessingInfo]
+    BaseInternVLDummyInputsBuilder[InternVLProcessingInfo, InternVLProfilingInfo]
 ):
     """InternVL DummyInputsBuilder extended for video support"""
 
@@ -956,10 +964,10 @@ class InternVLDummyInputsBuilder(
         dummy_image = super().get_dummy_mm_data(
             seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_options
         )
-        if self.info.supports_video:
-            config = self.info.get_hf_config()
+        if self.processing_info.supports_video:
+            config = self.processing_info.get_hf_config()
             image_size: int = config.vision_config.image_size
-            target_num_frames = self.info.get_num_frames_with_most_features(
+            target_num_frames = self.profiling_info.get_num_frames_with_most_features(
                 seq_len, mm_counts
             )
             num_videos = mm_counts.get("video", 0)
@@ -979,7 +987,7 @@ class InternVLDummyInputsBuilder(
 
 
 class InternVLMultiModalProcessor(
-    BaseInternVLMultiModalProcessor[InternVLProcessingInfo]
+    BaseInternVLMultiModalProcessor[InternVLProcessingInfo, InternVLProfilingInfo]
 ):
     """InternVL MultiModalProcessor extended for video support"""
 
@@ -994,9 +1002,9 @@ class InternVLMultiModalProcessor(
             prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**mm_kwargs)
         if (
-            self.info.supports_video
+            self.processing_info.supports_video
             and (video_token_id := hf_processor.video_token_id) is not None
         ):
             processed_outputs["video_token_id"] = torch.tensor(video_token_id)
@@ -1008,7 +1016,7 @@ class InternVLMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
-        if self.info.supports_video:
+        if self.processing_info.supports_video:
             video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
             num_videos = len(video_num_patches)
             video_fields = dict(
@@ -1035,7 +1043,7 @@ class InternVLMultiModalProcessor(
             out_mm_kwargs=out_mm_kwargs,
         )
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         out_mm_data = out_mm_kwargs.get_data()
         if "video_num_patches" in out_mm_data:
@@ -1055,7 +1063,7 @@ class InternVLMultiModalProcessor(
                 feature_size, num_patches, video_context_token=hf_processor.video_token
             )
 
-        if self.info.supports_video:
+        if self.processing_info.supports_video:
             prompt_repl = [
                 *prompt_repl,
                 PromptReplacement(
@@ -1068,13 +1076,13 @@ class InternVLMultiModalProcessor(
         return prompt_repl
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    InternVLMultiModalProcessor,
-    info=InternVLProcessingInfo,
-    dummy_inputs=InternVLDummyInputsBuilder,
-)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     merge_by_field_config = True
+
+    processor_info = InternVLProcessingInfo
+    profiling_info = InternVLProfilingInfo
+    dummy_builder = InternVLDummyInputsBuilder
+    processor = InternVLMultiModalProcessor
 
     supports_encoder_tp_data = True
 
