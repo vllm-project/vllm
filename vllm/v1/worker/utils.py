@@ -42,10 +42,8 @@ class MultiModalBudget:
 
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
 
-        max_tokens_by_modality = (
-            mm_registry.get_max_tokens_per_item_by_nonzero_modality(
-                model_config, cache=cache
-            )
+        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
+            model_config, cache=cache
         )
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
