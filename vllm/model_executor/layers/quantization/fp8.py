@@ -1214,22 +1214,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
-            assert scoring_func == "sigmoid", (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}"
-            )
+
             if self.block_quant:
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
-                assert (
-                    renormalize and use_grouped_topk and custom_routing_function is None
-                )
                 e_score_correction_bias = (
                     e_score_correction_bias.to(x.dtype)
                     if e_score_correction_bias is not None
                     else None
                 )
+                routing_method_type = getattr(layer, "routing_method_type", 2)
                 return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                    routing_logits=router_logits.to(torch.float32),
+                    routing_logits=router_logits.to(torch.float32)
+                    if routing_method_type == 2
+                    else router_logits,
                     routing_bias=e_score_correction_bias,
                     x=x,
                     w13_weight=layer.w13_weight,
@@ -1245,6 +1243,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     local_num_experts=layer.local_num_experts,
                     block_shape=self.weight_block_size,
                     routed_scaling=routed_scaling_factor,
+                    routing_method_type=routing_method_type,
                 )
             else:
                 assert not renormalize and custom_routing_function is not None
@@ -1292,7 +1291,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # can override fused_experts or cutlass but not rocm or marlin.
         #
         topk_weights, topk_ids, zero_expert_result = select_result
-
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts,
