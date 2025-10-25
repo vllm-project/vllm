@@ -38,11 +38,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     topk_group = topk_group if topk_group is not None else 0
     assert top_k <= global_num_experts
     assert top_k <= 10
-    # assert topk_group <= 4
-    # assert global_num_experts > num_expert_group
-    # assert global_num_experts % num_expert_group == 0
     assert global_num_experts % 4 == 0
-    # assert top_k < (topk_group * global_num_experts / num_expert_group)
     assert block_shape == [128, 128]
     # Routing kernel expects #experts <= #threads 512
     assert global_num_experts <= 512

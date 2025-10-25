@@ -208,9 +208,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 >>>>>>> 9d88f1762 (update work)
 
         if self.shared_expert is not None:
-            # if ("model.layers.0." in self.prefix_print or "model.layers.1." in self.prefix_print or "model.layers.47." in self.prefix_print):
-            #     print(f"shared_expert: {final_hidden_states[0]}")
-            #     print(f"routed_expert: {final_hidden_states[1]}")
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.is_sequence_parallel:

@@ -1226,15 +1226,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
-            # assert scoring_func == "sigmoid", (
-            #     f"Expected 'sigmoid' scoring func but got {scoring_func}"
-            # )
+
             if self.block_quant:
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
-                # assert (
-                #     renormalize and use_grouped_topk and custom_routing_function is None
-                # )
                 e_score_correction_bias = (
                     e_score_correction_bias.to(x.dtype)
                     if e_score_correction_bias is not None
@@ -1304,10 +1299,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         topk_weights, topk_ids, zero_expert_result = select_result
-        # if (topk_ids.shape[0] <100):
-        #     print("=== MoE Routing Results ===")
-        #     print(f"topk_ids: {topk_ids}")
-        #     print(f"topk_weights: {topk_weights}")
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts,
