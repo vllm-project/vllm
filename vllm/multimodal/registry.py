@@ -1,102 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
-
-import torch.nn as nn
+from typing import TYPE_CHECKING, cast
 
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, cached_tokenizer_from_config
-from vllm.utils.collection_utils import ClassRegistry
 
 from .cache import BaseMultiModalProcessorCache
 from .processing import (
     BaseMultiModalProcessor,
-    BaseProcessingInfo,
+    EncDecMultiModalProcessor,
     InputProcessingContext,
 )
-from .profiling import (
-    BaseDummyInputsBuilder,
-    DummyDecoderData,
-    DummyEncoderData,
-    MultiModalProfiler,
-)
+from .profiling import DummyDecoderData, DummyEncoderData
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
-
-N = TypeVar("N", bound=type[nn.Module])
-_I = TypeVar("_I", bound=BaseProcessingInfo)
-_I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
-
-
-class ProcessingInfoFactory(Protocol[_I_co]):
-    """
-    Constructs a
-    [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
-    instance from the context.
-    """
-
-    def __call__(
-        self,
-        ctx: InputProcessingContext,
-    ) -> _I_co: ...
-
-
-class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
-    """
-    Constructs a
-    [`BaseDummyInputsBuilder`][vllm.multimodal.profiling.BaseDummyInputsBuilder]
-    instance from the context.
-    """
-
-    def __call__(self, info: _I) -> BaseDummyInputsBuilder[_I]: ...
-
-
-class MultiModalProcessorFactory(Protocol[_I]):  # type: ignore[misc]
-    """
-    Constructs a
-    [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
-    instance from the context.
-    """
-
-    def __call__(
-        self,
-        info: _I,
-        dummy_inputs: BaseDummyInputsBuilder[_I],
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-    ) -> BaseMultiModalProcessor[_I]: ...
-
-
-@dataclass(frozen=True)
-class _ProcessorFactories(Generic[_I]):
-    info: ProcessingInfoFactory[_I]
-    processor: MultiModalProcessorFactory[_I]
-    dummy_inputs: DummyInputsBuilderFactory[_I]
-
-    def build_processor(
-        self,
-        ctx: InputProcessingContext,
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-    ):
-        info = self.info(ctx)
-        dummy_inputs_builder = self.dummy_inputs(info)
-        return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
 class MultiModalRegistry:
     """
     A registry that dispatches data processing according to the model.
     """
-
-    def __init__(self) -> None:
-        self._processor_factories = ClassRegistry[nn.Module, _ProcessorFactories]()
 
     def _extract_mm_options(
         self,
@@ -129,15 +58,17 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return False
 
-        info = self._create_processing_info(model_config, tokenizer=None)
-        supported_modalities = info.get_supported_mm_limits()
+        model_cls = self._get_model_cls(model_config)
+        ctx = self._create_processing_ctx(model_config)
+        processor_info = model_cls.processor_info(ctx)
+        profiling_info = model_cls.profiling_info(processor_info)
 
         mm_config = model_config.get_multimodal_config()
 
         # Check if all supported modalities have limit == 0
         if all(
             mm_config.get_limit_per_prompt(modality) == 0
-            for modality in supported_modalities
+            for modality in profiling_info.supported_mm_limits
         ):
             logger.info_once(
                 "All limits of multimodal modalities supported by the model "
@@ -162,14 +93,16 @@ class MultiModalRegistry:
             return {}
 
         processor = self.create_processor(model_config, cache=cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
         profiler_limits = (
-            profiler.get_mm_limits() if profiler_limits is None else profiler_limits
+            processor.dummy_builder.profiling_info.allowed_mm_limits
+            if profiler_limits is None
+            else profiler_limits
         )
 
-        return profiler.get_mm_max_contiguous_tokens(
+        return processor.dummy_builder.get_mm_max_contiguous_tokens(
+            processor,
             seq_len,
             {modality: 1 for modality, limit in profiler_limits.items() if limit > 0},
         )
@@ -187,50 +120,26 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, cache=cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        return profiler.get_mm_limits()
+        model_cls = self._get_model_cls(model_config)
+        ctx = self._create_processing_ctx(model_config)
+        processor_info = model_cls.processor_info(ctx)
+        profiling_info = model_cls.profiling_info(processor_info)
 
-    def register_processor(
-        self,
-        processor: MultiModalProcessorFactory[_I],
-        *,
-        info: ProcessingInfoFactory[_I],
-        dummy_inputs: DummyInputsBuilderFactory[_I],
-    ):
-        """
-        Register a multi-modal processor to a model class. The processor
-        is constructed lazily, hence a factory method should be passed.
+        return profiling_info.allowed_mm_limits
 
-        When the model receives multi-modal data, the provided function is
-        invoked to transform the data into a dictionary of model inputs.
-        """
-
-        def wrapper(model_cls: N) -> N:
-            if self._processor_factories.contains(model_cls, strict=True):
-                logger.warning(
-                    "Model class %s already has a multi-modal processor "
-                    "registered to %s. It is overwritten by the new one.",
-                    model_cls,
-                    self,
-                )
-
-            self._processor_factories[model_cls] = _ProcessorFactories(
-                info=info,
-                dummy_inputs=dummy_inputs,
-                processor=processor,
-            )
-
-            return model_cls
-
-        return wrapper
+    def register_processor(self, *args, **kwargs):
+        # TODO: Link to PR
+        raise ValueError(
+            "We have going to remove multi-modal registry in the near future. "
+            "Please see PR# on how to update your model."
+        )
 
     def _get_model_cls(self, model_config: "ModelConfig"):
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        return model_cls
+        return cast("SupportsMultiModal", model_cls)
 
     def _create_processing_ctx(
         self,
@@ -239,18 +148,8 @@ class MultiModalRegistry:
     ) -> InputProcessingContext:
         if tokenizer is None and not model_config.skip_tokenizer_init:
             tokenizer = cached_tokenizer_from_config(model_config)
-        return InputProcessingContext(model_config, tokenizer)
 
-    def _create_processing_info(
-        self,
-        model_config: "ModelConfig",
-        *,
-        tokenizer: AnyTokenizer | None = None,
-    ) -> BaseProcessingInfo:
-        model_cls = self._get_model_cls(model_config)
-        factories = self._processor_factories[model_cls]
-        ctx = self._create_processing_ctx(model_config, tokenizer)
-        return factories.info(ctx)
+        return InputProcessingContext(model_config, tokenizer)
 
     def create_processor(
         self,
@@ -258,7 +157,7 @@ class MultiModalRegistry:
         *,
         tokenizer: AnyTokenizer | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
-    ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
+    ) -> BaseMultiModalProcessor:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """
@@ -266,11 +165,13 @@ class MultiModalRegistry:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
         model_cls = self._get_model_cls(model_config)
-        factories = self._processor_factories[model_cls]
 
         ctx = self._create_processing_ctx(model_config, tokenizer)
+        processor_info = model_cls.processor_info(ctx)
+        profiling_info = model_cls.profiling_info(processor_info)
+        dummy_builder = model_cls.dummy_builder(profiling_info)
 
-        return factories.build_processor(ctx, cache=cache)
+        return model_cls.processor(dummy_builder, cache=cache)
 
     def get_decoder_dummy_data(
         self,
@@ -286,14 +187,18 @@ class MultiModalRegistry:
         The model is identified by `model_config`.
         """
         processor = self.create_processor(model_config, cache=cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         # Extract configurable options from multimodal config.
         # Only include modalities that use advanced option types so legacy
         # count-only behavior remains unchanged.
         mm_options = self._extract_mm_options(model_config)
 
-        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts, mm_options)
+        dummy_data = processor.dummy_builder.get_decoder_dummy_data(
+            processor,
+            seq_len,
+            mm_counts=mm_counts,
+            mm_options=mm_options,
+        )
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
@@ -318,15 +223,22 @@ class MultiModalRegistry:
 
         The model is identified by `model_config`.
         """
-        processor = self.create_processor(model_config, cache=cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
+        processor = cast(
+            EncDecMultiModalProcessor,
+            self.create_processor(model_config, cache=cache),
+        )
 
         # Extract configurable options from multimodal config.
         # Only include modalities that use advanced option types so legacy
         # count-only behavior remains unchanged.
         mm_options = self._extract_mm_options(model_config)
 
-        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts, mm_options)
+        dummy_data = processor.dummy_builder.get_encoder_dummy_data(
+            processor,
+            seq_len,
+            mm_counts=mm_counts,
+            mm_options=mm_options,
+        )
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids

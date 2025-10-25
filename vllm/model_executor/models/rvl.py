@@ -9,13 +9,13 @@ from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict
 
 from .llava_next import (
     LlavaDummyInputsBuilder,
     LlavaNextMultiModalProcessor,
     LlavaNextProcessingInfo,
+    LlavaNextProfilingInfo,
 )
 from .llava_onevision import LlavaOnevisionForConditionalGeneration
 from .utils import WeightsMapper
@@ -29,7 +29,9 @@ class RVLProcessingInfo(LlavaNextProcessingInfo):
         return self.ctx.get_hf_processor(**kwargs)
 
 
-class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
+class RVLDummyInputsBuilder(
+    LlavaDummyInputsBuilder[RVLProcessingInfo, LlavaNextProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         image_token = "<image>"
@@ -44,7 +46,9 @@ class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
 
         image_overrides = mm_options.get("image") if mm_options else None
 
@@ -83,12 +87,11 @@ class RVLMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    LlavaNextMultiModalProcessor,
-    info=RVLProcessingInfo,
-    dummy_inputs=RVLDummyInputsBuilder,
-)
 class RForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
+    processor_info = RVLProcessingInfo
+    dummy_builder = RVLDummyInputsBuilder
+    processor = LlavaNextMultiModalProcessor
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers

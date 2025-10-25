@@ -70,7 +70,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
 from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -88,7 +87,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
@@ -169,9 +168,6 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(KimiVLConfig)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
     def get_num_image_tokens(
         self,
         *,
@@ -214,11 +210,18 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
         return self.get_hf_config().media_placeholder_token_id
 
 
-class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
+class KimiVLProfilingInfo(BaseProfilingInfo[KimiVLProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
+
+class KimiVLDummyInputsBuilder(
+    BaseDummyInputsBuilder[KimiVLProcessingInfo, KimiVLProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
 
         return image_token * num_images
@@ -243,7 +246,9 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
         }
 
 
-class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
+class KimiVLMultiModalProcessor(
+    BaseMultiModalProcessor[KimiVLProcessingInfo, KimiVLProfilingInfo]
+):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -267,7 +272,7 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        image_token_id = self.info.image_token_id
+        image_token_id = self.processing_info.image_token_id
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items(
@@ -278,7 +283,7 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
                 image_size = images.get_image_size(item_idx)
-                num_image_tokens = self.info.get_num_image_tokens(
+                num_image_tokens = self.processing_info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
@@ -294,13 +299,13 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    KimiVLMultiModalProcessor,
-    info=KimiVLProcessingInfo,
-    dummy_inputs=KimiVLDummyInputsBuilder,
-)
 class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = KimiVLProcessingInfo
+    profiling_info = KimiVLProfilingInfo
+    dummy_builder = KimiVLDummyInputsBuilder
+    processor = KimiVLMultiModalProcessor
 
     supports_encoder_tp_data = True
 

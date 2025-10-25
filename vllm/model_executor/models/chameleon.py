@@ -40,7 +40,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     row_parallel_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -54,7 +53,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -94,19 +93,23 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(ChameleonProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": 1}
-
     def get_num_image_tokens(self) -> int:
         processor = self.get_hf_processor()
         return processor.image_seq_length
 
 
-class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo]):
+class ChameleonProfilingInfo(BaseProfilingInfo[ChameleonProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": 1}
+
+
+class ChameleonDummyInputsBuilder(
+    BaseDummyInputsBuilder[ChameleonProcessingInfo, ChameleonProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
 
         return image_token * num_images
@@ -117,7 +120,7 @@ class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        config = self.info.get_hf_config()
+        config = self.processing_info.get_hf_config()
 
         width = height = config.vq_config.resolution
         num_images = mm_counts.get("image", 0)
@@ -134,7 +137,9 @@ class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo
         }
 
 
-class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingInfo]):
+class ChameleonMultiModalProcessor(
+    BaseMultiModalProcessor[ChameleonProcessingInfo, ChameleonProfilingInfo]
+):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -143,7 +148,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.processing_info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -159,7 +164,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         prompt_tokens: list[int],
     ) -> list[int]:
         # HF processor adds sep token for chat mode
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
@@ -179,15 +184,15 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
+        processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         image_start_id = vocab[processor.image_start_token]
         image_token_id = vocab[processor.image_token]
         image_end_id = vocab[processor.image_end_token]
 
-        num_image_tokens = self.info.get_num_image_tokens()
+        num_image_tokens = self.processing_info.get_num_image_tokens()
         image_tokens = [image_token_id] * num_image_tokens
 
         return [
@@ -925,15 +930,15 @@ class ChameleonModel(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    ChameleonMultiModalProcessor,
-    info=ChameleonProcessingInfo,
-    dummy_inputs=ChameleonDummyInputsBuilder,
-)
 class ChameleonForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
     merge_by_field_config = True
+
+    processor_info = ChameleonProcessingInfo
+    profiling_info = ChameleonProfilingInfo
+    dummy_builder = ChameleonDummyInputsBuilder
+    processor = ChameleonMultiModalProcessor
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

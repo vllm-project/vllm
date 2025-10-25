@@ -9,13 +9,13 @@ from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict
 
 from .llava_next import (
     LlavaDummyInputsBuilder,
     LlavaNextMultiModalProcessor,
     LlavaNextProcessingInfo,
+    LlavaNextProfilingInfo,
 )
 from .llava_onevision import LlavaOnevisionForConditionalGeneration
 from .utils import WeightsMapper
@@ -79,7 +79,9 @@ class BeeProcessingInfo(LlavaNextProcessingInfo):
         return (unpadded_features, newline_features)
 
 
-class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
+class BeeDummyInputsBuilder(
+    LlavaDummyInputsBuilder[BeeProcessingInfo, LlavaNextProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         image_token = "<image>"
@@ -94,7 +96,9 @@ class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
 
         image_overrides = mm_options.get("image") if mm_options else None
 
@@ -133,12 +137,11 @@ class BeeMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    LlavaNextMultiModalProcessor,
-    info=BeeProcessingInfo,
-    dummy_inputs=BeeDummyInputsBuilder,
-)
 class BeeForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
+    processor_info = BeeProcessingInfo
+    dummy_builder = BeeDummyInputsBuilder
+    processor = LlavaNextMultiModalProcessor
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers
