@@ -225,6 +225,7 @@ from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    get_dcp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -567,6 +568,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        self.dcp_kv_cache_interleave_size = parallel_config.dcp_kv_cache_interleave_size
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -793,15 +795,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             )
         )
 
-        # Note(hc): update seq_lens of decode reqs under DCP.
-        if self.dcp_world_size > 1:
-            assert dcp_local_seq_lens is not None
-            dcp_local_seq_lens[:num_decodes] = seq_lens[
-                :num_decodes
-            ] // self.dcp_world_size + (
-                self.dcp_rank <= (seq_lens[:num_decodes] - 1) % self.dcp_world_size
-            )
-
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
@@ -811,9 +804,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
             # Note(hc): The context lengths in the perspective of dcp rank0.
-            cp_context_lens_cpu = torch.ceil(
-                context_lens_cpu.float() / self.dcp_world_size
-            ).int()
+            cp_context_lens_cpu = (
+                torch.ceil(
+                    context_lens_cpu.float()
+                    / (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
+                ).int()
+                * self.dcp_kv_cache_interleave_size
+            )
             origin_context_lens = context_lens_cpu.tolist()
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
@@ -1005,6 +1002,7 @@ def reorg_kvcache(
     chunk_size: int,
     chunk_idx: int,
     toks: int,
+    interleave_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     reorg kvcache after cp local gather to tp layout for attn kernel.
@@ -1019,27 +1017,32 @@ def reorg_kvcache(
             chunked_context_metadata building.
         chunk_idx: chunk idx of chunked_prefill.
         toks: the number of tokens for local gather cache.
+        interleave_size: Interleave size of kv_cache storage.
     """
     kv_c_segments = []
     k_pe_segments = []
     src_token_idx = 0
     max_seq_len_check = 0
-    for cp_chunk_seq_len, origin_context_len in zip(
-        cp_chunk_seq_lens_lst, origin_context_lens
+    local_context_lens_allrank = get_dcp_local_seq_lens(
+        torch.Tensor(origin_context_lens),
+        cp_world_size,
+        None,
+        interleave_size,
+    )
+    # print(origin_context_lens, local_context_lens_allrank)
+    for cp_chunk_seq_len, origin_context_len, local_context_lens in zip(
+        cp_chunk_seq_lens_lst, origin_context_lens, local_context_lens_allrank
     ):
         chunk_context_len = chunk_size
         if cp_chunk_seq_len != 0:
             chunk_context_len = min(
                 chunk_context_len, origin_context_len - chunk_size * chunk_idx
             )
-        cp_target_rank = (chunk_context_len - 1) % cp_world_size
+
         cur_seq_len = 0
         for rank in range(cp_world_size):
-            if rank > cp_target_rank and cp_chunk_seq_len:
-                real_cp_chunk_seq_len = cp_chunk_seq_len - 1
-            else:
-                real_cp_chunk_seq_len = cp_chunk_seq_len
-            if real_cp_chunk_seq_len:
+            real_cp_chunk_seq_len = local_context_lens[rank]
+            if real_cp_chunk_seq_len != 0:
                 kv_c_segment = allgatered_kv_c_normed[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
@@ -1294,6 +1297,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
                 get_current_vllm_config()
             )
+        )
+        self.dcp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(
@@ -1752,6 +1758,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 chunk_size=prefill_metadata.chunked_context.chunk_size,
                 chunk_idx=i,
                 toks=toks,
+                interleave_size=self.dcp_kv_cache_interleave_size,
             )
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
