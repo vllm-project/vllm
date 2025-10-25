@@ -29,6 +29,7 @@ from typing import Any
 import torch
 from torch import nn
 from transformers import Qwen3Config
+from vllm.forward_context import get_forward_context
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -278,7 +279,9 @@ ALL_DECODER_LAYER_TYPES = {
 class Qwen3Model(Qwen2Model):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         alt_stream = None
-        if current_platform.is_cuda() or current_platform.is_out_of_tree():
+        cudagraph_runtime_mode = get_forward_context().cudagraph_runtime_mode
+        if cudagraph_runtime_mode.has_full_cudagraphs() and (
+                current_platform.is_cuda() or current_platform.is_out_of_tree()):
             alt_stream = device_module.Stream()
         super().__init__(
             vllm_config=vllm_config,

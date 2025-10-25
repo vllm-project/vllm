@@ -30,6 +30,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from vllm.forward_context import get_forward_context
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -444,7 +445,9 @@ class Qwen3MoeModel(nn.Module):
             prefix=f"{prefix}.embed_tokens",
         )
         alt_stream = None
-        if current_platform.is_cuda() or current_platform.is_out_of_tree():
+        cudagraph_runtime_mode = get_forward_context().cudagraph_runtime_mode
+        if cudagraph_runtime_mode.has_full_cudagraphs() and (
+                current_platform.is_cuda() or current_platform.is_out_of_tree()):
             alt_stream = device_module.Stream()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
