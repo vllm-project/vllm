@@ -1113,7 +1113,7 @@ steps:
   - tests/weight_loading
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
-  
+
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
@@ -1168,6 +1168,17 @@ steps:
     - pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+
+- label: LM Eval Large Models (H200) # optional
+  gpu: h200
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-h100.txt --tp-size=4
 
 ##### B200 test #####
 - label: Distributed Tests (B200) # optional

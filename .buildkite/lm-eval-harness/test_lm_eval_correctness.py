@@ -40,6 +40,7 @@ def launch_lm_eval(eval_config, tp_size):
         # existing text models in CI, so only apply it for mm.
         apply_chat_template=backend == "vllm-vlm",
         batch_size=batch_size,
+        gen_kwargs=eval_config.get("gen_kwargs", None),
     )
     return results
 
