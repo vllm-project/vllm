@@ -49,7 +49,6 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
-from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -64,12 +63,12 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
+    construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
     has_custom_tools,
-    parse_input_to_harmony_message,
     parse_output_message,
     parse_remaining_state,
     parse_response_input,
@@ -907,40 +906,6 @@ class OpenAIServingResponses(OpenAIServing):
         )
         return sys_msg
 
-    def _construct_harmony_previous_input_messages(
-        self,
-        request: ResponsesRequest,
-    ) -> list[OpenAIHarmonyMessage]:
-        messages: list[OpenAIHarmonyMessage] = []
-        if request.previous_input_messages:
-            for message in request.previous_input_messages:
-                # Handle both OpenAIHarmonyMessage objects and dictionary inputs
-                if isinstance(message, OpenAIHarmonyMessage):
-                    message_role = message.author.role
-                    # To match OpenAI, instructions, reasoning and tools are
-                    # always taken from the most recent Responses API request
-                    # not carried over from previous requests
-                    if (
-                        message_role == OpenAIHarmonyRole.SYSTEM
-                        or message_role == OpenAIHarmonyRole.DEVELOPER
-                    ):
-                        continue
-                    messages.append(message)
-                else:
-                    harmony_messages = parse_input_to_harmony_message(message)
-                    for harmony_msg in harmony_messages:
-                        message_role = harmony_msg.author.role
-                        # To match OpenAI, instructions, reasoning and tools are
-                        # always taken from the most recent Responses API request
-                        # not carried over from previous requests
-                        if (
-                            message_role == OpenAIHarmonyRole.SYSTEM
-                            or message_role == OpenAIHarmonyRole.DEVELOPER
-                        ):
-                            continue
-                        messages.append(harmony_msg)
-        return messages
-
     def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
@@ -971,7 +936,7 @@ class OpenAIServingResponses(OpenAIServing):
                     instructions=request.instructions, tools=request.tools
                 )
                 messages.append(dev_msg)
-            messages += self._construct_harmony_previous_input_messages(request)
+            messages += construct_harmony_previous_input_messages(request)
 
         else:
             # Continue the previous conversation.
