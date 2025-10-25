@@ -200,7 +200,7 @@ def rocm_per_tensor_w8a8_scaled_mm_impl(
             out_dtype,
             scale_a,
             scale_b,
-            current_platform.get_cu_count(),
+            torch.cuda.get_device_properties(0).multi_processor_count,
             bias,
         )
     else:
