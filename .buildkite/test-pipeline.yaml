@@ -776,13 +776,6 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
-- label: LM Eval Small Models on H100 # 20min 
-  timeout_in_minutes: 40
-  source_file_dependencies:
-  - vllm/
-  commands:
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-h100.txt --tp-size=1
-
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
   source_file_dependencies:
@@ -948,6 +941,10 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-gpt-oss.txt --tp-size=1
+  # New added tests, we don't block merge for now.
+  # branches: "gh-readonly-queue/*"
+  branches: if: build.branch == "main" && env("BUILDKITE_PULL_REQUEST") == "false"
 
 - label: Blackwell Quantized MoE Test
   timeout_in_minutes: 60
