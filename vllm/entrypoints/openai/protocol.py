@@ -1500,7 +1500,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = -1
 
     # --8<-- [start:embedding-extra-params]
     add_special_tokens: bool = Field(
@@ -1563,7 +1563,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = -1
 
     # --8<-- [start:chat-embedding-extra-params]
     add_generation_prompt: bool = Field(
@@ -1725,7 +1725,7 @@ class ScoreRequest(OpenAIBaseModel):
     model: str | None = None
     text_1: list[str] | str | ScoreMultiModalParam
     text_2: list[str] | str | ScoreMultiModalParam
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = -1
 
     # --8<-- [start:score-extra-params]
 
@@ -1759,7 +1759,7 @@ class RerankRequest(OpenAIBaseModel):
     query: str | ScoreMultiModalParam
     documents: list[str] | ScoreMultiModalParam
     top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = -1
 
     # --8<-- [start:rerank-extra-params]
 
