@@ -603,7 +603,7 @@ class RandomTokenIDDataset(BenchmarkDataset):
 class RandomDataset(RandomTokenIDDataset):
     """
     Synthetic text-only dataset for serving/throughput benchmarks.
-    Addtionally to RandomTokenIDDataset, we perform a decode then re-encode/truncate
+    Additionally to RandomTokenIDDataset, we perform a decode then re-encode/truncate
     to ensure prompt token counts match.
     """
 
