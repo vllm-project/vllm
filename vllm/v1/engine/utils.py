@@ -911,7 +911,7 @@ def launch_core_engines(
         addresses.fault_pub_socket_addr = get_engine_client_zmq_addr(
             local_only=False,
             host="0.0.0.0",
-            port=vllm_config.fault_tolerance_config.fault_pub_port,
+            port=vllm_config.fault_tolerance_config.external_fault_notify_port,
         )
 
     # Run the DP Coordinator process with rank 0 when in
@@ -1215,8 +1215,7 @@ def generate_identity_group(peer1, peer2, use, n):
 
 async def get_queue_snapshot(queue: asyncio.Queue, queue_lock: asyncio.Lock) -> list:
     """Thread-safe snapshot of the exception queue."""
-    """复制队列元素到列表（保留队列内容）"""
-    async with queue_lock:  # 加锁确保复制期间无其他协程修改队列
+    async with queue_lock:
         items = []
         # get item at first
         while not queue.empty():
