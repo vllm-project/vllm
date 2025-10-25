@@ -140,6 +140,7 @@ Install build dependencies:
 
 ```bash
 pip install -r requirements/tpu.txt
+pip install torch_xla[tpu, pallas]==2.8.0
 sudo apt-get install --no-install-recommends --yes libopenblas-base libopenmpi-dev libomp-dev
 ```
 
