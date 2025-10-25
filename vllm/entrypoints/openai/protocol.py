@@ -1938,7 +1938,7 @@ class ScoreResponse(OpenAIBaseModel):
 
 class ClassificationRequest(OpenAIBaseModel):
     model: str | None = None
-    input: list[str] | str
+    input: list[str] | str | None = None
     truncate_prompt_tokens: int | None = None
     user: str | None = None
 
