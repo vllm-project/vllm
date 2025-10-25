@@ -20,7 +20,6 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -403,7 +402,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        if is_global_first_rank():
+        if vllm_config.parallel_config.data_parallel_rank == 0:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
                 VLLM_VERSION,
@@ -548,9 +547,10 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(
+        logger.info_once(
             ("init engine (profile, create kv cache, warmup model) took %.2f seconds"),
             elapsed,
+            scope="local",
         )
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
@@ -1065,7 +1065,7 @@ class EngineCoreProc(EngineCore):
         )
 
         # Receive initialization message.
-        logger.info("Waiting for init message from front-end.")
+        logger.debug("Waiting for init message from front-end.")
         if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
             raise RuntimeError(
                 "Did not receive response from front-end "
