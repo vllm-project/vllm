@@ -2067,8 +2067,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output.append(output)
 
         return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
+            # NOTE(woosuk): input_batch.req_ids may include requests that are
+            # not scheduled in this step. Therefore, we truncate it here.
+            req_ids=self.input_batch.req_ids[: self.input_batch.num_reqs],
             sampled_token_ids=[],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -2244,7 +2245,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         list[list[int]],
         dict[str, LogprobsTensors | None],
         list[str],
-        dict[str, int],
         list[int],
     ]:
         num_nans_in_logits = {}
@@ -2261,8 +2261,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
-        req_ids_output_copy = self.input_batch.req_ids.copy()
-        req_id_to_index_output_copy = self.input_batch.req_id_to_index.copy()
+        # NOTE(woosuk): input_batch.req_ids may include requests that are
+        # not scheduled in this step. Therefore, we truncate it here.
+        num_reqs = self.input_batch.num_reqs
+        req_ids_output_copy = self.input_batch.req_ids[:num_reqs].copy()
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
@@ -2358,7 +2360,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_sampled_token_ids,
             prompt_logprobs_dict,
             req_ids_output_copy,
-            req_id_to_index_output_copy,
             invalid_req_indices,
         )
 
@@ -2628,7 +2629,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 valid_sampled_token_ids,
                 prompt_logprobs_dict,
                 req_ids_output_copy,
-                req_id_to_index_output_copy,
                 invalid_req_indices,
             ) = self._bookkeeping_sync(
                 scheduler_output,
@@ -2653,7 +2653,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
-            req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
