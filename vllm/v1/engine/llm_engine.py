@@ -4,7 +4,7 @@
 import time
 from collections.abc import Callable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, cast
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -112,10 +112,9 @@ class LLMEngine:
         self.output_processor = OutputProcessor(
             self.tokenizer, log_stats=self.log_stats
         )
-        if self.observability_config.otlp_traces_endpoint is not None:
-            tracer = init_tracer(
-                "vllm.llm_engine", self.observability_config.otlp_traces_endpoint
-            )
+        endpoint = self.observability_config.otlp_traces_endpoint
+        if endpoint is not None:
+            tracer = init_tracer("vllm.llm_engine", endpoint)
             self.output_processor.tracer = tracer
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
@@ -259,7 +258,10 @@ class LLMEngine:
                 trace_headers,
                 priority,
             )
-            prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
+            if isinstance(prompt, str):
+                prompt_text = prompt
+            elif isinstance(prompt, Mapping):
+                prompt_text = cast(str | None, prompt.get("prompt"))
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -285,7 +287,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[RequestOutput] | list[PoolingRequestOutput]:
+    def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()

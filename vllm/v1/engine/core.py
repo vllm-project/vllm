@@ -1075,6 +1075,7 @@ class DPEngineCoreProc(EngineCoreProc):
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
+        assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         if vllm_config.kv_transfer_config is not None:
