@@ -14,6 +14,14 @@ from typing import Final
 
 import jinja2
 from fastapi import Request
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageToolCallParam,
+    ChatCompletionToolMessageParam,
+)
+from openai.types.chat.chat_completion_message_tool_call_param import (
+    Function as FunctionCallTool,
+)
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
@@ -41,6 +49,7 @@ from openai.types.responses import (
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
+    ToolChoiceFunction,
     response_function_web_search,
     response_text_delta_event,
 )
@@ -49,6 +58,7 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -77,12 +87,15 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
+    FunctionCall,
+    FunctionDefinition,
     InputTokensDetails,
     OutputTokensDetails,
     RequestResponseMetadata,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseInProgressEvent,
+    ResponseInputOutputItem,
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
     ResponsesRequest,
@@ -177,16 +190,12 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
-
+        self.enable_auto_tools = enable_auto_tools
         # set up tool use
-        self.enable_auto_tools: bool = enable_auto_tools
-        if self.enable_auto_tools:
-            logger.info(
-                '"auto" tool choice has been enabled please note that while'
-                " the parallel_tool_calls client option is preset for "
-                "compatibility reasons, it will be ignored."
-            )
-
+        self.tool_parser = self._get_tool_parser(
+            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
+        )
+        self.exclude_tools_when_tool_choice_none = False
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -485,16 +494,20 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: ResponsesResponse | None,
         tokenizer: AnyTokenizer,
     ):
-        if len(request.tools) > 0:
-            raise NotImplementedError(
-                "Tool use is not supported in Responses API without Harmony"
-            )
+        if request.tools is None or (
+            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
+        ):
+            tool_dicts = None
+        else:
+            tool_dicts = [tool.model_dump() for tool in request.tools]
         # Construct the input messages.
         messages = self._construct_input_messages(request, prev_response)
         _, request_prompts, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
             messages,
+            tool_dicts=tool_dicts,
+            tool_parser=self.tool_parser,
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
         )
@@ -776,7 +789,8 @@ class OpenAIServingResponses(OpenAIServing):
                     delta=False,
                 )
 
-        output = []
+        reasoning_item = None
+        message_item = None
         if reasoning_content:
             reasoning_item = ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",
@@ -789,7 +803,9 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
                 status=None,  # NOTE: Only the last output item has status.
             )
-            output.append(reasoning_item)
+        function_calls, content = self._parse_tool_calls_from_content(
+            request, tokenizer, content=content
+        )
         if content:
             output_text = ResponseOutputText(
                 text=content,
@@ -806,15 +822,122 @@ class OpenAIServingResponses(OpenAIServing):
                     else None
                 ),
             )
-            message = ResponseOutputMessage(
+            message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
                 content=[output_text],
                 role="assistant",
                 status="completed",
                 type="message",
             )
-            output.append(message)
-        return output
+        outputs = []
+
+        if reasoning_item:
+            outputs.append(reasoning_item)
+        if message_item:
+            outputs.append(message_item)
+        if function_calls:
+            tool_call_items = [
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_uuid()}",
+                    call_id=f"call_{random_uuid()}",
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+                for tool_call in function_calls
+            ]
+            outputs.extend(tool_call_items)
+        return outputs
+
+    def _parse_tool_calls_from_content(
+        self,
+        request: ResponsesRequest,
+        tokenizer: AnyTokenizer,
+        content: str | None = None,
+    ) -> tuple[list[FunctionCall] | None, str | None]:
+        function_calls = list[FunctionCall]()
+
+        if not self.enable_auto_tools or not self.tool_parser:
+            # Tools are not enabled
+            return None, content
+        elif request.tool_choice is None:
+            # No tool calls.
+            return None, content
+        elif request.tool_choice and isinstance(
+            request.tool_choice, ToolChoiceFunction
+        ):
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice == "required":
+            assert content is not None
+            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
+            function_calls.extend(
+                [
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                    for tool_call in tool_calls
+                ]
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice == "auto" or request.tool_choice == "none":
+            try:
+                tool_parser = self.tool_parser(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                raise e
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "",
+                request=request,  # type: ignore
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
+                function_calls.extend(
+                    FunctionCall(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                content = tool_call_info.content
+            else:
+                # No tool calls.
+                return None, content
+        else:
+            raise ValueError(f"Invalid tool_choice: {request.tool_choice}")
+        return function_calls, content
+
+    def _construct_chat_message_with_tool_call(
+        self, item: ResponseInputOutputItem
+    ) -> ChatCompletionMessageParam:
+        if isinstance(item, ResponseFunctionToolCall):
+            # Append the function call as a tool call.
+            return ChatCompletionAssistantMessageParam(
+                role="assistant",
+                tool_calls=[
+                    ChatCompletionMessageToolCallParam(
+                        id=item.call_id,
+                        function=FunctionCallTool(
+                            name=item.name,
+                            arguments=item.arguments,
+                        ),
+                        type="function",
+                    )
+                ],
+            )
+        elif item.get("type") == "function_call_output":
+            # Append the function call output as a tool message.
+            return ChatCompletionToolMessageParam(
+                role="tool",
+                content=item.get("output"),
+                tool_call_id=item.get("call_id"),
+            )
+        return item  # type: ignore
 
     def _make_response_output_items_with_harmony(
         self,
@@ -867,7 +990,8 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(request.input, str):
             messages.append({"role": "user", "content": request.input})
         else:
-            messages.extend(request.input)  # type: ignore
+            for item in request.input:
+                messages.append(self._construct_chat_message_with_tool_call(item))
         return messages
 
     def _construct_harmony_system_input_message(
