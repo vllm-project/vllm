@@ -3304,80 +3304,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dp_rank = self.parallel_config.data_parallel_rank
             num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
 
-        attn_metadata: PerLayerAttnMetadata | None = None
-
-        # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.
-        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            attn_metadata = {}
-            if ubatch_slices is not None:
-                attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-
-            if create_mixed_batch:
-                # In the mixed batch mode (used for FI warmup), we use
-                # shorter sequence lengths to run faster.
-                # TODO(luka) better system for describing dummy batches
-                seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
-            else:
-                seq_lens = max_query_len
-            self.seq_lens.np[:num_reqs] = seq_lens
-            self.seq_lens.np[num_reqs:] = 0
-            self.seq_lens.copy_to_gpu()
-
-            cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
-            self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
-            self.query_start_loc.copy_to_gpu()
-
-            for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups
-            ):
-                common_attn_metadata = CommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
-                    seq_lens=self.seq_lens.gpu[:num_reqs],
-                    seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                        :num_reqs
-                    ],
-                    num_reqs=num_reqs,
-                    num_actual_tokens=num_tokens,
-                    max_query_len=max_query_len,
-                    max_seq_len=self.max_model_len,
-                    block_table_tensor=self.input_batch.block_table[
-                        kv_cache_group_id
-                    ].get_device_tensor(num_reqs),
-                    slot_mapping=self.input_batch.block_table[
-                        kv_cache_group_id
-                    ].slot_mapping.gpu[:num_tokens],
-                    causal=True,
-                    dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
-                    if self.dcp_world_size > 1
-                    else None,
-                )
-                for attn_group in self.attn_groups[kv_cache_group_id]:
-                    if ubatch_slices is not None:
-                        common_attn_metadata_list = split_attn_metadata(
-                            ubatch_slices, common_attn_metadata
-                        )
-                        for ubid, common_attn_metadata in enumerate(
-                            common_attn_metadata_list
-                        ):
-                            assert common_attn_metadata.max_query_len == 1
-                            attn_metadata_i = attn_group.get_metadata_builder(
-                                ubatch_id=ubid
-                            ).build_for_cudagraph_capture(common_attn_metadata)
-                            for layer_name in attn_group.layer_names:
-                                assert type(attn_metadata) is list
-                                attn_metadata[ubid][layer_name] = attn_metadata_i
-                    else:
-                        assert type(attn_metadata) is dict
-                        metadata_builder = attn_group.get_metadata_builder()
-                        attn_metadata_i = metadata_builder.build_for_cudagraph_capture(
-                            common_attn_metadata
-                        )
-                        for layer_name in attn_group.layer_names:
-                            attn_metadata[layer_name] = attn_metadata_i
-
         with self.maybe_dummy_run_with_lora(
             self.lora_config, num_scheduled_tokens, activate_lora, remove_lora
         ):
@@ -3444,6 +3370,82 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             else:
                 cudagraph_runtime_mode = _cg_mode
+
+            attn_metadata: PerLayerAttnMetadata | None = None
+
+            # If force_attention is True, we always capture attention. Otherwise,
+            # it only happens for cudagraph_runtime_mode=FULL.
+            if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                attn_metadata = {}
+                if ubatch_slices is not None:
+                    attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+
+                if create_mixed_batch:
+                    # In the mixed batch mode (used for FI warmup), we use
+                    # shorter sequence lengths to run faster.
+                    # TODO(luka) better system for describing dummy batches
+                    seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
+                else:
+                    seq_lens = max_query_len
+                self.seq_lens.np[:num_reqs] = seq_lens
+                self.seq_lens.np[num_reqs:] = 0
+                self.seq_lens.copy_to_gpu()
+
+                cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+                self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+                self.query_start_loc.copy_to_gpu()
+
+                for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                    self.kv_cache_config.kv_cache_groups
+                ):
+                    common_attn_metadata = CommonAttentionMetadata(
+                        query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
+                        query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
+                        seq_lens=self.seq_lens.gpu[:num_reqs],
+                        seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                        num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
+                            :num_reqs
+                        ],
+                        num_reqs=num_reqs,
+                        num_actual_tokens=num_tokens,
+                        max_query_len=max_query_len,
+                        max_seq_len=self.max_model_len,
+                        block_table_tensor=self.input_batch.block_table[
+                            kv_cache_group_id
+                        ].get_device_tensor(num_reqs),
+                        slot_mapping=self.input_batch.block_table[
+                            kv_cache_group_id
+                        ].slot_mapping.gpu[:num_tokens],
+                        causal=True,
+                        dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
+                        if self.dcp_world_size > 1
+                        else None,
+                    )
+                    for attn_group in self.attn_groups[kv_cache_group_id]:
+                        if ubatch_slices is not None:
+                            common_attn_metadata_list = split_attn_metadata(
+                                ubatch_slices, common_attn_metadata
+                            )
+                            for ubid, common_attn_metadata in enumerate(
+                                common_attn_metadata_list
+                            ):
+                                assert common_attn_metadata.max_query_len == 1
+                                attn_metadata_i = attn_group.get_metadata_builder(
+                                    ubatch_id=ubid
+                                ).build_for_cudagraph_capture(common_attn_metadata)
+                                for layer_name in attn_group.layer_names:
+                                    assert type(attn_metadata) is list
+                                    attn_metadata[ubid][layer_name] = attn_metadata_i
+                        else:
+                            assert type(attn_metadata) is dict
+                            metadata_builder = attn_group.get_metadata_builder()
+                            attn_metadata_i = (
+                                metadata_builder.build_for_cudagraph_capture(
+                                    common_attn_metadata
+                                )
+                            )
+                            for layer_name in attn_group.layer_names:
+                                attn_metadata[layer_name] = attn_metadata_i
 
             if ubatch_slices is not None:
                 # Adjust values to reflect a single ubatch.
