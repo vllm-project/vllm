@@ -23,8 +23,18 @@ FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(
+            *args,
+            **kwargs,
+        )
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
 
 class FlashInferMLABackend(MLACommonBackend):

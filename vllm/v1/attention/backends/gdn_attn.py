@@ -59,10 +59,6 @@ class GDNAttentionMetadata:
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
-    cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
-
-    reorder_batch_threshold: int = 1
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -81,6 +77,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()

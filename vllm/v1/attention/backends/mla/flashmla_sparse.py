@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -239,8 +239,6 @@ def triton_convert_req_index_to_global_index(
 
 @dataclass
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -299,6 +297,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             dtype=torch.int32,
             device=device,
         )
+
+        self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def build(
         self,
