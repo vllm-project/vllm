@@ -209,6 +209,54 @@ class InputPreprocessor:
 
         return kwargs
 
+    def _should_add_special_tokens(self, prompt: str) -> bool:
+        """
+        Determine whether to add special tokens when tokenizing a prompt.
+
+        Returns False if the prompt appears to already contain special tokens
+        (e.g., from chat template application), True otherwise.
+
+        This helps avoid duplicating BOS/EOS tokens when users manually apply
+        chat templates before calling generate().
+
+        See: https://github.com/vllm-project/vllm/issues/27486
+        """
+        if self.tokenizer is None:
+            return True
+
+        # Check if tokenizer has a BOS token
+        bos_token = getattr(self.tokenizer, "bos_token", None)
+        if not bos_token:
+            return True
+
+        # If prompt starts with BOS token text, don't add special tokens
+        # This handles cases like Llama's "<|begin_of_text|>"
+        if prompt.startswith(bos_token):
+            logger.debug(
+                "Detected BOS token at the start of prompt. "
+                "Setting add_special_tokens=False to avoid duplication."
+            )
+            return False
+
+        # Check for common chat template markers that indicate special tokens
+        # are already present (e.g., "<|start_header_id|>", "<|im_start|>")
+        chat_markers = [
+            "<|start_header_id|>",  # Llama 3.x
+            "<|im_start|>",  # ChatML format
+            "<s>",  # Common BOS in older models
+        ]
+
+        for marker in chat_markers:
+            if marker in prompt[:100]:  # Check first 100 chars
+                logger.debug(
+                    "Detected chat template marker '%s' in prompt. "
+                    "Setting add_special_tokens=False to avoid duplication.",
+                    marker,
+                )
+                return False
+
+        return True
+
     def _tokenize_prompt(
         self,
         prompt: str,
@@ -220,6 +268,13 @@ class InputPreprocessor:
         """
         tokenizer = self.get_tokenizer()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
+
+        # Intelligently detect if special tokens should be added
+        # This prevents double BOS tokens when using chat templates
+        if "add_special_tokens" not in tokenization_kwargs:
+            tokenization_kwargs["add_special_tokens"] = self._should_add_special_tokens(
+                prompt
+            )
 
         encoder_config = self.model_config.encoder_config
 

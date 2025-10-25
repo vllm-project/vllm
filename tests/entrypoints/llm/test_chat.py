@@ -116,6 +116,62 @@ def test_llm_chat_tokenization_no_double_bos(text_llm):
     assert prompt_token_ids[1] != bos_token, "Double BOS"
 
 
+def test_llm_generate_with_chat_template_no_double_bos(text_llm):
+    """
+    Test for issue #27486: When using apply_chat_template manually
+    and then calling generate(), should not duplicate BOS token.
+    """
+    from transformers import AutoTokenizer
+
+    from vllm import SamplingParams
+
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+
+    messages = [{"role": "user", "content": "Hello, how are you?"}]
+
+    # Apply chat template manually (as users might do)
+    prompt_with_template = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Get expected token IDs from transformers
+    expected_token_ids = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True
+    )
+
+    # Generate using vLLM with the templated string
+    outputs = text_llm.generate(
+        [prompt_with_template],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=1),
+    )
+
+    assert len(outputs) == 1
+    prompt_token_ids = outputs[0].prompt_token_ids
+    assert prompt_token_ids is not None
+
+    # Check that vLLM produces the same token IDs as transformers
+    assert len(prompt_token_ids) == len(expected_token_ids), (
+        f"Length mismatch: vLLM has {len(prompt_token_ids)} tokens, "
+        f"expected {len(expected_token_ids)}"
+    )
+
+    # Verify no duplicate BOS at the start
+    bos_token = tokenizer.bos_token_id
+    assert prompt_token_ids[0] == bos_token, "First token should be BOS"
+    assert prompt_token_ids[1] != bos_token, (
+        "Second token should not be BOS (no duplication)"
+    )
+
+    # Verify exact match
+    if prompt_token_ids != expected_token_ids:
+        mismatch_idx = next(
+            i
+            for i, (a, b) in enumerate(zip(prompt_token_ids, expected_token_ids))
+            if a != b
+        )
+        raise AssertionError(f"Token mismatch at index {mismatch_idx}")
+
+
 @pytest.fixture(scope="function")
 def thinking_llm():
     # pytest caches the fixture so we use weakref.proxy to
