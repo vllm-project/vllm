@@ -43,7 +43,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     activation_without_mul,
-    disable_inplace,
     moe_kernel_quantize_input,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
@@ -1544,7 +1543,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if inplace and not disable_inplace():
+    if inplace:
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
 
@@ -1795,10 +1794,7 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    if inplace and not disable_inplace():
-        out_hidden_states = hidden_states
-    else:
-        out_hidden_states = torch.empty_like(hidden_states)
+    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if ocp_mx_scheme is not None:
         # TODO: On platforms for which `current_platform.supports_mx()` is True

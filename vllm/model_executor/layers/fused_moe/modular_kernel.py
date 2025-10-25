@@ -14,7 +14,6 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     count_expert_num_tokens,
-    disable_inplace,
 )
 from vllm.utils import cdiv
 from vllm.v1.worker.ubatching import (
@@ -1147,7 +1146,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
 
-        if inplace and self.shared_experts is None and not disable_inplace():
+        if inplace and self.shared_experts is None:
             output = hidden_states
         else:
             output = torch.zeros_like(hidden_states)
