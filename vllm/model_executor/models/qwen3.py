@@ -281,7 +281,8 @@ class Qwen3Model(Qwen2Model):
         alt_stream = None
         cudagraph_runtime_mode = get_forward_context().cudagraph_runtime_mode
         if cudagraph_runtime_mode.has_full_cudagraphs() and (
-                current_platform.is_cuda() or current_platform.is_out_of_tree()):
+            current_platform.is_cuda() or current_platform.is_out_of_tree()
+        ):
             alt_stream = device_module.Stream()
         super().__init__(
             vllm_config=vllm_config,
