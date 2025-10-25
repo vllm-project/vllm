@@ -50,7 +50,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker Test # 36min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
