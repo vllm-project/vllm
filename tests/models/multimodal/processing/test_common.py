@@ -29,7 +29,11 @@ from vllm.transformers_utils.tokenizer import (
 )
 
 from ....multimodal.utils import random_audio, random_image, random_video
-from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+from ...registry import (
+    _MULTIMODAL_EXAMPLE_MODELS,
+    _TRANSFORMERS_BACKEND_MODELS,
+    HF_EXAMPLE_MODELS,
+)
 
 
 def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
@@ -128,7 +132,9 @@ def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
 
 def get_model_ids_to_test():
-    return _get_model_ids_to_test(_MULTIMODAL_EXAMPLE_MODELS.keys())
+    return _get_model_ids_to_test(
+        _MULTIMODAL_EXAMPLE_MODELS.keys() - _TRANSFORMERS_BACKEND_MODELS.keys()
+    )
 
 
 def get_text_token_prompts(
