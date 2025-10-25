@@ -452,7 +452,7 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention",
+        "vllm::gdn_attention_core",
         "vllm::sparse_attn_indexer",
     ]
 
