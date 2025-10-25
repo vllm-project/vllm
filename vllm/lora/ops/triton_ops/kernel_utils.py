@@ -102,6 +102,7 @@ def do_expand_kernel(
     EVEN_K: tl.constexpr,
     CAST_TYPE: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
+    USE_GDC: tl.constexpr,
 ):
     """
     Given an array of integers that identifies the rows of A, ram,
@@ -123,7 +124,8 @@ def do_expand_kernel(
         cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
         cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
         cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
-
+    if USE_GDC:
+        tl.extra.cuda.gdc_wait()
     # Identify the input_ptr and lora_ptr from slice_id.
     if SLICE_NUM == 1:
         cur_input_ptr = input_ptr
@@ -223,6 +225,7 @@ def do_shrink_kernel(
     EVEN_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
     SLICE_NUM: tl.constexpr,
+    USE_GDC: tl.constexpr,
 ):
     """
     Given an array of integers that identifies the rows of A, ram,
@@ -284,8 +287,9 @@ def do_shrink_kernel(
         + offset_cn[None, :] * output_d2_stride
     )
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < N)
-
     accumulator *= scaling
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
     # handles write-back with reduction-splitting
     if SPLIT_K == 1:
         tl.store(c_ptr, accumulator, mask=c_mask)

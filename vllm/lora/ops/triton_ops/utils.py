@@ -3,6 +3,7 @@
 
 import functools
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -248,3 +250,15 @@ def get_lora_op_configs(
 
     assert config_data is not None
     return config_data
+
+
+@lru_cache
+def supports_pdl(device: torch.device | None = None) -> bool:
+    """
+    Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
+    """
+    if not current_platform.is_cuda():
+        return False
+    # PDL requires compute capability SM90 or above
+    capability = torch.cuda.get_device_capability(device)
+    return capability[0] >= 9
