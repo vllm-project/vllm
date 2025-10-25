@@ -91,10 +91,11 @@ async def test_basic_audio_with_lora(mary_had_lamb):
             file=mary_had_lamb,
             language="en",
             response_format="text",
-            temperature=0.0)
+            temperature=0.0,
+        )
     out = json.loads(transcription)
-    out_text = out['text']
-    out_usage = out['usage']
+    out_text = out["text"]
+    out_usage = out["usage"]
     assert "mary had a little lamb" in out_text
     assert out_usage["seconds"] == 16, out_usage["seconds"]
 
