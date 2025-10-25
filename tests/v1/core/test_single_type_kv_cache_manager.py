@@ -14,9 +14,14 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
     SlidingWindowManager,
 )
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    SlidingWindowSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -354,3 +359,121 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     assert (
         manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2) == 15
     )
+
+
+def test_lazy_null_block_allocation_in_managers():
+    """Test that different managers have different null block allocation patterns."""
+    # Test FullAttentionManager - should not allocate null block
+    block_pool_full = BlockPool(num_gpu_blocks=4, enable_caching=True)
+    full_spec = FullAttentionSpec(
+        block_size=32,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=None,
+    )
+
+    full_manager = FullAttentionManager(full_spec, block_pool_full, kv_cache_group_id=0)
+
+    # FullAttentionManager should not trigger null block allocation
+    assert block_pool_full._null_block is None
+    assert block_pool_full.get_num_free_blocks() == 4
+
+    full_manager.remove_skipped_blocks("test", 100)
+    assert block_pool_full._null_block is None  # Still None
+    assert block_pool_full.get_num_free_blocks() == 4  # All blocks available
+
+    # SlidingWindowManager should allocate null block when needed
+    block_pool_sliding = BlockPool(num_gpu_blocks=4, enable_caching=True)
+    sliding_spec = SlidingWindowSpec(
+        block_size=32,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=64,
+    )
+
+    sliding_manager = SlidingWindowManager(
+        sliding_spec, block_pool_sliding, kv_cache_group_id=0
+    )
+
+    # Initially should not have allocated null block
+    assert block_pool_sliding._null_block is None
+    assert block_pool_sliding.get_num_free_blocks() == 4
+
+    # Set up blocks for sliding window operation
+    blocks = block_pool_sliding.get_new_blocks(2)
+    sliding_manager.req_to_blocks["test"] = blocks
+    assert block_pool_sliding.get_num_free_blocks() == 2
+    assert block_pool_sliding._null_block is None
+
+    # This should trigger null block allocation, but also frees 1 block
+    sliding_manager.remove_skipped_blocks("test", 100)
+
+    # Now null block should be allocated
+    assert block_pool_sliding._null_block is not None
+    assert block_pool_sliding.get_num_free_blocks() == 2
+
+    # ChunkedLocalAttentionManager should allocate null block when needed
+    pool_chunked = BlockPool(num_gpu_blocks=4, enable_caching=True)
+    chunked_spec = ChunkedLocalAttentionSpec(
+        block_size=32,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        attention_chunk_size=16,
+    )
+
+    # Create ChunkedLocalAttentionManager
+    chunked_manager = ChunkedLocalAttentionManager(
+        chunked_spec, pool_chunked, kv_cache_group_id=0
+    )
+
+    # Should not have triggered null block allocation yet
+    assert pool_chunked._null_block is None
+    assert pool_chunked.get_num_free_blocks() == 4
+
+    blocks = pool_chunked.get_new_blocks(2)
+    chunked_manager.req_to_blocks["test_request"] = blocks
+    assert pool_chunked.get_num_free_blocks() == 2
+    assert pool_chunked._null_block is None
+
+    # This should trigger null block allocation, but also frees 1 block
+    chunked_manager.remove_skipped_blocks("test_request", 48)
+
+    # Should have triggered null block allocation
+    assert pool_chunked._null_block is not None
+    assert pool_chunked.get_num_free_blocks() == 2
+
+
+def test_manager_null_block_property_behavior():
+    """Test that manager null_block property provides correct lazy behavior."""
+    block_pool = BlockPool(num_gpu_blocks=4, enable_caching=True)
+    sliding_spec = SlidingWindowSpec(
+        block_size=32,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=64,
+    )
+
+    manager = SlidingWindowManager(sliding_spec, block_pool, kv_cache_group_id=0)
+
+    # Initially, both manager and pool should have no null block
+    assert manager._null_block is None
+    assert block_pool._null_block is None
+    assert block_pool.get_num_free_blocks() == 4
+
+    # Access manager's null_block property
+    manager_null_block = manager.null_block
+
+    # Should have triggered allocation at both levels
+    assert manager._null_block is not None
+    assert block_pool._null_block is not None
+    assert manager_null_block is block_pool._null_block
+    assert block_pool.get_num_free_blocks() == 3
+
+    # Second access should return same instance
+    manager_null_block2 = manager.null_block
+    assert manager_null_block is manager_null_block2
+    assert block_pool.get_num_free_blocks() == 3  # No additional allocation
