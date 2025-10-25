@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import time
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any, Final, cast
 
@@ -75,10 +76,19 @@ class EmbeddingMixin(OpenAIServing):
     ) -> ErrorResponse | None:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
+            a = time.perf_counter()
+
+            time.a = a
+
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
+
+
             tokenizer = await self.engine_client.get_tokenizer()
+
+
             renderer = self._get_renderer(tokenizer)
+
 
             if isinstance(ctx.request, EmbeddingChatRequest):
                 (
@@ -100,6 +110,7 @@ class EmbeddingMixin(OpenAIServing):
                     prompt_or_prompts=ctx.request.input,
                     config=self._build_render_config(ctx.request),
                 )
+
             return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")

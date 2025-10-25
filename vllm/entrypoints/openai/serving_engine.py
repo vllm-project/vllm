@@ -581,9 +581,14 @@ class OpenAIServing:
         if error := self._validate_request(ctx):
             yield error
 
+        a = time.perf_counter()
+
         preprocess_ret = await self._preprocess(ctx)
         if isinstance(preprocess_ret, ErrorResponse):
             yield preprocess_ret
+
+        b = time.perf_counter()
+        print("_preprocess", (b-a) *1000)
 
         generators_ret = await self._prepare_generators(ctx)
         if isinstance(generators_ret, ErrorResponse):
