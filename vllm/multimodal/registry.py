@@ -152,6 +152,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
+        profiler_limits: Mapping[str, int] | None = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -164,11 +165,13 @@ class MultiModalRegistry:
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
-        mm_limits = profiler.get_mm_limits()
+        profiler_limits = (
+            profiler.get_mm_limits() if profiler_limits is None else profiler_limits
+        )
 
         return profiler.get_mm_max_contiguous_tokens(
             seq_len,
-            {modality: 1 for modality, limit in mm_limits.items() if limit > 0},
+            {modality: 1 for modality, limit in profiler_limits.items() if limit > 0},
         )
 
     def get_mm_limits_per_prompt(
