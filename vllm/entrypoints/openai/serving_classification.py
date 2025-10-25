@@ -50,15 +50,13 @@ class ClassificationMixin(OpenAIServing):
 
             messages = getattr(ctx.request, "messages", None)
             if messages:
-                error_check_ret = self._validate_chat_template(
+                ret = self._validate_chat_template(
                     request_chat_template=getattr(ctx.request, "chat_template", None),
-                    chat_template_kwargs=getattr(
-                        ctx.request, "chat_template_kwargs", None
-                    ),
+                    chat_template_kwargs=getattr(ctx.request, "chat_template_kwargs", None),
                     trust_request_chat_template=self.trust_request_chat_template,
                 )
-                if error_check_ret is not None:
-                    return error_check_ret
+                if ret:
+                    return ret
 
                 (
                     _,
@@ -81,17 +79,13 @@ class ClassificationMixin(OpenAIServing):
                 )
                 ctx.engine_prompts = engine_prompts
             else:
-                if ctx.request.input is None or (
-                    isinstance(ctx.request.input, str) and not ctx.request.input
-                ):
+                input_data = ctx.request.input
+                if input_data is None or (isinstance(input_data, str) and not input_data):
                     return self.create_error_response(
                         "Input or messages must be provided",
                         status_code=HTTPStatus.BAD_REQUEST,
                     )
-                if (
-                    isinstance(ctx.request.input, list)
-                    and len(ctx.request.input) == 0
-                ):
+                if isinstance(input_data, list) and not input_data:
                     return None
 
                 renderer = self._get_renderer(ctx.tokenizer)
