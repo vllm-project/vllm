@@ -1166,9 +1166,13 @@ class OpenAIServingChat(OpenAIServing):
                             )
 
                         # Send the finish response for each request.n only once
+                        # In OpenAI's API, when a tool is called, the
+                        # finish_reason is:
+                        # "tool_calls" for "auto" or "required" tool calls,
+                        # and "stop" for named tool calls.
                         if (
                             auto_tools_called
-                            or tools_streamed[i]
+                            or (tools_streamed[i] and not tool_choice_function_name)
                             or (self.use_harmony and harmony_tools_streamed[i])
                         ):
                             finish_reason_ = "tool_calls"
@@ -1517,13 +1521,21 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(
                     role=role, reasoning_content=reasoning_content, content=content
                 )
+            # In OpenAI's API, when a tool is called, the finish_reason is:
+            # "tool_calls" for "auto" or "required" tool calls,
+            # and "stop" for named tool calls.
+            is_finish_reason_tool_calls = auto_tools_called or (
+                request.tool_choice
+                and request.tool_choice == "required"
+                and output.finish_reason == "stop"
+            )
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
                 finish_reason="tool_calls"
-                if auto_tools_called
+                if is_finish_reason_tool_calls
                 else output.finish_reason
                 if output.finish_reason
                 else "stop",
