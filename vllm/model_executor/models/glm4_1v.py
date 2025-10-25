@@ -36,9 +36,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from packaging.version import Version
 from transformers import BatchFeature
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor,
@@ -62,6 +60,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -100,7 +99,11 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
+from .vision import (
+    conv3d_to_linear_weight,
+    get_vit_attn_backend,
+    run_dp_sharded_mrope_vision_model,
+)
 
 logger = init_logger(__name__)
 
@@ -296,6 +299,7 @@ class Glm4vVisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
@@ -479,18 +483,15 @@ class Glm4vVisionPatchEmbed(nn.Module):
         self.hidden_size = hidden_size
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = nn.Conv3d(
-            in_channels,
+        self.proj = ReplicatedLinear(
+            in_channels * math.prod(kernel_size),
             hidden_size,
-            kernel_size=kernel_size,
-            stride=kernel_size,
             bias=True,
+            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
-        x = self.proj(x).view(L, self.hidden_size)
+        x = self.proj(x)
         return x
 
 
@@ -888,6 +889,9 @@ class Glm4vVisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            if name.endswith("patch_embed.proj.weight"):
+                loaded_weight = conv3d_to_linear_weight(loaded_weight)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1269,14 +1273,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
 
-                # backward compatibility for Transformers 4.55
                 unuse_metadata = ["do_sample_frames"]
-                if (
-                    not hasattr(VideoMetadata, "frames_indices")
-                    and "frames_indices" in metadata
-                ):
-                    unuse_metadata.append("frames_indices")
-
                 video_mm_data["video_metadata"] = [
                     [
                         VideoMetadata(
@@ -1295,24 +1292,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_kwargs=video_mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                if not video_mm_kwargs["do_sample_frames"] and Version(
-                    TRANSFORMERS_VERSION
-                ) < Version("4.56.0"):
-                    # Transformers v4.55 has incorrect timestamps issue for
-                    # skip sampling. We construct the placeholder manually to
-                    # get placeholders with correct timestamps.
-                    placeholder = self.info._construct_video_placeholder(
-                        video_array,
-                        metadata,
-                        video_outputs["video_grid_thw"].squeeze(0),
-                    )
-                    video_placeholder = processor.tokenizer.decode(placeholder)
-                else:
-                    input_ids = video_outputs.pop("input_ids")
-                    input_ids[input_ids == processor.image_token_id] = (
-                        processor.video_token_id
-                    )
-                    video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
+                input_ids = video_outputs.pop("input_ids")
+                input_ids[input_ids == processor.image_token_id] = (
+                    processor.video_token_id
+                )
+                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
