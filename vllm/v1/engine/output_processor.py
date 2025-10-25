@@ -96,6 +96,7 @@ class RequestState:
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
+        input_kv_transfer_params: dict[str, Any] | None = None,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -117,6 +118,8 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        # Store input kv_transfer_params to identify decode server in PD disaggregation
+        self.input_kv_transfer_params = input_kv_transfer_params
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -157,6 +160,11 @@ class RequestState:
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
+        # Extract kv_transfer_params from sampling_params if available
+        input_kv_transfer_params = None
+        if sampling_params and sampling_params.extra_args:
+            input_kv_transfer_params = sampling_params.extra_args.get("kv_transfer_params")
+
         return cls(
             request_id=request.request_id,
             parent_req=parent_req,
@@ -177,6 +185,7 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            input_kv_transfer_params=input_kv_transfer_params,
         )
 
     def make_request_output(
@@ -443,6 +452,13 @@ class OutputProcessor:
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
+                # In Prefill/Decode Disaggregation (PD) setup, decode servers receive
+                # invalid token IDs through the KV connector. Skip processing prompt_logprobs
+                # for decode servers to avoid crashes.
+                # Decode server is identified by: do_remote_decode=False in input kv_transfer_params
+                if (req_state.input_kv_transfer_params is not None and
+                    req_state.input_kv_transfer_params.get("do_remote_decode") == False):
+                    engine_core_output.new_prompt_logprobs_tensors = None
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
