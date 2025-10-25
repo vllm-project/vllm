@@ -1203,15 +1203,11 @@ class BaseMultiModalProcessor(ABC, Generic[_Proc, _Prof]):
         "and will be removed in v0.13."
     )
     def info(self):  # Backward compatibility
-        return self.profiling_info.processing_info
+        return self.dummy_builder.processing_info
 
     @property
     def processing_info(self) -> _Proc:
         return self.dummy_builder.processing_info
-
-    @property
-    def profiling_info(self) -> _Prof:
-        return self.dummy_builder.profiling_info
 
     def __call__(
         self,
@@ -1240,7 +1236,7 @@ class BaseMultiModalProcessor(ABC, Generic[_Proc, _Prof]):
         modality: str,
         num_items: int,
     ) -> None:
-        profiling_info = self.profiling_info
+        profiling_info = self.dummy_builder.profiling_info
         supported_limit = profiling_info.supported_mm_limits.get(modality, 0)
         allowed_limit = profiling_info.allowed_mm_limits.get(modality, 0)
 
