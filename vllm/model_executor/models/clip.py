@@ -162,7 +162,9 @@ class CLIPProfilingInfo(BaseProfilingInfo[CLIPProcessingInfo]):
         )
 
 
-class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProfilingInfo]):
+class CLIPDummyInputsBuilder(
+    BaseDummyInputsBuilder[CLIPProcessingInfo, CLIPProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
 
