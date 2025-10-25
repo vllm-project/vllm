@@ -23,10 +23,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
-from vllm.v1.attention.backends.mla.indexer import (
-    get_max_prefill_buffer_size,
-    split_prefill_chunks,
-)
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -53,6 +49,45 @@ structured as:
 -   **Last 128 bytes:** The "RoPE" part, containing 64 `bfloat16` values. This 
     part is not quantized for accuracy.
 """
+
+
+def split_prefill_chunks(
+    seq_lens_cpu: torch.Tensor, workspace_size: int
+) -> list[tuple[int, int]]:
+    """
+    Split the prefill chunks into a list of tuples of (reqs_start, reqs_end)
+    such that the total sequence length of each chunk is less than the
+    maximum prefill buffer size.
+
+    Args:
+        seq_lens_cpu: The sequence lengths of the prefill requests.
+        max_prefill_buffer_size: The maximum prefill buffer size.
+
+    Returns:
+        A list of tuples of (reqs_start, reqs_end).
+    """
+    chunk_bounds = []
+    i, n = 0, len(seq_lens_cpu)
+    assert np.all(seq_lens_cpu <= workspace_size)
+
+    while i < n:
+        start, total = i, 0
+        while i < n and (total + (cur := seq_lens_cpu[i].item())) <= workspace_size:
+            total += cur
+            i += 1
+        chunk_bounds.append((start, i))
+    return chunk_bounds
+
+
+def get_prefill_workspace_size(vllm_config: VllmConfig):
+    max_model_len = vllm_config.model_config.max_model_len
+    # NOTE(Lucas): 5 is a magic number for controlling the prefill buffer size.
+    # May be tuned later.
+    # Memory usage: 5 * max_model_len * 576 * 2 bytes
+    #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
+    #            5 * 163840 * 576 * 2 = ~900 MB
+    # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
+    return max_model_len * 5
 
 
 class FlashMLASparseBackend(AttentionBackend):
@@ -138,21 +173,12 @@ class FlashMLASparseMetadata:
         Prefill requests may be chunked to fit within the fixed workspace size.
         """
 
-        seq_lens: (
-            torch.Tensor
-        )  # [num_reqs_in_chunk] sequence lengths (for gather kernel)
-        tokens_slice: slice  # Slice to extract query tokens for this chunk
-        block_table: (
-            torch.Tensor
-        )  # [num_reqs_in_chunk, max_blocks] block table for chunk
-        req_start_idx: int  # Starting request index in the original request list
-        workspace_starts: (
-            torch.Tensor
-        )  # [num_reqs_in_chunk] workspace starts, adjusted to start at 0 for this chunk
-        request_slice: (
-            slice  # Slice to extract requests for this chunk from the full request list
-        )
-        chunk_size: int  # Total number of tokens in this chunk (sum of seq_lens)
+        seq_lens: torch.Tensor
+        tokens_slice: slice
+        block_table: torch.Tensor
+        req_start_idx: int
+        workspace_starts: torch.Tensor
+        chunk_size: int
 
     prefill_chunks: list[ChunkMetadata] | None = None
 
@@ -278,14 +304,12 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # For pure decode batches, prefill_request_id will be None
         # For mixed batches, it will have -1 for decode and request_id for prefill
         if num_prefill_reqs > 0:
-            # Get sequence lengths from common_attn_metadata
-            # seq_lens includes both context and query
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            # Prefill requests are at the end (after decode requests)
+            seq_lens = common_attn_metadata.seq_lens
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+
             prefill_seq_lens_cpu = seq_lens_cpu[num_decode_reqs:]
-            prefill_seq_lens = torch.tensor(
-                prefill_seq_lens_cpu, dtype=torch.int32, device=self.device
-            )
+            prefill_seq_lens = seq_lens[num_decode_reqs:]
 
             # Build prefill_request_id: -1 for decode, request index for
             # prefill. This enables a single
@@ -301,75 +325,45 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 req_query_end = common_attn_metadata.query_start_loc[global_req_idx + 1]
                 prefill_request_id[req_query_start:req_query_end] = req_idx
 
-            # Compute cumulative sequence lengths for workspace mapping
-            # Shape: [num_prefill_reqs] - cumsum gives END of each sequence
-            # We'll convert to STARTS below
-            prefill_workspace_starts = torch.cumsum(
-                prefill_seq_lens, dim=0, dtype=torch.int32
+            # will be adjusted by chunk loop
+            prefill_workspace_starts_cpu = torch.zeros(
+                num_prefill_reqs, dtype=torch.int32, pin_memory=True
             )
-            # Convert ends to starts by shifting:
-            # cumsum=[10,25,45,50] -> starts=[0,10,25,45]
-            prefill_workspace_starts = torch.cat(
-                [
-                    torch.zeros(1, dtype=torch.int32, device=self.device),
-                    prefill_workspace_starts[:-1],
-                ]
+            torch.cumsum(prefill_seq_lens[1:], out=prefill_workspace_starts_cpu)
+            # populated by non-blocking copy after prefill_workspace_starts_cpu is
+            # updated by each chunk
+            prefill_workspace_starts = torch.empty(
+                num_prefill_reqs, dtype=torch.int32, device=self.device
             )
 
             # Chunk prefill requests to fit within workspace size
-            max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
+            max_prefill_buffer_size = get_prefill_workspace_size(self.vllm_config)
             chunk_bounds = split_prefill_chunks(
-                prefill_seq_lens_cpu, max_prefill_buffer_size, 0
+                prefill_seq_lens_cpu, max_prefill_buffer_size
             )
-
-            # Adjust workspace_starts in-place per chunk to be 0-indexed
-            # within each chunk
-            # Example: seq_lens=[10,15,20,5], chunks=[[0,2],[2,4]]
-            #   Initial: workspace_starts=[0,10,25,45]
-            #   After:   workspace_starts=[0,10,0,20]
-            #           (chunk 0 starts at 0, chunk 1 starts at 0)
-            for chunk_start, chunk_end in chunk_bounds:
-                offset = prefill_workspace_starts[chunk_start].item()
-                prefill_workspace_starts[chunk_start:chunk_end] -= offset
-
-            # Create chunk metadata for each chunk
             prefill_chunks = []
+
             for chunk_start, chunk_end in chunk_bounds:
-                # Get sequence lengths for this chunk
+                # Adjust workspace_starts in-place per chunk to be
+                # 0-indexed within each chunk
+                # Example: seq_lens=[10,15,20,5], chunks=[[0,2],[2,4]]
+                #   Initial: workspace_starts=[0,10,25,45]
+                #   After:   workspace_starts=[0,10,0,20]
+                #           (chunk 0 starts at 0, chunk 1 starts at 0)
+                offset = prefill_workspace_starts_cpu[chunk_start].item()
+                prefill_workspace_starts_cpu[chunk_start:chunk_end] -= offset
+
                 chunk_seq_lens = prefill_seq_lens[chunk_start:chunk_end]
-
-                # Compute chunk size from CPU tensor to avoid GPU-to-CPU transfer later
                 chunk_size = int(prefill_seq_lens_cpu[chunk_start:chunk_end].sum())
-
-                # Create request slice (used for block_table and workspace_starts)
-                chunk_req_slice = slice(
-                    num_decode_reqs + chunk_start, num_decode_reqs + chunk_end
-                )
-
-                # Determine token slice for this chunk's queries
-                # query_start_loc indices for prefill requests start after
-                # decode requests
-                token_start = common_attn_metadata.query_start_loc[
-                    chunk_req_slice.start
-                ].item()
-                token_end = common_attn_metadata.query_start_loc[
-                    chunk_req_slice.stop
-                ].item()
+                token_start = query_start_loc_cpu[chunk_start].item()
+                token_end = query_start_loc_cpu[chunk_end].item()
                 tokens_slice = slice(token_start, token_end)
 
-                # Extract block table for this chunk
-                chunk_block_table = common_attn_metadata.block_table_tensor[
-                    chunk_req_slice
-                ]
-
-                # Extract workspace_starts for this chunk
-                # (already adjusted to start at 0)
+                # Create chunk view of gpu tensor
                 chunk_workspace_starts = prefill_workspace_starts[chunk_start:chunk_end]
-
-                # Store request slice for mapping global req IDs to chunk-local IDs
-                request_slice = slice(
-                    num_decode_reqs + chunk_start, num_decode_reqs + chunk_end
-                )
+                chunk_block_table = common_attn_metadata.block_table_tensor[
+                    num_decode_reqs + chunk_start : num_decode_reqs + chunk_end
+                ]
 
                 prefill_chunks.append(
                     FlashMLASparseMetadata.ChunkMetadata(
@@ -378,10 +372,13 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                         block_table=chunk_block_table,
                         req_start_idx=chunk_start,
                         workspace_starts=chunk_workspace_starts,
-                        request_slice=request_slice,
                         chunk_size=chunk_size,
                     )
                 )
+
+            prefill_workspace_starts.copy_(
+                prefill_workspace_starts_cpu, non_blocking=True
+            )
 
         fp8_extra_metadata = None
         if self.use_fp8_kv_cache:
@@ -475,18 +472,11 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.padding = 128 if current_platform.is_device_capability(100) else 64
 
         # Reserve fixed workspace for prefill upconversion
-        # Workspace size: 5 * max_model_len tokens * head_dim (576) *
-        # sizeof(bfloat16). This allows us to gather and upconvert up to
-        # 5*max_model_len tokens from the KV cache for prefill attention.
-        # Prefill requests are chunked to fit within this workspace.
-        # Memory usage: 5 * max_model_len * 576 * 2 bytes
-        #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
-        #            5 * 163840 * 576 * 2 = ~900 MB
         vllm_config = indexer.vllm_config
-        max_prefill_buffer_size = get_max_prefill_buffer_size(vllm_config)
+        prefill_workspace_size = get_prefill_workspace_size(vllm_config)
 
         self.prefill_workspace_spec = WorkspaceSpec(
-            shape=(max_prefill_buffer_size, head_size),
+            shape=(prefill_workspace_size, head_size),
             dtype=torch.bfloat16,
             name="FlashMLASparseImpl.prefill_workspace",
         )
@@ -506,7 +496,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
-        # NOTE(Chen): kernel requires num_local_head to be a multiple of
+        # NOTE(Lucas): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell
         if self.num_heads % self.padding != 0:
             assert self.padding % self.num_heads == 0
@@ -613,7 +603,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
 
         # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill). Single call for all tokens!
+        # offsets (prefill).
         # prefill_workspace_starts has been adjusted in-place per chunk so
         # prefill indices automatically come out chunk-local
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -648,25 +638,14 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                     attn_metadata,
                 )
 
-            # Process prefill tokens in chunks
             if num_prefill_tokens > 0:
-                if kv_cache.numel() == 0:
-                    raise RuntimeError(
-                        "Expected non-empty kv_cache for fp8_ds_mla prefill handling"
-                    )
-
                 assert attn_metadata.prefill_chunks is not None
-
-                # Get the reserved workspace (reused for all chunks)
                 prefill_bf16_workspace = current_workspace_manager().get(
                     self.prefill_workspace_spec
                 )
 
-                # Process each chunk
                 for chunk in attn_metadata.prefill_chunks:
-                    # Gather and upconvert this chunk into workspace
                     chunk_workspace = prefill_bf16_workspace[: chunk.chunk_size]
-
                     ops.cp_gather_and_upconvert_fp8_kv_cache(
                         kv_cache,
                         chunk_workspace,
@@ -676,13 +655,11 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                         len(chunk.block_table),
                     )
 
-                    # Get query tokens and precomputed workspace indices for this chunk
                     chunk_q = q[chunk.tokens_slice]
                     chunk_topk_indices_workspace = topk_indices_global[
                         chunk.tokens_slice
                     ]
 
-                    # Run attention for this chunk
                     chunk_attn_out = self._forward_bf16_kv(
                         chunk_q,
                         chunk_workspace,
@@ -690,7 +667,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                         attn_metadata,
                     )
 
-                    # Write results back to output tensor
                     attn_out[chunk.tokens_slice] = chunk_attn_out
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
