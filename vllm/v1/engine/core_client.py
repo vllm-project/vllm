@@ -418,12 +418,18 @@ class ClientGuard:
             assert message is not None, (
                 "message should not be None at fault tolerance scenario"
             )
-            # TODO Asynchronous issuance of pause commands and design of engine
-            #  core status
+
             self.engine_exception_q.put_nowait(FaultInfo.from_json(message))
             self.fault_pub_socket.send_string(
                 f"vllm_fault|{FaultInfo.from_json(message).serialize()}"
             )
+            # TODO Asynchronous issuance of pause commands and design of engine
+            #  core status
+            # Pause healthy engines on fault.
+            # Pause will be invoked again during fault-tolerance handling,
+            # so it's unnecessary to track whether all engines are currently
+            # paused.
+            asyncio.run(self.handle_fault("pause", 1))
 
     def shutdown_guard(self):
         self.client_guard_dead = True
