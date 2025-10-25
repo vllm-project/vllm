@@ -29,12 +29,15 @@ class ImageSize:
 
 
 def _parse_image_size(size_str: str) -> ImageSize:
-    if "x" in size_str:
-        width_str, height_str = size_str.lower().split("x", maxsplit=1)
-        width = int(width_str)
-        height = int(height_str)
-    else:
-        width = height = int(size_str)
+    try:
+        if "x" in size_str:
+            width_str, height_str = size_str.lower().split("x", maxsplit=1)
+            width = int(width_str)
+            height = int(height_str)
+        else:
+            width = height = int(size_str)
+    except ValueError as exc:
+        raise ValueError(f"Invalid image size format: {size_str!r}") from exc
 
     if width <= 0 or height <= 0:
         raise ValueError(f"Image size must be positive, got {size_str!r}.")
@@ -263,6 +266,15 @@ def _time_encoder(
 
 
 def _summarize(times_ms: Sequence[float]) -> dict[str, float]:
+    if not times_ms:
+        return {
+            "avg": 0.0,
+            "p50": 0.0,
+            "p90": 0.0,
+            "p99": 0.0,
+            "stdev": 0.0,
+        }
+
     arr = np.array(times_ms, dtype=np.float64)
     return {
         "avg": float(arr.mean()),
