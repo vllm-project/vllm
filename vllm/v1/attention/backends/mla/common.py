@@ -1861,7 +1861,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def forward(
         self,
         layer: AttentionLayer,
-        q: torch.Tensor,
+        q: tuple[torch.Tensor, torch.Tensor],
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
@@ -1906,7 +1906,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         output = output[:num_actual_toks, ...]
-        q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
@@ -1920,9 +1919,27 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        decode_q = q[:num_decode_tokens]
+        assert isinstance(q, tuple), "MLA backends expect (q_nope, q_rope) tuple"
+        q_nope, q_pe = q
+        q_nope_trimmed = q_nope[:num_actual_toks, ...]
+        q_pe_trimmed = q_pe[:num_actual_toks, ...]
 
-        prefill_q = q[num_decode_tokens:]
+        decode_q_nope, prefill_q_nope = torch.split(
+            q_nope_trimmed,
+            [num_decode_tokens, q_nope_trimmed.size(0) - num_decode_tokens],
+            dim=0,
+        )
+        decode_q_pe, prefill_q_pe = torch.split(
+            q_pe_trimmed,
+            [num_decode_tokens, q_pe_trimmed.size(0) - num_decode_tokens],
+            dim=0,
+        )
+        if prefill_q_nope.shape[:-1] != prefill_q_pe.shape[:-1]:
+            raise RuntimeError(
+                "MLA prefill query components have mismatched shapes: "
+                f"{prefill_q_nope.shape} vs {prefill_q_pe.shape}"
+            )
+        prefill_q = torch.cat((prefill_q_nope, prefill_q_pe), dim=-1)
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
@@ -2019,6 +2036,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_q = torch.cat(decode_q, dim=-1)
                 # decode_q do allgather in head dim.
                 decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+                # split back after gather to maintain tuple interface
+                decode_q = decode_q.split(
+                    [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+                )
 
             # call decode attn
             attn_out, lse = self._forward_decode(
