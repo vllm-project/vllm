@@ -471,3 +471,12 @@ class KVConnectorBase_V1(ABC):
         which can implement custom aggregation logic on the data dict.
         """
         return None
+
+    def reset_cache(self) -> bool | None:
+        """
+        Reset the connector's internal cache.
+
+        Returns:
+            bool: True if the cache was successfully reset, False otherwise.
+        """
+        return None

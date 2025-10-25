@@ -372,3 +372,6 @@ class MultiConnector(KVConnectorBase_V1):
                 stats_by_connector = MultiKVConnectorStats()
             stats_by_connector[c.__class__.__name__] = stats
         return stats_by_connector
+
+    def reset_cache(self) -> bool:
+        return all(c.reset_cache() is not False for c in self._connectors)
