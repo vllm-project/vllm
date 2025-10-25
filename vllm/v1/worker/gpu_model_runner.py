@@ -866,8 +866,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 second_per_grid_ts.append(t)
             if (t := mm_input.get("audio_feature_lengths")) is not None:
                 audio_feature_lengths.append(t)
-            if mm_input.get("use_audio_in_video") is True:
-                use_audio_in_video = True
+            # Check for use_audio_in_video
+            use_audio_in_video_value = mm_input.get("use_audio_in_video")
+            if use_audio_in_video_value is not None:
+                use_audio_in_video = bool(use_audio_in_video_value.item())
 
         assert supports_mrope(self.get_model()), "M-RoPE support is not implemented."
 
