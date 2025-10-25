@@ -73,6 +73,19 @@ def phi3v_model_config_mm_interleaved():
     )
 
 
+@pytest.fixture(scope="function")
+def phi3v_model_config_image_embeds():
+    return ModelConfig(
+        PHI3V_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+        enable_mm_embeds=True,
+    )
+
+
 @pytest.fixture(scope="module")
 def phi3v_tokenizer():
     return get_tokenizer(PHI3V_MODEL_ID)
@@ -799,7 +812,7 @@ def test_parse_chat_messages_empty_pil_image_with_uuid(
 
 
 def test_parse_chat_messages_empty_image_embeds_with_uuid(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -813,7 +826,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -832,7 +845,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
 
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -846,7 +859,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -1729,7 +1742,9 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1829,7 +1844,9 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1890,7 +1907,9 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1948,7 +1967,9 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )

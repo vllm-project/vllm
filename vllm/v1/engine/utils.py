@@ -23,7 +23,7 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import get_mp_context
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -497,6 +497,8 @@ class CoreEngineActorManager:
                 )
                 placement_groups.append(pg)
                 local_dp_ranks.append(i)
+                if len(placement_groups) == dp_size:
+                    break
 
         if len(placement_groups) < dp_size:
             raise ValueError(
@@ -506,6 +508,13 @@ class CoreEngineActorManager:
                 "Available resources: "
                 f"{available_resources}"
             )
+        assert len(placement_groups) == dp_size, (
+            f"Created {len(placement_groups)} DP placement groups, expected {dp_size}"
+        )
+        assert len(local_dp_ranks) == dp_size, (
+            f"local_dp_ranks length {len(local_dp_ranks)} does not match "
+            f"expected {dp_size}"
+        )
         return placement_groups, local_dp_ranks
 
     @staticmethod
