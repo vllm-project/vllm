@@ -36,7 +36,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -51,7 +50,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -97,9 +96,6 @@ ImageInputs: TypeAlias = Idefics3ImagePixelInputs | Idefics3ImageEmbeddingInputs
 class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
         return self.ctx.get_hf_processor(Idefics3Processor, **kwargs)
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
 
     def _resize_output_size(
         self,
@@ -282,6 +278,11 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return num_patches * processor.image_seq_len
 
+
+class Idefics3ProfilingInfo(BaseProfilingInfo[Idefics3ProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
         image_processor: Idefics3ImageProcessor = processor.image_processor
@@ -292,12 +293,14 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         )
 
 
-class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]):
+class Idefics3DummyInputsBuilder(
+    BaseDummyInputsBuilder[Idefics3ProcessingInfo, Idefics3ProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
-        image_token, _, _ = self.info._get_image_token(processor)
+        processor = self.processing_info.get_hf_processor()
+        image_token, _, _ = self.processing_info._get_image_token(processor)
 
         return image_token * num_images
 
@@ -308,7 +311,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo])
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        hf_processor = self.info.get_hf_processor()
+        hf_processor = self.processing_info.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         longest_edge = image_processor.max_image_size["longest_edge"]
 
@@ -324,7 +327,9 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo])
         }
 
 
-class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo]):
+class Idefics3MultiModalProcessor(
+    BaseMultiModalProcessor[Idefics3ProcessingInfo, Idefics3ProfilingInfo]
+):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -334,7 +339,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.processing_info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -353,10 +358,10 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**mm_kwargs)
 
         num_patches = [
-            self.info.get_num_patches(
+            self.processing_info.get_num_patches(
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
@@ -393,15 +398,15 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token, _, _ = self.info._get_image_token(hf_processor)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_token, _, _ = self.processing_info._get_image_token(hf_processor)
 
         def get_replacement_idefics3(item_idx: int) -> PromptUpdateDetails:
             images = mm_items.get_items("image", ImageProcessorItems)
 
             image_size = images.get_image_size(item_idx)
 
-            image_repl = self.info.get_image_repl(
+            image_repl = self.processing_info.get_image_repl(
                 image_width=image_size.width,
                 image_height=image_size.height,
                 processor=hf_processor,
@@ -569,13 +574,13 @@ class Idefics3Model(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Idefics3MultiModalProcessor,
-    info=Idefics3ProcessingInfo,
-    dummy_inputs=Idefics3DummyInputsBuilder,
-)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA):
     merge_by_field_config = True
+
+    processor_info = Idefics3ProcessingInfo
+    profiling_info = Idefics3ProfilingInfo
+    dummy_builder = Idefics3DummyInputsBuilder
+    processor = Idefics3MultiModalProcessor
 
     packed_modules_mapping = {
         "qkv_proj": [

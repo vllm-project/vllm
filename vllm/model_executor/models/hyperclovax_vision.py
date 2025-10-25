@@ -20,8 +20,6 @@ from transformers.modeling_utils import no_init_weights
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -31,11 +29,10 @@ from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -115,9 +112,6 @@ class HCXVisionProcessingInfo(BaseProcessingInfo):
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None, "video": None}
-
     def get_num_image_tokens(
         self,
         *,
@@ -138,21 +132,28 @@ class HCXVisionProcessingInfo(BaseProcessingInfo):
         else:
             return sum(vision_query_length)
 
+
+class HCXVisionProfilingInfo(BaseProfilingInfo[HCXVisionProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None, "video": None}
+
     def get_image_size_with_most_features(self) -> ImageSize:
-        vision_encoder_info = self.get_vision_encoder_info()
+        vision_encoder_info = self.processing_info.get_vision_encoder_info()
         width = height = vision_encoder_info.get_image_size()
         return ImageSize(width=width, height=height)
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
+        return self.processing_info.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
         )
 
 
-class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo]):
+class HCXVisionDummyInputsBuilder(
+    BaseDummyInputsBuilder[HCXVisionProcessingInfo, HCXVisionProfilingInfo]
+):
     def get_dummy_text(
         self,
         mm_counts: Mapping[str, int],
@@ -171,7 +172,9 @@ class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
         target_num_frames = 32
 
         image_overrides = mm_options.get("image") if mm_options else None
@@ -194,7 +197,9 @@ class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo
         }
 
 
-class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingInfo]):
+class HCXVisionMultiModalProcessor(
+    BaseMultiModalProcessor[HCXVisionProcessingInfo, HCXVisionProfilingInfo]
+):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -206,8 +211,8 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
             if video_arr.dtype != np.uint8:
                 mm_data["videos"][video_idx] = video_arr.astype(np.uint8)
 
-        processed_outputs = self.info.ctx.call_hf_processor(
-            hf_processor=self.info.get_hf_processor(**mm_kwargs),
+        processed_outputs = self.processing_info.ctx.call_hf_processor(
+            hf_processor=self.processing_info.get_hf_processor(**mm_kwargs),
             data=dict(
                 text=prompt,
                 images=None,
@@ -220,8 +225,8 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
             videos = mm_data.get("videos")
 
             # batchify input as a single item
-            _processed_outputs = self.info.ctx.call_hf_processor(
-                hf_processor=self.info.get_hf_processor(**mm_kwargs),
+            _processed_outputs = self.processing_info.ctx.call_hf_processor(
+                hf_processor=self.processing_info.get_hf_processor(**mm_kwargs),
                 data=dict(
                     text=None,
                     images=None if images is None else [images],
@@ -283,7 +288,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         placeholder = {
             "image": hf_config.image_token_id,
             "video": hf_config.video_token_id,
@@ -298,10 +303,14 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
 
             if modality == "image":
                 lens = out_item["vision_query_lengths_images"].data.tolist()
-                num_tokens = self.info.get_num_image_tokens(vision_query_length=lens)
+                num_tokens = self.processing_info.get_num_image_tokens(
+                    vision_query_length=lens
+                )
             elif modality == "video":
                 lens = out_item["vision_query_lengths_videos"].data.tolist()
-                num_tokens = self.info.get_num_video_tokens(vision_query_length=lens)
+                num_tokens = self.processing_info.get_num_video_tokens(
+                    vision_query_length=lens
+                )
             else:
                 raise NotImplementedError(modality)
 
@@ -334,28 +343,6 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
             vision_query_lengths_videos=MultiModalFieldConfig.batched("video"),
         )
-
-
-def _build_hcxvision_hf_info(
-    ctx: InputProcessingContext,
-) -> HCXVisionProcessingInfo:
-    return HCXVisionProcessingInfo(ctx)
-
-
-def _build_hcxvision_hf_processor(
-    info: HCXVisionProcessingInfo,
-    dummy_inputs: BaseDummyInputsBuilder[HCXVisionProcessingInfo],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    if isinstance(info, HCXVisionProcessingInfo):
-        return HCXVisionMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-        )
-
-    raise NotImplementedError(type(info))
 
 
 def init_vision_tower_for_hcxvision(
@@ -586,13 +573,13 @@ class HCXVisionCAbstractor(nn.Module):
         return nn.Sequential(*layers)
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    _build_hcxvision_hf_processor,
-    info=_build_hcxvision_hf_info,
-    dummy_inputs=HCXVisionDummyInputsBuilder,
-)
 class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = HCXVisionProcessingInfo
+    profiling_info = HCXVisionProfilingInfo
+    dummy_builder = HCXVisionDummyInputsBuilder
+    processor = HCXVisionMultiModalProcessor
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

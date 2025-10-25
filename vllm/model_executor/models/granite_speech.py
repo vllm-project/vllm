@@ -38,7 +38,6 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -55,7 +54,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -91,7 +90,11 @@ class GraniteSpeechAudioInputs(TensorSchema):
     """List of audio embedding sizes for each item in batch."""
 
 
-class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
+class GraniteSpeechProcessingInfo(BaseProcessingInfo):
+    pass
+
+
+class GraniteSpeechProfilingInfo(BaseProfilingInfo[GraniteSpeechProcessingInfo]):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -108,10 +111,10 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
 ### Input Processing  & Multimodal utils
 class GraniteSpeechMultiModalProcessor(
-    BaseMultiModalProcessor[GraniteSpeechMultiModalProcessingInfo]
+    BaseMultiModalProcessor[GraniteSpeechProcessingInfo, GraniteSpeechProfilingInfo]
 ):
     def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_hf_processor().audio_processor
+        feature_extractor = self.processing_info.get_hf_processor().audio_processor
         sampling_rate = feature_extractor.melspec_kwargs["sample_rate"]
         return MultiModalDataParser(target_sr=sampling_rate)
 
@@ -131,8 +134,8 @@ class GraniteSpeechMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
+        processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.processing_info.get_tokenizer()
         feature_extractor = processor.audio_processor
         vocab = tokenizer.get_vocab()
 
@@ -181,7 +184,7 @@ class GraniteSpeechMultiModalProcessor(
         if "audio" in mm_data:
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
-            audio_token_index = self.info.get_hf_config().audio_token_index
+            audio_token_index = self.processing_info.get_hf_config().audio_token_index
             processed_outputs["audio_embed_sizes"] = (
                 processed_outputs["input_ids"] == audio_token_index
             ).sum(-1)
@@ -190,7 +193,7 @@ class GraniteSpeechMultiModalProcessor(
 
 
 class GraniteSpeechDummyInputsBuilder(
-    BaseDummyInputsBuilder[GraniteSpeechMultiModalProcessingInfo]
+    BaseDummyInputsBuilder[GraniteSpeechProcessingInfo, GraniteSpeechProfilingInfo]
 ):
     def get_dummy_mm_data(
         self,
@@ -203,7 +206,7 @@ class GraniteSpeechDummyInputsBuilder(
 
         return {
             "audio": self._get_dummy_audios(
-                length=self.info.get_max_audio_len(),
+                length=self.profiling_info.get_max_audio_len(),
                 num_audios=num_audios,
                 overrides=audio_overrides,
             )
@@ -211,7 +214,7 @@ class GraniteSpeechDummyInputsBuilder(
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
-        hf_processor = self.info.get_hf_processor()
+        hf_processor = self.processing_info.get_hf_processor()
         audio_token = getattr(hf_processor, "audio_token", "<|audio|>")
         return audio_token * num_audios
 
@@ -535,11 +538,6 @@ class GraniteSpeechCTCEncoder(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    GraniteSpeechMultiModalProcessor,
-    info=GraniteSpeechMultiModalProcessingInfo,
-    dummy_inputs=GraniteSpeechDummyInputsBuilder,
-)
 class GraniteSpeechForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
@@ -547,6 +545,11 @@ class GraniteSpeechForConditionalGeneration(
     SupportsLoRA,
 ):
     merge_by_field_config = True
+
+    processor_info = GraniteSpeechProcessingInfo
+    profiling_info = GraniteSpeechProfilingInfo
+    dummy_builder = GraniteSpeechDummyInputsBuilder
+    processor = GraniteSpeechMultiModalProcessor
 
     packed_modules_mapping = {
         "qkv_proj": [

@@ -66,7 +66,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -81,7 +80,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -916,9 +915,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self):
         return self.ctx.tokenizer
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None, "video": 1}
-
     def get_image_processor(self, **kwargs: object) -> Glm4vImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
@@ -966,12 +962,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return preprocessed_size, num_vision_tokens
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        max_image_size, _ = self._get_vision_info(
-            image_width=9999999, image_height=9999999
-        )
-        return max_image_size
-
     def get_num_image_tokens(
         self,
         *,
@@ -984,14 +974,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             max_image_pixels=28 * 28 * 2 * 6144,
         )
         return num_image_tokens
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
 
     def get_num_video_tokens(
         self,
@@ -1007,41 +989,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             max_image_pixels=28 * 28 * 2 * 30000,
         )
         return num_video_tokens
-
-    def _get_max_video_frames(self, max_tokens: int) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        num_frames = 0
-
-        while True:
-            next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
-                image_width=target_width,
-                image_height=target_height,
-                num_frames=next_num_frames,
-            )
-            if next_max_tokens > max_tokens or next_max_tokens == 0:
-                break
-
-            num_frames = next_num_frames
-
-        return num_frames
-
-    def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self._get_max_video_frames(seq_len - max_image_tokens)
-        max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
-        )
-
-        return max(max_frames_per_video, 1)
 
     def _get_video_second_idx(
         self, metadata: dict[str, Any], total_frames: int
@@ -1130,14 +1077,70 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return placeholder
 
 
-class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
+class Glm4vProfilingInfo(BaseProfilingInfo[Glm4vProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None, "video": 1}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        max_image_size, _ = self.processing_info._get_vision_info(
+            image_width=9999999, image_height=9999999
+        )
+        return max_image_size
+
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return self.processing_info.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+        )
+
+    def _get_max_video_frames(self, max_tokens: int) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        num_frames = 0
+
+        while True:
+            next_num_frames = num_frames + 1
+            next_max_tokens = self.processing_info.get_num_video_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                num_frames=next_num_frames,
+            )
+            if next_max_tokens > max_tokens or next_max_tokens == 0:
+                break
+
+            num_frames = next_num_frames
+
+        return num_frames
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_images = mm_counts.get("image", 0)
+        max_videos = mm_counts.get("video", 0)
+
+        max_image_tokens = self.get_max_image_tokens() * max_images
+        max_total_frames = self._get_max_video_frames(seq_len - max_image_tokens)
+        max_frames_per_video = min(
+            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
+        )
+
+        return max(max_frames_per_video, 1)
+
+
+class Glm4vDummyInputsBuilder(
+    BaseDummyInputsBuilder[Glm4vProcessingInfo, Glm4vProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        hf_config = self.info.get_hf_config()
-        hf_processor = self.info.get_hf_processor()
-        tokenizer = self.info.get_tokenizer()
+        hf_config = self.processing_info.get_hf_config()
+        hf_processor = self.processing_info.get_hf_processor()
+        tokenizer = self.processing_info.get_tokenizer()
 
         image_token: str = hf_processor.image_token
         video_token_ids = [
@@ -1158,8 +1161,10 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
+        target_num_frames = self.profiling_info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
@@ -1237,7 +1242,9 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         return video_items
 
 
-class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
+class Glm4vMultiModalProcessor(
+    BaseMultiModalProcessor[Glm4vProcessingInfo, Glm4vProfilingInfo]
+):
     def _get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(video_needs_metadata=True)
 
@@ -1249,7 +1256,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        processor = self.processing_info.get_hf_processor(**mm_kwargs)
 
         # GLM-4.1V use `image_token_id` as video placeholder, we need to
         # replace it with `video_token_id` for video processing. So we
@@ -1330,7 +1337,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _create_qwen2vl_field_factory(
-            self.info.get_hf_config().vision_config.spatial_merge_size
+            self.processing_info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
 
     def _get_prompt_updates(
@@ -1339,8 +1346,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.processing_info.get_image_processor(
+            **hf_processor_mm_kwargs
+        )
 
         merge_length = image_processor.merge_size**2
 
@@ -1358,7 +1367,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
-            placeholder = self.info._construct_video_placeholder(
+            placeholder = self.processing_info._construct_video_placeholder(
                 video, metadata, grid_thw
             )
             return PromptUpdateDetails.select_token_id(
@@ -1380,15 +1389,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Glm4vMultiModalProcessor,
-    info=Glm4vProcessingInfo,
-    dummy_inputs=Glm4vDummyInputsBuilder,
-)
 class Glm4vForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP
 ):
     merge_by_field_config = True
+
+    processor_info = Glm4vProcessingInfo
+    profiling_info = Glm4vProfilingInfo
+    dummy_builder = Glm4vDummyInputsBuilder
+    processor = Glm4vMultiModalProcessor
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1668,11 +1677,6 @@ class Glm4vForConditionalGeneration(
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Glm4vMultiModalProcessor,
-    info=Glm4vProcessingInfo,
-    dummy_inputs=Glm4vDummyInputsBuilder,
-)
 class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
     packed_modules_mapping = {
         "qkv_proj": [

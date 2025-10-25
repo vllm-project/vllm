@@ -33,7 +33,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -46,7 +45,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -458,9 +457,6 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": 1}
-
     def get_num_image_tokens(self) -> int:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -475,7 +471,14 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens() + 2
 
 
-class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
+class GLM4VProfilingInfo(BaseProfilingInfo[GLM4VProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": 1}
+
+
+class GLM4VDummyInputsBuilder(
+    BaseDummyInputsBuilder[GLM4VProcessingInfo, GLM4VProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -489,7 +492,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         vision_config = hf_config.vision_config
 
         target_width = target_height = vision_config["image_size"]
@@ -507,7 +510,9 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         }
 
 
-class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
+class GLM4VMultiModalProcessor(
+    BaseMultiModalProcessor[GLM4VProcessingInfo, GLM4VProfilingInfo]
+):
     def _hf_processor_applies_updates(
         self,
         prompt_text: str,
@@ -530,14 +535,14 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
 
         boi_token_id = hf_config.boi_token_id
         image_token_id = hf_config.pad_token_id
         eoi_token_id = hf_config.eoi_token_id
 
         def get_replacement(item_idx: int):
-            num_image_tokens = self.info.get_num_image_tokens()
+            num_image_tokens = self.processing_info.get_num_image_tokens()
             image_tokens = [image_token_id] * num_image_tokens
 
             return [boi_token_id] + image_tokens + [eoi_token_id]
@@ -551,15 +556,15 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    GLM4VMultiModalProcessor,
-    info=GLM4VProcessingInfo,
-    dummy_inputs=GLM4VDummyInputsBuilder,
-)
 class GLM4VForCausalLM(
     ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
     merge_by_field_config = True
+
+    processor_info = GLM4VProcessingInfo
+    profiling_info = GLM4VProfilingInfo
+    dummy_builder = GLM4VDummyInputsBuilder
+    processor = GLM4VMultiModalProcessor
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
