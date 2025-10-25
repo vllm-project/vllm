@@ -30,7 +30,6 @@ from typing import Any
 
 import torch
 from torch import nn
-from vllm.forward_context import get_forward_context
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -41,6 +40,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -447,7 +447,8 @@ class Qwen3MoeModel(nn.Module):
         alt_stream = None
         cudagraph_runtime_mode = get_forward_context().cudagraph_runtime_mode
         if cudagraph_runtime_mode.has_full_cudagraphs() and (
-                current_platform.is_cuda() or current_platform.is_out_of_tree()):
+            current_platform.is_cuda() or current_platform.is_out_of_tree()
+        ):
             alt_stream = device_module.Stream()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
