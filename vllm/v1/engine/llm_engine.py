@@ -331,6 +331,9 @@ class LLMEngine:
     def reset_prefix_cache(self, device: Device | None = None):
         self.engine_core.reset_prefix_cache()
 
+    def unpin_all_pinned_prefixes(self) -> int:
+        return self.engine_core.unpin_all_pinned_prefixes()
+
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
