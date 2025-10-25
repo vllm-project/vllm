@@ -21,15 +21,20 @@ from vllm.attention.ops.flashmla import (
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
+from vllm.v1.attention.backends.mla.indexer import (
+    get_max_prefill_buffer_size,
+    split_prefill_chunks,
+)
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import WorkspaceSpec, current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -108,6 +113,49 @@ class FlashMLASparseMetadata:
     block_size: int = 64
     topk_tokens: int = 2048
 
+    num_prefill_reqs: int = 0
+    num_decode_reqs: int = 0
+    num_prefill_tokens: int = 0
+    num_decode_tokens: int = 0
+
+    # Sequence lengths (context + query) for prefill requests
+    prefill_seq_lens: torch.Tensor | None = None
+
+    # Request ID for each token: -1 for decode tokens, request index
+    # (0, 1, 2, ...) for prefill tokens. Shape: [num_actual_tokens]
+    prefill_request_id: torch.Tensor | None = None
+
+    # Workspace start offsets for all prefill requests
+    # Shape: [num_prefill_reqs], adjusted in-place per chunk to be
+    # 0-indexed within each chunk. Used to map prefill tokens to workspace
+    # offsets in convert_logical_index_to_physical_index
+    prefill_workspace_starts: torch.Tensor | None = None
+
+    @dataclass
+    class ChunkMetadata:
+        """Metadata for a chunk of prefill requests.
+
+        Prefill requests may be chunked to fit within the fixed workspace size.
+        """
+
+        seq_lens: (
+            torch.Tensor
+        )  # [num_reqs_in_chunk] sequence lengths (for gather kernel)
+        tokens_slice: slice  # Slice to extract query tokens for this chunk
+        block_table: (
+            torch.Tensor
+        )  # [num_reqs_in_chunk, max_blocks] block table for chunk
+        req_start_idx: int  # Starting request index in the original request list
+        workspace_starts: (
+            torch.Tensor
+        )  # [num_reqs_in_chunk] workspace starts, adjusted to start at 0 for this chunk
+        request_slice: (
+            slice  # Slice to extract requests for this chunk from the full request list
+        )
+        chunk_size: int  # Total number of tokens in this chunk (sum of seq_lens)
+
+    prefill_chunks: list[ChunkMetadata] | None = None
+
     @dataclass
     class FP8KernelMetadata:
         scheduler_metadata: torch.Tensor | None
@@ -118,126 +166,6 @@ class FlashMLASparseMetadata:
     fp8_extra_metadata: FP8KernelMetadata | None = None
 
 
-@triton.jit
-def _convert_req_index_to_global_index_kernel(
-    req_id_ptr,  # int32 [num_tokens]
-    block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    # shapes (compile-time where possible)
-    max_num_blocks_per_req: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_N: tl.constexpr,  # tile width along columns
-    # strides (in elements)
-    bt_stride0,
-    bt_stride1,
-    ti_stride0,
-    ti_stride1,
-    out_stride0,
-    out_stride1,
-):
-    # program_id(0) -> token_id (row)
-    # program_id(1) -> tile index along columns
-    token_id = tl.program_id(0)
-    tile_id = tl.program_id(1)
-
-    # Each program covers BLOCK_N consecutive columns
-    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    # Load request id for this token (no mask: grid is exact)
-    req = tl.load(req_id_ptr + token_id)
-
-    # Load token indices for this tile
-    ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-    tok = tl.load(ti_ptr)  # int32
-
-    # Only token == -1 should propagate as -1
-    is_invalid_tok = tok < 0
-
-    # Compute block id and in-block offset
-    block_id = tok // BLOCK_SIZE
-    inblock_off = tok % BLOCK_SIZE
-
-    # Guard block_table access
-    valid_block = block_id < max_num_blocks_per_req
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    base = tl.load(bt_ptr, mask=valid_block, other=0)
-
-    # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
-    out_val = tl.where(
-        is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
-    )
-
-    # Store results
-    out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val)
-
-
-def triton_convert_req_index_to_global_index(
-    req_id: torch.Tensor,  # int32 [num_tokens]
-    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    BLOCK_SIZE: int = 64,
-    NUM_TOPK_TOKENS: int = 2048,
-    BLOCK_N: int = 128,  # tile width along columns
-):
-    """
-    out[token_id, indice_id] =
-        block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
-        + token_indices[token_id, indice_id] % BLOCK_SIZE
-
-    Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be
-        out-of-bounds.
-    """
-    assert req_id.dtype == torch.int32
-    assert block_table.dtype == torch.int32
-    assert token_indices.dtype == torch.int32
-    assert token_indices.shape[1] == NUM_TOPK_TOKENS
-    assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
-        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible byBLOCK_N ({BLOCK_N})"
-    )
-
-    num_tokens = req_id.shape[0]
-    num_requests, max_num_blocks_per_req = block_table.shape
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
-
-    # Ensure contiguous tensors on the same device
-    req_id_c = req_id.contiguous()
-    block_table_c = block_table.contiguous()
-    token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
-
-    # Strides in elements
-    bt_stride0, bt_stride1 = block_table_c.stride()
-    ti_stride0, ti_stride1 = token_indices_c.stride()
-    out_stride0, out_stride1 = out.stride()
-
-    # Exact 2D grid: tokens × column tiles
-    grid = (num_tokens, tiles_per_row)
-
-    _convert_req_index_to_global_index_kernel[grid](
-        req_id_c,
-        block_table_c,
-        token_indices_c,
-        out,
-        # shapes / constexprs
-        max_num_blocks_per_req,
-        BLOCK_SIZE,
-        BLOCK_N,
-        # strides
-        bt_stride0,
-        bt_stride1,
-        ti_stride0,
-        ti_stride1,
-        out_stride0,
-        out_stride1,
-    )
-    return out
-
-
-@dataclass
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -247,18 +175,25 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
-    ):
+    ) -> None:
+        self.vllm_config = vllm_config
+        self.layer_names = layer_names
         cache_config = vllm_config.cache_config
         self.kv_cache_spec = kv_cache_spec
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.device = device
 
+        # Treat requests with query length <= 1 as decodes to match the
+        # DeepGEMM indexer constraint (fp8_paged_mqa_logits only supports next_n <= 2)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
         props = torch.cuda.get_device_properties(device)
         sm_count = props.multi_processor_count
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
+
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
         self.topk_tokens_tensor = torch.tensor(
@@ -319,6 +254,135 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
+        (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
+            split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold or 1
+            )
+        )
+
+        num_prefill_reqs = num_prefills
+        num_decode_reqs = num_decodes
+        prefill_token_count = num_prefill_tokens
+        decode_token_count = num_decode_tokens
+
+        assert num_prefill_reqs + num_decode_reqs == common_attn_metadata.num_reqs
+        assert prefill_token_count + decode_token_count == num_tokens
+
+        # Extract prefill sequence lengths (context + query, not just query)
+        # Decode requests come first in the batch, prefill requests follow
+        prefill_seq_lens = None
+        prefill_request_id = None
+        prefill_workspace_starts = None
+        prefill_chunks = None
+
+        # For pure decode batches, prefill_request_id will be None
+        # For mixed batches, it will have -1 for decode and request_id for prefill
+        if num_prefill_reqs > 0:
+            # Get sequence lengths from common_attn_metadata
+            # seq_lens includes both context and query
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            # Prefill requests are at the end (after decode requests)
+            prefill_seq_lens_cpu = seq_lens_cpu[num_decode_reqs:]
+            prefill_seq_lens = torch.tensor(
+                prefill_seq_lens_cpu, dtype=torch.int32, device=self.device
+            )
+
+            # Build prefill_request_id: -1 for decode, request index for
+            # prefill. This enables a single
+            # convert_logical_index_to_physical_index call for all tokens
+            prefill_request_id = torch.full(
+                (num_tokens,), -1, dtype=torch.int32, device=self.device
+            )
+            # Map prefill tokens to their request IDs (0, 1, 2, ...)
+            for req_idx in range(num_prefill_reqs):
+                # Get query token range for this prefill request
+                global_req_idx = num_decode_reqs + req_idx
+                req_query_start = common_attn_metadata.query_start_loc[global_req_idx]
+                req_query_end = common_attn_metadata.query_start_loc[global_req_idx + 1]
+                prefill_request_id[req_query_start:req_query_end] = req_idx
+
+            # Compute cumulative sequence lengths for workspace mapping
+            # Shape: [num_prefill_reqs] - cumsum gives END of each sequence
+            # We'll convert to STARTS below
+            prefill_workspace_starts = torch.cumsum(
+                prefill_seq_lens, dim=0, dtype=torch.int32
+            )
+            # Convert ends to starts by shifting:
+            # cumsum=[10,25,45,50] -> starts=[0,10,25,45]
+            prefill_workspace_starts = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.int32, device=self.device),
+                    prefill_workspace_starts[:-1],
+                ]
+            )
+
+            # Chunk prefill requests to fit within workspace size
+            max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
+            chunk_bounds = split_prefill_chunks(
+                prefill_seq_lens_cpu, max_prefill_buffer_size, 0
+            )
+
+            # Adjust workspace_starts in-place per chunk to be 0-indexed
+            # within each chunk
+            # Example: seq_lens=[10,15,20,5], chunks=[[0,2],[2,4]]
+            #   Initial: workspace_starts=[0,10,25,45]
+            #   After:   workspace_starts=[0,10,0,20]
+            #           (chunk 0 starts at 0, chunk 1 starts at 0)
+            for chunk_start, chunk_end in chunk_bounds:
+                offset = prefill_workspace_starts[chunk_start].item()
+                prefill_workspace_starts[chunk_start:chunk_end] -= offset
+
+            # Create chunk metadata for each chunk
+            prefill_chunks = []
+            for chunk_start, chunk_end in chunk_bounds:
+                # Get sequence lengths for this chunk
+                chunk_seq_lens = prefill_seq_lens[chunk_start:chunk_end]
+
+                # Compute chunk size from CPU tensor to avoid GPU-to-CPU transfer later
+                chunk_size = int(prefill_seq_lens_cpu[chunk_start:chunk_end].sum())
+
+                # Create request slice (used for block_table and workspace_starts)
+                chunk_req_slice = slice(
+                    num_decode_reqs + chunk_start, num_decode_reqs + chunk_end
+                )
+
+                # Determine token slice for this chunk's queries
+                # query_start_loc indices for prefill requests start after
+                # decode requests
+                token_start = common_attn_metadata.query_start_loc[
+                    chunk_req_slice.start
+                ].item()
+                token_end = common_attn_metadata.query_start_loc[
+                    chunk_req_slice.stop
+                ].item()
+                tokens_slice = slice(token_start, token_end)
+
+                # Extract block table for this chunk
+                chunk_block_table = common_attn_metadata.block_table_tensor[
+                    chunk_req_slice
+                ]
+
+                # Extract workspace_starts for this chunk
+                # (already adjusted to start at 0)
+                chunk_workspace_starts = prefill_workspace_starts[chunk_start:chunk_end]
+
+                # Store request slice for mapping global req IDs to chunk-local IDs
+                request_slice = slice(
+                    num_decode_reqs + chunk_start, num_decode_reqs + chunk_end
+                )
+
+                prefill_chunks.append(
+                    FlashMLASparseMetadata.ChunkMetadata(
+                        seq_lens=chunk_seq_lens,
+                        tokens_slice=tokens_slice,
+                        block_table=chunk_block_table,
+                        req_start_idx=chunk_start,
+                        workspace_starts=chunk_workspace_starts,
+                        request_slice=request_slice,
+                        chunk_size=chunk_size,
+                    )
+                )
+
         fp8_extra_metadata = None
         if self.use_fp8_kv_cache:
             tile_scheduler_metadata, num_splits = get_mla_metadata(
@@ -361,6 +425,14 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            num_prefill_reqs=num_prefill_reqs,
+            num_decode_reqs=num_decode_reqs,
+            num_prefill_tokens=prefill_token_count,
+            num_decode_tokens=decode_token_count,
+            prefill_seq_lens=prefill_seq_lens,
+            prefill_request_id=prefill_request_id,
+            prefill_workspace_starts=prefill_workspace_starts,
+            prefill_chunks=prefill_chunks,
             fp8_extra_metadata=fp8_extra_metadata,
         )
         return metadata
@@ -401,6 +473,26 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability(100) else 64
+
+        # Reserve fixed workspace for prefill upconversion
+        # Workspace size: 5 * max_model_len tokens * head_dim (576) *
+        # sizeof(bfloat16). This allows us to gather and upconvert up to
+        # 5*max_model_len tokens from the KV cache for prefill attention.
+        # Prefill requests are chunked to fit within this workspace.
+        # Memory usage: 5 * max_model_len * 576 * 2 bytes
+        #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
+        #            5 * 163840 * 576 * 2 = ~900 MB
+        vllm_config = indexer.vllm_config
+        max_prefill_buffer_size = get_max_prefill_buffer_size(vllm_config)
+
+        self.prefill_workspace_spec = WorkspaceSpec(
+            shape=(max_prefill_buffer_size, head_size),
+            dtype=torch.bfloat16,
+            name="FlashMLASparseImpl.prefill_workspace",
+        )
+
+        if kv_cache_dtype == "fp8_ds_mla":
+            current_workspace_manager().reserve(self.prefill_workspace_spec)
 
     def _forward_bf16_kv(
         self,
@@ -465,7 +557,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
+        attn_metadata: FlashMLASparseMetadata | None,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -481,6 +573,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
 
         if attn_metadata is None:
+            # Dummy run - no need to allocate buffers
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
@@ -504,18 +597,11 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        # TODO: handle index / kv_cache correctly
-        topk_indices_global = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
-        )
+        use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
         q = torch.cat([ql_nope, q_pe], dim=-1)
 
-        # write the latent and rope to kv cache
+        # CRITICAL: Write to KV cache FIRST before gathering/upconverting
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
                 k_c_normed,
@@ -526,14 +612,86 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 scale=layer._k_scale,
             )
 
-        if self.kv_cache_dtype != "fp8_ds_mla":
+        # Convert per-request indices to global slots (decode) or workspace
+        # offsets (prefill). Single call for all tokens!
+        # prefill_workspace_starts has been adjusted in-place per chunk so
+        # prefill indices automatically come out chunk-local
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+
+        topk_indices_global = ops.convert_logical_index_to_physical_index(
+            attn_metadata.req_id_per_token,
+            attn_metadata.block_table,
+            topk_indices,
+            block_size=attn_metadata.block_size,
+            prefill_request_id=attn_metadata.prefill_request_id,
+            workspace_starts=attn_metadata.prefill_workspace_starts,
+        )
+
+        if not use_fp8_cache:
             attn_out = self._forward_bf16_kv(
                 q, kv_cache, topk_indices_global, attn_metadata
             )
         else:
-            attn_out = self._forward_fp8_kv(
-                q, kv_cache, topk_indices_global, attn_metadata
+            attn_out = q.new_empty(
+                (num_actual_toks, self.num_heads, self.kv_lora_rank),
+                dtype=q.dtype,
+                device=q.device,
             )
+
+            # Process decode tokens
+            if num_decode_tokens > 0:
+                attn_out[:num_decode_tokens] = self._forward_fp8_kv(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    topk_indices_global[:num_decode_tokens],
+                    attn_metadata,
+                )
+
+            # Process prefill tokens in chunks
+            if num_prefill_tokens > 0:
+                if kv_cache.numel() == 0:
+                    raise RuntimeError(
+                        "Expected non-empty kv_cache for fp8_ds_mla prefill handling"
+                    )
+
+                assert attn_metadata.prefill_chunks is not None
+
+                # Get the reserved workspace (reused for all chunks)
+                prefill_bf16_workspace = current_workspace_manager().get(
+                    self.prefill_workspace_spec
+                )
+
+                # Process each chunk
+                for chunk in attn_metadata.prefill_chunks:
+                    # Gather and upconvert this chunk into workspace
+                    chunk_workspace = prefill_bf16_workspace[: chunk.chunk_size]
+
+                    ops.cp_gather_and_upconvert_fp8_kv_cache(
+                        kv_cache,
+                        chunk_workspace,
+                        chunk.block_table,
+                        chunk.seq_lens,
+                        chunk.workspace_starts,
+                        len(chunk.block_table),
+                    )
+
+                    # Get query tokens and precomputed workspace indices for this chunk
+                    chunk_q = q[chunk.tokens_slice]
+                    chunk_topk_indices_workspace = topk_indices_global[
+                        chunk.tokens_slice
+                    ]
+
+                    # Run attention for this chunk
+                    chunk_attn_out = self._forward_bf16_kv(
+                        chunk_q,
+                        chunk_workspace,
+                        chunk_topk_indices_workspace,
+                        attn_metadata,
+                    )
+
+                    # Write results back to output tensor
+                    attn_out[chunk.tokens_slice] = chunk_attn_out
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output

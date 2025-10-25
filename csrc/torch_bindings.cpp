@@ -90,6 +90,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 
   ops.def(
+      "convert_logical_index_to_physical_index("
+      "    Tensor req_id,"
+      "    Tensor block_table,"
+      "    Tensor token_indices,"
+      "    int block_size,"
+      "    Tensor? prefill_request_id,"
+      "    Tensor? workspace_starts) -> Tensor");
+  ops.impl("convert_logical_index_to_physical_index", torch::kCUDA,
+           &convert_logical_index_to_physical_index);
+
+  ops.def(
       "convert_vertical_slash_indexes("
       "   Tensor! block_count, Tensor! block_offset, "
       "   Tensor! column_count, Tensor! column_index, "
@@ -721,6 +732,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
+
+  cache_ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
+      "batch_size) -> ()");
+  cache_ops.impl("cp_gather_and_upconvert_fp8_kv_cache", torch::kCUDA,
+                 &cp_gather_and_upconvert_fp8_kv_cache);
 
   cache_ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "

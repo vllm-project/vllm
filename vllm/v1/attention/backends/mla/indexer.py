@@ -176,9 +176,9 @@ def kv_spans_from_batches(
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
-    # NOTE(Chen): 2 is a magic number for controlling the prefill buffer size.
+    # NOTE(Chen): 5 is a magic number for controlling the prefill buffer size.
     # May be tuned later.
-    return max_model_len * 2
+    return max_model_len * 5
 
 
 def split_prefill_chunks(

@@ -60,6 +60,12 @@ void merge_attn_states(torch::Tensor& output,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse);
 
+torch::Tensor convert_logical_index_to_physical_index(
+    torch::Tensor req_id, torch::Tensor block_table,
+    torch::Tensor token_indices, int64_t block_size,
+    const std::optional<torch::Tensor>& prefill_request_id,
+    const std::optional<torch::Tensor>& workspace_starts);
+
 void convert_vertical_slash_indexes(
     torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
     torch::Tensor& block_offset,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]

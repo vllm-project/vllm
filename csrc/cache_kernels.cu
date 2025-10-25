@@ -2,6 +2,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/util/Optional.h>
 
 #include "cuda_utils.h"
 #include "cuda_compat.h"
@@ -514,7 +515,8 @@ __global__ void indexer_k_quant_and_cache_kernel(
     const int quant_block_size,                // quantization block size
     const int cache_block_size,                // cache block size
     const int cache_stride,  // stride for each token in kv_cache
-    const bool use_ue8m0     // use ue8m0 scale format
+
+    const bool use_ue8m0  // use ue8m0 scale format
 ) {
   constexpr int VEC_SIZE = 4;
   const int64_t token_idx = blockIdx.x;
@@ -1058,6 +1060,84 @@ void gather_and_maybe_dequant_cache(
 }
 
 namespace vllm {
+
+// Gather and upconvert FP8 KV cache tokens to BF16 workspace
+// Similar to cp_gather_cache but specifically for FP8->BF16 conversion
+__global__ void cp_gather_and_upconvert_fp8_kv_cache(
+    const uint8_t* __restrict__ src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    __nv_bfloat16* __restrict__ dst,          // [TOT_TOKENS, 576]
+    const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
+    const int32_t* __restrict__ seq_lens,     // [BATCH]
+    const int32_t* __restrict__ workspace_starts,  // [BATCH]
+    const int32_t block_size, const int32_t head_dim,
+    const int64_t block_table_stride, const int64_t cache_block_stride,
+    const int64_t cache_entry_stride, const int64_t dst_entry_stride) {
+  const int64_t bid = blockIdx.x;  // Batch ID
+  const int32_t num_splits = gridDim.y;
+  const int32_t split = blockIdx.y;
+  const int32_t seq_start = workspace_starts[bid];
+  const int32_t seq_len = seq_lens[bid];
+  const int32_t tot_slots = seq_len;
+  const int32_t split_slots = cuda_utils::ceil_div(tot_slots, num_splits);
+
+  const int32_t split_start = split * split_slots;
+  const int32_t split_end = min((split + 1) * split_slots, tot_slots);
+
+  const bool is_active_split = (split_start < tot_slots);
+
+  if (!is_active_split) return;
+
+  // Adjust the pointer for the block_table for this batch
+  const int32_t batch_offset = bid * block_table_stride;
+  int32_t offset = split_start;
+  int32_t offset_div = offset / block_size;
+  offset = offset % block_size;
+  const int32_t* batch_block_table = block_table + batch_offset;
+
+  // Adjust dst pointer based on the cumulative sequence lengths
+  dst += seq_start * dst_entry_stride;
+
+  const int tid = threadIdx.x;
+
+  // Process each token in this split
+  for (int pid = split_start; pid < split_end; ++pid) {
+    auto block_id = batch_block_table[offset_div];
+    const uint8_t* token_ptr =
+        src_cache + block_id * cache_block_stride + offset * cache_entry_stride;
+    __nv_bfloat16* dst_ptr = dst + pid * dst_entry_stride;
+
+    // FP8 format: 512 bytes fp8 + 16 bytes scales + 128 bytes rope (64 bf16)
+    const uint8_t* no_pe_ptr = token_ptr;
+    const float* scales_ptr = reinterpret_cast<const float*>(token_ptr + 512);
+    const __nv_bfloat16* rope_ptr =
+        reinterpret_cast<const __nv_bfloat16*>(token_ptr + 512 + 16);
+
+    // Parallelize fp8 dequant (512 elements) and rope copy (64 elements)
+    if (tid < 512) {
+      // FP8 dequantization
+      const int tile = tid >> 7;  // each tile is 128 elements
+      const float scale = scales_ptr[tile];
+      const uint8_t val = no_pe_ptr[tid];
+      dst_ptr[tid] =
+          fp8::scaled_convert<__nv_bfloat16, uint8_t,
+                              vllm::Fp8KVCacheDataType::kFp8E4M3>(val, scale);
+    } else if (tid < 576) {
+      // Rope copy (64 bf16 elements)
+      const int rope_idx = tid - 512;
+      dst_ptr[512 + rope_idx] = rope_ptr[rope_idx];
+    }
+    // Threads 576+ are idle
+    // No sync needed - each iteration processes independent tokens
+
+    // Move to next token
+    offset += 1;
+    if (offset == block_size) {
+      offset_div += 1;
+      offset = 0;
+    }
+  }
+}
+
 template <typename scalar_t>
 // Note(hc): The cp_gather_cache allows seq_starts to no longer be divisible by
 // block_size.
@@ -1199,6 +1279,58 @@ void cp_gather_cache(
   }
 }
 
+// Host function to launch the gather-and-upconvert kernel
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    torch::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& seq_lens,          // [BATCH]
+    torch::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size) {
+  at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  int32_t block_size = src_cache.size(1);
+  int32_t head_dim = dst.size(1);
+
+  TORCH_CHECK(block_table.dtype() == torch::kInt32,
+              "block_table must be int32");
+  TORCH_CHECK(seq_lens.dtype() == torch::kInt32, "seq_lens must be int32");
+  TORCH_CHECK(workspace_starts.dtype() == torch::kInt32,
+              "workspace_starts must be int32");
+
+  TORCH_CHECK(src_cache.device() == dst.device(),
+              "src_cache and dst must be on the same device");
+  TORCH_CHECK(src_cache.device() == block_table.device(),
+              "src_cache and block_table must be on the same device");
+  TORCH_CHECK(src_cache.device() == seq_lens.device(),
+              "src_cache and seq_lens must be on the same device");
+  TORCH_CHECK(src_cache.device() == workspace_starts.device(),
+              "src_cache and workspace_starts must be on the same device");
+
+  TORCH_CHECK(src_cache.dtype() == torch::kUInt8, "src_cache must be uint8");
+  TORCH_CHECK(dst.dtype() == torch::kBFloat16, "dst must be bfloat16");
+  TORCH_CHECK(head_dim == 576, "head_dim must be 576 for MLA");
+
+  int64_t block_table_stride = block_table.stride(0);
+  int64_t cache_block_stride = src_cache.stride(0);
+  int64_t cache_entry_stride = src_cache.stride(1);
+  int64_t dst_entry_stride = dst.stride(0);
+
+  // Decide on the number of splits based on the batch size
+  int num_splits = batch_size > 128 ? 2 : batch_size > 64 ? 4 : 16;
+  dim3 grid(batch_size, num_splits);
+  dim3 block(1024);
+
+  vllm::cp_gather_and_upconvert_fp8_kv_cache<<<grid, block, 0, stream>>>(
+      src_cache.data_ptr<uint8_t>(),
+      reinterpret_cast<__nv_bfloat16*>(dst.data_ptr()),
+      block_table.data_ptr<int32_t>(), seq_lens.data_ptr<int32_t>(),
+      workspace_starts.data_ptr<int32_t>(), block_size, head_dim,
+      block_table_stride, cache_block_stride, cache_entry_stride,
+      dst_entry_stride);
+}
+
 // Macro to dispatch the kernel based on the data type.
 #define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)         \
   vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>       \
@@ -1238,7 +1370,159 @@ void indexer_k_quant_and_cache(
                              CALL_INDEXER_K_QUANT_AND_CACHE);
 }
 
-// Macro to dispatch the kernel based on the data amount.
+namespace vllm {
+
+// Simplified kernel: convert per-request indices to global slots or workspace
+// offsets
+__global__ void convert_logical_index_to_physical_index_kernel(
+    const int32_t* __restrict__ req_id,         // [num_tokens]
+    const int32_t* __restrict__ block_table,    // [num_requests,
+                                                // max_num_blocks_per_req]
+    const int32_t* __restrict__ token_indices,  // [num_tokens, NUM_TOPK_TOKENS]
+    int32_t* __restrict__ out,                  // [num_tokens, NUM_TOPK_TOKENS]
+    const int32_t* __restrict__ prefill_request_id,  // [num_tokens], -1 for
+                                                     // decode, >=0 for prefill
+    const int32_t* __restrict__ workspace_starts,    // [num_prefill_reqs+1] or
+                                                     // nullptr
+    int num_topk_tokens, int block_size, int max_num_blocks_per_req,
+    int bt_stride0, int bt_stride1, int ti_stride0, int ti_stride1,
+    int out_stride0, int out_stride1) {
+  const int token_id = blockIdx.x;
+  const int tid = threadIdx.x;
+
+  // Load request id and prefill request id for this token
+  const int req = req_id[token_id];
+  const int prefill_req_id =
+      prefill_request_id != nullptr ? prefill_request_id[token_id] : -1;
+  const bool is_prefill = prefill_req_id >= 0;
+
+  // Loop over topk_indices
+  for (int indice_id = tid; indice_id < num_topk_tokens;
+       indice_id += blockDim.x) {
+    // Load token index (logical index within request)
+    const int ti_offset = token_id * ti_stride0 + indice_id * ti_stride1;
+    const int tok = token_indices[ti_offset];
+
+    // Check if token is invalid
+    bool is_invalid = tok < 0;
+
+    int out_val = -1;
+
+    if (is_prefill && workspace_starts != nullptr && !is_invalid) {
+      // Map to workspace offset: workspace_starts[prefill_req_id] +
+      // logical_token_id
+      out_val = workspace_starts[prefill_req_id] + tok;
+    } else if (!is_invalid) {
+      // Map to global cache slot (decode path)
+      // Compute block id and in-block offset
+      const int block_id = tok / block_size;
+      const int inblock_off = tok % block_size;
+
+      // Guard block_table access
+      const bool valid_block = block_id < max_num_blocks_per_req;
+      int base = 0;
+      if (valid_block) {
+        const int bt_offset = req * bt_stride0 + block_id * bt_stride1;
+        base = block_table[bt_offset];
+      }
+
+      if (valid_block) {
+        out_val = base * block_size + inblock_off;
+      }
+    }
+
+    // Store result
+    const int out_offset = token_id * out_stride0 + indice_id * out_stride1;
+    out[out_offset] = out_val;
+  }
+}
+
+}  // namespace vllm
+
+// Host function to launch the simplified index conversion kernel
+torch::Tensor convert_logical_index_to_physical_index(
+    torch::Tensor req_id,       // int32 [num_tokens]
+    torch::Tensor block_table,  // int32 [num_requests, max_num_blocks_per_req]
+    torch::Tensor token_indices,  // int32 [num_tokens, NUM_TOPK_TOKENS]
+    int64_t block_size,           // KV cache block size
+    const std::optional<torch::Tensor>&
+        prefill_request_id,  // int32 [num_tokens], -1 for decode
+    const std::optional<torch::Tensor>&
+        workspace_starts  // int32 [num_prefill_reqs+1]
+) {
+  constexpr int THREADS_PER_BLOCK = 256;
+
+  // Validate input tensors
+  TORCH_CHECK(req_id.is_cuda(), "req_id must be a CUDA tensor");
+  TORCH_CHECK(block_table.is_cuda(), "block_table must be a CUDA tensor");
+  TORCH_CHECK(token_indices.is_cuda(), "token_indices must be a CUDA tensor");
+  TORCH_CHECK(req_id.dtype() == torch::kInt32, "req_id must be int32");
+  TORCH_CHECK(block_table.dtype() == torch::kInt32,
+              "block_table must be int32");
+  TORCH_CHECK(token_indices.dtype() == torch::kInt32,
+              "token_indices must be int32");
+
+  // Ensure contiguous
+  req_id = req_id.contiguous();
+  block_table = block_table.contiguous();
+  token_indices = token_indices.contiguous();
+
+  // Extract dimensions
+  const int num_tokens = req_id.size(0);
+  const int num_topk_tokens = token_indices.size(1);
+  const int max_num_blocks_per_req = block_table.size(1);
+
+  // Create output tensor
+  auto out = torch::empty_like(token_indices);
+
+  // Extract strides
+  const int bt_stride0 = block_table.stride(0);
+  const int bt_stride1 = block_table.stride(1);
+  const int ti_stride0 = token_indices.stride(0);
+  const int ti_stride1 = token_indices.stride(1);
+  const int out_stride0 = out.stride(0);
+  const int out_stride1 = out.stride(1);
+
+  // Handle optional prefill tensors
+  const int32_t* prefill_request_id_ptr = nullptr;
+  const int32_t* workspace_starts_ptr = nullptr;
+
+  if (prefill_request_id.has_value()) {
+    auto& prid = prefill_request_id.value();
+    TORCH_CHECK(prid.is_cuda(), "prefill_request_id must be a CUDA tensor");
+    TORCH_CHECK(prid.is_contiguous(), "prefill_request_id must be contiguous");
+    TORCH_CHECK(prid.dtype() == torch::kInt32,
+                "prefill_request_id must be int32");
+    prefill_request_id_ptr = prid.data_ptr<int32_t>();
+  }
+
+  if (workspace_starts.has_value()) {
+    auto& ws = workspace_starts.value();
+    TORCH_CHECK(ws.is_cuda(), "workspace_starts must be a CUDA tensor");
+    TORCH_CHECK(ws.is_contiguous(), "workspace_starts must be contiguous");
+    TORCH_CHECK(ws.dtype() == torch::kInt32, "workspace_starts must be int32");
+    workspace_starts_ptr = ws.data_ptr<int32_t>();
+  }
+
+  // Get CUDA stream
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // Launch kernel
+  dim3 grid(num_tokens);
+  dim3 block(THREADS_PER_BLOCK);
+
+  vllm::convert_logical_index_to_physical_index_kernel<<<grid, block, 0,
+                                                         stream>>>(
+      req_id.data_ptr<int32_t>(), block_table.data_ptr<int32_t>(),
+      token_indices.data_ptr<int32_t>(), out.data_ptr<int32_t>(),
+      prefill_request_id_ptr, workspace_starts_ptr, num_topk_tokens, block_size,
+      max_num_blocks_per_req, bt_stride0, bt_stride1, ti_stride0, ti_stride1,
+      out_stride0, out_stride1);
+
+  return out;
+}
+
+// Macro to dispatch the kernel based on the data type.
 #define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
   vllm::cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                \
       <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,               \

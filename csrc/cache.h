@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/all.h>
+#include <c10/util/Optional.h>
 
 #include <map>
 #include <vector>
@@ -57,6 +58,15 @@ void cp_gather_cache(
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
     int64_t batch_size, std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+// Gather and upconvert FP8 KV cache to BF16 workspace
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    torch::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& seq_lens,          // [BATCH]
+    torch::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
+
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]
@@ -72,3 +82,9 @@ void cp_gather_indexer_k_quant_cache(
     torch::Tensor& dst_scale,  // [num_tokens, head_dim / quant_block_size * 4]
     const torch::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::Tensor& cu_seq_lens);  // [batch_size + 1]
+
+torch::Tensor convert_logical_index_to_physical_index(
+    torch::Tensor req_id, torch::Tensor block_table,
+    torch::Tensor token_indices, int64_t block_size,
+    const std::optional<torch::Tensor>& prefill_request_id,
+    const std::optional<torch::Tensor>& workspace_starts);

@@ -45,6 +45,7 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -216,6 +217,9 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
+        # Initialize workspace manager
+        init_workspace_manager(self.device, self.vllm_config)
+
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
             self.vllm_config, self.device
@@ -323,6 +327,7 @@ class Worker(WorkerBase):
         )
         gc.collect()
 
+        # Workspaces are now allocated dynamically, no need to pre-reserve memory
         return int(self.available_kv_cache_memory_bytes)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
