@@ -75,6 +75,9 @@ class Scheduler(SchedulerInterface):
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
+        self.prefill_max_num_scheduled_tokens = (
+            self.scheduler_config.prefill_max_num_batched_tokens
+        )
         self.max_model_len = self.scheduler_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -176,6 +179,18 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+    def _has_decode_requests(self) -> bool:
+        """Check if there are any requests in the decode phase in the running queue.
+
+        Criteria:
+        The request has completed prompt computation and is generating output tokens
+        i.e., num_computed_tokens >= num_prompt_tokens
+        """
+        for request in self.running:
+            if request.num_computed_tokens >= request.num_prompt_tokens:
+                return True
+        return False
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -195,7 +210,16 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
+
         token_budget = self.max_num_scheduled_tokens
+        # Check if there are any requests in the decode phase in the running queue
+        # when hybrid chunked prefill is enabled.
+        has_decode_requests = True
+        if self.scheduler_config.enable_hybrid_chunked_prefill:
+            has_decode_requests = self._has_decode_requests()
+            if not has_decode_requests:
+                token_budget = self.prefill_max_num_scheduled_tokens
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -459,6 +483,7 @@ class Scheduler(SchedulerInterface):
                     # pooling requests to be chunked
                     if (
                         not self.scheduler_config.chunked_prefill_enabled
+                        and not self.scheduler_config.enable_hybrid_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
                         self.waiting.pop_request()
@@ -584,7 +609,13 @@ class Scheduler(SchedulerInterface):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+        if (
+            self.scheduler_config.enable_hybrid_chunked_prefill
+            and not has_decode_requests
+        ):
+            assert total_num_scheduled_tokens <= self.prefill_max_num_scheduled_tokens
+        else:
+            assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
