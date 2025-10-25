@@ -115,6 +115,15 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
+from vllm import envs
+
+def _ensure_v1_or_exit():
+    if not envs.VLLM_USE_V1:
+        raise SystemExit(
+            "V0 engine was removed in vLLM >= 0.11; only the V1 engine is available.\n"
+            "Detected VLLM_USE_V1=0. To proceed, unset VLLM_USE_V1 or set VLLM_USE_V1=1."
+        )
+
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
@@ -210,7 +219,7 @@ async def build_async_engine_client_from_engine_args(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
-    assert envs.VLLM_USE_V1
+    _ensure_v1_or_exit()
 
     if disable_frontend_multiprocessing:
         logger.warning(
