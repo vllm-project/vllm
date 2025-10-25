@@ -782,6 +782,7 @@ class SupportsTranscription(Protocol):
     Transcription models can opt out of text generation by setting this to
     `True`.
     """
+    supports_segment_timestamp: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
