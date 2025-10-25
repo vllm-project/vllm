@@ -336,6 +336,9 @@ class CudaPlatformBase(Platform):
             TRITON_ATTN = (
                 "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
             )
+            EXPERIMENTAL_HELION_ATTN = (
+                "vllm.v1.attention.backends.helion_attn.HelionAttentionBackend"  # noqa: E501
+            )
             FLASH_ATTN_V1 = (
                 "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
             )
@@ -359,6 +362,9 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.TRITON_ATTN:
                 logger.info_once("Using Triton backend on V1 engine.")
                 return TRITON_ATTN
+            elif selected_backend == _Backend.EXPERIMENTAL_HELION_ATTN:
+                logger.info_once("Using EXPERIMENTAL Helion backend on V1 engine.")
+                return EXPERIMENTAL_HELION_ATTN
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1

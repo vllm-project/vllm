@@ -1747,6 +1747,7 @@ class EngineArgs:
             "XFORMERS",
             "ROCM_ATTN",
             "ROCM_AITER_UNIFIED_ATTN",
+            "EXPERIMENTAL_HELION_ATTN"
         ]
         if (
             envs.is_set("VLLM_ATTENTION_BACKEND")
