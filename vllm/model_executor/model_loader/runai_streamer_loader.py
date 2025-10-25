@@ -27,10 +27,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+
+        self._is_distributed = False
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
 
-            self._is_distributed = False
             if "distributed" in extra_config and isinstance(
                 extra_config.get("distributed"), bool
             ):
