@@ -230,8 +230,9 @@ class InputPreprocessor:
             return True
 
         # If prompt starts with BOS token text, don't add special tokens
-        # This handles cases like Llama's "<|begin_of_text|>"
-        if prompt.startswith(bos_token):
+        # This handles cases like Llama's "<|begin_of_text|>" and "<s>"
+        # Use lstrip() to handle prompts with leading whitespace
+        if prompt.lstrip().startswith(bos_token):
             logger.debug(
                 "Detected BOS token at the start of prompt. "
                 "Setting add_special_tokens=False to avoid duplication."
@@ -239,11 +240,13 @@ class InputPreprocessor:
             return False
 
         # Check for common chat template markers that indicate special tokens
-        # are already present (e.g., "<|start_header_id|>", "<|im_start|>")
+        # are already present (e.g., "<|start_header_id|>", "<|im_start|>").
+        # Note: "<s>" is intentionally not included here as it is too generic
+        # and can cause false positives (e.g., in "<script>" tags). The check
+        # above handles "<s>" when it's a BOS token via startswith().
         chat_markers = [
             "<|start_header_id|>",  # Llama 3.x
             "<|im_start|>",  # ChatML format
-            "<s>",  # Common BOS in older models
         ]
 
         for marker in chat_markers:
