@@ -1942,7 +1942,7 @@ class OpenAIServingResponses(OpenAIServing):
                 output=[],
                 status="in_progress",
                 usage=None,
-            ).model_dump()
+            ).model_dump(by_alias=True)
             yield _increment_sequence_number_and_return(
                 ResponseCreatedEvent(
                     type="response.created",
@@ -1991,6 +1991,6 @@ class OpenAIServingResponses(OpenAIServing):
                 ResponseCompletedEvent(
                     type="response.completed",
                     sequence_number=-1,
-                    response=final_response,
+                    response=final_response.model_dump(by_alias=True),
                 )
             )
