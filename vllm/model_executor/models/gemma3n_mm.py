@@ -50,7 +50,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     replace_token_matches,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -105,14 +105,6 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(Gemma3nProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "audio": None}
-
-    def get_max_tokens_per_item(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> Optional[Mapping[str, int]]:
-        return {"image": TOKENS_PER_IMAGE, "audio": TOKENS_PER_AUDIO}
-
     def get_image_repl(
         self,
         *,
@@ -153,12 +145,24 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         )
 
 
-class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
+class Gemma3nProfilingInfo(BaseProfilingInfo[Gemma3nProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "audio": None}
+
+    def get_mm_max_tokens_per_item(
+        self, seq_len: int, mm_counts: Mapping[str, int]
+    ) -> Optional[Mapping[str, int]]:
+        return {"image": TOKENS_PER_IMAGE, "audio": TOKENS_PER_AUDIO}
+
+
+class Gemma3nDummyInputsBuilder(
+    BaseDummyInputsBuilder[Gemma3nProcessingInfo, Gemma3nProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
         audio_token = processor.audio_token
 
@@ -172,7 +176,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         audio_feature_extractor: Gemma3nAudioFeatureExtractor = (
             processor.feature_extractor
         )
@@ -197,9 +201,11 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         }
 
 
-class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]):
+class Gemma3nMultiModalProcessor(
+    BaseMultiModalProcessor[Gemma3nProcessingInfo, Gemma3nProfilingInfo]
+):
     def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_hf_processor().feature_extractor
+        feature_extractor = self.processing_info.get_hf_processor().feature_extractor
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
     def _call_hf_processor(
@@ -256,7 +262,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         prompt_updates = []
 
@@ -267,7 +273,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             def get_replacement_image(item_idx: int):
                 images = mm_items.get_items("image", ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
-                return self.info.get_image_repl(
+                return self.processing_info.get_image_repl(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     processor=hf_processor,
@@ -311,7 +317,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         # Since our replacement can insert "\n\n" next to "\n"
         # tokens, we have to combine them to be consistent with
         # the output of the tokenizer
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         newline_1 = vocab["\n"]
         newline_2 = vocab["\n\n"]
@@ -342,7 +348,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
         # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.profiling_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         newline_1 = vocab["\n"]
         newline_2 = vocab["\n\n"]
@@ -455,15 +461,16 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         return self.embedding_post_projection_norm(emb_norm_proj)
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Gemma3nMultiModalProcessor,
-    info=Gemma3nProcessingInfo,
-    dummy_inputs=Gemma3nDummyInputsBuilder,
-)
 class Gemma3nForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsTranscription
 ):
     merge_by_field_config = True
+
+    processor_info = Gemma3nProcessingInfo
+    profiling_info = Gemma3nProfilingInfo
+    dummy_builder = Gemma3nDummyInputsBuilder
+    processor = Gemma3nMultiModalProcessor
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {

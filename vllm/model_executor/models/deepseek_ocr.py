@@ -23,7 +23,6 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -42,7 +41,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
@@ -184,9 +183,6 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(DeepseekOCRProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
     def get_num_image_tokens(
         self, *, image_width: int, image_height: int, cropping: bool = True
     ) -> int:
@@ -220,17 +216,24 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
 
         return global_views_tokens + local_views_tokens + 1
 
+
+class DeepseekOCRProfilingInfo(BaseProfilingInfo[DeepseekOCRProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
     def get_image_size_with_most_features(self) -> ImageSize:
         if IMAGE_SIZE == 1024 and BASE_SIZE == 1280:
             return ImageSize(width=1024 * 2, height=1024 * 2)
         return ImageSize(width=640 * 2, height=640 * 2)
 
 
-class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessingInfo]):
+class DeepseekOCRDummyInputsBuilder(
+    BaseDummyInputsBuilder[DeepseekOCRProcessingInfo, DeepseekOCRProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
 
         return image_token * num_images
@@ -243,7 +246,7 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        max_image_size = self.info.get_image_size_with_most_features()
+        max_image_size = self.profiling_info.get_image_size_with_most_features()
 
         return {
             "image": self._get_dummy_images(
@@ -255,7 +258,7 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
 
 
 class DeepseekOCRMultiModalProcessor(
-    BaseMultiModalProcessor[DeepseekOCRProcessingInfo]
+    BaseMultiModalProcessor[DeepseekOCRProcessingInfo, DeepseekOCRProfilingInfo]
 ):
     def _call_hf_processor(
         self,
@@ -264,20 +267,15 @@ class DeepseekOCRMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                mm_kwargs,
-            )
+        if not mm_data:
+            tokenizer = self.processing_info.get_tokenizer()
+            return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
 
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
-            )
-
-        return processed_outputs
+        return self.processing_info.ctx.call_hf_processor(
+            self.processing_info.get_hf_processor(**mm_kwargs),
+            dict(prompt=prompt, **mm_data),
+            mm_kwargs,
+        )
 
     def _get_mm_fields_config(
         self,
@@ -332,13 +330,13 @@ class DeepseekOCRMultiModalProcessor(
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    DeepseekOCRMultiModalProcessor,
-    info=DeepseekOCRProcessingInfo,
-    dummy_inputs=DeepseekOCRDummyInputsBuilder,
-)
 class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = DeepseekOCRProcessingInfo
+    profiling_info = DeepseekOCRProfilingInfo
+    dummy_builder = DeepseekOCRDummyInputsBuilder
+    processor = DeepseekOCRMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

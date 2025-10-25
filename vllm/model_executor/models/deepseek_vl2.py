@@ -19,7 +19,6 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.transformers.utils import replace_linear_class
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -39,7 +38,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (
     DeepseekVLV2Config,
@@ -162,9 +161,6 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(DeepseekVLV2Processor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
     def get_num_image_tokens(
         self, *, image_width: int, image_height: int, cropping: bool = True
     ) -> int:
@@ -190,6 +186,11 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         local_views_tokens = (num_height_tiles * h) * (num_width_tiles * w + 1)
         return global_views_tokens + local_views_tokens + 1
 
+
+class DeepseekVL2ProfilingInfo(BaseProfilingInfo[DeepseekVL2ProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
     def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
         candidate_resolutions = hf_config.candidate_resolutions
@@ -202,11 +203,13 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width, height=height)
 
 
-class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]):
+class DeepseekVL2DummyInputsBuilder(
+    BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo, DeepseekVL2ProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
 
         return image_token * num_images
@@ -219,7 +222,7 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        max_image_size = self.info.get_image_size_with_most_features()
+        max_image_size = self.profiling_info.get_image_size_with_most_features()
 
         image_overrides = mm_options.get("image") if mm_options else None
 
@@ -234,7 +237,7 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
 
 
 class DeepseekVL2MultiModalProcessor(
-    BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]
+    BaseMultiModalProcessor[DeepseekVL2ProcessingInfo, DeepseekVL2ProfilingInfo]
 ):
     def _call_hf_processor(
         self,
@@ -244,7 +247,7 @@ class DeepseekVL2MultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
-            tokenizer = self.info.get_tokenizer()
+            tokenizer = self.processing_info.get_tokenizer()
             return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
 
         processed_outputs = super()._call_hf_processor(
@@ -279,7 +282,7 @@ class DeepseekVL2MultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token_id = hf_processor.image_token_id
         assert isinstance(image_token_id, int)
@@ -339,13 +342,13 @@ class DeepseekVL2MultiModalProcessor(
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    DeepseekVL2MultiModalProcessor,
-    info=DeepseekVL2ProcessingInfo,
-    dummy_inputs=DeepseekVL2DummyInputsBuilder,
-)
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = DeepseekVL2ProcessingInfo
+    profiling_info = DeepseekVL2ProfilingInfo
+    dummy_builder = DeepseekVL2DummyInputsBuilder
+    processor = DeepseekVL2MultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

@@ -20,7 +20,7 @@ from typing import (
 
 import regex as re
 import torch
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar, assert_never, deprecated
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -56,7 +56,11 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
     from .cache import BaseMultiModalProcessorCache
-    from .profiling import BaseDummyInputsBuilder
+    from .profiling import (
+        BaseDummyInputsBuilder,
+        BaseEncDecDummyInputsBuilder,
+        BaseProfilingInfo,
+    )
 else:
     PretrainedConfig = object
     BatchFeature = object
@@ -65,6 +69,9 @@ else:
     ModelConfig = object
 
     BaseMultiModalProcessorCache = object
+    BaseDummyInputsBuilder = object
+    BaseEncDecDummyInputsBuilder = object
+    BaseProfilingInfo = object
 
 logger = init_logger(__name__)
 
@@ -1134,63 +1141,14 @@ class BaseProcessingInfo:
         """
         return self.ctx.get_hf_processor(**kwargs)
 
-    @abstractmethod
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        """
-        Return the maximum supported number of items for each modality.
 
-        A value of `None` means unlimited number of items.
+_Proc = TypeVar(
+    "_Proc", covariant=True, bound=BaseProcessingInfo, default=BaseProcessingInfo
+)
+_Prof = TypeVar(
+    "_Prof", covariant=True, bound="BaseProfilingInfo", default="BaseProfilingInfo"
+)
 
-        Omitting a modality from the returned dictionary means that
-        it is not supported at all.
-        """
-        raise NotImplementedError
-
-    def get_allowed_mm_limits(self) -> Mapping[str, int]:
-        """Return the maximum allowed number of items for each modality."""
-        supported_mm_limits = self.get_supported_mm_limits()
-        mm_config = self.ctx.get_mm_config()
-
-        allowed_limits = dict[str, int]()
-        for modality, supported_limit in supported_mm_limits.items():
-            user_limit = mm_config.get_limit_per_prompt(modality)
-
-            allowed_limits[modality] = (
-                user_limit
-                if supported_limit is None
-                else min(user_limit, supported_limit)
-            )
-
-        return allowed_limits
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int] | None:
-        """
-        Return the maximum number of tokens per item of for each modality.
-
-        When `None` (the default) is returned, vLLM will generate dummy inputs
-        (images/videos) at maximum possible sizes and process them to determine
-        the maximum token count per modality.
-
-        This approach works but can be very slow for certain models (e.g.,
-        Qwen2.5-VL), leading to very long startup time. For better performance,
-        each model can override this method to return pre-computed maximum token
-        counts, avoiding the need for dummy input generation and processing.
-
-        Note:
-            The maximum number of tokens per item of each modality returned
-            from this function should respect the model's maximum sequence
-            length and the maximum number of items of each modality allowed,
-            and agree with dummy inputs (images/videos) at maximum possible
-            sizes.
-        """
-        return None
-
-
-_I = TypeVar("_I", bound=BaseProcessingInfo)
 
 MultiModalHashes = dict[str, list[str]]
 """
@@ -1219,7 +1177,7 @@ class MultiModalProcessingInfo(NamedTuple):
     prompt_updates: MultiModalPromptUpdates
 
 
-class BaseMultiModalProcessor(ABC, Generic[_I]):
+class BaseMultiModalProcessor(ABC, Generic[_Proc, _Prof]):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
 
@@ -1228,30 +1186,32 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def __init__(
         self,
-        info: _I,
-        dummy_inputs: "BaseDummyInputsBuilder[_I]",
+        dummy_builder: "BaseDummyInputsBuilder[_Proc, _Prof]",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
         super().__init__()
 
-        self.info = info
-        self.dummy_inputs = dummy_inputs
+        self.dummy_builder = dummy_builder
         self.cache = cache
 
         self.data_parser = self._get_data_parser()
 
-        # Avoid unnecessary recomputation
-        self._supported_mm_limits = self.info.get_supported_mm_limits()
-        self._allowed_mm_limits = self.info.get_allowed_mm_limits()
+    @property
+    @deprecated(
+        "`BaseMultiModalProcessor.info` is superseded by `processing_info` "
+        "and will be removed in v0.13."
+    )
+    def info(self):  # Backward compatibility
+        return self.profiling_info.processing_info
 
     @property
-    def supported_mm_limits(self):
-        return self._supported_mm_limits
+    def processing_info(self) -> _Proc:
+        return self.dummy_builder.processing_info
 
     @property
-    def allowed_mm_limits(self):
-        return self._allowed_mm_limits
+    def profiling_info(self) -> _Prof:
+        return self.dummy_builder.profiling_info
 
     def __call__(
         self,
@@ -1280,8 +1240,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         modality: str,
         num_items: int,
     ) -> None:
-        supported_limit = self.supported_mm_limits.get(modality, 0)
-        allowed_limit = self.allowed_mm_limits.get(modality, 0)
+        profiling_info = self.profiling_info
+        supported_limit = profiling_info.supported_mm_limits.get(modality, 0)
+        allowed_limit = profiling_info.allowed_mm_limits.get(modality, 0)
 
         if supported_limit is None:
             supported_limit = allowed_limit
@@ -1309,7 +1270,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
 
-        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        mm_config = self.processing_info.ctx.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
             for modality, items in mm_items.items():
                 if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
@@ -1407,7 +1368,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         new_token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
 
         return find_mm_placeholders(new_token_ids, mm_prompt_updates, tokenizer)
 
@@ -1437,8 +1398,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Call the HF processor on the prompt text and
         associated multi-modal data.
         """
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+        return self.processing_info.ctx.call_hf_processor(
+            self.processing_info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
             dict(**mm_kwargs, **tok_kwargs),
         )
@@ -1551,7 +1512,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_counts = mm_items.get_all_counts()
 
         _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
-            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
+            prompt_text=self.dummy_builder.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
@@ -1614,7 +1575,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Note: When overrides are provided via callers of `apply`,
         `_hash_mm_items` will be bypassed and the overrides will be used.
         """
-        model_id = self.info.model_id
+        model_id = self.processing_info.model_id
 
         hashes: MultiModalHashes = {}
         mm_uuids = mm_uuids or {}
@@ -1896,7 +1857,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         return apply_token_matches(prompt, mm_prompt_updates, tokenizer)
 
     def _apply_text_matches(
@@ -1904,7 +1865,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: str,
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[str, MultiModalPromptUpdatesApplyResult]:
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         return apply_text_matches(prompt, mm_prompt_updates, tokenizer)
 
     def _apply_prompt_updates(
@@ -1912,7 +1873,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
 
         new_token_ids, match_result = self._apply_token_matches(
             token_ids,
@@ -2107,7 +2068,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
 
-class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
+class EncDecMultiModalProcessor(BaseMultiModalProcessor[_Proc, _Prof]):
+    def __init__(
+        self,
+        dummy_builder: "BaseEncDecDummyInputsBuilder[_Proc, _Prof]",
+        *,
+        cache: BaseMultiModalProcessorCache | None = None,
+    ) -> None:
+        super().__init__(dummy_builder, cache=cache)
+
+        self.dummy_builder: BaseEncDecDummyInputsBuilder[_Proc, _Prof] = dummy_builder
+
     @abstractmethod
     def create_encoder_prompt(
         self,
@@ -2119,10 +2090,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         this prompt during profiling and generation.
         """
         raise NotImplementedError
-
-    @property
-    def pad_dummy_encoder_prompt(self) -> bool:
-        return False
 
     def create_decoder_prompt(
         self,
@@ -2138,7 +2105,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
         encoder_inputs: MultiModalInputs,
     ):
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
         if isinstance(decoder_prompt_raw, str):
             decoder_prompt_ids = encode_tokens(

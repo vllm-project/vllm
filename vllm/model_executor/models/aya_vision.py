@@ -17,7 +17,6 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
@@ -28,7 +27,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -139,16 +138,6 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> GotOcr2ImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_image_processor()
-        height = image_processor.size["height"]
-        width = image_processor.size["width"]
-        max_patches = image_processor.max_patches
-        return ImageSize(height=height * max_patches, width=width * max_patches)
-
     def get_num_patches(
         self,
         *,
@@ -174,11 +163,25 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return num_blocks if num_blocks == 1 else num_blocks + 1
 
 
-class AyaVisionDummyInputsBuilder(BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
+class AyaVisionProfilingInfo(BaseProfilingInfo[AyaVisionProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        image_processor = self.processing_info.get_image_processor()
+        height = image_processor.size["height"]
+        width = image_processor.size["width"]
+        max_patches = image_processor.max_patches
+        return ImageSize(height=height * max_patches, width=width * max_patches)
+
+
+class AyaVisionDummyInputsBuilder(
+    BaseDummyInputsBuilder[AyaVisionProcessingInfo, AyaVisionProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
 
         return image_token * num_images
@@ -190,7 +193,7 @@ class AyaVisionDummyInputsBuilder(BaseDummyInputsBuilder[AyaVisionProcessingInfo
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        image_size = self.info.get_image_size_with_most_features()
+        image_size = self.profiling_info.get_image_size_with_most_features()
 
         image_overrides = mm_options.get("image") if mm_options else None
 
@@ -204,7 +207,9 @@ class AyaVisionDummyInputsBuilder(BaseDummyInputsBuilder[AyaVisionProcessingInfo
         }
 
 
-class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingInfo]):
+class AyaVisionMultiModalProcessor(
+    BaseMultiModalProcessor[AyaVisionProcessingInfo, AyaVisionProfilingInfo]
+):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -218,7 +223,7 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
             mm_kwargs,
             tok_kwargs,
         )
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
 
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
@@ -233,7 +238,7 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
             ]
 
             num_patches = [
-                self.info.get_num_patches(
+                self.processing_info.get_num_patches(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     size=image_processor.size,
@@ -272,7 +277,7 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
-            num_patches = self.info.get_num_patches(
+            num_patches = self.processing_info.get_num_patches(
                 image_width=image_size.width,
                 image_height=image_size.height,
                 size=image_processor.size,
@@ -312,13 +317,13 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     return feature_layer_index
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    AyaVisionMultiModalProcessor,
-    info=AyaVisionProcessingInfo,
-    dummy_inputs=AyaVisionDummyInputsBuilder,
-)
 class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = AyaVisionProcessingInfo
+    profiling_info = AyaVisionProfilingInfo
+    dummy_builder = AyaVisionDummyInputsBuilder
+    processor = AyaVisionMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

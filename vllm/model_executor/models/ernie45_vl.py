@@ -55,7 +55,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -68,7 +67,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -910,18 +909,6 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        max_image_tokens = self.get_max_image_tokens()
-        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
-        return {"image": max_image_tokens, "video": max_video_tokens}
-
     def _get_vision_info(
         self,
         *,
@@ -991,8 +978,13 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         )
         return num_video_tokens
 
+
+class Ernie4_5_VLProfilingInfo(BaseProfilingInfo[Ernie4_5_VLProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None, "video": None}
+
     def get_image_size_with_most_features(self) -> ImageSize:
-        max_image_size, _ = self._get_vision_info(
+        max_image_size, _ = self.processing_info._get_vision_info(
             image_width=9999999,
             image_height=9999999,
             image_processor=None,
@@ -1002,7 +994,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        num_image_tokens = self.get_num_image_tokens(
+        num_image_tokens = self.processing_info.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
             image_processor=None,
@@ -1016,7 +1008,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
+            next_max_tokens = self.processing_info.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -1055,23 +1047,34 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     ) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_video_tokens(
+        return self.processing_info.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
             image_processor=None,
         )
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_image_tokens = self.get_max_image_tokens()
+        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+        return {"image": max_image_tokens, "video": max_video_tokens}
 
-class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
+
+class Ernie4_5_VLMultiModalProcessor(
+    BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo, Ernie4_5_VLProfilingInfo]
+):
     def _pixel_values_norm(
         self,
         pixel_values: torch.Tensor,
         mm_kwargs: object,
     ) -> torch.Tensor:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         vision_config = hf_config.vision_config
-        image_processor = self.info.get_image_processor(**mm_kwargs)
+        image_processor = self.processing_info.get_image_processor(**mm_kwargs)
         image_mean_tensor = torch.tensor(
             image_processor.image_mean, dtype=torch.float32
         ).reshape([1, 3, 1, 1])
@@ -1111,7 +1114,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         # when the prompt is not empty but the multimodal data is empty,
         # directly invoke the tokenizer.
         if "images" not in mm_data and "videos" not in mm_data and prompt != "":
-            tokenizer = self.info.get_tokenizer()
+            tokenizer = self.processing_info.get_tokenizer()
             prompt_ids = tokenizer.encode(prompt)
             tokenizer_output = BatchFeature(
                 dict(input_ids=[prompt_ids]), tensor_type="pt"
@@ -1122,8 +1125,9 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             mm_data["images"] = []
         if "videos" not in mm_data:
             mm_data["videos"] = []
-        processor_output = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+
+        processor_output = self.processing_info.ctx.call_hf_processor(
+            self.processing_info.get_hf_processor(**mm_kwargs),
             dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
             dict(**mm_kwargs, **tok_kwargs),
         )
@@ -1228,7 +1232,9 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         )
 
 
-class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessingInfo]):
+class Ernie4_5_VLDummyInputsBuilder(
+    BaseDummyInputsBuilder[Ernie4_5_VLProcessingInfo, Ernie4_5_VLProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1251,8 +1257,10 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
+        target_num_frames = self.profiling_info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
@@ -1276,15 +1284,15 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         }
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Ernie4_5VLMultiModalProcessor,
-    info=Ernie4_5_VLProcessingInfo,
-    dummy_inputs=Ernie4_5_VLDummyInputsBuilder,
-)
 class Ernie4_5_VLMoeForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
     merge_by_field_config = True
+
+    processor_info = Ernie4_5_VLProcessingInfo
+    profiling_info = Ernie4_5_VLProfilingInfo
+    dummy_builder = Ernie4_5_VLDummyInputsBuilder
+    processor = Ernie4_5_VLMultiModalProcessor
 
     packed_modules_mapping = {
         "qkv_proj": [

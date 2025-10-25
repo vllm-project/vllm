@@ -30,7 +30,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -46,7 +45,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -125,9 +124,6 @@ class CLIPProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(CLIPProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": 1}
-
     def get_num_image_tokens(
         self,
         *,
@@ -147,21 +143,26 @@ class CLIPProcessingInfo(BaseProcessingInfo):
             _get_vision_feature_select_strategy(pooler_config.pooling_type),
         )
 
+
+class CLIPProfilingInfo(BaseProfilingInfo[CLIPProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": 1}
+
     def get_image_size_with_most_features(self) -> ImageSize:
-        vision_encoder_info = self.get_vision_encoder_info()
+        vision_encoder_info = self.processing_info.get_vision_encoder_info()
         width = height = vision_encoder_info.get_image_size()
         return ImageSize(width=width, height=height)
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
+        return self.processing_info.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
         )
 
 
-class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProcessingInfo]):
+class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProfilingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
 
@@ -173,7 +174,9 @@ class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
 
         image_overrides = mm_options.get("image") if mm_options else None
 
@@ -775,16 +778,17 @@ class CLIPVisionModel(nn.Module):
 
 # Assume EOS token corresponds to LAST token in text model
 @default_pooling_type("LAST")
-@MULTIMODAL_REGISTRY.register_processor(
-    CLIPMultiModalProcessor,
-    info=CLIPProcessingInfo,
-    dummy_inputs=CLIPDummyInputsBuilder,
-)
 class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
-    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
     merge_by_field_config = True
+
+    processor_info = CLIPProcessingInfo
+    profiling_info = CLIPProfilingInfo
+    dummy_builder = CLIPDummyInputsBuilder
+    processor = CLIPMultiModalProcessor
+
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

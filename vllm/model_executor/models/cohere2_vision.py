@@ -26,7 +26,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
@@ -37,7 +36,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -148,16 +147,6 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_image_processor()
-        height = image_processor.size["height"]
-        width = image_processor.size["width"]
-        max_patches = image_processor.max_patches
-        return ImageSize(height=height * max_patches, width=width)
-
     def get_num_patches(
         self,
         *,
@@ -202,13 +191,25 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         return num_patches
 
 
+class Cohere2VisionProfilingInfo(BaseProfilingInfo[Cohere2VisionProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        image_processor = self.processing_info.get_image_processor()
+        height = image_processor.size["height"]
+        width = image_processor.size["width"]
+        max_patches = image_processor.max_patches
+        return ImageSize(height=height * max_patches, width=width)
+
+
 class Cohere2VisionDummyInputsBuilder(
-    BaseDummyInputsBuilder[Cohere2VisionProcessingInfo]
+    BaseDummyInputsBuilder[Cohere2VisionProcessingInfo, Cohere2VisionProfilingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
 
         return image_token * num_images
@@ -220,7 +221,7 @@ class Cohere2VisionDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        image_size = self.info.get_image_size_with_most_features()
+        image_size = self.profiling_info.get_image_size_with_most_features()
 
         image_overrides = mm_options.get("image") if mm_options else None
 
@@ -235,7 +236,7 @@ class Cohere2VisionDummyInputsBuilder(
 
 
 class Cohere2VisionMultiModalProcessor(
-    BaseMultiModalProcessor[Cohere2VisionProcessingInfo]
+    BaseMultiModalProcessor[Cohere2VisionProcessingInfo, Cohere2VisionProfilingInfo]
 ):
     def _call_hf_processor(
         self,
@@ -256,7 +257,7 @@ class Cohere2VisionMultiModalProcessor(
             "num_patches" not in processed_outputs
             and (images := mm_data.get("images")) is not None
         ):
-            hf_processor = self.info.get_hf_processor(**mm_kwargs)
+            hf_processor = self.processing_info.get_hf_processor(**mm_kwargs)
 
             # Fallback calculation if HF processor didn't provide num_patches
             parsed_images = (
@@ -266,7 +267,7 @@ class Cohere2VisionMultiModalProcessor(
             )
 
             num_patches = [
-                self.info.get_num_patches(
+                self.processing_info.get_num_patches(
                     image_width=parsed_images.get_image_size(i).width,
                     image_height=parsed_images.get_image_size(i).height,
                     processor=hf_processor,
@@ -295,7 +296,7 @@ class Cohere2VisionMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
         img_tokens_per_tile = int(hf_processor.patch_size**2)
         img_line_break_token = hf_processor.img_line_break_token
@@ -306,7 +307,7 @@ class Cohere2VisionMultiModalProcessor(
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
 
-            num_patches = self.info.get_num_patches(
+            num_patches = self.processing_info.get_num_patches(
                 image_width=image_size.width,
                 image_height=image_size.height,
                 processor=hf_processor,
@@ -325,13 +326,13 @@ class Cohere2VisionMultiModalProcessor(
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Cohere2VisionMultiModalProcessor,
-    info=Cohere2VisionProcessingInfo,
-    dummy_inputs=Cohere2VisionDummyInputsBuilder,
-)
 class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = Cohere2VisionProcessingInfo
+    profiling_info = Cohere2VisionProfilingInfo
+    dummy_builder = Cohere2VisionDummyInputsBuilder
+    processor = Cohere2VisionMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
