@@ -9,8 +9,10 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import is_rocm_aiter_rmsnorm_enabled
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -87,6 +89,22 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
         kFp8DynamicTokenSym, True
     ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
 }
+
+
+if is_rocm_aiter_rmsnorm_enabled():
+    AITER_RMS_GROUP_QUANT_OP = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+    AITER_RMS_ADD_GROUP_QUANT_OP = (
+        torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
+    )
+
+    AITER_BLOCK_QUANT_OP = torch.ops.vllm.rocm_aiter_per1x128_quant.default
+    AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
+    AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
+
+    import aiter as rocm_aiter
+
+    rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
+    rocm_aiter_fp8_quant_group_size = 128
 
 
 class RMSNormQuantPattern:
@@ -319,6 +337,90 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         )
 
 
+if is_rocm_aiter_rmsnorm_enabled():
+
+    class AiterRMSGroupQuantFP8Pattern:
+        def __init__(self, epsilon: float, quant_dtype: torch.dtype):
+            self.epsilon = epsilon
+            self.quant_dtype = quant_dtype
+
+        def register(self, pm_pass: PatternMatcherPass):
+            def pattern(
+                input: torch.Tensor,
+                weight: torch.Tensor,  # result_rms: torch.Tensor,
+            ):
+                at1 = AITER_RMS_OP(
+                    x=input, weight=weight, variance_epsilon=self.epsilon
+                )
+
+                at2 = AITER_BLOCK_QUANT_OP(x=at1[0])
+
+                return at2[0], at2[1]
+
+            def replacement(
+                input: torch.Tensor,
+                weight: torch.Tensor,
+            ):
+                at = AITER_RMS_GROUP_QUANT_OP(
+                    x=input, residual=None, weight=weight, variance_epsilon=self.epsilon
+                )
+
+                return at[0], at[1]
+
+            inputs = [
+                empty_bf16(5, 4),  # input
+                empty_bf16(1, 5),  # weight
+            ]
+
+            pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
+
+    class AiterFusedAddRMSGroupQuantPattern:
+        def __init__(self, epsilon: float, quant_dtype: torch.dtype):
+            self.epsilon = epsilon
+            self.quant_dtype = quant_dtype
+
+        def register(self, pm_pass: PatternMatcherPass):
+            def pattern(
+                input: torch.Tensor,
+                residual: torch.Tensor,
+                weight: torch.Tensor,
+            ):
+                at1 = AITER_RMS_ADD_OP(
+                    x=input,
+                    residual=residual,
+                    weight=weight,
+                    variance_epsilon=self.epsilon,
+                )
+
+                at2 = AITER_BLOCK_QUANT_OP(x=at1[0])
+
+                # result, scale, residual
+                return at2[0], at2[1], at1[1]
+
+            def replacement(
+                input: torch.Tensor,
+                residual: torch.Tensor,
+                weight: torch.Tensor,
+            ):
+                at = AITER_RMS_ADD_GROUP_QUANT_OP(
+                    x=input,
+                    residual=residual,
+                    weight=weight,
+                    variance_epsilon=self.epsilon,
+                )
+
+                # result, scale, residual
+                return at[0], at[1], at[2]
+
+            inputs = [
+                empty_bf16(5, 4),  # input
+                empty_bf16(5, 4),  # residual
+                empty_bf16(1, 5),  # weight
+            ]
+
+            pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
+
+
 class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
@@ -349,6 +451,14 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                 self.patterns
             )
 
+            if is_rocm_aiter_rmsnorm_enabled():
+                # Fuse rms_norm + dynamic group fp8 quant
+                AiterRMSGroupQuantFP8Pattern(epsilon, FP8_DTYPE).register(self.patterns)
+
+                AiterFusedAddRMSGroupQuantPattern(epsilon, FP8_DTYPE).register(
+                    self.patterns
+                )
+
             # Fuse rms_norm + dynamic per-token fp8 quant
             RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
@@ -360,11 +470,89 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> Any:
-        return self.hash_source(
-            self,
+        fusion_patterns = [
             RMSNormQuantPattern,
             RMSNormStaticQuantPattern,
             RMSNormDynamicQuantPattern,
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
+        ]
+        if is_rocm_aiter_rmsnorm_enabled():
+            fusion_patterns.extend(
+                [AiterRMSGroupQuantFP8Pattern, AiterFusedAddRMSGroupQuantPattern]
+            )
+        return self.hash_source(self, *fusion_patterns)
+
+
+if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    from .matcher_utils import MatcherAiterFusedMulAdd
+
+    class AiterMulAddFusionPattern:
+        def __init__(self):
+            config = get_current_vllm_config()
+            self.model_dtype = (
+                config.model_config.dtype if config.model_config else None
+            )
+            self.enabled = current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+            self.fused_mul_add_matcher = MatcherAiterFusedMulAdd()
+
+        def register(self, pm_pass: PatternMatcherPass):
+            if not self.enabled:
+                return
+
+            def pattern(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+                mul_add = self.fused_mul_add_matcher.forward_native(x, a, b)
+                return mul_add
+
+            def replacement(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+                # AITER's fused_mul_add requires that a either be a
+                # scalar or have the same number of elements as x.
+                if (
+                    isinstance(a, torch.Tensor)
+                    and isinstance(b, torch.Tensor)
+                    and (a.numel() in [1, x.numel()])
+                    and (b.numel() in [1, x.numel()])
+                ):
+                    return self.fused_mul_add_matcher.forward_custom(x, a, b)
+                else:
+                    return self.fused_mul_add_matcher.forward_native(x, a, b)
+
+            pm.register_replacement(
+                pattern,
+                replacement,
+                self.fused_mul_add_matcher.inputs(),
+                pm.fwd_only,
+                pm_pass,
+            )
+
+
+class MulAddFusionPass(VllmPatternMatcherPass):
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig):
+        super().__init__(config)
+
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="mul_add_fusion_pass"
+        )
+
+        if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+            AiterMulAddFusionPattern().register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph):
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug(
+            "Replaced %s mul+add patterns with fused_mul_add", self.matched_count
+        )
+
+    def uuid(self) -> Any:
+        fusion_patterns = []
+        if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+            fusion_patterns.append(AiterMulAddFusionPattern)
+        return self.hash_source(
+            self,
+            *fusion_patterns,
         )

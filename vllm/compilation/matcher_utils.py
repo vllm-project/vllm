@@ -6,6 +6,7 @@ import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -57,6 +58,9 @@ class MatcherCustomOp(ABC):
 
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.model_dtype, device=self.device, **kws)
+
+    def empty_bf16(self, *args, **kws):
+        return torch.empty(*args, dtype=torch.bfloat16, device=self.device, **kws)
 
     def empty_f32(self, *args, **kws):
         return torch.empty(*args, dtype=torch.float32, device=self.device, **kws)
@@ -236,3 +240,61 @@ class MatcherSiluAndMul(MatcherCustomOp):
         x: torch.Tensor,
     ) -> torch.Tensor:
         return SiluAndMul.forward_native(x)
+
+
+if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    from aiter.ops.triton.fused_mul_add import fused_mul_add
+
+    from vllm.utils.torch_utils import direct_register_custom_op
+
+    def rocm_aiter_fused_mul_add_impl(
+        x: torch.Tensor, a: torch.Tensor, b: torch.Tensor
+    ) -> torch.Tensor:
+        # fused_mul_add(x, a, b) computes x * a + b
+        x = x.contiguous()
+        out = fused_mul_add(x, a, b)
+        return out
+
+    def rocm_aiter_fused_mul_add_fake(
+        x: torch.Tensor, a: torch.Tensor, b: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_fused_mul_add",
+        op_func=rocm_aiter_fused_mul_add_impl,
+        fake_impl=rocm_aiter_fused_mul_add_fake,
+    )
+
+    class MatcherAiterFusedMulAdd(MatcherCustomOp):
+        def __init__(self, enabled: bool | None = None):
+            if enabled is None:
+                enabled = current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+
+            super().__init__(enabled)
+
+        def inputs(self):
+            x = self.empty_bf16(5, 16)
+            a = self.empty_f32(1, 1)
+            b = self.empty_bf16(5, 16)
+            return [x, a, b]
+
+        def forward_custom(
+            self,
+            x: torch.Tensor,
+            a: torch.Tensor,
+            b: torch.Tensor,
+        ) -> torch.Tensor:
+            # fused_mul_add(x, a, b) computes x * a + b
+            out = torch.ops.vllm.rocm_aiter_fused_mul_add(x, a, b)
+            return out
+
+        def forward_native(
+            self,
+            x: torch.Tensor,
+            a: torch.Tensor,
+            b: torch.Tensor,
+        ) -> torch.Tensor:
+            mul_result = x * a
+            add_result = mul_result + b
+            return add_result
