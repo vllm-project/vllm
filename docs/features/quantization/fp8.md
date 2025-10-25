@@ -138,5 +138,40 @@ result = llm.generate("Hello, my name is")
 print(result[0].outputs[0].text)
 ```
 
+### Online Channelwise Quantization
+
+vLLM supports **channelwise quantization** using the `compressed-tensors` quantization method. This approach quantizes weights on a per-channel basis during model loading, providing better accuracy than per-tensor quantization while still requiring no calibration data.
+
+To enable channelwise online quantization, use both the `--quantization` and `--quantization-schema` flags:
+
+```bash
+vllm serve meta-llama/Llama-3-8B-Instruct \
+  --quantization compressed-tensors \
+  --quantization-schema fp8_channelwise
+```
+
+Or in Python:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    "meta-llama/Llama-3-8B-Instruct",
+    quantization="compressed-tensors",
+    quantization_schema="fp8_channelwise"
+)
+result = llm.generate("Hello, my name is")
+print(result[0].outputs[0].text)
+```
+
+This mode provides:
+
+- **Per-channel weight quantization**: Each output channel of weight matrices gets its own scale factor, preserving more information than per-tensor scaling
+- **Dynamic per-token activation quantization**: Activations are quantized dynamically per token for maximum accuracy
+- **No calibration required**: Quantization happens automatically during model loading based on the weight statistics
+
+!!! note
+    Channelwise quantization is currently supported for FP8 (W8A8) with the `compressed-tensors` quantization method. It uses static per-channel quantization for weights and dynamic per-token quantization for activations.
+
 !!! warning
     Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
