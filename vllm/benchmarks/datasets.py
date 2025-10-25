@@ -1936,15 +1936,24 @@ class CustomDataset(BenchmarkDataset):
                 break
             prompt = item["prompt"]
 
-            # apply template
-            if not skip_chat_template:
-                prompt = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True,
-                    tokenize=False,
-                )
+            if isinstance(prompt, list):
+                # Prompt is a list of token IDs
+                if not all(isinstance(token_id, int) for token_id in prompt):
+                    raise ValueError(
+                        f"Prompt must be either a string or a list of integers, "
+                        f"got list with non-integer elements at index {i}"
+                    )
+                prompt_len = len(prompt)
+            else:
+                # Prompt is a string, apply template if needed
+                if not skip_chat_template:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
+                prompt_len = len(tokenizer(prompt).input_ids)
 
-            prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
