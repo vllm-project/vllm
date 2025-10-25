@@ -215,6 +215,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
+    VLLM_NSYS_PROFILE_START_STOP: str = "None"
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
@@ -1393,6 +1394,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable NCCL symmetric memory allocation and registration
     "VLLM_USE_NCCL_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))
+    ),
+    # Enable programmatic Nsight Systems capture via CUDA profiler API.
+    # Set to "<start>-<stop>" to start/stop profiling on engine iteration
+    # numbers. Example: "10-20" starts at iteration 10 and stops at 20.
+    # Use together with nsys flags:
+    #   --capture-range=cudaProfilerApi --stop-on-range-end=true
+    # Default: "None" (disabled). Invalid values are ignored with a warning.
+    # Note: "iteration" refers to the engine's internal scheduler loop, not
+    # tokens; vLLM logs will indicate when profiling starts/stops.
+    "VLLM_NSYS_PROFILE_START_STOP": lambda: os.environ.get(
+        "VLLM_NSYS_PROFILE_START_STOP", "None"
     ),
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
