@@ -16,22 +16,12 @@ import traceback
 import uuid
 import warnings
 import weakref
-from argparse import (
-    Action,
-    ArgumentDefaultsHelpFormatter,
-    ArgumentParser,
-    ArgumentTypeError,
-    RawDescriptionHelpFormatter,
-    _ArgumentGroup,
-)
-from collections import defaultdict
 from collections.abc import Callable
-from functools import partial, wraps
+from functools import cache, partial, wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import cloudpickle
 import psutil
-import regex as re
 import torch
 
 import vllm.envs as envs
