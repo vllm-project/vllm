@@ -132,9 +132,21 @@ def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
 
 def get_model_ids_to_test():
-    return _get_model_ids_to_test(
-        _MULTIMODAL_EXAMPLE_MODELS.keys() - _TRANSFORMERS_BACKEND_MODELS.keys()
-    )
+    transformers_arch_ids = {
+        model_id
+        for info in _TRANSFORMERS_BACKEND_MODELS.values()
+        for model_id in (info.default, *info.extras.values())
+    }
+    vllm_only_archs = {
+        arch
+        for arch, info in _MULTIMODAL_EXAMPLE_MODELS.items()
+        if not any(
+            model_id in transformers_arch_ids
+            for model_id in (info.default, *info.extras.values())
+        )
+    }
+
+    return _get_model_ids_to_test(vllm_only_archs)
 
 
 def get_text_token_prompts(
