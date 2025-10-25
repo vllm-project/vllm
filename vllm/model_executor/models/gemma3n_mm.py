@@ -348,7 +348,7 @@ class Gemma3nMultiModalProcessor(
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
         # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
-        tokenizer = self.profiling_info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         newline_1 = vocab["\n"]
         newline_2 = vocab["\n\n"]
