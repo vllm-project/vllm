@@ -88,6 +88,7 @@ class AsyncLLM(EngineClient):
         Returns:
             None
         """
+        print(f'[debug] vllm/v1/engine/async_llm.py: {executor_class=}')
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "

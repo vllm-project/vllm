@@ -677,7 +677,7 @@ class CompilationConfig:
             return resolve_obj_by_qualname(self.backend)
 
         assert self.mode == CompilationMode.VLLM_COMPILE
-        if self.backend not in ["eager", "inductor"]:
+        if not current_platform.is_tpu() and self.backend not in ["eager", "inductor"]:
             raise ValueError(
                 f"Invalid backend for piecewise compilation: {self.backend}"
             )

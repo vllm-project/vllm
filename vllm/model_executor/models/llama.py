@@ -391,6 +391,7 @@ class LlamaModel(nn.Module):
             lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
+        # logger.info(f'{self.start_layer=}, {self.end_layer=}, {len(self.layers)=}')
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -422,8 +423,8 @@ class LlamaModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
         aux_hidden_states = []
+
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
@@ -441,6 +442,9 @@ class LlamaModel(nn.Module):
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    def run_full_model(self) -> bool:
+        return get_pp_group().is_first_rank and get_pp_group().is_last_rank
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
