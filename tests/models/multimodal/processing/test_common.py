@@ -382,6 +382,8 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    if model_id == "google/gemma-3n-E2B-it":
+        pytest.skip("Skipping gemma-3n-E2B-it due to transformers #39911 bug.")
     if model_id == "OpenGVLab/InternVL2-2B":
         pytest.skip("Tokenizer can include space in front of BOS token")
 
