@@ -49,7 +49,7 @@ class ClassificationMixin(OpenAIServing):
             ctx.tokenizer = await self.engine_client.get_tokenizer()
 
             messages = getattr(ctx.request, "messages", None)
-            if messages:
+            if messages is not None:
                 ret = self._validate_chat_template(
                     request_chat_template=getattr(ctx.request, "chat_template", None),
                     chat_template_kwargs=getattr(ctx.request, "chat_template_kwargs", None),
