@@ -54,6 +54,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -248,6 +249,9 @@ class Worker(WorkerBase):
                 )
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
+
+        # Initialize workspace manager
+        init_workspace_manager(self.device, self.vllm_config)
 
         # Construct the model runner
         if self.use_v2_model_runner:
