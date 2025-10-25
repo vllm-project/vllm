@@ -78,7 +78,7 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         "--lora-modules",
         f"{lora_model_name}={model_name}",
         "--max-model-len",
-        "2048",
+        "1024",
         "--max-num-seqs",
         "1",
     ]
