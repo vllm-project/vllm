@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 

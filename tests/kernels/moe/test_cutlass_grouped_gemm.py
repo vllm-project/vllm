@@ -13,8 +13,8 @@ from tests.kernels.moe.utils import per_token_cast_to_fp8
 from tests.kernels.utils import baseline_scaled_mm
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
+from vllm.utils.math_utils import cdiv
 
 
 @pytest.mark.parametrize(
