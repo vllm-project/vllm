@@ -12,13 +12,17 @@ spec:
    spec:
     containers:
     - name: job-download-model
-      image: {{ include "chart.extraInitImage" . }}
-      command: 
-        - /bin/bash
+      image: {{ .Values.extraInit.image.repository }}:{{ .Values.extraInit.image.tag }}
+      imagePullPolicy: {{ .Values.extraInit.image.pullPolicy }}
+      command: {{ .Values.extraInit.downloadJob.command | toJson }}
       args:
-        - -eucx
-        - aws --endpoint-url $S3_ENDPOINT_URL s3 sync s3://$S3_BUCKET_NAME/$S3_PATH /data
-      env: {{- include "chart.extraInitEnv" . | nindent 8 }}
+      {{- toYaml .Values.extraInit.downloadJob.args | nindent 8 }}
+      env:
+      {{- if .Values.extraInit.downloadJob.env }}
+      {{- toYaml .Values.extraInit.downloadJob.env | nindent 8 }}
+      {{- else }}
+      {{- include "chart.extraInitEnv" . | nindent 8 }}
+      {{- end }}
       volumeMounts:
         - name: {{ .Release.Name }}-storage
           mountPath: /data

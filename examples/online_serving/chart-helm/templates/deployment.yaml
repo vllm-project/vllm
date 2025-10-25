@@ -75,13 +75,17 @@ spec:
       {{-   if .Values.extraInit  }}
       initContainers:
       - name: wait-download-model
-        image: {{ include "chart.extraInitImage" . }}
-        command: 
-          - /bin/bash
+        image: {{ .Values.extraInit.image.repository }}:{{ .Values.extraInit.image.tag }}
+        imagePullPolicy: {{ .Values.extraInit.image.pullPolicy }}
+        command: {{ .Values.extraInit.waitContainer.command | toJson }}
         args:
-          - -eucx
-          - while aws --endpoint-url $S3_ENDPOINT_URL s3 sync --dryrun s3://$S3_BUCKET_NAME/$S3_PATH /data | grep -q download; do sleep 10; done
-        env: {{- include "chart.extraInitEnv" . | nindent 10 }}
+        {{- toYaml .Values.extraInit.waitContainer.args | nindent 10 }}
+        env:
+        {{- if .Values.extraInit.waitContainer.env }}
+        {{- toYaml .Values.extraInit.waitContainer.env | nindent 10 }}
+        {{- else }}
+        {{- include "chart.extraInitEnv" . | nindent 10 }}
+        {{- end }}
         resources:
           requests:
             cpu: 200m
