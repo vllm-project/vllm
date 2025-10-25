@@ -27,7 +27,6 @@ import torch
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
-from vllm.utils.platform_utils import cuda_is_initialized, xpu_is_initialized
 
 # Import utilities from specialized modules for backward compatibility
 from vllm.utils.argparse_utils import (
@@ -42,6 +41,7 @@ from vllm.utils.math_utils import (
     round_down,
     round_up,
 )
+from vllm.utils.platform_utils import cuda_is_initialized, xpu_is_initialized
 
 __all__ = [
     # Argparse utilities
