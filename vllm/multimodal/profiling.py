@@ -355,7 +355,11 @@ class MultiModalProfiler(Generic[_I]):
             mm_counts=mm_counts,
         )
         if max_tokens_per_item is not None:
-            return max_tokens_per_item
+            return {
+                modality: max_tokens
+                for modality, max_tokens in max_tokens_per_item.items()
+                if mm_counts.get(modality, 0) > 0
+            }
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         return self._get_mm_num_tokens(mm_inputs, mm_embeddings_only=mm_embeddings_only)
@@ -375,5 +379,4 @@ class MultiModalProfiler(Generic[_I]):
         This is important to take into account when profiling and
         initializing the encoder cache size.
         """
-
         return self._get_mm_max_tokens(seq_len, mm_counts, mm_embeddings_only=False)
