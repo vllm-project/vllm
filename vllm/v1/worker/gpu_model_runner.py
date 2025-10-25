@@ -2852,7 +2852,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Args:
             eep_scale_up: the model loading is for elastic EP scale up.
         """
-        logger.info("Starting to load model %s...", self.model_config.model)
+        logger.info_once(
+            "Starting to load model %s...",
+            self.model_config.model,
+            scope="global",
+        )
         if eep_scale_up:
             from vllm.distributed.parallel_state import get_ep_group
 
@@ -2913,10 +2917,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.model.set_aux_hidden_state_layers(aux_layers)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        logger.info(
+        logger.info_once(
             "Model loading took %.4f GiB and %.6f seconds",
             self.model_memory_usage / GiB_bytes,
             time_after_load - time_before_load,
+            scope="local",
         )
         prepare_communication_buffer_for_model(self.model)
 
@@ -3494,7 +3499,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        return hidden_states, hidden_states[logit_indices]
+        logit_indices_device = torch.from_numpy(logit_indices).to(
+            self.device, non_blocking=True
+        )
+        return hidden_states, hidden_states[logit_indices_device]
 
     @torch.inference_mode()
     def _dummy_sampler_run(
@@ -3837,10 +3845,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
-        logger.info(
+        logger.info_once(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
             elapsed_time,
             cuda_graph_size / (1 << 30),
+            scope="local",
         )
         return cuda_graph_size
 
