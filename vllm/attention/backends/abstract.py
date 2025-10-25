@@ -252,6 +252,34 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    # split-path interfaces
+    def forward_prefill(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def forward_decode(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def supports_compiled_split(self) -> bool:
+        """Whether this implementation supports prefill/decode split entrypoints.
+
+        Default False; backends should override when ready.
+        """
+        return False
+
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype != "auto"
