@@ -5,7 +5,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -176,6 +176,15 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+    def get_dynamic_token_budget(self, request: Request, available_budget: int) -> int:
+        """Get the effective token budget for scheduling a request.
+        
+        This method can be overridden by subclasses to implement dynamic scheduling constraints
+        based on runtime conditions. For example, data parallel schedulers might want to 
+        consider per-rank token budgets or resource availability.
+        """
+        return available_budget
+    
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -217,7 +226,10 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
+            
+            # Apply dynamic token budget constraints
+            effective_budget = self.get_dynamic_token_budget(request, token_budget)
+            num_new_tokens = min(num_new_tokens, effective_budget)
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -465,7 +477,9 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    # Apply dynamic token budget constraints
+                    effective_budget = self.get_dynamic_token_budget(request, token_budget)
+                    num_new_tokens = min(num_new_tokens, effective_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
