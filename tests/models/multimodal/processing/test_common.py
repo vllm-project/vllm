@@ -167,7 +167,7 @@ def get_text_token_prompts(
     text_prompt: str | None
     token_prompt: list[int]
     if isinstance(tokenizer, MistralTokenizer):
-        images = mm_data.get("image", [])
+        images = parsed_data.get("image", [])
         request = ChatCompletionRequest(
             messages=[
                 UserMessage(
