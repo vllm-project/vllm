@@ -483,7 +483,7 @@ class FlexibleArgumentParser(ArgumentParser):
         except Exception as ex:
             logger.error(
                 "Unable to read the config file at %s. Check path correctness",
-                file_path
+                file_path,
             )
             raise ex
 
