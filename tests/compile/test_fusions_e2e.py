@@ -132,6 +132,9 @@ def test_attn_quant(
         mode = CUDAGraphMode.FULL_AND_PIECEWISE
         splitting_ops: list[str] | None = None
     else:
+        # FIXME: Llama-4-Scout-17B-16E-Instruct-FP8 + FlashInfer + Blackwell end at
+        # CUDAGraphMode.NONE here because it derives an attention backend that
+        # does not support full cudagraphs
         mode = CUDAGraphMode.FULL_DECODE_ONLY
         splitting_ops = []
 
@@ -151,7 +154,7 @@ def test_attn_quant(
         cudagraph_mode=mode,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
@@ -236,7 +239,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         custom_ops=custom_ops_list,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(
             enable_attn_fusion=True,
             enable_noop=True,
@@ -273,7 +276,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)
-        else CompilationConfig(level=compile_config)
+        else CompilationConfig(mode=compile_config)
     )
 
     prompts = [

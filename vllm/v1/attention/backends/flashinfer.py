@@ -41,6 +41,7 @@ from vllm.utils.flashinfer import (
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -324,7 +325,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             ] = {}
             self._decode_cudagraph_max_bs = min(
                 (1 + num_spec_tokens) * max_num_reqs,
-                self.compilation_config.max_capture_size,
+                self.compilation_config.max_cudagraph_capture_size,
             )
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
