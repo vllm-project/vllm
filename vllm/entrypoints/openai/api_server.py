@@ -19,7 +19,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Optional
 
 import prometheus_client
 import pydantic
@@ -112,6 +112,7 @@ from vllm.utils import Device, FlexibleArgumentParser, set_ulimit
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.metrics.loggers import StatLoggerFactory
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -159,6 +160,7 @@ async def build_async_engine_client(
     args: Namespace,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
+    stat_loggers: Optional[list[StatLoggerFactory]] = None,
     disable_frontend_multiprocessing: bool | None = None,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
@@ -184,6 +186,7 @@ async def build_async_engine_client(
     async with build_async_engine_client_from_engine_args(
         engine_args,
         usage_context=usage_context,
+        stat_loggers=stat_loggers,
         disable_frontend_multiprocessing=disable_frontend_multiprocessing,
         client_config=client_config,
     ) as engine:
@@ -195,6 +198,7 @@ async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
+    stat_loggers: Optional[list[StatLoggerFactory]] = None,
     disable_frontend_multiprocessing: bool = False,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
@@ -231,6 +235,7 @@ async def build_async_engine_client_from_engine_args(
         async_llm = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
             enable_log_requests=engine_args.enable_log_requests,
             aggregate_engine_logging=engine_args.aggregate_engine_logging,
             disable_log_stats=engine_args.disable_log_stats,
