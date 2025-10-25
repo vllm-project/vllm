@@ -1102,6 +1102,16 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
+                        # check for error finish reason and abort streaming
+                        # finish_reason='error' indicates a retryable error
+                        error_data = self._handle_streaming_error_finish_reason(
+                            output.finish_reason, request_id
+                        )
+                        if error_data:
+                            yield f"data: {error_data}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
@@ -1295,6 +1305,15 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert final_res is not None
+
+        # Check for error finish reason and return 500 error
+        # finish_reason='error' indicates a retryable request-level internal error
+        for output in final_res.outputs:
+            error_response = self._handle_error_finish_reason(
+                output.finish_reason, request_id
+            )
+            if error_response:
+                return error_response
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":

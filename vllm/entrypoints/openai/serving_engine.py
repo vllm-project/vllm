@@ -438,6 +438,28 @@ class OpenAIServing:
             for i, current_beam in enumerate(all_beams):
                 result = output[i]
 
+                # check for error finish reason and abort beam search
+                if result.outputs[0].finish_reason == "error":
+                    # yield error output and terminate beam search
+                    yield RequestOutput(
+                        request_id=request_id,
+                        prompt=prompt_text,
+                        outputs=[
+                            CompletionOutput(
+                                index=0,
+                                text="",
+                                token_ids=[],
+                                cumulative_logprob=None,
+                                logprobs=None,
+                                finish_reason="error",
+                            )
+                        ],
+                        finished=True,
+                        prompt_token_ids=prompt_token_ids,
+                        prompt_logprobs=None,
+                    )
+                    return
+
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
@@ -731,6 +753,39 @@ class OpenAIServing:
             ).model_dump()
         )
         return json_str
+
+    def _handle_streaming_error_finish_reason(
+        self, finish_reason: str | None, request_id: str
+    ) -> str | None:
+        """handle error finish reason in streaming mode by logging and
+        returning error data if found"""
+        if finish_reason == "error":
+            logger.error(
+                "Request %s failed with an internal error during generation",
+                request_id,
+            )
+            return self.create_streaming_error_response(
+                "Internal server error",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return None
+
+    def _handle_error_finish_reason(
+        self, finish_reason: str | None, request_id: str
+    ) -> ErrorResponse | None:
+        """handle error finish reason by logging and returning 500 if found"""
+        if finish_reason == "error":
+            logger.error(
+                "Request %s failed with an internal error during generation",
+                request_id,
+            )
+            return self.create_error_response(
+                "Internal server error",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return None
 
     async def _check_model(
         self,

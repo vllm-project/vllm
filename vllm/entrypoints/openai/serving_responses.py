@@ -49,6 +49,7 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -579,6 +580,16 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "incomplete"
                 elif context.finish_reason == "abort":
                     status = "cancelled"
+                elif context.finish_reason == "error":
+                    logger.error(
+                        "Request %s failed with an internal error during generation",
+                        request.request_id,
+                    )
+                    return self.create_error_response(
+                        "Internal server error",
+                        err_type="InternalServerError",
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
             else:
                 status = "incomplete"
         else:
@@ -587,6 +598,13 @@ class OpenAIServingResponses(OpenAIServing):
             assert final_res is not None
             assert len(final_res.outputs) == 1
             final_output = final_res.outputs[0]
+
+            # finish_reason='error' indicates a retryable request-level internal error
+            error_response = self._handle_error_finish_reason(
+                final_output.finish_reason, request.request_id
+            )
+            if error_response:
+                return error_response
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
@@ -1167,6 +1185,17 @@ class OpenAIServingResponses(OpenAIServing):
                 continue
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
+                # finish_reason='error' indicates a retryable error
+                error_data = self._handle_streaming_error_finish_reason(
+                    output.finish_reason, request.request_id
+                )
+                if error_data:
+                    yield _increment_sequence_number_and_return(
+                        TypeAdapter(StreamingResponsesResponse).validate_json(
+                            error_data
+                        )
+                    )
+                    return
                 if reasoning_parser:
                     delta_message = (
                         reasoning_parser.extract_reasoning_content_streaming(
@@ -1463,6 +1492,16 @@ class OpenAIServingResponses(OpenAIServing):
         is_first_function_call_delta = False
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
+
+            # finish_reason='error' indicates a retryable error
+            error_data = self._handle_streaming_error_finish_reason(
+                ctx.finish_reason, request.request_id
+            )
+            if error_data:
+                yield _increment_sequence_number_and_return(
+                    TypeAdapter(StreamingResponsesResponse).validate_json(error_data)
+                )
+                return
 
             if ctx.is_expecting_start():
                 current_output_index += 1
