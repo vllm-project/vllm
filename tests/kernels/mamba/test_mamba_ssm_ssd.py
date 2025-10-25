@@ -192,7 +192,10 @@ def generate_continuous_batched_examples(
 @pytest.mark.parametrize("n_heads", [4, 16, 32])
 @pytest.mark.parametrize("d_head", [5, 8, 32, 128])
 @pytest.mark.parametrize("seq_len_chunk_size", [(112, 16), (128, 32)])
-def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, itype):
+@pytest.mark.parametrize("mamba2_fast_kernel", [False, True])
+def test_mamba_chunk_scan_single_example(
+    d_head, n_heads, seq_len_chunk_size, itype, mamba2_fast_kernel
+):
     # this tests the kernels on a single example (bs=1)
 
     # TODO: the bfloat16 case requires higher thresholds. To be investigated
@@ -239,6 +242,7 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, it
         seq_idx=seq_idx_chunks,
         out=Y,
         D=None,
+        use_fused_kernel=mamba2_fast_kernel,
     )
 
     # just test the last in sequence
@@ -257,6 +261,7 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, it
 @pytest.mark.parametrize("itype", [torch.float32])
 @pytest.mark.parametrize("n_heads", [4, 8])
 @pytest.mark.parametrize("d_head", [5, 16, 32])
+@pytest.mark.parametrize("mamba2_fast_kernel", [False, True])
 @pytest.mark.parametrize(
     "seq_len_chunk_size_cases",
     [
@@ -283,7 +288,9 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, it
         (768, 128, 2, [(138, 225), (138, 225)]),
     ],
 )
-def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases, itype):
+def test_mamba_chunk_scan_cont_batch(
+    d_head, n_heads, seq_len_chunk_size_cases, itype, mamba2_fast_kernel
+):
     # this test with multiple examples in a continuous batch
     # (i.e. chunked prefill)
 
@@ -329,6 +336,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases, 
             out=Y,
             D=None,
             initial_states=states,
+            use_fused_kernel=mamba2_fast_kernel,
         )
 
         # just test the last in sequence
@@ -347,11 +355,14 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases, 
 
 
 @pytest.mark.parametrize("chunk_size", [8, 256])
+@pytest.mark.parametrize("mamba2_fast_kernel", [False, True])
 @pytest.mark.parametrize(
     "seqlens",
     [(16, 20), (270, 88, 212, 203)],
 )
-def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
+def test_mamba_chunk_scan_cont_batch_prefill_chunking(
+    chunk_size, seqlens, mamba2_fast_kernel
+):
     # This test verifies the correctness of the chunked prefill implementation
     # in the mamba2 ssd kernels, by comparing concatenation (in the sequence
     # dimension) of chunked results with the full sequence result.
@@ -414,6 +425,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
         out=Y_ref,
         D=None,
         initial_states=None,
+        use_fused_kernel=mamba2_fast_kernel,
     )
 
     ## chunked seqlen computation
