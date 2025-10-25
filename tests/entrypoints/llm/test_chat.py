@@ -120,12 +120,14 @@ def test_llm_generate_with_chat_template_no_double_bos(text_llm):
     """
     Test for issue #27486: When using apply_chat_template manually
     and then calling generate(), should not duplicate BOS token.
-    """
-    from transformers import AutoTokenizer
 
+    Note: This test reuses the text_llm fixture's tokenizer to avoid
+    GPU resource conflicts when running the full test suite.
+    """
     from vllm import SamplingParams
 
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+    # Reuse the tokenizer from the existing LLM instance
+    tokenizer = text_llm.get_tokenizer()
 
     messages = [{"role": "user", "content": "Hello, how are you?"}]
 
