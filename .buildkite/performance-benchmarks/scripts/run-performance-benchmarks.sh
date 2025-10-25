@@ -469,7 +469,7 @@ main() {
   ensure_sharegpt_downloaded
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
-  QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
+  QUICK_BENCHMARK_ROOT=../.buildkite/performance-benchmarks/
 
   # dump vllm info via vllm collect-env
   env_output=$(vllm collect-env)
