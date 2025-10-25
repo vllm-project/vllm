@@ -141,8 +141,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             try:
                 engine_exception = self.fault_signal_q.get_nowait()
                 logger.warning(
-                    "[EngineCoreGuard_%s] Detected exception",
-                    self.engine_index,
+                    "[EngineCoreGuard] Detected exception",
                     engine_exception,
                 )
                 self._report_client_exception(engine_exception)
@@ -151,6 +150,7 @@ class EngineCoreGuard(threading.Thread):  # changed
 
             has_msg, cmd_str = self._recv_cmd(poll_timeout=poll_timeout_ms)
             if has_msg:
+                logger.info("[EngineCoreGuard] Received cmd: %s", cmd_str)
                 self._execute_cmd(cmd_str)
 
     def _send_msg(
@@ -252,19 +252,14 @@ class EngineCoreGuard(threading.Thread):  # changed
         Execute a command received from ClientGuard.
         """
         method, method_params = deserialize_method_call(cmd_str)
-        logger.info(
-            "[EngineCoreGuard_%s] Executing command: %s", self.engine_index, method
-        )
+        logger.info("[EngineCoreGuard] Executing command: %s", method)
         try:
             success = run_method(self, method, args=(), kwargs=method_params)
-            logger.info(
-                "[EngineCoreGuard_%s] Command succeeded: %s", self.engine_index, method
-            )
+            logger.info("[EngineCoreGuard] Command succeeded: %s", success)
 
         except Exception as e:
             logger.error(
-                "[EngineCoreGuard_%s] Error executing method %s: %s",
-                self.engine_index,
+                "[EngineCoreGuard] Error executing method %s: %s",
                 method,
                 e,
             )
@@ -278,6 +273,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         Args:
             timeout:wait for the busy loop to acknowledge the pause signal
         """
+        logger.info("[EngineCoreGuard] Start pausing EngineCore")
         if self.busy_loop_active.is_set():
             # Clear the flag to signal busy loop should pause
             self.busy_loop_active.clear()
