@@ -1175,7 +1175,7 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/run_ucx_fault_injection_test.sh
+    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh --enable-fault-injection
 
 
 ##### multi gpus test #####
