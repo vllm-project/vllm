@@ -311,9 +311,10 @@ class DefaultModelLoader(BaseModelLoader):
             loaded_weights = load_weights_and_online_quantize(self, model, model_config)
 
         self.counter_after_loading_weights = time.perf_counter()
-        logger.info(
+        logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
+            scope="local",
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.
