@@ -16,7 +16,6 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -39,6 +38,7 @@ from .llava_next import (
     BaseLlavaNextMultiModalProcessor,
     LlavaNextLikeConfig,
     LlavaNextProcessingInfo,
+    LlavaNextProfilingInfo,
 )
 from .siglip import SiglipVisionModel
 from .utils import (
@@ -133,9 +133,6 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(LlavaOnevisionProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None, "video": None}
-
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
     # with additional logic afterwards taken from LlavaOnevisionProcessor
     def _get_num_unpadded_features(
@@ -178,10 +175,6 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
         return (unpadded_features, newline_features)
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        # NOTE: This hardcoded value is found via processor tests
-        return ImageSize(width=1153, height=944)
-
     def _get_num_frame_tokens(
         self,
         *,
@@ -211,6 +204,15 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
         return num_frame_tokens * num_frames + 1  # Newline token
 
+
+class LlavaOnevisionProfilingInfo(LlavaNextProfilingInfo[LlavaOnevisionProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None, "video": None}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # NOTE: This hardcoded value is found via processor tests
+        return ImageSize(width=1153, height=944)
+
     def _get_max_video_frames(self, max_tokens: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
@@ -218,7 +220,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
+            next_max_tokens = self.processing_info.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -252,7 +254,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     ) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_video_tokens(
+        return self.processing_info.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
@@ -260,13 +262,13 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
 
 class LlavaOnevisionDummyInputsBuilder(
-    LlavaDummyInputsBuilder[LlavaOnevisionProcessingInfo]
+    LlavaDummyInputsBuilder[LlavaOnevisionProcessingInfo, LlavaOnevisionProfilingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
         video_token = processor.video_token
 
@@ -281,8 +283,10 @@ class LlavaOnevisionDummyInputsBuilder(
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
+        target_num_frames = self.profiling_info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
@@ -307,7 +311,9 @@ class LlavaOnevisionDummyInputsBuilder(
 
 
 class LlavaOnevisionMultiModalProcessor(
-    BaseLlavaNextMultiModalProcessor[LlavaOnevisionProcessingInfo]
+    BaseLlavaNextMultiModalProcessor[
+        LlavaOnevisionProcessingInfo, LlavaOnevisionProfilingInfo
+    ]
 ):
     def _get_mm_fields_config(
         self,
@@ -344,7 +350,7 @@ class LlavaOnevisionMultiModalProcessor(
         # with different sizes when converting back to tensors
         # So, we process each component separately
         # NOTE: No prompt replacement is applied in this case
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
         video_token = processor.video_token
 
@@ -420,7 +426,7 @@ class LlavaOnevisionMultiModalProcessor(
             out_mm_kwargs=out_mm_kwargs,
         )
 
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         video_token_id = hf_config.video_token_index
 
         def get_video_replacement(item_idx: int):
@@ -432,7 +438,7 @@ class LlavaOnevisionMultiModalProcessor(
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 image_size = videos.get_frame_size(item_idx)
-                num_video_tokens = self.info.get_num_video_tokens(
+                num_video_tokens = self.processing_info.get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),
@@ -473,13 +479,13 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    LlavaOnevisionMultiModalProcessor,
-    info=LlavaOnevisionProcessingInfo,
-    dummy_inputs=LlavaOnevisionDummyInputsBuilder,
-)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = LlavaOnevisionProcessingInfo
+    profiling_info = LlavaOnevisionProfilingInfo
+    dummy_builder = LlavaOnevisionDummyInputsBuilder
+    processor = LlavaOnevisionMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

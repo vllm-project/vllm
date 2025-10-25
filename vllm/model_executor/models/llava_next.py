@@ -14,7 +14,6 @@ from transformers.models.llava_next.modeling_llava_next import (
 )
 
 from vllm.config import VllmConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
@@ -25,6 +24,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (
     BaseLlavaMultiModalProcessor,
     BaseLlavaProcessingInfo,
+    BaseLlavaProfilingInfo,
     LlavaDummyInputsBuilder,
     LlavaLikeConfig,
     LlavaMultiModalProjector,
@@ -170,12 +170,17 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
 
         return (unpadded_features, newline_features)
 
+
+_Proc = TypeVar("_Proc", bound=LlavaNextProcessingInfo)
+
+
+class LlavaNextProfilingInfo(BaseLlavaProfilingInfo[_Proc]):
     def get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
 
         largest_feature_size, largest_feature_pinpoint = 0, None
         for height, width in hf_config.image_grid_pinpoints:
-            feat_size = self.get_num_image_tokens(
+            feat_size = self.processing_info.get_num_image_tokens(
                 image_width=width, image_height=height
             )
             if feat_size > largest_feature_size:
@@ -188,10 +193,10 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return largest_feature_pinpoint
 
 
-_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
+_Prof = TypeVar("_Prof", bound=LlavaNextProfilingInfo)
 
 
-class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
+class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_Proc, _Prof]):
     # Copied from BaseMultiModalProcessor
     @abstractmethod
     def _get_mm_fields_config(
@@ -203,7 +208,7 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 
 
 class LlavaNextMultiModalProcessor(
-    BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]
+    BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo, LlavaNextProfilingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -217,13 +222,13 @@ class LlavaNextMultiModalProcessor(
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    LlavaNextMultiModalProcessor,
-    info=LlavaNextProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = LlavaNextProcessingInfo
+    profiling_info = LlavaNextProfilingInfo
+    dummy_builder = LlavaDummyInputsBuilder
+    processor = LlavaNextMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

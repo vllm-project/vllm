@@ -923,7 +923,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class InternVLProfilingInfo(BaseInternVLProfilingInfo):
+class InternVLProfilingInfo(BaseInternVLProfilingInfo[InternVLProcessingInfo]):
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.processing_info.supports_video else {}
         return {**super().get_supported_mm_limits(), **video_limit}

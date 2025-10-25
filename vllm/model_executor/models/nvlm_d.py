@@ -15,7 +15,6 @@ from transformers import PretrainedConfig
 
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -34,6 +33,7 @@ from .internvl import (
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
     BaseInternVLProcessor,
+    BaseInternVLProfilingInfo,
     InternVLChatModel,
 )
 
@@ -80,7 +80,9 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]):
+class NVLMDummyInputsBuilder(
+    BaseInternVLDummyInputsBuilder[NVLMProcessingInfo, BaseInternVLProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -94,7 +96,9 @@ class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo])
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
         num_images = mm_counts.get("image", 0)
 
         image_overrides = mm_options.get("image") if mm_options else None
@@ -109,14 +113,16 @@ class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo])
         }
 
 
-class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
+class NVLMMultiModalProcessor(
+    BaseInternVLMultiModalProcessor[NVLMProcessingInfo, BaseInternVLProfilingInfo]
+):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
 
         out_mm_data = out_mm_kwargs.get_data()
         if "image_num_patches" in out_mm_data:
@@ -139,7 +145,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
                 feature_size = images.get_feature_size(item_idx)
             else:
                 image_size = images.get_image_size(item_idx)
-                feature_size = self.info.get_num_image_tokens(
+                feature_size = self.processing_info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     processor=hf_processor,
@@ -163,12 +169,12 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    NVLMMultiModalProcessor,
-    info=NVLMProcessingInfo,
-    dummy_inputs=NVLMDummyInputsBuilder,
-)
 class NVLM_D_Model(InternVLChatModel):
+    processor_info = NVLMProcessingInfo
+    profiling_info = BaseInternVLProfilingInfo
+    dummy_builder = NVLMDummyInputsBuilder
+    processor = NVLMMultiModalProcessor
+
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_intermediate_size = config.text_config.intermediate_size

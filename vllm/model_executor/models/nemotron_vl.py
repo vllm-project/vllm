@@ -24,13 +24,13 @@ from vllm.model_executor.models.internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
+    BaseInternVLProfilingInfo,
     InternVLImageEmbeddingInputs,
     InternVLImageInputs,
     InternVLImagePixelInputs,
     InternVLProcessor,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
@@ -352,13 +352,13 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    BaseInternVLMultiModalProcessor[NemotronVLProcessingInfo],
-    info=NemotronVLProcessingInfo,
-    dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo],
-)
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     merge_by_field_config = True
+
+    processor_info = NemotronVLProcessingInfo
+    profiling_info = BaseInternVLProfilingInfo
+    dummy_builder = BaseInternVLDummyInputsBuilder
+    processor = BaseInternVLMultiModalProcessor
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

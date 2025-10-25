@@ -1174,7 +1174,7 @@ class KeyeProfilingInfo(BaseProfilingInfo[_Proc]):
 _Prof = TypeVar("_Prof", bound=KeyeProfilingInfo)
 
 
-class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_Proc, _Prof]):
+class KeyeDummyInputsBuilder(BaseDummyInputsBuilder[_Proc, _Prof]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1221,12 +1221,6 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_Proc, _Prof]):
         }
 
         return mm_data
-
-
-class KeyeDummyInputsBuilder(
-    KeyeBaseDummyInputsBuilder[KeyeProcessingInfo, KeyeProfilingInfo]
-):
-    pass
 
 
 class KeyeMultiModalProcessor(
