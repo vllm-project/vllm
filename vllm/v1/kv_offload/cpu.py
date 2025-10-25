@@ -9,7 +9,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
-from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
+from vllm.v1.kv_offload.factory import OffloadingManagerFactory
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
@@ -33,16 +33,22 @@ class CPUOffloadingSpec(OffloadingSpec):
         # worker-side
         self._handler: OffloadingHandler | None = None
 
+        self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
             kv_events_config = self.vllm_config.kv_events_config
             enable_events = (
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
-            self._manager = LRUOffloadingManager(
-                CPUBackend(
-                    block_size=self.offloaded_block_size, num_blocks=self.num_cpu_blocks
-                ),
+
+            backend = CPUBackend(
+                block_size=self.offloaded_block_size, num_blocks=self.num_cpu_blocks
+            )
+
+            self._manager = OffloadingManagerFactory.create_manager(
+                policy_name=self.eviction_policy,
+                backend=backend,
                 enable_events=enable_events,
             )
         return self._manager
