@@ -90,17 +90,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 
   ops.def(
-      "convert_logical_index_to_physical_index("
-      "    Tensor req_id,"
-      "    Tensor block_table,"
-      "    Tensor token_indices,"
-      "    int block_size,"
-      "    Tensor? prefill_request_id,"
-      "    Tensor? workspace_starts) -> Tensor");
-  ops.impl("convert_logical_index_to_physical_index", torch::kCUDA,
-           &convert_logical_index_to_physical_index);
-
-  ops.def(
       "convert_vertical_slash_indexes("
       "   Tensor! block_count, Tensor! block_offset, "
       "   Tensor! column_count, Tensor! column_index, "

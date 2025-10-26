@@ -117,34 +117,50 @@ class WorkspaceManager:
     def reserve(self, spec: "WorkspaceSpec") -> None:
         """Reserve workspace memory for a given spec.
 
-        Allocates the workspace immediately if needed.
+        This is a convenience wrapper around get() that makes it easier to grep
+        for workspace reservations in the codebase for auditing purposes.
 
         Args:
             spec: The workspace specification.
         """
-        # Allocate if workspace needs resize
-        # Note: both ubatches always have the same size, so we only check the first
-        num_bytes = spec.num_bytes()
-        if self._workspace_size_bytes(self._current_workspaces[0]) < num_bytes:
-            self._increase_size(num_bytes, spec.name)
+        # TODO(Lucas): Assert that only reserves (ds/reserve_simultaneous) can
+        # increase the workspace size, so that reserve must be called before `get`.
+        # This will encourage the use of reserve which is mostly just useful for
+        # grepping/auditing the codebase.
+
+        # Note: We don't assert !locked here because reserve can be called
+        # during forward passes. The actual locking logic is in _increase_size.
+        # Call get() to perform the actual allocation
+        self.get(spec)
+
+    def ds(self, spec: "WorkspaceSpec") -> None:
+        """Alias for reserve() for backwards compatibility.
+
+        Reserve workspace memory for a given spec.
+
+        Args:
+            spec: The workspace specification.
+        """
+        self.reserve(spec)
 
     def reserve_simultaneous(self, *specs: "WorkspaceSpec") -> None:
         """Reserve workspace memory for multiple specs simultaneously.
 
-        Allocates a single workspace large enough for all specs immediately if needed.
+        This is a convenience wrapper around get_simultaneous() that makes it easier
+        to grep for workspace reservations in the codebase for auditing purposes.
 
         Args:
             *specs: One or more workspace specifications.
         """
-        # Calculate total bytes needed for specs
-        spec_bytes = [spec.num_bytes() for spec in specs]
-        aligned_bytes = [round_up(byte_count, 256) for byte_count in spec_bytes]
-        total_bytes = sum(aligned_bytes)
+        # TODO(Lucas): Assert that only reserves (ds/reserve_simultaneous) can
+        # increase the workspace size, so that reserve must be called before `get`.
+        # This will encourage the use of reserve which is mostly just useful for
+        # grepping/auditing the codebase.
 
-        # Allocate if workspace needs resize
-        if self._workspace_size_bytes(self._current_workspaces[0]) < total_bytes:
-            workspace_names = ", ".join(spec.name for spec in specs)
-            self._increase_size(total_bytes, f"[{workspace_names}]")
+        # Note: We don't assert !locked here because reserve can be called
+        # during forward passes. The actual locking logic is in _increase_size.
+        # Call get_simultaneous() to perform the actual allocation
+        self.get_simultaneous(*specs)
 
     def get(self, spec: "WorkspaceSpec") -> torch.Tensor:
         """Get a workspace tensor for the given spec.
@@ -155,17 +171,9 @@ class WorkspaceManager:
         Returns:
             A tensor view into the workspace buffer with the requested shape and dtype.
         """
-        shape, num_bytes = self._shape_and_bytes_for_spec(spec)
-        current_workspace = self._ensure_workspace_size(num_bytes, spec.name)
-        return current_workspace[:num_bytes].view(spec.dtype).reshape(shape)
-
-    def _shape_and_bytes_for_spec(
-        self, spec: "WorkspaceSpec"
-    ) -> tuple[tuple[int, ...], int]:
-        """Return adjusted shape and actual size for a workspace spec."""
         num_bytes = spec.num_bytes()
-        shape = spec.shape
-        return shape, num_bytes
+        current_workspace = self._ensure_workspace_size(num_bytes, spec.name)
+        return current_workspace[:num_bytes].view(spec.dtype).reshape(spec.shape)
 
     def get_simultaneous(self, *specs: "WorkspaceSpec") -> list[torch.Tensor]:
         """Get multiple workspace tensors simultaneously from a single allocation.
@@ -176,9 +184,7 @@ class WorkspaceManager:
         Returns:
             List of tensor views into the workspace buffer, one per spec.
         """
-        adjusted = [self._shape_and_bytes_for_spec(spec) for spec in specs]
-        adjusted_shapes = [shape for shape, _ in adjusted]
-        actual_bytes = [actual for _, actual in adjusted]
+        actual_bytes = [spec.num_bytes() for spec in specs]
         aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
         total_bytes = sum(aligned_bytes)
 
@@ -193,7 +199,7 @@ class WorkspaceManager:
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
             .view(specs[i].dtype)
-            .reshape(adjusted_shapes[i])
+            .reshape(specs[i].shape)
             for i in range(len(specs))
         ]
 

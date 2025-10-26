@@ -82,9 +82,3 @@ void cp_gather_indexer_k_quant_cache(
     torch::Tensor& dst_scale,  // [num_tokens, head_dim / quant_block_size * 4]
     const torch::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::Tensor& cu_seq_lens);  // [batch_size + 1]
-
-torch::Tensor convert_logical_index_to_physical_index(
-    torch::Tensor req_id, torch::Tensor block_table,
-    torch::Tensor token_indices, int64_t block_size,
-    const std::optional<torch::Tensor>& prefill_request_id,
-    const std::optional<torch::Tensor>& workspace_starts);

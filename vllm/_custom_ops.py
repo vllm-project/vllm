@@ -2184,37 +2184,6 @@ def cp_gather_indexer_k_quant_cache(
     )
 
 
-def convert_logical_index_to_physical_index(
-    req_id: torch.Tensor,
-    block_table: torch.Tensor,
-    token_indices: torch.Tensor,
-    block_size: int,
-    prefill_request_id: torch.Tensor | None = None,
-    workspace_starts: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Convert per-request logical indices to physical cache slots or workspace offsets.
-
-    For decode tokens, maps to physical cache slots.
-    For prefill tokens, maps to workspace offsets.
-
-    Args:
-        req_id: Request ID for each token
-        block_table: Block table mapping requests to cache blocks
-        token_indices: Per-request logical token indices to convert
-        block_size: Size of each cache block
-        prefill_request_id: Request ID for prefill tokens (-1 for decode)
-        workspace_starts: Cumulative sum of prefill sequence lengths
-    """
-    return torch.ops._C.convert_logical_index_to_physical_index(
-        req_id,
-        block_table,
-        token_indices,
-        block_size,
-        prefill_request_id,
-        workspace_starts,
-    )
-
-
 def get_device_attribute(attribute: int, device: int) -> int:
     return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
 
