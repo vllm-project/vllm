@@ -499,8 +499,12 @@ def filter_duplicate_safetensors_files(
     with open(index_file_name) as f:
         weight_map = json.load(f)["weight_map"]
     weight_files_in_index = set()
+    # If the index file is inside a subfolder (e.g., 'llm/model.safetensors.index.json'),
+    # the shard paths in `weight_map` are relative to that subfolder. Use the
+    # index file's directory as the base for joining shard filenames.
+    base_dir = os.path.dirname(index_file_name)
     for weight_name in weight_map:
-        weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
+        weight_files_in_index.add(os.path.join(base_dir, weight_map[weight_name]))
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
     return hf_weights_files

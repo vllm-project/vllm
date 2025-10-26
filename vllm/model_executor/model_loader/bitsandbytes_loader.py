@@ -96,14 +96,27 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         is_local = os.path.isdir(model_name_or_path)
 
         if is_local:
-            for pattern in allowed_patterns:
+            patterns = list(allowed_patterns)
+            # Prefer subfolder patterns if common subfolder exists locally.
+            if os.path.isdir(os.path.join(model_name_or_path, "llm")):
+                patterns = [f"llm/{p}" for p in allowed_patterns] + patterns
+            for pattern in patterns:
                 weight_files = glob.glob(os.path.join(model_name_or_path, pattern))
                 if weight_files:
                     return model_name_or_path, weight_files, pattern
         else:
             hf_api = HfApi()
             repo_files = hf_api.list_repo_files(repo_id=model_name_or_path)
-            for pattern in allowed_patterns:
+            search_patterns = list(allowed_patterns)
+            # Prefer 'llm/' weights when present in the repo.
+            if any(
+                f.startswith("llm/") and f.endswith((".safetensors", ".bin", ".pt"))
+                for f in repo_files
+            ):
+                search_patterns = [
+                    f"llm/{p}" for p in allowed_patterns
+                ] + search_patterns
+            for pattern in search_patterns:
                 matching_files = fnmatch.filter(repo_files, pattern)
                 if matching_files:
                     hf_folder = download_weights_from_hf(
@@ -128,26 +141,35 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         allowed_patterns = ["*.safetensors", "*.bin", "*.pt"]
 
+        if getattr(self, "allow_patterns_overrides", None):
+            allowed_patterns = list(self.allow_patterns_overrides)
+
         hf_folder, hf_weights_files, matched_pattern = self._get_weight_files(
             model_name_or_path, allowed_patterns, revision
         )
 
-        use_safetensors = matched_pattern == "*.safetensors"
+        # Detect safetensors robustly (pattern may include subfolder)
+        use_safetensors = matched_pattern.endswith(".safetensors")
+        # Additionally guard by checking actual files
+        if not use_safetensors:
+            use_safetensors = any(f.endswith(".safetensors") for f in hf_weights_files)
         is_local = os.path.isdir(model_name_or_path)
-        index_file = SAFE_WEIGHTS_INDEX_NAME
+        # If weights live under a subfolder (e.g., 'llm/*.safetensors'),
+        # the index file will also live there.
+        if "/" in matched_pattern:
+            folder_prefix = matched_pattern.rsplit("/", 1)[0] + "/"
+        else:
+            folder_prefix = ""
+        index_file = folder_prefix + SAFE_WEIGHTS_INDEX_NAME
+        if use_safetensors and not is_local:
+            # Download index for safetensors to select correct shards.
+            download_safetensors_index_file_from_hf(
+                model_name_or_path,
+                index_file,
+                self.load_config.download_dir,
+                revision,
+            )
         if use_safetensors:
-            # For models like Mistral-7B-Instruct-v0.3
-            # there are both sharded safetensors files and a consolidated
-            # safetensors file. Using both breaks.
-            # Here, we download the `model.safetensors.index.json` and filter
-            # any files not found in the index.
-            if not is_local:
-                download_safetensors_index_file_from_hf(
-                    model_name_or_path,
-                    index_file,
-                    self.load_config.download_dir,
-                    revision,
-                )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
             )
@@ -586,6 +608,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         self._get_bnb_target_modules(model)
         self._classify_module_sharding(model)
+
+        self.allow_patterns_overrides = getattr(model, "allow_patterns_overrides", None)
 
     def _dequantize_dq(self, quant_states: Any):
         """

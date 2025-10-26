@@ -96,6 +96,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
+    # Some repos (e.g., nvidia/omnivinci) use `llm_cfg` for nested text config
+    "llm_cfg": "text_config",
 }
 
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -121,6 +123,36 @@ class HFConfigParser(ConfigParserBase):
             token=_get_hf_token(),
             **kwargs,
         )
+        # repos like nvidia/omnivinci keep the LLM config under a subfolder (e.g., `llm/`)
+        if (
+            "llm_cfg" in config_dict or "llm_config" in config_dict
+        ) and file_or_path_exists(model, "llm/config.json", revision):
+            try:
+                sub_cfg = AutoConfig.from_pretrained(
+                    model,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    code_revision=code_revision,
+                    token=_get_hf_token(),
+                    subfolder="llm",
+                    **{k: v for k, v in kwargs.items() if k != "local_files_only"},
+                )
+                return config_dict, sub_cfg
+            except ValueError as e:
+                if (
+                    not trust_remote_code
+                    and "requires you to execute the configuration file" in str(e)
+                ):
+                    err_msg = (
+                        "Failed to load the model config. If the model "
+                        "is a custom model not yet available in the "
+                        "HuggingFace transformers library, consider setting "
+                        "`trust_remote_code=True` in LLM or using the "
+                        "`--trust-remote-code` flag in the CLI."
+                    )
+                    raise RuntimeError(err_msg) from e
+                else:
+                    raise e
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type is None:
@@ -1000,6 +1032,14 @@ def try_get_generation_config(
             revision=revision,
         )
     except OSError:  # Not found
+        try:
+            return GenerationConfig.from_pretrained(
+                model,
+                revision=revision,
+                subfolder="llm",
+            )
+        except OSError:
+            pass
         try:
             config = get_config(
                 model,

@@ -166,6 +166,10 @@ _TEXT_GENERATION_MODELS = {
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
+    # nvidia/omnivinci root config advertises VILAForCausalLM but the LLM
+    # component is Qwen2 with weights/config under the llm/ subfolder.
+    # Map it to a thin wrapper that reuses Qwen2 implementation.
+    "VILAForCausalLM": ("omnivinci", "OmniVinciForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {

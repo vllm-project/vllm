@@ -15,7 +15,10 @@ from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.transformers_utils.config import (
+    file_exists,
+    get_sentence_transformer_tokenizer_config,
+)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -212,6 +215,21 @@ def get_tokenizer(
         )
     else:
         try:
+            needs_subfolder_probe = (
+                isinstance(tokenizer_name, (str, os.PathLike))
+                and not Path(str(tokenizer_name)).exists()
+                and "subfolder" not in kwargs
+            )
+            if needs_subfolder_probe:
+                root_has = file_exists(
+                    str(tokenizer_name), "tokenizer.json", revision=revision
+                )
+                llm_has = file_exists(
+                    str(tokenizer_name), "llm/tokenizer.json", revision=revision
+                )
+                if not root_has and llm_has:
+                    kwargs["subfolder"] = "llm"
+
             tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_name,
                 *args,
