@@ -187,7 +187,7 @@ def _convert_req_index_to_global_index_kernel(
     req = tl.load(req_id_ptr + token_id)
 
     # Load prefill request id if prefill support is enabled
-    is_prefill = tl.full((BLOCK_N,), 0, dtype=tl.bool)
+    is_prefill = tl.full((BLOCK_N,), 0, dtype=tl.int1)
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
