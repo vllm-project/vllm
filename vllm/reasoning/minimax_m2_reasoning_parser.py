@@ -59,11 +59,6 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        logger.info(
-            "extract_reasoning_content_streaming: delta_token_ids: %s, delta_text: %s",
-            delta_token_ids,
-            delta_text,
-        )
         if len(previous_token_ids) == 0:
             delta_text = "<think>" + delta_text
         return DeltaMessage(content=delta_text)

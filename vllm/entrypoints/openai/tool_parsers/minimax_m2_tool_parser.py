@@ -512,7 +512,7 @@ class MinimaxM2ToolParser(ToolParser):
                     self.in_function = False
                     self.accumulated_params = {}
 
-                    logger.warning("[M2_STREAMING] Tool call completed")
+                    logger.debug("[M2_STREAMING] Tool call completed")
 
                     return result
                 else:
