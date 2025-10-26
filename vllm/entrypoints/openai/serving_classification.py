@@ -4,16 +4,15 @@
 from http import HTTPStatus
 from typing import cast
 
+import jinja2
 import numpy as np
 from fastapi import Request
-from typing_extensions import override
 
-import jinja2
-
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
     ClassificationData,
     ClassificationRequest,
     ClassificationResponse,
@@ -35,7 +34,10 @@ logger = init_logger(__name__)
 
 
 class ClassificationMixin(OpenAIServing):
-    @override
+    chat_template: str | None
+    chat_template_content_format: ChatTemplateContentFormatOption
+    trust_request_chat_template: bool
+
     async def _preprocess(
         self,
         ctx: ServeContext,
@@ -50,10 +52,17 @@ class ClassificationMixin(OpenAIServing):
 
             messages = getattr(ctx.request, "messages", None)
             if messages is not None:
+                trust_request_chat_template = getattr(
+                    self,
+                    "trust_request_chat_template",
+                    False,
+                )
                 ret = self._validate_chat_template(
                     request_chat_template=getattr(ctx.request, "chat_template", None),
-                    chat_template_kwargs=getattr(ctx.request, "chat_template_kwargs", None),
-                    trust_request_chat_template=self.trust_request_chat_template,
+                    chat_template_kwargs=getattr(
+                        ctx.request, "chat_template_kwargs", None
+                    ),
+                    trust_request_chat_template=trust_request_chat_template,
                 )
                 if ret:
                     return ret
@@ -63,14 +72,17 @@ class ClassificationMixin(OpenAIServing):
                     _,
                     engine_prompts,
                 ) = await self._preprocess_chat(
-                    ctx.request,
+                    cast(ChatCompletionRequest, ctx.request),
                     ctx.tokenizer,
                     messages,
                     chat_template=(
                         getattr(ctx.request, "chat_template", None)
-                        or self.chat_template
+                        or getattr(self, "chat_template", None)
                     ),
-                    chat_template_content_format=self.chat_template_content_format,
+                    chat_template_content_format=cast(
+                        ChatTemplateContentFormatOption,
+                        getattr(self, "chat_template_content_format", "auto"),
+                    ),
                     add_generation_prompt=False,
                     continue_final_message=False,
                     add_special_tokens=getattr(
@@ -89,8 +101,9 @@ class ClassificationMixin(OpenAIServing):
                     return None
 
                 renderer = self._get_renderer(ctx.tokenizer)
+                prompt_input = cast(str | list[str], input_data)
                 ctx.engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=ctx.request.input,
+                    prompt_or_prompts=prompt_input,
                     config=self._build_render_config(ctx.request),
                 )
 
@@ -100,7 +113,6 @@ class ClassificationMixin(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-    @override
     def _build_response(
         self,
         ctx: ServeContext,
@@ -197,7 +209,6 @@ class ServingClassification(ClassificationMixin):
 
         return await super().handle(ctx)  # type: ignore
 
-    @override
     def _create_pooling_params(
         self,
         ctx: ClassificationServeContext,
