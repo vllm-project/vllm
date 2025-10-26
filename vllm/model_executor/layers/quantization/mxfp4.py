@@ -115,8 +115,13 @@ def get_mxfp4_backend():
             )
 
         # If FlashInfer is not available, try either Marlin or Triton
+        # For SM90, default to Marlin unless Triton is explicitly requested
         if (
             envs.VLLM_MXFP4_USE_MARLIN
+            or (
+                current_platform.get_device_capability()[0] == 9
+                and not envs.VLLM_MXFP4_USE_TRITON
+            )
             or current_platform.get_device_capability()[0] < 9
             or not has_triton_kernels()
             or not is_torch_equal_or_newer("2.8.0")
