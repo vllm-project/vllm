@@ -733,16 +733,14 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
-- label: Multi-Modal Processor and Models Test (CPU) # 44min
+- label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
-  no_gpu: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/processing
-    - pytest -v -s models/multimodal/test_mapping.py
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 80
@@ -754,7 +752,7 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/test_mapping.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
