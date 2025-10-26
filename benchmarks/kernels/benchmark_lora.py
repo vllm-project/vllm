@@ -21,6 +21,7 @@ from weight_shapes import WEIGHT_SHAPES
 
 from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import HAS_TRITON, triton
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (  ## added fused_moe_lora
