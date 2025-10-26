@@ -27,7 +27,7 @@
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
+from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
@@ -1034,6 +1034,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         )
         return num_video_tokens
 
+    @lru_cache(maxsize=128)  # noqa: B019
     def get_image_size_with_most_features(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
