@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 import struct
 from functools import cache
 from os import PathLike
@@ -109,3 +110,13 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
         length_of_metadata = struct.unpack("<Q", f.read(8))[0]
         metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))
         return metadata
+
+
+def convert_model_repo_to_path(model_repo: str) -> str:
+    """When VLLM_USE_MODELSCOPE is True convert a model
+    repository string to a Path str."""
+    if not envs.VLLM_USE_MODELSCOPE or Path(model_repo).exists():
+        return model_repo
+    from modelscope.utils.file_utils import get_model_cache_root
+
+    return os.path.join(get_model_cache_root(), model_repo)
