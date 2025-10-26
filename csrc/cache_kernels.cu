@@ -1277,7 +1277,6 @@ void cp_gather_cache(
   }
 }
 
-// Host function to launch the gather-and-upconvert kernel
 void cp_gather_and_upconvert_fp8_kv_cache(
     torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
     torch::Tensor const& dst,               // [TOT_TOKENS, 576]
@@ -1368,7 +1367,7 @@ void indexer_k_quant_and_cache(
                              CALL_INDEXER_K_QUANT_AND_CACHE);
 }
 
-// Macro to dispatch the kernel based on the data type.
+// Macro to dispatch the kernel based on the data amount.
 #define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
   vllm::cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                \
       <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,               \
