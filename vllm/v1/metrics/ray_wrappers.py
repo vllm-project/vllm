@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Optional, Union
 
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
@@ -63,9 +62,9 @@ class RayGaugeWrapper(RayPrometheusMetric):
     def __init__(
         self,
         name: str,
-        documentation: Optional[str] = "",
-        labelnames: Optional[list[str]] = None,
-        multiprocess_mode: Optional[str] = "",
+        documentation: str | None = "",
+        labelnames: list[str] | None = None,
+        multiprocess_mode: str | None = "",
     ):
         # All Ray metrics are keyed by WorkerId, so multiprocess modes like
         # "mostrecent", "all", "sum" do not apply. This logic can be manually
@@ -77,7 +76,7 @@ class RayGaugeWrapper(RayPrometheusMetric):
             name=name, description=documentation, tag_keys=labelnames_tuple
         )
 
-    def set(self, value: Union[int, float]):
+    def set(self, value: int | float):
         return self.metric.set(value)
 
     def set_to_current_time(self):
@@ -92,8 +91,8 @@ class RayCounterWrapper(RayPrometheusMetric):
     def __init__(
         self,
         name: str,
-        documentation: Optional[str] = "",
-        labelnames: Optional[list[str]] = None,
+        documentation: str | None = "",
+        labelnames: list[str] | None = None,
     ):
         labelnames_tuple = tuple(labelnames) if labelnames else None
         name = self._get_sanitized_opentelemetry_name(name)
@@ -101,7 +100,7 @@ class RayCounterWrapper(RayPrometheusMetric):
             name=name, description=documentation, tag_keys=labelnames_tuple
         )
 
-    def inc(self, value: Union[int, float] = 1.0):
+    def inc(self, value: int | float = 1.0):
         if value == 0:
             return
         return self.metric.inc(value)
@@ -114,9 +113,9 @@ class RayHistogramWrapper(RayPrometheusMetric):
     def __init__(
         self,
         name: str,
-        documentation: Optional[str] = "",
-        labelnames: Optional[list[str]] = None,
-        buckets: Optional[list[float]] = None,
+        documentation: str | None = "",
+        labelnames: list[str] | None = None,
+        buckets: list[float] | None = None,
     ):
         labelnames_tuple = tuple(labelnames) if labelnames else None
         name = self._get_sanitized_opentelemetry_name(name)
@@ -128,7 +127,7 @@ class RayHistogramWrapper(RayPrometheusMetric):
             boundaries=boundaries,
         )
 
-    def observe(self, value: Union[int, float]):
+    def observe(self, value: int | float):
         return self.metric.observe(value)
 
 

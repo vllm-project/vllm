@@ -5,7 +5,6 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -21,15 +20,13 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
-InputBatch = Union[TPUInputBatch, GPUInputBatch]
+InputBatch = TPUInputBatch | GPUInputBatch
 
 logger = init_logger(__name__)
 
 
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
-    LORA_WARMUP_RANK = 8
-
     def load_lora_model(
         self, model: nn.Module, vllm_config: VllmConfig, device: torch.device
     ) -> nn.Module:
@@ -87,7 +84,7 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_setup_dummy_loras(
-        self, lora_config: Optional[LoRAConfig], remove_lora: bool = True
+        self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
         if lora_config is None:
             yield
@@ -96,7 +93,9 @@ class LoRAModelRunnerMixin:
             assert self.lora_manager is not None, "LoRA is not enabled"
 
             num_loras = lora_config.max_loras
-
+            lora_warmup_rank = (
+                lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
+            )
             # Make dummy lora requests
             lora_requests: set[LoRARequest] = {
                 LoRARequest(
@@ -111,7 +110,7 @@ class LoRAModelRunnerMixin:
                 # Add the dummy LoRAs here so _set_active_loras doesn't try to
                 # load from disk.
                 for lr in lora_requests:
-                    self.lora_manager.add_dummy_lora(lr, rank=self.LORA_WARMUP_RANK)
+                    self.lora_manager.add_dummy_lora(lr, rank=lora_warmup_rank)
 
                 yield
 
@@ -121,7 +120,10 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_select_dummy_loras(
-        self, lora_config: Optional[LoRAConfig], num_scheduled_tokens: np.ndarray
+        self,
+        lora_config: LoRAConfig | None,
+        num_scheduled_tokens: np.ndarray,
+        activate_lora: bool = True,
     ):
         if lora_config is None:
             yield
@@ -134,7 +136,12 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
+            if activate_lora:
+                prompt_lora_mapping = (
+                    np.arange(num_reqs, dtype=np.int32) % num_loras
+                ) + 1
+            else:
+                prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping, num_scheduled_tokens)
@@ -158,17 +165,20 @@ class LoRAModelRunnerMixin:
     @contextmanager
     def maybe_dummy_run_with_lora(
         self,
-        lora_config: Optional[LoRAConfig],
+        lora_config: LoRAConfig | None,
         num_scheduled_tokens: np.ndarray,
+        activate_lora: bool = True,
         remove_lora: bool = True,
     ):
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
-            self.maybe_select_dummy_loras(lora_config, num_scheduled_tokens),
+            self.maybe_select_dummy_loras(
+                lora_config, num_scheduled_tokens, activate_lora
+            ),
         ):
             yield
 
-    def maybe_remove_all_loras(self, lora_config: Optional[LoRAConfig]):
+    def maybe_remove_all_loras(self, lora_config: LoRAConfig | None):
         if lora_config is None:
             return
         self.lora_manager.remove_all_adapters()

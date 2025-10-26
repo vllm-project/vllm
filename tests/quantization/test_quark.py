@@ -11,7 +11,6 @@ import importlib.metadata
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import Optional
 
 import huggingface_hub
 import lm_eval
@@ -57,7 +56,10 @@ def enable_pickle(monkeypatch):
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     with vllm_runner(
-        model_path, kv_cache_dtype=kv_cache_dtype, tensor_parallel_size=tp
+        model_path,
+        enforce_eager=True,
+        kv_cache_dtype=kv_cache_dtype,
+        tensor_parallel_size=tp,
     ) as llm:
 
         def check_model(model):
@@ -75,14 +77,14 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
 
 
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
     model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
-    with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+    with vllm_runner(model_path, enforce_eager=True, tensor_parallel_size=tp) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -99,14 +101,14 @@ def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
 
 
 @pytest.mark.parametrize("tp", [1])
 def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
-    with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+    with vllm_runner(model_path, enforce_eager=True, tensor_parallel_size=tp) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -118,7 +120,7 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
 
 
@@ -156,8 +158,8 @@ class AccuracyTestConfig:
     def get_model_args(
         self,
         tp_size: int,
-        model_max_len: Optional[int] = None,
-        kwargs: Optional[dict] = None,
+        model_max_len: int | None = None,
+        kwargs: dict | None = None,
     ) -> dict:
         if kwargs is None:
             kwargs = {}

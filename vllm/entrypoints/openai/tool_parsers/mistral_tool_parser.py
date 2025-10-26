@@ -5,7 +5,6 @@ import json
 from collections.abc import Sequence
 from random import choices
 from string import ascii_letters, digits
-from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -95,6 +94,7 @@ class MistralToolParser(ToolParser):
             )
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if (
             not isinstance(self.model_tokenizer, MistralTokenizer)
             and request.tools
@@ -194,7 +194,7 @@ class MistralToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         # if the tool call token is not in the tokens generated so far, append
         # output to contents since it's not a tool
         if self.bot_token not in current_text:
@@ -252,7 +252,7 @@ class MistralToolParser(ToolParser):
                 # auto-generated due to JSON completions, but wasn't
                 # streamed to the client yet.
                 if self.current_tool_id >= 0:
-                    diff: Union[str, None] = current_tool_call.get("arguments")
+                    diff: str | None = current_tool_call.get("arguments")
 
                     if diff:
                         diff = json.dumps(diff, ensure_ascii=False).replace(

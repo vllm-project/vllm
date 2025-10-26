@@ -33,11 +33,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   ops.def(
-      "silu_mul_fp8_quant_deep_gemm_cuda(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s, int group_size, "
-      "bool use_ue8m0, int num_parallel_tokens) -> ()");
-  ops.impl("silu_mul_fp8_quant_deep_gemm_cuda", torch::kCUDA,
-           &silu_mul_fp8_quant_deep_gemm_cuda);
+      "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
+      "y_q, Tensor! y_s,"
+      "bool use_ue8m0) -> ()");
+  ops.impl("persistent_masked_m_silu_mul_quant", torch::kCUDA,
+           &persistent_masked_m_silu_mul_quant);
 
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
@@ -175,12 +175,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
-  // Polynomial Normalization.
-  ops.def(
-      "poly_norm(Tensor! out, Tensor input, Tensor weight, Tensor bias, float "
-      "epsilon) -> ()");
-  ops.impl("poly_norm", torch::kCUDA, &poly_norm);
-
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
@@ -191,9 +185,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Optimized top-k per row operation
   ops.def(
       "top_k_per_row(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, Tensor! values, int numRows, int stride0, "
+      "Tensor! indices, int numRows, int stride0, "
       "int stride1) -> ()");
   ops.impl("top_k_per_row", torch::kCUDA, &top_k_per_row);
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, int numRows, "
+      "int stride0, int stride1) -> ()");
+  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -557,7 +557,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // to prevent the meta function registry.
   ops.def(
       "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
-      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, int bit) "
+      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
+      "use_v2_format, int bit) "
       "-> Tensor",
       {stride_tag});
   ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);

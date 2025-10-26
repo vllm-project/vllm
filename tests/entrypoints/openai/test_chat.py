@@ -3,7 +3,6 @@
 
 # imports for structured outputs tests
 import json
-from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -176,7 +175,7 @@ async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: st
     [(MODEL_NAME, 1), (MODEL_NAME, 0), (MODEL_NAME, -1), (MODEL_NAME, None)],
 )
 async def test_prompt_logprobs_chat(
-    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: Optional[int]
+    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: int | None
 ):
     params: dict = {
         "messages": [
@@ -369,7 +368,7 @@ async def test_chat_completion_stream_options(
             assert chunk.usage is None
         else:
             assert chunk.usage is None
-            final_chunk = await stream.__anext__()
+            final_chunk = await anext(stream)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
@@ -598,145 +597,6 @@ async def test_structured_outputs_choice_chat_logprobs(
     # -9999.0 is the minimum logprob returned by OpenAI
     for item in top_logprobs:
         assert item.logprob >= -9999.0, f"Failed (top_logprobs={top_logprobs})"
-
-
-@pytest.mark.asyncio
-async def test_named_tool_use(
-    client: openai.AsyncOpenAI,
-    sample_json_schema,
-):
-    messages = [
-        {"role": "system", "content": "you are a helpful assistant"},
-        {
-            "role": "user",
-            "content": (
-                "Give an example JSON for an employee profile using the specified tool."
-            ),
-        },
-    ]
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema,
-            },
-        }
-    ]
-    tool_choice = {"type": "function", "function": {"name": "dummy_function_name"}}
-
-    # non-streaming
-
-    chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_completion_tokens=1000,
-        tools=tools,
-        tool_choice=tool_choice,
-    )
-    message = chat_completion.choices[0].message
-    assert len(message.content) == 0
-    json_string = message.tool_calls[0].function.arguments
-    json1 = json.loads(json_string)
-    jsonschema.validate(instance=json1, schema=sample_json_schema)
-
-    messages.append({"role": "assistant", "content": json_string})
-    messages.append(
-        {"role": "user", "content": "Give me another one with a different name and age"}
-    )
-
-    # streaming
-
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_completion_tokens=1000,
-        tools=tools,
-        tool_choice=tool_choice,
-        stream=True,
-    )
-
-    output = []
-    finish_reason_count = 0
-    async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if delta.role:
-            assert delta.role == "assistant"
-        assert delta.content is None or len(delta.content) == 0
-        if delta.tool_calls:
-            output.append(delta.tool_calls[0].function.arguments)
-        if chunk.choices[0].finish_reason is not None:
-            finish_reason_count += 1
-    # finish reason should only return in last block
-    assert finish_reason_count == 1
-    json2 = json.loads("".join(output))
-    jsonschema.validate(instance=json2, schema=sample_json_schema)
-    assert json1["name"] != json2["name"]
-    assert json1["age"] != json2["age"]
-
-
-@pytest.mark.asyncio
-async def test_inconsistent_tool_choice_and_tools(
-    client: openai.AsyncOpenAI, sample_json_schema
-):
-    messages = [
-        {"role": "system", "content": "you are a helpful assistant"},
-        {
-            "role": "user",
-            "content": f"Give an example JSON for an employee profile that "
-            f"fits this schema: {sample_json_schema}",
-        },
-    ]
-
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tool_choice={
-                "type": "function",
-                "function": {"name": "dummy_function_name"},
-            },
-        )
-
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "dummy_function_name",
-                        "description": "This is a dummy function",
-                        "parameters": sample_json_schema,
-                    },
-                }
-            ],
-            tool_choice={
-                "type": "function",
-                "function": {"name": "nondefined_function_name"},
-            },
-        )
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "dummy_function_name",
-                        "description": "This is a dummy function",
-                        "parameters": sample_json_schema,
-                    },
-                }
-            ],
-            tool_choice={},
-        )
 
 
 @pytest.mark.asyncio

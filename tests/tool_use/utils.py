@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Any, Optional
+from typing import Any
 
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 from typing_extensions import TypedDict
@@ -13,10 +13,10 @@ from tests.utils import VLLM_PATH
 class ServerConfig(TypedDict, total=False):
     model: str
     arguments: list[str]
-    system_prompt: Optional[str]
-    supports_parallel: Optional[bool]
-    supports_rocm: Optional[bool]
-    extended: Optional[bool]  # tests do not run in CI automatically
+    system_prompt: str | None
+    supports_parallel: bool | None
+    supports_rocm: bool | None
+    extended: bool | None  # tests do not run in CI automatically
 
 
 def patch_system_prompt(

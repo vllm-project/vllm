@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import numpy as np
 import pytest
@@ -32,7 +31,7 @@ def _dummy_elem(
     key: str,
     size: int,
     *,
-    rng: Optional[np.random.RandomState] = None,
+    rng: np.random.RandomState | None = None,
 ):
     if rng is None:
         data = torch.empty((size,), dtype=torch.int8)
@@ -51,7 +50,7 @@ def _dummy_item(
     modality: str,
     size_by_key: dict[str, int],
     *,
-    rng: Optional[np.random.RandomState] = None,
+    rng: np.random.RandomState | None = None,
 ):
     return MultiModalKwargsItem.from_elems(
         [_dummy_elem(modality, key, size, rng=rng) for key, size in size_by_key.items()]
@@ -61,7 +60,7 @@ def _dummy_item(
 def _dummy_items(
     size_by_key_modality: dict[str, dict[str, int]],
     *,
-    rng: Optional[np.random.RandomState] = None,
+    rng: np.random.RandomState | None = None,
 ):
     return MultiModalKwargsItems.from_seq(
         [
