@@ -84,6 +84,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.pre_quant: bool = False
         self.load_8bit: bool = False
         self.is_pool_model: bool = False
+        self.allow_patterns_overrides: list[str] | None = None
 
     def _get_weight_files(
         self,
@@ -142,8 +143,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         allowed_patterns = ["*.safetensors", "*.bin", "*.pt"]
 
-        if getattr(self, "allow_patterns_overrides", None):
-            allowed_patterns = list(self.allow_patterns_overrides)
+        allow_patterns_overrides = getattr(self, "allow_patterns_overrides", None)
+        if allow_patterns_overrides is not None:
+            allowed_patterns = list(allow_patterns_overrides)
 
         hf_folder, hf_weights_files, matched_pattern = self._get_weight_files(
             model_name_or_path, allowed_patterns, revision

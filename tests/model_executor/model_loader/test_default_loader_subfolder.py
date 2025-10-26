@@ -24,10 +24,12 @@ def test_default_loader_prefers_llm_subfolder_and_filters_with_index(tmp_path):
     # Default loader in auto format should find llm/*.safetensors and use the subfolder index
     loader = DefaultModelLoader(LoadConfig(load_format="auto"))
     hf_folder, files, use_safetensors = loader._prepare_weights(
-        str(tmp_path), revision=None, fall_back_to_pt=True, allow_patterns_overrides=None
+        str(tmp_path),
+        revision=None,
+        fall_back_to_pt=True,
+        allow_patterns_overrides=None,
     )
 
     assert hf_folder == str(tmp_path)
     assert use_safetensors is True
     assert files == [str(keep)]
-

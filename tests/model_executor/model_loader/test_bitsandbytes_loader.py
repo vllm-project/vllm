@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.bitsandbytes_loader import (
@@ -22,7 +21,7 @@ class _DummyBitsAndBytesLoader(BitsAndBytesModelLoader):
         self,
         model_name_or_path: str,
         allowed_patterns: list[str],
-        revision: Optional[str] = None,
+        revision: str | None = None,
     ) -> tuple[str, list[str], str]:
         return self._mock_result
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 from transformers import GenerationConfig, PretrainedConfig
 
@@ -16,16 +15,14 @@ def test_hf_config_parser_uses_llm_subfolder(monkeypatch):
 
     def fake_get_config_dict(
         cls,
-        model: Union[str, bytes],
-        revision: Optional[str] = None,
-        code_revision: Optional[str] = None,
+        model: str | bytes,
+        revision: str | None = None,
+        code_revision: str | None = None,
         **kwargs,
     ):
         return {"llm_cfg": {}}, base_config
 
-    def fake_file_exists(
-        model: Union[str, bytes], config_name: str, revision: Optional[str]
-    ):
+    def fake_file_exists(model: str | bytes, config_name: str, revision: str | None):
         return config_name == "llm/config.json"
 
     auto_called = {}

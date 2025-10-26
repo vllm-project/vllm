@@ -137,7 +137,7 @@ class DefaultModelLoader(BaseModelLoader):
             hf_folder = model_name_or_path
 
         hf_weights_files: list[str] = []
-        matched_pattern: Optional[str] = None
+        matched_pattern: str | None = None
         for pattern in allow_patterns:
             files = glob.glob(os.path.join(hf_folder, pattern))
             if files:
@@ -157,7 +157,11 @@ class DefaultModelLoader(BaseModelLoader):
                 first_dir_rel = os.path.relpath(
                     os.path.dirname(hf_weights_files[0]), hf_folder
                 )
-                folder_prefix = "" if first_dir_rel in ("", ".") else first_dir_rel.rstrip("/") + "/"
+                folder_prefix = (
+                    ""
+                    if first_dir_rel in ("", ".")
+                    else first_dir_rel.rstrip("/") + "/"
+                )
             index_file = folder_prefix + index_file
             # For models like Mistral-7B-Instruct-v0.3
             # there are both sharded safetensors files and a consolidated
