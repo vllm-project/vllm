@@ -133,17 +133,17 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_bias = self.slice_bias(lora_bias)
 
         self.lora_a_stacked[0][index,
-                               0, :lora_a.shape[1], :lora_a.shape[0]].detach().copy_(
-                                   lora_a.T, non_blocking=True).requires_grad_(True)
+                               0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+                                   lora_a.T, non_blocking=True)
         self.lora_b_stacked[0][index,
-                               0, :lora_b.shape[1], :lora_b.shape[0]].detach().copy_(
-                                   lora_b.T, non_blocking=True).requires_grad_(True)
+                               0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                   lora_b.T, non_blocking=True)
         if lora_bias is not None:
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             assert len(self.lora_bias_stacked)
-            self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].detach().copy_(
-                lora_bias.T, non_blocking=True).requires_grad_(True)
+            self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
+                lora_bias.T, non_blocking=True)
         if is_trainable:
             self.lora_a_stacked[0].requires_grad_(True)
             self.lora_b_stacked[0].requires_grad_(True)
@@ -162,12 +162,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        # TODO(girfan): This is WRONG. It is evaluating to true even in inference mode.
-        if self.training:
-            # TODO(girfan): Do this conditionally only for training inputs.
-            # Maybe by setting it in input_ids and checking if they require_grad?
-            # Maybe we don't need this if it is already set higher up in the call chain?
-            # x.requires_grad_(True)
+        if torch.is_grad_enabled():
             return self._training_apply(x, output)
         else:
             return self._inference_apply(x, output)
@@ -195,8 +190,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output_offset = 0
             for slice_idx in range(len(self.lora_a_stacked)):
                 # Get LoRA weights for this slice
-                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :].clone().detach().requires_grad_(True)  # [rank, input_size]
-                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :].clone().detach().requires_grad_(True)  # [output_size, rank]
+                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :] # [rank, input_size]
+                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :] # [output_size, rank]
 
                 # Apply LoRA: x @ A^T @ B^T
                 # lora_hidden = x[token_idx:token_idx+1] @ lora_a.T
