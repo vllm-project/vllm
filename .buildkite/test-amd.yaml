@@ -50,7 +50,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker Test # 36min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -395,7 +395,9 @@ steps:
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
     - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
-    - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+    # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
+    - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+    #- python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
 
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
@@ -436,7 +438,11 @@ steps:
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
       --ignore=lora/test_chatglm3_tp.py \
       --ignore=lora/test_llama_tp.py \
-      --ignore=lora/test_llm_with_multi_loras.py
+      --ignore=lora/test_llm_with_multi_loras.py \
+      --ignore=lora/test_olmoe_tp.py \
+      --ignore=lora/test_deepseekv2_tp.py \
+      --ignore=lora/test_gptoss.py \
+      --ignore=lora/test_qwen3moe_tp.py
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests # 15min
@@ -783,8 +789,10 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
@@ -1208,6 +1216,7 @@ steps:
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
+    - pytest -v -s -x lora/test_olmoe_tp.py
 
 - label: Weight Loading Multiple GPU Test  # 33min
   timeout_in_minutes: 45
