@@ -989,6 +989,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         else:
             self.audio_tower = None
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
+
         if multimodal_config.get_limit_per_prompt(
             "image"
         ) or multimodal_config.get_limit_per_prompt("video"):
@@ -997,6 +1003,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
+                attn_backend_override=attn_backend_override,
             )
         else:
             self.visual = None
