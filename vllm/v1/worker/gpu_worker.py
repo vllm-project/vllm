@@ -327,7 +327,6 @@ class Worker(WorkerBase):
         )
         gc.collect()
 
-        # Workspaces are now allocated dynamically, no need to pre-reserve memory
         return int(self.available_kv_cache_memory_bytes)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

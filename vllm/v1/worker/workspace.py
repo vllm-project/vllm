@@ -105,10 +105,6 @@ class WorkspaceManager:
         # increase the workspace size, so that reserve must be called before `get`.
         # This will encourage the use of reserve which is mostly just useful for
         # grepping/auditing the codebase.
-
-        # Note: We don't assert !locked here because reserve can be called
-        # during forward passes. The actual locking logic is in _increase_size.
-        # Call get() to perform the actual allocation
         self.get(spec)
 
     def reserve_simultaneous(self, *specs: "WorkspaceSpec") -> None:
@@ -124,10 +120,6 @@ class WorkspaceManager:
         # increase the workspace size, so that reserve must be called before `get`.
         # This will encourage the use of reserve which is mostly just useful for
         # grepping/auditing the codebase.
-
-        # Note: We don't assert !locked here because reserve can be called
-        # during forward passes. The actual locking logic is in _increase_size.
-        # Call get_simultaneous() to perform the actual allocation
         self.get_simultaneous(*specs)
 
     def get(self, spec: "WorkspaceSpec") -> torch.Tensor:
