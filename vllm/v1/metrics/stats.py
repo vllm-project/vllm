@@ -151,6 +151,16 @@ class MultiModalCacheStats(BaseCacheStats):
 
 
 @dataclass
+class BlockResidencyEvent:
+    """Single KV cache block eviction sample."""
+
+    lifetime_seconds: float
+    idle_seconds: float
+    reuse_gaps_seconds: tuple[float, ...]
+    prefix_residency_seconds: float | None = None
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -171,6 +181,8 @@ class SchedulerStats:
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
+
+    block_residency_events: list[BlockResidencyEvent] = field(default_factory=list)
 
 
 @dataclass

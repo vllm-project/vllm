@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import Any, Literal, cast
 
 from packaging.version import parse
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm import version
@@ -46,6 +46,13 @@ class ObservabilityConfig:
 
     Note that collecting detailed timing information for each request can be
     expensive."""
+
+    kv_cache_metrics: bool = False
+    """Enable KV cache residency metrics (lifetime, idle time, reuse gaps).
+    Uses sampling to minimize overhead."""
+
+    kv_cache_metrics_sample: float = Field(default=0.01, ge=0, le=1)
+    """Sampling rate for KV cache metrics [0.0, 1.0]. Default 0.01 = 1% of blocks."""
 
     @cached_property
     def collect_model_forward_time(self) -> bool:
