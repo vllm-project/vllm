@@ -135,3 +135,40 @@ def test_preprocessor_always_mm_code_path(model_id, prompt):
 
     processed_inputs = input_preprocessor.preprocess(prompt)
     assert sep_token_id in processed_inputs["prompt_token_ids"]
+
+
+def _get_bos_prefixed_prompt_or_skip(tokenizer):
+    bos_token = getattr(tokenizer, "bos_token", None)
+    if not bos_token or not isinstance(bos_token, str):
+        pytest.skip("Tokenizer has no string bos_token to test BOS handling.")
+    return f"{bos_token} Hello world"
+
+
+@pytest.mark.parametrize(
+    "explicit_add_special",
+    [True, None],
+)
+def test_double_bos_token(monkeypatch, explicit_add_special):
+    model_config = ModelConfig(model="facebook/opt-125m")
+    input_preprocessor = InputPreprocessor(model_config)
+
+    tokenizer = input_preprocessor.get_tokenizer()
+    prompt = _get_bos_prefixed_prompt_or_skip(tokenizer)
+
+    captured: dict[str, object] = {}
+
+    def fake_encode(text, **kwargs):
+        captured["kwargs"] = dict(kwargs)
+        # dummy
+        return [101, 102, 103]
+
+    monkeypatch.setattr(tokenizer, "encode", fake_encode, raising=True)
+
+    if explicit_add_special is True:
+        _ = input_preprocessor._tokenize_prompt(
+            prompt, tokenization_kwargs={"add_special_tokens": True}
+        )
+        assert captured["kwargs"].get("add_special_tokens") is True
+    else:
+        _ = input_preprocessor._tokenize_prompt(prompt)
+        assert captured["kwargs"].get("add_special_tokens") is False
