@@ -66,7 +66,7 @@ class CpuPlatform(Platform):
         elif sys.platform.startswith(
                 "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
             # Check for bf16 support on Apple Silicon
-            if self.bf16_support_mac():
+            if self._bf16_support_mac():
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.

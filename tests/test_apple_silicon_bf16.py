@@ -38,7 +38,7 @@ class TestAppleSiliconBF16(unittest.TestCase):
         if not self.is_apple_silicon:
             self.skipTest("Test only runs on Apple Silicon")
 
-        has_support = CpuPlatform.bf16_support_mac()
+        has_support = CpuPlatform._bf16_support_mac()
         print(f"BF16 support detected: {has_support}")
 
         # Test PyTorch MPS backend
@@ -68,7 +68,7 @@ class TestAppleSiliconBF16(unittest.TestCase):
         self.assertIn(torch.float32, dtypes)
 
         # Check bf16 support
-        has_bf16 = CpuPlatform.bf16_support_mac()
+        has_bf16 = CpuPlatform._bf16_support_mac()
         if has_bf16:
             self.assertIn(torch.bfloat16, dtypes)
         else:
