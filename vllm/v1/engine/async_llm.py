@@ -36,6 +36,7 @@ from vllm.utils.func_utils import deprecate_kwargs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.llm_engine import _V1_ONLY_ERROR_MSG
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
@@ -89,12 +90,7 @@ class AsyncLLM(EngineClient):
             None
         """
         if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github."
-            )
+            raise ValueError(_V1_ONLY_ERROR_MSG)
 
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
@@ -208,12 +204,7 @@ class AsyncLLM(EngineClient):
         disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github."
-            )
+            raise ValueError(_V1_ONLY_ERROR_MSG)
 
         # Create the LLMEngine.
         return cls(

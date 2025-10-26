@@ -13,9 +13,6 @@ import typing
 # other modules are imported.
 import vllm.env_override  # noqa: F401
 
-# Ensure SamplingParams is always importable from top-level, even if VLLM_USE_V1=0.
-from vllm.sampling_params import SamplingParams  # noqa: F401
-
 MODULE_ATTRS = {
     "bc_linter_skip": "._bc_linter:bc_linter_skip",
     "bc_linter_include": "._bc_linter:bc_linter_include",

@@ -112,17 +112,15 @@ from vllm.utils import Device, FlexibleArgumentParser, set_ulimit
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.llm_engine import _V1_ONLY_ERROR_MSG
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
-from vllm import envs
 
 def _ensure_v1_or_exit():
     if not envs.VLLM_USE_V1:
-        raise SystemExit(
-            "V0 engine was removed in vLLM >= 0.11; only the V1 engine is available.\n"
-            "Detected VLLM_USE_V1=0. To proceed, unset VLLM_USE_V1 or set VLLM_USE_V1=1."
-        )
+        raise SystemExit(_V1_ONLY_ERROR_MSG)
+
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 

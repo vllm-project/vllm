@@ -1,6 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 import os
+
 import pytest
+
 
 def _reload_llm_engine_with_env(val: str | None):
     # envs.VLLM_USE_V1 is computed at import time; reload after setting env
@@ -11,9 +15,11 @@ def _reload_llm_engine_with_env(val: str | None):
 
     import vllm.envs as envs
     import vllm.v1.engine.llm_engine as le
+
     importlib.reload(envs)
     importlib.reload(le)
     return le
+
 
 def test_v1_env_zero_raises_clear_message():
     le = _reload_llm_engine_with_env("0")
@@ -22,6 +28,7 @@ def test_v1_env_zero_raises_clear_message():
     msg = str(excinfo.value)
     assert "V0 engine was removed" in msg
     assert "unset VLLM_USE_V1 or set VLLM_USE_V1=1" in msg
+
 
 def test_v1_env_unset_and_one_ok():
     le = _reload_llm_engine_with_env(None)

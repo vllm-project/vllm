@@ -38,18 +38,21 @@ from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.worker.worker_base import WorkerBase
 
+_V1_ONLY_ERROR_MSG = (
+    "V0 engine was removed in vLLM >= 0.11; only the V1 engine is available.\n"
+    "Detected VLLM_USE_V1=0 in your environment. To proceed, unset VLLM_USE_V1 "
+    "or set VLLM_USE_V1=1."
+)
+
+
 def _ensure_v1_env_or_raise() -> None:
     if not envs.VLLM_USE_V1:
-        raise ValueError(
-            "V0 engine was removed in vLLM >= 0.11; only the V1 engine is available.\n"
-            "Detected VLLM_USE_V1=0 in your environment. To proceed, unset VLLM_USE_V1 "
-            "or set VLLM_USE_V1=1.\n"
-        )
+        raise ValueError(_V1_ONLY_ERROR_MSG)
+
 
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
-
 
 
 class LLMEngine:
