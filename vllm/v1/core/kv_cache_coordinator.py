@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -27,13 +28,17 @@ class KVCacheCoordinator(ABC):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(
-            kv_cache_config.num_blocks, enable_caching, enable_kv_cache_events
+            kv_cache_config.num_blocks,
+            enable_caching,
+            enable_kv_cache_events,
+            metrics_collector=metrics_collector,
         )
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
@@ -210,6 +215,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         use_eagle: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -218,6 +224,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             False,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            metrics_collector=metrics_collector,
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
@@ -250,6 +257,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -258,6 +266,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            metrics_collector=metrics_collector,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
@@ -302,6 +311,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -310,6 +320,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            metrics_collector=metrics_collector,
         )
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
@@ -452,6 +463,7 @@ def get_kv_cache_coordinator(
     enable_caching: bool,
     enable_kv_cache_events: bool,
     dcp_world_size: int,
+    metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -460,6 +472,7 @@ def get_kv_cache_coordinator(
             use_eagle,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            metrics_collector=metrics_collector,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
@@ -469,6 +482,7 @@ def get_kv_cache_coordinator(
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
         kv_cache_config,
@@ -477,4 +491,5 @@ def get_kv_cache_coordinator(
         enable_caching,
         enable_kv_cache_events,
         dcp_world_size=dcp_world_size,
+        metrics_collector=metrics_collector,
     )
