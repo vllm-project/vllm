@@ -8,7 +8,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
 import torch
 from fastapi import Request
@@ -815,7 +815,11 @@ class OpenAIServing:
         if not hasattr(request, "messages"):
             return message_types
 
-        for message in request.messages:
+        messages = cast(Sequence[Any], getattr(request, "messages", None))
+        if messages is None or isinstance(messages, (str, bytes)):
+            return message_types
+
+        for message in messages:
             if (
                 isinstance(message, dict)
                 and "content" in message

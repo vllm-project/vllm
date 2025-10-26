@@ -1939,10 +1939,17 @@ class ScoreResponse(OpenAIBaseModel):
 class ClassificationRequest(OpenAIBaseModel):
     model: str | None = None
     input: list[str] | str | None = None
+    messages: list[ChatCompletionMessageParam] | None = None
     truncate_prompt_tokens: int | None = None
     user: str | None = None
 
     # --8<-- [start:classification-extra-params]
+    add_generation_prompt: bool = False
+    add_special_tokens: bool = False
+    chat_template: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+
     priority: int = Field(
         default=0,
         description=(
