@@ -43,28 +43,6 @@ _GiB = 1024**3
 _manager: Optional["WorkspaceManager"] = None
 
 
-def is_workspace_manager_initialized() -> bool:
-    """Check if workspace manager has been initialized.
-
-    Returns:
-        True if workspace manager is initialized, False otherwise.
-    """
-    return _manager is not None
-
-
-def current_workspace_manager() -> "WorkspaceManager":
-    """Get the current workspace manager instance.
-
-    Raises:
-        AssertionError: If workspace manager has not been initialized.
-    """
-    assert _manager is not None, (
-        "WorkspaceManager not initialized. Call init_workspace_manager() "
-        "with a device before using workspace functions."
-    )
-    return _manager
-
-
 class WorkspaceManager:
     """Manager for workspace allocation.
 
@@ -123,7 +101,7 @@ class WorkspaceManager:
         Args:
             spec: The workspace specification.
         """
-        # TODO(Lucas): Assert that only reserves (ds/reserve_simultaneous) can
+        # TODO(Lucas): Assert that only reserves (reserve/reserve_simultaneous) can
         # increase the workspace size, so that reserve must be called before `get`.
         # This will encourage the use of reserve which is mostly just useful for
         # grepping/auditing the codebase.
@@ -132,16 +110,6 @@ class WorkspaceManager:
         # during forward passes. The actual locking logic is in _increase_size.
         # Call get() to perform the actual allocation
         self.get(spec)
-
-    def ds(self, spec: "WorkspaceSpec") -> None:
-        """Alias for reserve() for backwards compatibility.
-
-        Reserve workspace memory for a given spec.
-
-        Args:
-            spec: The workspace specification.
-        """
-        self.reserve(spec)
 
     def reserve_simultaneous(self, *specs: "WorkspaceSpec") -> None:
         """Reserve workspace memory for multiple specs simultaneously.
@@ -234,9 +202,6 @@ class WorkspaceManager:
             required_bytes: The number of bytes required.
             name: Name for debugging/logging.
         """
-        # Manager owns a single device; no cross-device assertions needed
-
-        # Check if we need to grow the workspace
         current_size = self._workspace_size_bytes(self._current_workspaces[0])
         if self._locked and current_size < required_bytes:
             raise AssertionError(
@@ -245,8 +210,6 @@ class WorkspaceManager:
                 f"{current_size / _MB:.2f} MB. "
                 "Workspace growth is not allowed after locking."
             )
-
-        was_unallocated = self._current_workspaces[0] is None
 
         for ubatch_id in range(self._num_ubatches):
             current_workspace = self._current_workspaces[ubatch_id]
@@ -261,25 +224,37 @@ class WorkspaceManager:
 
         if envs.VLLM_DEBUG_WORKSPACE:
             total_mb = required_bytes * self._num_ubatches / _MB
-            if was_unallocated:
-                logger.info(
-                    "[WORKSPACE DEBUG] Allocated workspace '%s': %.2f MB "
-                    "(%d ubatches, total memory %.2f MB)",
-                    name,
-                    required_bytes / _MB,
-                    self._num_ubatches,
-                    total_mb,
-                )
-            else:
-                logger.info(
-                    "[WORKSPACE DEBUG] Resized workspace '%s': %.2f MB -> %.2f "
-                    "MB (%d ubatches, total memory %.2f MB)",
-                    name,
-                    current_size / _MB,
-                    required_bytes / _MB,
-                    self._num_ubatches,
-                    total_mb,
-                )
+            logger.info(
+                "[WORKSPACE DEBUG] Resized workspace '%s': %.2f MB -> %.2f "
+                "MB (%d ubatches, total memory %.2f MB)",
+                name,
+                current_size / _MB,
+                required_bytes / _MB,
+                self._num_ubatches,
+                total_mb,
+            )
+
+
+def is_workspace_manager_initialized() -> bool:
+    """Check if workspace manager has been initialized.
+
+    Returns:
+        True if workspace manager is initialized, False otherwise.
+    """
+    return _manager is not None
+
+
+def current_workspace_manager() -> "WorkspaceManager":
+    """Get the current workspace manager instance.
+
+    Raises:
+        AssertionError: If workspace manager has not been initialized.
+    """
+    assert _manager is not None, (
+        "WorkspaceManager not initialized. Call init_workspace_manager() "
+        "with a device before using workspace functions."
+    )
+    return _manager
 
 
 def init_workspace_manager(device: torch.device, vllm_config: VllmConfig) -> None:

@@ -1126,8 +1126,6 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache(
       const int rope_idx = tid - 512;
       dst_ptr[512 + rope_idx] = rope_ptr[rope_idx];
     }
-    // Threads 576+ are idle
-    // No sync needed - each iteration processes independent tokens
 
     // Move to next token
     offset += 1;
@@ -1320,7 +1318,7 @@ void cp_gather_and_upconvert_fp8_kv_cache(
   // Decide on the number of splits based on the batch size
   int num_splits = batch_size > 128 ? 2 : batch_size > 64 ? 4 : 16;
   dim3 grid(batch_size, num_splits);
-  dim3 block(1024);
+  dim3 block(576);
 
   vllm::cp_gather_and_upconvert_fp8_kv_cache<<<grid, block, 0, stream>>>(
       src_cache.data_ptr<uint8_t>(),

@@ -52,174 +52,6 @@ structured as:
 """
 
 
-@triton.jit
-def _convert_req_index_to_global_index_kernel(
-    req_id_ptr,  # int32 [num_tokens]
-    block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
-    workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
-    # shapes (compile-time where possible)
-    max_num_blocks_per_req: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_N: tl.constexpr,  # tile width along columns
-    HAS_PREFILL: tl.constexpr,
-    # strides (in elements)
-    bt_stride0,
-    bt_stride1,
-    ti_stride0,
-    ti_stride1,
-    out_stride0,
-    out_stride1,
-):
-    # program_id(0) -> token_id (row)
-    # program_id(1) -> tile index along columns
-    token_id = tl.program_id(0)
-    tile_id = tl.program_id(1)
-
-    # Each program covers BLOCK_N consecutive columns
-    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    # Load request id for this token (no mask: grid is exact)
-    req = tl.load(req_id_ptr + token_id)
-
-    # Load prefill request id if prefill support is enabled
-    if HAS_PREFILL:
-        prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
-        is_prefill = prefill_req_id >= 0
-
-    # Load token indices for this tile
-    ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-    tok = tl.load(ti_ptr)  # int32
-
-    # Only token == -1 should propagate as -1
-    is_invalid_tok = tok < 0
-
-    # Prefill path: map to workspace offset
-    if HAS_PREFILL:
-        workspace_start = tl.load(
-            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
-        )
-        prefill_out = workspace_start + tok
-
-    # Compute block id and in-block offset
-    block_id = tok // BLOCK_SIZE
-    inblock_off = tok % BLOCK_SIZE
-
-    # Guard block_table access
-    valid_block = block_id < max_num_blocks_per_req
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    base = tl.load(bt_ptr, mask=valid_block, other=0)
-
-    # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
-    if HAS_PREFILL:
-        decode_out = tl.where(valid_block, base * BLOCK_SIZE + inblock_off, -1)
-        out_val = tl.where(
-            is_invalid_tok, -1, tl.where(is_prefill, prefill_out, decode_out)
-        )
-    else:
-        out_val = tl.where(
-            is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
-        )
-
-    # Store results
-    out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val)
-
-
-def triton_convert_req_index_to_global_index(
-    req_id: torch.Tensor,  # int32 [num_tokens]
-    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    BLOCK_SIZE: int = 64,
-    NUM_TOPK_TOKENS: int = 2048,
-    BLOCK_N: int = 128,  # tile width along columns
-    prefill_request_id: torch.Tensor | None = None,
-    workspace_starts: torch.Tensor | None = None,
-):
-    """
-    out[token_id, indice_id] =
-        block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
-        + token_indices[token_id, indice_id] % BLOCK_SIZE
-
-    Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be
-        out-of-bounds.
-
-    When prefill_request_id and workspace_starts are provided, prefill tokens
-    are mapped to workspace offsets instead of global cache slots.
-    """
-    assert req_id.dtype == torch.int32
-    assert block_table.dtype == torch.int32
-    assert token_indices.dtype == torch.int32
-    assert token_indices.shape[1] == NUM_TOPK_TOKENS
-    assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
-        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
-    )
-
-    has_prefill = prefill_request_id is not None and workspace_starts is not None
-    if has_prefill:
-        assert prefill_request_id is not None
-        assert workspace_starts is not None
-        assert prefill_request_id.dtype == torch.int32
-        assert workspace_starts.dtype == torch.int32
-
-    num_tokens = req_id.shape[0]
-    num_requests, max_num_blocks_per_req = block_table.shape
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
-
-    # Ensure contiguous tensors on the same device
-    req_id_c = req_id.contiguous()
-    block_table_c = block_table.contiguous()
-    token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
-
-    # Strides in elements
-    bt_stride0, bt_stride1 = block_table_c.stride()
-    ti_stride0, ti_stride1 = token_indices_c.stride()
-    out_stride0, out_stride1 = out.stride()
-
-    # Prepare prefill pointers
-    if has_prefill:
-        assert prefill_request_id is not None  # for mypy
-        assert workspace_starts is not None  # for mypy
-        prefill_request_id_c = prefill_request_id.contiguous()
-        workspace_starts_c = workspace_starts.contiguous()
-        prefill_request_id_ptr = prefill_request_id_c
-        workspace_starts_ptr = workspace_starts_c
-    else:
-        # Dummy pointers (won't be accessed when HAS_PREFILL=False)
-        prefill_request_id_ptr = req_id_c
-        workspace_starts_ptr = req_id_c
-
-    # Exact 2D grid: tokens × column tiles
-    grid = (num_tokens, tiles_per_row)
-
-    _convert_req_index_to_global_index_kernel[grid](
-        req_id_c,
-        block_table_c,
-        token_indices_c,
-        out,
-        prefill_request_id_ptr,
-        workspace_starts_ptr,
-        # shapes / constexprs
-        max_num_blocks_per_req,
-        BLOCK_SIZE,
-        BLOCK_N,
-        has_prefill,
-        # strides
-        bt_stride0,
-        bt_stride1,
-        ti_stride0,
-        ti_stride1,
-        out_stride0,
-        out_stride1,
-    )
-    return out
-
-
 def split_prefill_chunks(
     seq_lens_cpu: torch.Tensor, workspace_size: int
 ) -> list[tuple[int, int]]:
@@ -257,49 +89,6 @@ def get_prefill_workspace_size(vllm_config: VllmConfig):
     #            5 * 163840 * 576 * 2 = ~900 MB
     # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
     return max_model_len * 5
-
-
-class FlashMLASparseBackend(AttentionBackend):
-    accept_output_buffer: bool = True
-
-    @staticmethod
-    def get_name() -> str:
-        return "FLASHMLA_SPARSE"
-
-    @staticmethod
-    def get_metadata_cls() -> type[AttentionMetadata]:
-        return FlashMLASparseMetadata
-
-    @staticmethod
-    def get_builder_cls() -> type["FlashMLASparseMetadataBuilder"]:
-        return FlashMLASparseMetadataBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type["FlashMLASparseImpl"]:
-        return FlashMLASparseImpl
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # custom storage fromat is 656 bytes
-            #  see FlashMLA readme.md for details
-            return (num_blocks, block_size, 656)
-        else:
-            return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
 
 
 @dataclass
@@ -347,7 +136,7 @@ class FlashMLASparseMetadata:
         block_table: torch.Tensor
         req_start_idx: int
         workspace_starts: torch.Tensor
-        chunk_size: int
+        chunk_tot_seqlen: int
 
     prefill_chunks: list[ChunkMetadata] | None = None
 
@@ -490,8 +279,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             for req_idx in range(num_prefill_reqs):
                 # Get query token range for this prefill request
                 global_req_idx = num_decode_reqs + req_idx
-                req_query_start = common_attn_metadata.query_start_loc[global_req_idx]
-                req_query_end = common_attn_metadata.query_start_loc[global_req_idx + 1]
+                req_query_start = query_start_loc_cpu[global_req_idx]
+                req_query_end = query_start_loc_cpu[global_req_idx + 1]
                 prefill_request_id[req_query_start:req_query_end] = req_idx
 
             # will be adjusted by chunk loop
@@ -512,8 +301,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             chunk_bounds = split_prefill_chunks(
                 prefill_seq_lens_cpu, max_prefill_buffer_size
             )
-            prefill_chunks = []
 
+            prefill_chunks = []
             for chunk_start, chunk_end in chunk_bounds:
                 # Adjust workspace_starts in-place per chunk to be
                 # 0-indexed within each chunk
@@ -525,7 +314,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 prefill_workspace_starts_cpu[chunk_start:chunk_end] -= offset
 
                 chunk_seq_lens = prefill_seq_lens[chunk_start:chunk_end]
-                chunk_size = int(prefill_seq_lens_cpu[chunk_start:chunk_end].sum())
+                chunk_tot_seqlen = prefill_seq_lens_cpu[chunk_start:chunk_end].sum()
                 token_start = query_start_loc_cpu[num_decode_reqs + chunk_start].item()
                 token_end = query_start_loc_cpu[num_decode_reqs + chunk_end].item()
                 tokens_slice = slice(token_start, token_end)
@@ -543,7 +332,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                         block_table=chunk_block_table,
                         req_start_idx=chunk_start,
                         workspace_starts=chunk_workspace_starts,
-                        chunk_size=chunk_size,
+                        chunk_tot_seqlen=chunk_tot_seqlen,
                     )
                 )
 
@@ -604,6 +393,214 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             fp8_extra_metadata=fp8_extra_metadata,
         )
         return metadata
+
+
+@triton.jit
+def _convert_req_index_to_global_index_kernel(
+    req_id_ptr,  # int32 [num_tokens]
+    block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
+    token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
+    workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
+    # shapes (compile-time where possible)
+    max_num_blocks_per_req: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,  # tile width along columns
+    HAS_PREFILL: tl.constexpr,
+    # strides (in elements)
+    bt_stride0,
+    bt_stride1,
+    ti_stride0,
+    ti_stride1,
+    out_stride0,
+    out_stride1,
+):
+    # program_id(0) -> token_id (row)
+    # program_id(1) -> tile index along columns
+    token_id = tl.program_id(0)
+    tile_id = tl.program_id(1)
+
+    # Each program covers BLOCK_N consecutive columns
+    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    # Load request id for this token (no mask: grid is exact)
+    req = tl.load(req_id_ptr + token_id)
+
+    # Load prefill request id if prefill support is enabled
+    is_prefill = tl.full((BLOCK_N,), 0, dtype=tl.bool)
+    if HAS_PREFILL:
+        prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
+        is_prefill = prefill_req_id >= 0
+
+    # Load token indices for this tile
+    ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
+    tok = tl.load(ti_ptr)  # int32
+
+    # Only token == -1 should propagate as -1
+    is_invalid_tok = tok < 0
+
+    # Compute block id and in-block offset
+    block_id = tok // BLOCK_SIZE
+    inblock_off = tok % BLOCK_SIZE
+
+    # Guard block_table access
+    valid_block = block_id < max_num_blocks_per_req
+    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
+    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+
+    if HAS_PREFILL:
+        workspace_start = tl.load(
+            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
+        )
+        prefill_out = workspace_start + tok
+        decode_out = tl.where(valid_block, base * BLOCK_SIZE + inblock_off, -1)
+        out_val = tl.where(is_prefill, prefill_out, decode_out)
+        out_val = tl.where(is_invalid_tok, -1, out_val)
+    else:
+        # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
+        out_val = tl.where(
+            is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
+        )
+
+    # Store results
+    out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
+    tl.store(out_ptr_ij, out_val)
+
+
+def triton_convert_req_index_to_global_index(
+    req_id: torch.Tensor,  # int32 [num_tokens]
+    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
+    token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    BLOCK_SIZE: int = 64,
+    NUM_TOPK_TOKENS: int = 2048,
+    BLOCK_N: int = 128,  # tile width along columns
+    prefill_request_id: torch.Tensor | None = None,
+    workspace_starts: torch.Tensor | None = None,
+):
+    """
+    out[token_id, indice_id] =
+        block_table[req_id[token_id],
+            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
+        + token_indices[token_id, indice_id] % BLOCK_SIZE
+
+    Only when token_indices[token_id, indice_id] == -1 do we output -1.
+    For safety, we also output -1 if the derived block_id would be
+        out-of-bounds.
+
+    When prefill_request_id and workspace_starts are provided, prefill tokens
+    are mapped to workspace offsets instead of global cache slots.
+    """
+    assert req_id.dtype == torch.int32
+    assert block_table.dtype == torch.int32
+    assert token_indices.dtype == torch.int32
+    assert token_indices.shape[1] == NUM_TOPK_TOKENS
+    assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
+        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
+    )
+
+    has_prefill = prefill_request_id is not None and workspace_starts is not None
+    if has_prefill:
+        assert prefill_request_id is not None
+        assert workspace_starts is not None
+        assert prefill_request_id.dtype == torch.int32
+        assert workspace_starts.dtype == torch.int32
+
+    num_tokens = req_id.shape[0]
+    num_requests, max_num_blocks_per_req = block_table.shape
+    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
+
+    # Ensure contiguous tensors on the same device
+    req_id_c = req_id.contiguous()
+    block_table_c = block_table.contiguous()
+    token_indices_c = token_indices.contiguous()
+    out = torch.empty_like(token_indices_c)
+
+    # Strides in elements
+    bt_stride0, bt_stride1 = block_table_c.stride()
+    ti_stride0, ti_stride1 = token_indices_c.stride()
+    out_stride0, out_stride1 = out.stride()
+
+    # Prepare prefill pointers
+    if has_prefill:
+        assert prefill_request_id is not None  # for mypy
+        assert workspace_starts is not None  # for mypy
+        prefill_request_id_c = prefill_request_id.contiguous()
+        workspace_starts_c = workspace_starts.contiguous()
+        prefill_request_id_ptr = prefill_request_id_c
+        workspace_starts_ptr = workspace_starts_c
+    else:
+        # Dummy pointers (won't be accessed when HAS_PREFILL=False)
+        prefill_request_id_ptr = req_id_c
+        workspace_starts_ptr = req_id_c
+
+    # Exact 2D grid: tokens × column tiles
+    grid = (num_tokens, tiles_per_row)
+
+    _convert_req_index_to_global_index_kernel[grid](
+        req_id_c,
+        block_table_c,
+        token_indices_c,
+        out,
+        prefill_request_id_ptr,
+        workspace_starts_ptr,
+        # shapes / constexprs
+        max_num_blocks_per_req,
+        BLOCK_SIZE,
+        BLOCK_N,
+        has_prefill,
+        # strides
+        bt_stride0,
+        bt_stride1,
+        ti_stride0,
+        ti_stride1,
+        out_stride0,
+        out_stride1,
+    )
+    return out
+
+
+class FlashMLASparseBackend(AttentionBackend):
+    accept_output_buffer: bool = True
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA_SPARSE"
+
+    @staticmethod
+    def get_metadata_cls() -> type[AttentionMetadata]:
+        return FlashMLASparseMetadata
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashMLASparseMetadataBuilder"]:
+        return FlashMLASparseMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type["FlashMLASparseImpl"]:
+        return FlashMLASparseImpl
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,  # assumed to be 1 for MLA
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        if cache_dtype_str == "fp8_ds_mla":
+            # custom storage fromat is 656 bytes
+            #  see FlashMLA readme.md for details
+            return (num_blocks, block_size, 656)
+        else:
+            return (num_blocks, block_size, head_size)
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [576]
 
 
 class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
@@ -667,7 +664,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
-        # NOTE(Lucas): kernel requires num_local_head to be a multiple of
+        # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell
         if self.num_heads % self.padding != 0:
             assert self.padding % self.num_heads == 0
@@ -773,13 +770,13 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 scale=layer._k_scale,
             )
 
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
         # prefill_workspace_starts has been adjusted in-place per chunk so
         # prefill indices automatically come out chunk-local
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-
         topk_indices_global = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
@@ -817,7 +814,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 )
 
                 for chunk in attn_metadata.prefill_chunks:
-                    chunk_workspace = prefill_bf16_workspace[: chunk.chunk_size]
+                    chunk_workspace = prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
                     ops.cp_gather_and_upconvert_fp8_kv_cache(
                         kv_cache,
                         chunk_workspace,
@@ -832,14 +829,12 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                         chunk.tokens_slice
                     ]
 
-                    chunk_attn_out = self._forward_bf16_kv(
+                    attn_out[chunk.tokens_slice] = self._forward_bf16_kv(
                         chunk_q,
                         chunk_workspace,
                         chunk_topk_indices_workspace,
                         attn_metadata,
                     )
-
-                    attn_out[chunk.tokens_slice] = chunk_attn_out
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output
