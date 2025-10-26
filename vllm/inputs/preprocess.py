@@ -221,6 +221,14 @@ class InputPreprocessor:
         tokenizer = self.get_tokenizer()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
+
+        bos_token_text = getattr(tokenizer, "bos_token", None)
+        if bos_token_text and isinstance(bos_token_text, str):
+            if prompt.lstrip().startswith(bos_token_text):
+                # override if not explicitly set by caller.
+                if "add_special_tokens" not in tokenization_kwargs:
+                    tokenization_kwargs["add_special_tokens"] = False
+
         encoder_config = self.model_config.encoder_config
 
         if encoder_config and encoder_config.get("do_lower_case", False):
