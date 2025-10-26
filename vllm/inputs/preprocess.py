@@ -221,7 +221,6 @@ class InputPreprocessor:
         tokenizer = self.get_tokenizer()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
-
         bos_token_text = getattr(tokenizer, "bos_token", None)
         if bos_token_text and isinstance(bos_token_text, str):
             if prompt.lstrip().startswith(bos_token_text):
