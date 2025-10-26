@@ -8,7 +8,7 @@ import torch
 
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def benchmark_rope_kernels_multi_lora(

@@ -32,7 +32,8 @@ from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingM
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.utils import random_uuid
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
