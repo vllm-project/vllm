@@ -78,7 +78,7 @@ class CpuPlatform(Platform):
     @classmethod
     def _bf16_support_mac(cls) -> bool:
         """Check if the Apple Silicon device supports bf16.
-        
+
         This checks both hardware capabilities and PyTorch support for bf16
         on Apple Silicon devices.
         """
@@ -91,6 +91,7 @@ class CpuPlatform(Platform):
         # Check if we're on Apple Silicon
         try:
             import platform
+
             if not platform.processor().startswith("arm"):
                 return False
         except Exception:
@@ -112,8 +113,10 @@ class CpuPlatform(Platform):
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif sys.platform.startswith(
-                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
+        elif (
+            sys.platform.startswith("darwin")
+            and self.get_cpu_architecture() == CpuArchEnum.ARM
+        ):
             # Check for bf16 support on Apple Silicon
             if self._bf16_support_mac():
                 return [torch.bfloat16, torch.float16, torch.float32]

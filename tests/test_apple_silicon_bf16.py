@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import platform
 import unittest
 from typing import ClassVar
@@ -42,8 +43,10 @@ class TestAppleSiliconBF16(unittest.TestCase):
         print(f"BF16 support detected: {has_support}")
 
         # Test PyTorch MPS backend
-        self.assertTrue(torch.backends.mps.is_available(),
-                        "MPS backend should be available on Apple Silicon")
+        self.assertTrue(
+            torch.backends.mps.is_available(),
+            "MPS backend should be available on Apple Silicon",
+        )
 
         # Test bf16 tensor creation if support is detected
         if has_support:
