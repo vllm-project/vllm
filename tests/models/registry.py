@@ -342,7 +342,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-M1-40k", trust_remote_code=True
     ),
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-M2", trust_remote_code=True
+        "MiniMaxAI/MiniMax-M2",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo(
