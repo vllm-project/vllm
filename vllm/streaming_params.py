@@ -27,7 +27,7 @@ class StreamingParams(
 ):  # type: ignore[call-arg]
     """Streaming parameters for token streaming during text generation.
 
-    Args:
+    Attributes:
         stream_n (int): Number of tokens to stream at a time. Must be an integer >= 1.
             Defaults to 1.
     """
