@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
+from packaging import version
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
-    BITBLAS_OPTIMIZE_FEATURES, BITBLAS_SUPPORTED_GROUP_SIZES,
-    MINIMUM_BITBLAS_VERSION, bitblas_make_empty_g_idx, bitblas_sort_g_idx,
-    check_bitblas_supports_shape, query_bitblas_supported_quant_types,
-    unpack_gptq_qweight, unpack_gptq_qzeros)
+    BITBLAS_OPTIMIZE_FEATURES,
+    BITBLAS_SUPPORTED_GROUP_SIZES,
+    MINIMUM_BITBLAS_VERSION,
+    bitblas_make_empty_g_idx,
+    bitblas_sort_g_idx,
+    check_bitblas_supports_shape,
+    query_bitblas_supported_quant_types,
+    unpack_gptq_qweight,
+    unpack_gptq_qzeros,
+)
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -20,7 +26,6 @@ logger = init_logger(__name__)
 
 
 class BitBLASLinearKernel(MPLinearKernel):
-
     OPT_FEATURES: list[int] = BITBLAS_OPTIMIZE_FEATURES
     ENABLE_TUNING: bool = True
     MATMUL_LAYOUT: str = "nt"
@@ -38,34 +43,34 @@ class BitBLASLinearKernel(MPLinearKernel):
         c: MPLinearLayerConfig,
         w_q_param_name: str,
         w_s_param_name: str,
-        w_zp_param_name: Optional[str] = None,
-        w_gidx_param_name: Optional[str] = None,
-        bitblas_quant_config: Optional[QuantizationConfig] = None,
+        w_zp_param_name: str | None = None,
+        w_gidx_param_name: str | None = None,
+        bitblas_quant_config: QuantizationConfig | None = None,
     ):
         self.quant_config = bitblas_quant_config
-        super().__init__(c, w_q_param_name, w_s_param_name, w_zp_param_name,
-                         w_gidx_param_name)
+        super().__init__(
+            c, w_q_param_name, w_s_param_name, w_zp_param_name, w_gidx_param_name
+        )
 
     def repack_bitblas_from_gptq(
         self,
         b_q_weight: torch.Tensor,
         scales: torch.Tensor,
-        qzeros: Optional[torch.Tensor] = None,
+        qzeros: torch.Tensor | None = None,
     ):
         from bitblas.quantization.utils import general_compress
+
         assert self.bitblas_matmul is not None, "bitblas_matmul is None"
 
         quant_config = self.quant_config
         # qweight in gptq old quant linear stored with
         # (outfeatures, infeatures), should be transposed.
-        qweight = b_q_weight.T.contiguous().view(
-            quant_config.torch_storage_dtype)  # type: ignore[union-attr]
-        intweight = unpack_gptq_qweight(
-            qweight,
-            quant_config.weight_bits).contiguous()  # type: ignore[union-attr]
+        qweight = b_q_weight.T.contiguous().view(quant_config.torch_storage_dtype)  # type: ignore[union-attr]
+        intweight = unpack_gptq_qweight(qweight, quant_config.weight_bits).contiguous()  # type: ignore[union-attr]
         if self.bitblas_matmul.weight_transform is not None:  # type: ignore[attr-defined]
             qweight = self.bitblas_matmul.weight_transform(  # type: ignore[attr-defined]
-                intweight.cpu()).cuda()
+                intweight.cpu()
+            ).cuda()
         # scales in gptq old quant linear stored with
         # (infeatures // group_size, outfeatures), should be transposed.
         scales = scales.T.contiguous()
@@ -76,7 +81,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         # qzeros should be de-quantized to int zeros.
         weight_bits = quant_config.weight_bits  # type: ignore[union-attr]
         intzeros = unpack_gptq_qzeros(qzeros, weight_bits).T.contiguous()
-        zeros: Optional[torch.Tensor] = None
+        zeros: torch.Tensor | None = None
         zeros_mode = self.bitblas_matmul.config.zeros_mode  # type: ignore[attr-defined]
         if zeros_mode == "original":
             zeros = intzeros.to(torch.float16).contiguous()
@@ -89,9 +94,14 @@ class BitBLASLinearKernel(MPLinearKernel):
                     general_compress(
                         intzeros.T.contiguous().cpu().numpy(),
                         weight_bits,
-                    )).to(qweight.device).
-                to(quant_config.torch_storage_dtype  # type: ignore[union-attr]
-                   ).contiguous())
+                    )
+                )
+                .to(qweight.device)
+                .to(
+                    quant_config.torch_storage_dtype  # type: ignore[union-attr]
+                )
+                .contiguous()
+            )
         else:
             raise ValueError("Unsupported zeros type: {}".format(zeros_mode))
 
@@ -102,40 +112,50 @@ class BitBLASLinearKernel(MPLinearKernel):
         return 70
 
     @classmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
-
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         is_bitblas_installed = True
 
         try:
             import bitblas
-            if bitblas.__version__ < MINIMUM_BITBLAS_VERSION:
+
+            if version.parse(bitblas.__version__) < version.parse(
+                MINIMUM_BITBLAS_VERSION
+            ):
                 raise ImportError(
                     "bitblas version is wrong. Please "
-                    f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
+                    f"install bitblas>={MINIMUM_BITBLAS_VERSION}"
+                )
         except ImportError:
             is_bitblas_installed = False
 
         if not is_bitblas_installed:
-            return False, "bitblas is not installed. Please install bitblas "\
-                          "by running `pip install bitblas>="\
-                           f"{MINIMUM_BITBLAS_VERSION}`"
+            return (
+                False,
+                "bitblas is not installed. Please install bitblas "
+                "by running `pip install bitblas>="
+                f"{MINIMUM_BITBLAS_VERSION}`",
+            )
 
         quant_types = query_bitblas_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
-            return False, (f"Quant type ({c.weight_type}) not supported by"
-                           f"  BitBLAS, supported types are: {quant_types}")
+            return False, (
+                f"Quant type ({c.weight_type}) not supported by"
+                f"  BitBLAS, supported types are: {quant_types}"
+            )
 
         if c.group_size not in BITBLAS_SUPPORTED_GROUP_SIZES:
-            return False, (f"Group size ({c.group_size}) not supported by "
-                           "BitBLAS, supported group sizes are: "
-                           f"{BITBLAS_SUPPORTED_GROUP_SIZES}")
+            return False, (
+                f"Group size ({c.group_size}) not supported by "
+                "BitBLAS, supported group sizes are: "
+                f"{BITBLAS_SUPPORTED_GROUP_SIZES}"
+            )
 
         return check_bitblas_supports_shape(
             c.partition_weight_shape[1],  # out_features
             c.partition_weight_shape[0],  # in_features
             c.full_weight_shape[0],  # in_features
-            c.group_size)
+            c.group_size,
+        )
 
     # note assumes that
     #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}
@@ -147,14 +167,15 @@ class BitBLASLinearKernel(MPLinearKernel):
 
         # Default names since bitblas requires empty parameters for these,
         # TODO: remove this requirement from bitblas (allow optional tensors)
-        if self.w_gidx_name is None:
-            self.w_gidx_name = "g_idx"
-        if self.w_zp_name is None:
-            self.w_zp_name = "qzeros"
+        if getattr(self, "w_gidx_name", None) is None:
+            self.w_gidx_name: str = "g_idx"
+        if getattr(self, "w_zp_name", None) is None:
+            self.w_zp_name: str = "qzeros"
 
         if c.has_g_idx:
             g_idx, g_idx_sort_indices = bitblas_sort_g_idx(
-                getattr(layer, self.w_gidx_name))
+                getattr(layer, self.w_gidx_name)
+            )
             self._transform_param(layer, self.w_gidx_name, lambda _: g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
         else:
@@ -167,13 +188,11 @@ class BitBLASLinearKernel(MPLinearKernel):
             setattr(layer, self.w_zp_name, bitblas_make_empty_g_idx(device))
 
         # Repack weights
-        bitblas_qweight, bitblas_scales, bitblas_qzeros = (
-            self.repack_bitblas_from_gptq(
-                layer.qweight,
-                layer.scales,
-                None if quant_config.is_sym else  # type: ignore[union-attr]
-                layer.qzeros,  # type: ignore[union-attr]
-            ))
+        bitblas_qweight, bitblas_scales, bitblas_qzeros = self.repack_bitblas_from_gptq(
+            layer.qweight,
+            layer.scales,
+            None if quant_config.is_sym else layer.qzeros,  # type: ignore[union-attr]
+        )
         replace_parameter(layer, self.w_q_name, bitblas_qweight)
         replace_parameter(layer, self.w_s_name, bitblas_scales)
         if bitblas_qzeros is not None:
@@ -210,6 +229,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         bits,
     ):
         from bitblas import MatmulConfig
+
         bitblas_dtype = self.BITBLAS_DTYPES[params_dtype]
         quant_config = self.quant_config
         with_scaling = False
@@ -246,30 +266,33 @@ class BitBLASLinearKernel(MPLinearKernel):
             zeros_mode=zeros_mode,
         )
         self.bitblas_matmul = self._get_or_create_bitblas_operator(
-            matmul_config, enable_tuning)
+            matmul_config, enable_tuning
+        )
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
         from bitblas import Matmul, auto_detect_nvidia_target
         from bitblas.cache import get_database_path, global_operator_cache
+
         BITBLAS_DATABASE_PATH = get_database_path()
         BITBLAS_TARGET = auto_detect_nvidia_target()
 
         if global_operator_cache.size() == 0:
-            global_operator_cache.load_from_database(BITBLAS_DATABASE_PATH,
-                                                     BITBLAS_TARGET)
+            global_operator_cache.load_from_database(
+                BITBLAS_DATABASE_PATH, BITBLAS_TARGET
+            )
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config,
-                                    target=BITBLAS_TARGET,
-                                    enable_tuning=False)
+            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET, enable_tuning=False)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
                 global_operator_cache.save_into_database(
-                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
+                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET
+                )
                 TUNING_MESSAGE = (
-                    f"BitBLAS Operator {config} tuned and saved to database.")
+                    f"BitBLAS Operator {config} tuned and saved to database."
+                )
                 logger.info(TUNING_MESSAGE)
             else:
                 _message = f"BitBLAS Operator {config} created without tuning. "
@@ -285,7 +308,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         x: torch.Tensor,
     ) -> torch.Tensor:
         output_size_per_partition = self.config.partition_weight_shape[1]
-        out_shape = x.shape[:-1] + (output_size_per_partition, )
+        out_shape = x.shape[:-1] + (output_size_per_partition,)
         args = [x, layer.qweight, layer.scales]
         if self.bitblas_matmul.config.with_zeros:  # type: ignore[attr-defined]
             args.append(layer.qzeros)
@@ -295,5 +318,6 @@ class BitBLASLinearKernel(MPLinearKernel):
     def apply_weights(self, layer, x, bias=None):
         NOT_IMPLEMENT_MESSAGE = (
             f"{self.__class__.__name__}.apply_weights is not implemented. "
-            "Please use BitBLASLinearKernel.apply_gptq_bitblas_linear instead")
+            "Please use BitBLASLinearKernel.apply_gptq_bitblas_linear instead"
+        )
         raise NotImplementedError(NOT_IMPLEMENT_MESSAGE)

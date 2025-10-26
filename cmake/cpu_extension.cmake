@@ -1,6 +1,7 @@
 include(FetchContent)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -12,9 +13,8 @@ endif()
 #
 # Define environment variables for special configurations
 #
-if(DEFINED ENV{VLLM_CPU_AVX512BF16})
-    set(ENABLE_AVX512BF16 ON)
-endif()
+set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
+set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -59,6 +59,22 @@ function (find_isa CPUINFO TARGET OUT)
     endif()
 endfunction()
 
+
+function(check_sysctl TARGET OUT)
+    execute_process(COMMAND sysctl -n "${TARGET}"
+                    RESULT_VARIABLE SYSCTL_RET
+                    OUTPUT_VARIABLE SYSCTL_INFO
+                    ERROR_QUIET
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(SYSCTL_RET EQUAL 0 AND
+      (SYSCTL_INFO STREQUAL "1" OR SYSCTL_INFO GREATER 0))
+        set(${OUT} ON PARENT_SCOPE)
+    else()
+        set(${OUT} OFF PARENT_SCOPE)
+    endif()
+endfunction()
+
+
 function (is_avx512_disabled OUT)
     set(DISABLE_AVX512 $ENV{VLLM_CPU_DISABLE_AVX512})
     if(DISABLE_AVX512 AND DISABLE_AVX512 STREQUAL "true")
@@ -71,6 +87,7 @@ endfunction()
 is_avx512_disabled(AVX512_DISABLED)
 
 if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    message(STATUS "Apple Silicon Detected")
     set(APPLE_SILICON_FOUND TRUE)
     
     # Check for bf16 support on Apple Silicon
@@ -94,13 +111,14 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
+    find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
+    find_isa(${CPUINFO} "v" RVV_FOUND) # Check for RISC-V RVV support
 endif()
-
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -114,24 +132,48 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
         if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
             CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
             list(APPEND CXX_COMPILE_FLAGS "-mavx512bf16")
+            set(ENABLE_AVX512BF16 ON)
         else()
+            set(ENABLE_AVX512BF16 OFF)
             message(WARNING "Disable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3")
         endif()
     else()
+        set(ENABLE_AVX512BF16 OFF)
         message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
+    endif()
+
+    find_isa(${CPUINFO} "avx512_vnni" AVX512VNNI_FOUND)
+    if (AVX512VNNI_FOUND OR ENABLE_AVX512VNNI)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
+            set(ENABLE_AVX512VNNI ON)
+        else()
+            set(ENABLE_AVX512VNNI OFF)
+            message(WARNING "Disable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AVX512VNNI OFF)
+        message(WARNING "Disable AVX512-VNNI ISA support, no avx512_vnni found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512VNNI=1.")
     endif()
     
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
     
-elseif (POWER9_FOUND OR POWER10_FOUND)
+elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
-    # Check for PowerPC VSX support
-    list(APPEND CXX_COMPILE_FLAGS
-        "-mvsx"
-        "-mcpu=native"
-        "-mtune=native")
+    if (POWER9_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power9"
+            "-mtune=power9")
+    elseif (POWER10_FOUND OR POWER11_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power10"
+            "-mtune=power10")
+    endif()
 
 elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 or later architecture detected")
@@ -144,9 +186,6 @@ elseif (ASIMD_FOUND)
         set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
-elseif(APPLE_SILICON_FOUND)
-    message(STATUS "Apple Silicon Detected")
-    set(ENABLE_NUMA OFF)
 elseif (S390_FOUND)
     message(STATUS "S390 detected")
     # Check for S390 VXE support
@@ -155,21 +194,75 @@ elseif (S390_FOUND)
         "-mzvector"
         "-march=native"
         "-mtune=native")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    if(RVV_FOUND)
+	    message(FAIL_ERROR "Can't support rvv now.")
+    else()
+        list(APPEND CXX_COMPILE_FLAGS "-march=rv64gc")
+    endif()
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA or ARMv8 support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA, ARMv8 or RISC-V support.")
 endif()
 
-#
-# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 platforms)
-#
-if (AVX512_FOUND AND NOT AVX512_DISABLED)
-    FetchContent_Declare(
-        oneDNN
-        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG  v3.7.1
-        GIT_PROGRESS TRUE
-        GIT_SHALLOW TRUE
-    )
+
+# Build oneDNN for GEMM kernels (only for x86-AVX512 /ARM platforms)
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+    # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
+    # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
+    if(ASIMD_FOUND)
+        if(DEFINED ENV{ACL_ROOT_DIR} AND IS_DIRECTORY "$ENV{ACL_ROOT_DIR}")
+            message(STATUS "Using ACL from specified source directory: $ENV{ACL_ROOT_DIR}")
+        else()
+            message(STATUS "Downloading Arm Compute Library (ACL) from GitHub")
+            FetchContent_Populate(arm_compute
+                SUBBUILD_DIR "${FETCHCONTENT_BASE_DIR}/arm_compute-subbuild"
+                SOURCE_DIR   "${FETCHCONTENT_BASE_DIR}/arm_compute-src"
+                GIT_REPOSITORY https://github.com/ARM-software/ComputeLibrary.git
+                GIT_TAG        v52.2.0
+                GIT_SHALLOW    TRUE
+                GIT_PROGRESS   TRUE
+            )
+            set(ENV{ACL_ROOT_DIR} "${arm_compute_SOURCE_DIR}")
+        endif()
+
+        # Build ACL with scons
+        include(ProcessorCount)
+        ProcessorCount(_NPROC)
+        execute_process(
+            COMMAND scons -j${_NPROC}
+                    Werror=0 debug=0 neon=1 examples=0 embed_kernels=0 os=linux
+                    arch=armv8.2-a build=native benchmark_examples=0 fixed_format_kernels=1
+                    multi_isa=1 openmp=1 cppthreads=0
+            WORKING_DIRECTORY "$ENV{ACL_ROOT_DIR}"
+            RESULT_VARIABLE _acl_rc
+        )
+        if(NOT _acl_rc EQUAL 0)
+            message(FATAL_ERROR "ACL SCons build failed (exit ${_acl_rc}).")
+        endif()
+
+        set(ONEDNN_AARCH64_USE_ACL "ON")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ENV{ACL_ROOT_DIR}/build/")
+        add_compile_definitions(VLLM_USE_ACL)
+    endif()
+
+    set(FETCHCONTENT_SOURCE_DIR_ONEDNN "$ENV{FETCHCONTENT_SOURCE_DIR_ONEDNN}" CACHE PATH "Path to a local oneDNN source directory.")
+
+    if(FETCHCONTENT_SOURCE_DIR_ONEDNN)
+        message(STATUS "Using oneDNN from specified source directory: ${FETCHCONTENT_SOURCE_DIR_ONEDNN}")
+        FetchContent_Declare(
+            oneDNN
+            SOURCE_DIR ${FETCHCONTENT_SOURCE_DIR_ONEDNN}
+        )
+    else()
+        message(STATUS "Downloading oneDNN from GitHub")
+        FetchContent_Declare(
+            oneDNN
+            GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+            GIT_TAG v3.9
+            GIT_PROGRESS TRUE
+            GIT_SHALLOW TRUE
+        )
+    endif()
 
     set(ONEDNN_LIBRARY_TYPE "STATIC")
     set(ONEDNN_BUILD_DOC "OFF")
@@ -182,38 +275,23 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(ONEDNN_ENABLE_ITT_TASKS "OFF")
     set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
     set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
+    set(ONEDNN_VERBOSE "OFF")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
     FetchContent_MakeAvailable(oneDNN)
-    
-    list(APPEND LIBS dnnl)
-elseif(POWER10_FOUND)
-    FetchContent_Declare(
-        oneDNN
-        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG v3.7.2
-        GIT_PROGRESS TRUE
-        GIT_SHALLOW TRUE
+    add_library(dnnl_ext OBJECT "csrc/cpu/dnnl_helper.cpp")
+    target_include_directories(
+        dnnl_ext
+        PUBLIC ${oneDNN_SOURCE_DIR}/include
+        PUBLIC ${oneDNN_BINARY_DIR}/include
+        PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
-
-    set(ONEDNN_LIBRARY_TYPE "STATIC")
-    set(ONEDNN_BUILD_DOC "OFF")
-    set(ONEDNN_BUILD_EXAMPLES "OFF")
-    set(ONEDNN_BUILD_TESTS "OFF")
-    set(ONEDNN_ENABLE_WORKLOAD "INFERENCE")
-    set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
-    set(ONEDNN_BUILD_GRAPH "OFF")
-    set(ONEDNN_ENABLE_JIT_PROFILING "OFF")
-    set(ONEDNN_ENABLE_ITT_TASKS "OFF")
-    set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
-    set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
-    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
-
-    set(DNNL_CPU_RUNTIME "OMP")
-
-    FetchContent_MakeAvailable(oneDNN)
-
-    list(APPEND LIBS dnnl)
+    target_link_libraries(dnnl_ext dnnl)
+    target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
+    list(APPEND LIBS dnnl_ext)
+    set(USE_ONEDNN ON)
+else()
+    set(USE_ONEDNN OFF)
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
@@ -236,18 +314,33 @@ set(VLLM_EXT_SRC
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
-    "csrc/cpu/torch_bindings.cpp")
+    "csrc/cpu/torch_bindings.cpp"
+    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp")
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
-        "csrc/cpu/quant.cpp"
         "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
-elseif(POWER10_FOUND)
+    if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
+        set(VLLM_EXT_SRC
+            "csrc/cpu/sgl-kernels/gemm.cpp"
+            "csrc/cpu/sgl-kernels/gemm_int8.cpp"
+            "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+            "csrc/cpu/sgl-kernels/moe.cpp"
+            "csrc/cpu/sgl-kernels/moe_int8.cpp"
+            "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+            ${VLLM_EXT_SRC})
+        add_compile_definitions(-DCPU_CAPABILITY_AVX512)
+    endif()
+endif()
+
+if(USE_ONEDNN)
     set(VLLM_EXT_SRC
-        "csrc/cpu/quant.cpp"
+        "csrc/cpu/dnnl_kernels.cpp"
         ${VLLM_EXT_SRC})
 endif()
+
+message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
 
 #
 # Define extension targets

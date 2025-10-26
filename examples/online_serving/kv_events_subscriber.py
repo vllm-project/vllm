@@ -1,38 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, Optional, Union
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
 
 import msgspec
 import zmq
 from msgspec.msgpack import Decoder
 
+from vllm.v1.core.kv_cache_utils import ExternalBlockHash
+
 
 #
 # Types copied from vllm.distributed.kv_events
 #
-class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True,
-                 gc=False):
+class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
     ts: float
     events: list[Any]
 
 
-class KVCacheEvent(msgspec.Struct,
-                   array_like=True,
-                   omit_defaults=True,
-                   gc=False,
-                   tag=True):
+class KVCacheEvent(
+    msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True
+):
     """Base class for all KV cache-related events"""
 
 
 class BlockStored(KVCacheEvent):
-    block_hashes: list[int]
-    parent_block_hash: Optional[int]
+    block_hashes: list[ExternalBlockHash]
+    parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
-    lora_id: Optional[int]
+    lora_id: int | None
+    medium: str | None
 
 
 class BlockRemoved(KVCacheEvent):
-    block_hashes: list[int]
+    block_hashes: list[ExternalBlockHash]
+    medium: str | None
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -40,7 +42,7 @@ class AllBlocksCleared(KVCacheEvent):
 
 
 class KVEventBatch(EventBatch):
-    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
 
 
 def process_event(event_batch):
@@ -77,8 +79,9 @@ def main():
 
                 if last_seq >= 0 and seq > last_seq + 1:
                     missed = seq - last_seq - 1
-                    print(f"Missed {missed} messages"
-                          f" (last: {last_seq}, current: {seq})")
+                    print(
+                        f"Missed {missed} messages (last: {last_seq}, current: {seq})"
+                    )
 
                     replay.send((last_seq + 1).to_bytes(8, "big"))
 

@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import typing
 
 from vllm.collect_env import main as collect_env_main
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.utils import FlexibleArgumentParser
+
+if typing.TYPE_CHECKING:
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 class CollectEnvSubcommand(CLISubcommand):
-    """The `collect-env` subcommand for the vLLM CLI. """
+    """The `collect-env` subcommand for the vLLM CLI."""
 
-    def __init__(self):
-        self.name = "collect-env"
-        super().__init__()
+    name = "collect-env"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -20,14 +24,14 @@ class CollectEnvSubcommand(CLISubcommand):
         collect_env_main()
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
-        collect_env_parser = subparsers.add_parser(
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
+        return subparsers.add_parser(
             "collect-env",
             help="Start collecting environment information.",
             description="Start collecting environment information.",
-            usage="vllm collect-env")
-        return collect_env_parser
+            usage="vllm collect-env",
+        )
 
 
 def cmd_init() -> list[CLISubcommand]:

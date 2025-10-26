@@ -1,25 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 
 from vllm.model_executor.layers.utils import apply_penalties
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-
-
-def apply_min_token_penalties(
-        logits: torch.Tensor, output_token_ids: list[list[int]],
-        min_tokens: dict[int, tuple[int, set[int]]]) -> None:
-    """
-    Applies minimum token penalty by setting the logits of the stop tokens
-    to -inf.
-    """
-    min_tokens_logits_to_penalize: list[tuple[int, int]] = []
-    for index, (min_token, stop_token_ids) in min_tokens.items():
-        if len(output_token_ids[index]) < min_token:
-            for stop_token_id in stop_token_ids:
-                min_tokens_logits_to_penalize.append((index, stop_token_id))
-    if min_tokens_logits_to_penalize:
-        logits[tuple(zip(*min_tokens_logits_to_penalize))] = -float("inf")
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import make_tensor_with_pad
 
 
 def apply_all_penalties(
@@ -34,15 +20,20 @@ def apply_all_penalties(
     Applies presence, frequency and repetition penalties to the logits.
     """
     _, vocab_size = logits.shape
-    output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size,
-                                          logits.device)
-    return apply_penalties(logits, prompt_token_ids, output_tokens_t,
-                           presence_penalties, frequency_penalties,
-                           repetition_penalties)
+    output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size, logits.device)
+    return apply_penalties(
+        logits,
+        prompt_token_ids,
+        output_tokens_t,
+        presence_penalties,
+        frequency_penalties,
+        repetition_penalties,
+    )
 
 
-def _convert_to_tensors(output_token_ids: list[list[int]], vocab_size: int,
-                        device: torch.device) -> torch.Tensor:
+def _convert_to_tensors(
+    output_token_ids: list[list[int]], vocab_size: int, device: torch.device
+) -> torch.Tensor:
     """
     Convert the different list data structures to tensors.
     """

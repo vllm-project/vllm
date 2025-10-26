@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 import pickle
-import re
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import regex as re
 import seaborn as sns
 from torch.utils.benchmark import Measurement as TMeasurement
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from typing import Optional, Union
 
 import torch
 from flashinfer.norm import fused_add_rmsnorm, rmsnorm
@@ -20,8 +20,8 @@ class HuggingFaceRMSNorm(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         if residual is not None:
@@ -40,7 +40,7 @@ class HuggingFaceRMSNorm(nn.Module):
 def rmsnorm_naive(
     x: torch.Tensor,
     weight: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
+    residual: torch.Tensor | None = None,
     eps: float = 1e-6,
 ):
     naive_norm = HuggingFaceRMSNorm(x.shape[-1], eps=eps)
@@ -64,7 +64,7 @@ def rmsnorm_naive(
 def rmsnorm_flashinfer(
     x: torch.Tensor,
     weight: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
+    residual: torch.Tensor | None = None,
     eps: float = 1e-6,
 ):
     orig_shape = x.shape
@@ -88,7 +88,7 @@ def rmsnorm_flashinfer(
 def rmsnorm_vllm(
     x: torch.Tensor,
     weight: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
+    residual: torch.Tensor | None = None,
     eps: float = 1e-6,
 ):
     orig_shape = x.shape

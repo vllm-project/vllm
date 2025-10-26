@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from __future__ import annotations
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
 from abc import ABC, abstractmethod
@@ -12,6 +11,9 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
     from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    VllmConfig = object
+    AnyTokenizer = object
 
 
 class StructuredOutputOptions(enum.Enum):
@@ -68,7 +70,7 @@ class StructuredOutputGrammar(ABC):
         """
 
     @abstractmethod
-    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+    def fill_bitmask(self, bitmask: "torch.Tensor", batch_index: int) -> None:
         """
         Fills the bitmask for a specific batch index.
 
@@ -102,14 +104,15 @@ class StructuredOutputBackend(ABC):
     vocab_size: int
 
     @abstractmethod
-    def compile_grammar(self, request_type: StructuredOutputOptions,
-                        grammar_spec: str) -> StructuredOutputGrammar:
+    def compile_grammar(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> StructuredOutputGrammar:
         """
         Compiles a grammar specification into a structured output grammar.
 
         Args:
             request_type (StructuredOutputOptions): The type of structured
-              output request.
+                output request.
             grammar_spec (str): The grammar specification to compile.
 
         Returns:
@@ -117,13 +120,13 @@ class StructuredOutputBackend(ABC):
         """
 
     @abstractmethod
-    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
+    def allocate_token_bitmask(self, max_num_seqs: int) -> "torch.Tensor":
         """
         Allocates a token bitmask for the specified maximum number of sequences.
 
         Args:
             max_num_seqs (int): The maximum number of sequences for which
-              to allocate the bitmask.
+                to allocate the bitmask.
         """
 
     @abstractmethod

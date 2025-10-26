@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import pytest
 
 from vllm.config import PoolerConfig
@@ -10,33 +12,48 @@ from ...utils import check_embeddings_close
 @pytest.mark.parametrize(
     "model",
     [
+        # Be careful of the order of models, decoder-only models should be
+        # placed before encoder-only models, otherwise `Qwen2.5-0.5B-Instruct`
+        # case won't pass because gte-Qwen2-1.5B-instruct will cache custom
+        # model code with bidirectional attention.
+        # [Decoder-only]
+        pytest.param(
+            "BAAI/bge-multilingual-gemma2",
+            marks=[pytest.mark.core_model, pytest.mark.slow_test],
+        ),
+        pytest.param(
+            "intfloat/e5-mistral-7b-instruct",
+            # CPU v1 doesn't support sliding window
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "ssmits/Qwen2-7B-Instruct-embed-base", marks=[pytest.mark.cpu_model]
+        ),
         # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1.5",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param(
+            "BAAI/bge-base-en-v1.5",
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.slow_test,
+            ],
+        ),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
-        pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
-        # [Decoder-only]
-        pytest.param("BAAI/bge-multilingual-gemma2",
-                     marks=[pytest.mark.core_model]),
-        pytest.param("intfloat/e5-mistral-7b-instruct",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
-        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
         # [Cross-Encoder]
-        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
+        pytest.param(
+            "sentence-transformers/stsb-roberta-base-v2",
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
     ],
 )
-@pytest.mark.parametrize("dtype", ["half"])
 def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
     model,
-    dtype: str,
     monkeypatch,
 ) -> None:
-
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
         # switch to use ROCm CK FA backend
@@ -44,11 +61,16 @@ def test_models(
 
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
-        vllm_extra_kwargs["override_pooler_config"] = \
-            PoolerConfig(pooling_type="MEAN")
+        vllm_extra_kwargs["pooler_config"] = PoolerConfig(
+            pooling_type="MEAN", normalize=False
+        )
 
-    if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
+    max_model_len: int | None = 512
+    if model in [
+        "sentence-transformers/all-MiniLM-L12-v2",
+        "sentence-transformers/stsb-roberta-base-v2",
+    ]:
+        max_model_len = None
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
@@ -58,16 +80,13 @@ def test_models(
     # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    with hf_runner(model, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model,
-                     task="embed",
-                     dtype=dtype,
-                     max_model_len=None,
-                     **vllm_extra_kwargs) as vllm_model:
-        vllm_outputs = vllm_model.encode(example_prompts)
+    with vllm_runner(
+        model, runner="pooling", max_model_len=max_model_len, **vllm_extra_kwargs
+    ) as vllm_model:
+        vllm_outputs = vllm_model.embed(example_prompts)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,

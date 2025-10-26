@@ -1,7 +1,8 @@
+<!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-dark.png">
-    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-light.png" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
+    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-light.png" width=55%>
   </picture>
 </p>
 
@@ -14,16 +15,26 @@ Easy, fast, and cheap LLM serving for everyone
 </p>
 
 ---
+Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundation.org/pytorch-conference/) and [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco for our latest updates on vLLM and to meet the vLLM team! Register now for the largest vLLM community events of the year!
+
+---
 
 *Latest News* 🔥
-- [2025/05] We hosted [NYC vLLM Meetup](https://lu.ma/c1rqyf1f)! Please find the meetup slides [here](https://docs.google.com/presentation/d/1_q_aW_ioMJWUImf1s1YM-ZhjXz8cUeL0IJvaquOYBeA/edit?usp=sharing).
+
+- [2025/09] We hosted [vLLM Toronto Meetup](https://luma.com/e80e0ymm) focused on tackling inference at scale and speculative decoding with speakers from NVIDIA and Red Hat! Please find the meetup slides [here](https://docs.google.com/presentation/d/1IYJYmJcu9fLpID5N5RbW_vO0XLo0CGOR14IXOjB61V8/edit?usp=sharing).
+- [2025/08] We hosted [vLLM Shenzhen Meetup](https://mp.weixin.qq.com/s/k8ZBO1u2_2odgiKWH_GVTQ) focusing on the ecosystem around vLLM! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Ua2SVKVSu-wp5vou_6ElraDt2bnKhiEA).
+- [2025/08] We hosted [vLLM Singapore Meetup](https://www.sginnovate.com/event/vllm-sg-meet). We shared V1 updates, disaggregated serving and MLLM speedups with speakers from Embedded LLM, AMD, WekaIO, and A*STAR. Please find the meetup slides [here](https://drive.google.com/drive/folders/1ncf3GyqLdqFaB6IeB834E5TZJPLAOiXZ?usp=sharing).
+- [2025/08] We hosted [vLLM Shanghai Meetup](https://mp.weixin.qq.com/s/pDmAXHcN7Iqc8sUKgJgGtg) focusing on building, developing, and integrating with vLLM! Please find the meetup slides [here](https://drive.google.com/drive/folders/1OvLx39wnCGy_WKq8SiVKf7YcxxYI3WCH).
 - [2025/05] vLLM is now a hosted project under PyTorch Foundation! Please find the announcement [here](https://pytorch.org/blog/pytorch-foundation-welcomes-vllm/).
-- [2025/04] We hosted [Asia Developer Day](https://www.sginnovate.com/event/limited-availability-morning-evening-slots-remaining-inaugural-vllm-asia-developer-day)! Please find the meetup slides from the vLLM team [here](https://docs.google.com/presentation/d/19cp6Qu8u48ihB91A064XfaXruNYiBOUKrBxAmDOllOo/edit?usp=sharing).
 - [2025/01] We are excited to announce the alpha release of vLLM V1: A major architectural upgrade with 1.7x speedup! Clean code, optimized execution loop, zero-overhead prefix caching, enhanced multimodal support, and more. Please check out our blog post [here](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html).
 
 <details>
 <summary>Previous News</summary>
 
+- [2025/08] We hosted [vLLM Korea Meetup](https://luma.com/cgcgprmh) with Red Hat and Rebellions! We shared the latest advancements in vLLM along with project spotlights from the vLLM Korea community. Please find the meetup slides [here](https://drive.google.com/file/d/1bcrrAE1rxUgx0mjIeOWT6hNe2RefC5Hm/view).
+- [2025/08] We hosted [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/dgkWg1WFpWGO2jCdTqQHxA) focusing on large-scale LLM deployment! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF) and the recording [here](https://www.chaspark.com/#/live/1166916873711665152).
+- [2025/05] We hosted [NYC vLLM Meetup](https://lu.ma/c1rqyf1f)! Please find the meetup slides [here](https://docs.google.com/presentation/d/1_q_aW_ioMJWUImf1s1YM-ZhjXz8cUeL0IJvaquOYBeA/edit?usp=sharing).
+- [2025/04] We hosted [Asia Developer Day](https://www.sginnovate.com/event/limited-availability-morning-evening-slots-remaining-inaugural-vllm-asia-developer-day)! Please find the meetup slides from the vLLM team [here](https://docs.google.com/presentation/d/19cp6Qu8u48ihB91A064XfaXruNYiBOUKrBxAmDOllOo/edit?usp=sharing).
 - [2025/03] We hosted [vLLM x Ollama Inference Night](https://lu.ma/vllm-ollama)! Please find the meetup slides from the vLLM team [here](https://docs.google.com/presentation/d/16T2PDD1YwRnZ4Tu8Q5r6n53c5Lr5c73UV9Vd2_eBo4U/edit?usp=sharing).
 - [2025/03] We hosted [the first vLLM China Meetup](https://mp.weixin.qq.com/s/n77GibL2corAtQHtVEAzfg)! Please find the meetup slides from vLLM team [here](https://docs.google.com/presentation/d/1REHvfQMKGnvz6p3Fd23HhSO4c8j5WPGZV0bKYLwnHyQ/edit?usp=sharing).
 - [2025/03] We hosted [the East Coast vLLM Meetup](https://lu.ma/7mu4k4xx)! Please find the meetup slides [here](https://docs.google.com/presentation/d/1NHiv8EUFF1NLd3fEYODm56nDmL26lEeXCaDgyDlTsRs/edit#slide=id.g31441846c39_0_0).
@@ -46,6 +57,7 @@ Easy, fast, and cheap LLM serving for everyone
 </details>
 
 ---
+
 ## About
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
@@ -58,28 +70,27 @@ vLLM is fast with:
 - Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
 - Continuous batching of incoming requests
 - Fast model execution with CUDA/HIP graph
-- Quantizations: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), INT4, INT8, and FP8.
-- Optimized CUDA kernels, including integration with FlashAttention and FlashInfer.
+- Quantizations: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [AutoRound](https://arxiv.org/abs/2309.05516), INT4, INT8, and FP8
+- Optimized CUDA kernels, including integration with FlashAttention and FlashInfer
 - Speculative decoding
 - Chunked prefill
-
-**Performance benchmark**: We include a performance benchmark at the end of [our blog post](https://blog.vllm.ai/2024/09/05/perf-update.html). It compares the performance of vLLM against other LLM serving engines ([TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [SGLang](https://github.com/sgl-project/sglang) and [LMDeploy](https://github.com/InternLM/lmdeploy)). The implementation is under [nightly-benchmarks folder](.buildkite/nightly-benchmarks/) and you can [reproduce](https://github.com/vllm-project/vllm/issues/8176) this benchmark using our one-click runnable script.
 
 vLLM is flexible and easy to use with:
 
 - Seamless integration with popular Hugging Face models
 - High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor parallelism and pipeline parallelism support for distributed inference
+- Tensor, pipeline, data and expert parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Neuron.
+- Support for NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, and TPU. Additionally, support for diverse hardware plugins such as Intel Gaudi, IBM Spyre and Huawei Ascend.
 - Prefix caching support
 - Multi-LoRA support
 
 vLLM seamlessly supports most popular open-source models on HuggingFace, including:
+
 - Transformer-like LLMs (e.g., Llama)
 - Mixture-of-Expert LLMs (e.g., Mixtral, Deepseek-V2 and V3)
-- Embedding Models (e.g. E5-Mistral)
+- Embedding Models (e.g., E5-Mistral)
 - Multi-modal LLMs (e.g., LLaVA)
 
 Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
@@ -93,6 +104,7 @@ pip install vllm
 ```
 
 Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
+
 - [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
@@ -100,15 +112,16 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 ## Contributing
 
 We welcome and value any contributions and collaborations.
-Please check out [Contributing to vLLM](https://docs.vllm.ai/en/stable/contributing/overview.html) for how to get involved.
+Please check out [Contributing to vLLM](https://docs.vllm.ai/en/latest/contributing/index.html) for how to get involved.
 
 ## Sponsors
 
 vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
 
 <!-- Note: Please sort them in alphabetical order. -->
-<!-- Note: Please keep these consistent with docs/source/community/sponsors.md -->
+<!-- Note: Please keep these consistent with docs/community/sponsors.md -->
 Cash Donations:
+
 - a16z
 - Dropbox
 - Sequoia Capital
@@ -116,6 +129,8 @@ Cash Donations:
 - ZhenFund
 
 Compute Resources:
+
+- Alibaba Cloud
 - AMD
 - Anyscale
 - AWS
@@ -134,6 +149,7 @@ Compute Resources:
 - Trainy
 - UC Berkeley
 - UC San Diego
+- Volcengine
 
 Slack Sponsor: Anyscale
 
@@ -154,12 +170,14 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 
 ## Contact Us
 
-- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues) or [Discussions](https://github.com/vllm-project/vllm/discussions)
+<!-- --8<-- [start:contact-us] -->
+- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues)
 - For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
-- coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
+- For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
 - For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
 - For collaborations and partnerships, please contact us at [vllm-questions@lists.berkeley.edu](mailto:vllm-questions@lists.berkeley.edu)
+<!-- --8<-- [end:contact-us] -->
 
 ## Media Kit
 
-- If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit).
+- If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)

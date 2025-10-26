@@ -76,7 +76,7 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
     hipify${NAME}
-    COMMAND ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${SRCS}
     BYPRODUCTS ${HIP_SRCS}
     COMMENT "Running hipify on ${NAME} extension source files.")
@@ -122,6 +122,7 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "-DENABLE_FP8"
       "-U__HIP_NO_HALF_CONVERSIONS__"
       "-U__HIP_NO_HALF_OPERATORS__"
+      "-Werror=unused-variable"
       "-fno-gpu-rdc")
 
   endif()
@@ -264,8 +265,8 @@ macro(set_gencode_flags_for_srcs)
 endmacro()
 
 #
-# For the given `SRC_CUDA_ARCHS` list of gencode versions in the form 
-#  `<major>.<minor>[letter]` compute the "loose intersection" with the 
+# For the given `SRC_CUDA_ARCHS` list of gencode versions in the form
+#  `<major>.<minor>[letter]` compute the "loose intersection" with the
 #  `TGT_CUDA_ARCHS` list of gencodes. We also support the `+PTX` suffix in
 #  `SRC_CUDA_ARCHS` which indicates that the PTX code should be built when there
 #  is a CUDA_ARCH in `TGT_CUDA_ARCHS` that is equal to or larger than the
@@ -277,7 +278,7 @@ endmacro()
 #  in `SRC_CUDA_ARCHS` that is less or equal to the version in `TGT_CUDA_ARCHS`.
 # We have special handling for x.0a, if x.0a is in `SRC_CUDA_ARCHS` and x.0 is
 #  in `TGT_CUDA_ARCHS` then we should remove x.0a from `SRC_CUDA_ARCHS` and add
-#  x.0a to the result (and remove x.0 from TGT_CUDA_ARCHS). 
+#  x.0a to the result (and remove x.0 from TGT_CUDA_ARCHS).
 # The result is stored in `OUT_CUDA_ARCHS`.
 #
 # Example:
@@ -309,24 +310,19 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
+  # If x.0a or x.0f is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
+  # remove x.0a or x.0f from SRC_CUDA_ARCHS and add x.0a or x.0f to _CUDA_ARCHS
   set(_CUDA_ARCHS)
-  if ("9.0a" IN_LIST _SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM _SRC_CUDA_ARCHS "9.0a")
-    if ("9.0" IN_LIST TGT_CUDA_ARCHS)
-      list(REMOVE_ITEM _TGT_CUDA_ARCHS "9.0")
-      set(_CUDA_ARCHS "9.0a")
+  foreach(_arch ${_SRC_CUDA_ARCHS})
+    if(_arch MATCHES "[af]$")
+      list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      endif()
     endif()
-  endif()
-
-  if ("10.0a" IN_LIST _SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM _SRC_CUDA_ARCHS "10.0a")
-    if ("10.0" IN_LIST TGT_CUDA_ARCHS)
-      list(REMOVE_ITEM _TGT_CUDA_ARCHS "10.0")
-      set(_CUDA_ARCHS "10.0a")
-    endif()
-  endif()
+  endforeach()
 
   list(SORT _SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
@@ -358,7 +354,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   endforeach()
 
   list(REMOVE_DUPLICATES _CUDA_ARCHS)
-  
+
   # reapply +PTX suffix to architectures that requested PTX
   set(_FINAL_ARCHS)
   foreach(_arch ${_CUDA_ARCHS})
@@ -369,7 +365,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
     endif()
   endforeach()
   set(_CUDA_ARCHS ${_FINAL_ARCHS})
-  
+
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
 endfunction()
 
@@ -471,6 +467,12 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   if (GPU_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
     add_dependencies(${GPU_MOD_NAME} hipify${GPU_MOD_NAME})
+    # Make sure we include the hipified versions of the headers, and avoid conflicts with the ones in the original source folder
+    target_include_directories(${GPU_MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
+      ${GPU_INCLUDE_DIRECTORIES})
+  else()
+    target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
+      ${GPU_INCLUDE_DIRECTORIES})
   endif()
 
   if (GPU_ARCHITECTURES)
@@ -478,7 +480,6 @@ function (define_gpu_extension_target GPU_MOD_NAME)
       ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
   endif()
 
-  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
 
   target_compile_options(${GPU_MOD_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
@@ -486,8 +487,6 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_compile_definitions(${GPU_MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
 
-  target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
-    ${GPU_INCLUDE_DIRECTORIES})
 
   target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
 

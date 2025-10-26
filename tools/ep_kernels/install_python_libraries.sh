@@ -10,18 +10,12 @@ if [ ! -d "$WORKSPACE" ]; then
     mkdir -p $WORKSPACE
 fi
 
-# install dependencies if not installed
-pip3 install cmake torch ninja
+# configurable pip command (default: pip3)
+PIP_CMD=${PIP_CMD:-pip3}
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 
-# build gdrcopy, required by nvshmem
-pushd $WORKSPACE
-wget https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v2.4.4.tar.gz
-mkdir -p gdrcopy_src
-tar -xvf v2.4.4.tar.gz -C gdrcopy_src --strip-components=1
-pushd gdrcopy_src
-make -j$(nproc)
-make prefix=$WORKSPACE/gdrcopy_install install
-popd
+# install dependencies if not installed
+$PIP_CMD install cmake torch ninja
 
 # build nvshmem
 pushd $WORKSPACE
@@ -34,44 +28,99 @@ git init
 git apply -vvv nvshmem.patch
 
 # assume CUDA_HOME is set correctly
-export GDRCOPY_HOME=$WORKSPACE/gdrcopy_install
+if [ -z "$CUDA_HOME" ]; then
+    echo "CUDA_HOME is not set, please set it to your CUDA installation directory."
+    exit 1
+fi
+
+# assume TORCH_CUDA_ARCH_LIST is set correctly
+if [ -z "$TORCH_CUDA_ARCH_LIST" ]; then
+    echo "TORCH_CUDA_ARCH_LIST is not set, please set it to your desired architecture."
+    exit 1
+fi
+
+# disable all features except IBGDA
+export NVSHMEM_IBGDA_SUPPORT=1
+
 export NVSHMEM_SHMEM_SUPPORT=0
 export NVSHMEM_UCX_SUPPORT=0
 export NVSHMEM_USE_NCCL=0
-export NVSHMEM_IBGDA_SUPPORT=1
 export NVSHMEM_PMIX_SUPPORT=0
 export NVSHMEM_TIMEOUT_DEVICE_POLLING=0
-export NVSHMEM_USE_GDRCOPY=1
-export NVSHMEM_IBRC_SUPPORT=1
-
-# remove MPI dependency
+export NVSHMEM_USE_GDRCOPY=0
+export NVSHMEM_IBRC_SUPPORT=0
 export NVSHMEM_BUILD_TESTS=0
 export NVSHMEM_BUILD_EXAMPLES=0
 export NVSHMEM_MPI_SUPPORT=0
+export NVSHMEM_BUILD_HYDRA_LAUNCHER=0
+export NVSHMEM_BUILD_TXZ_PACKAGE=0
+export NVSHMEM_TIMEOUT_DEVICE_POLLING=0
 
-cmake -S . -B $WORKSPACE/nvshmem_build/ -DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install
-
-cd $WORKSPACE/nvshmem_build/
-make -j$(nproc)
-make install
+cmake -G Ninja -S . -B $WORKSPACE/nvshmem_build/ -DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install
+cmake --build $WORKSPACE/nvshmem_build/ --target install
 
 popd
 
 export CMAKE_PREFIX_PATH=$WORKSPACE/nvshmem_install:$CMAKE_PREFIX_PATH
 
+is_git_dirty() {
+    local dir=$1
+    pushd "$dir" > /dev/null
+
+    if [ -d ".git" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        popd > /dev/null
+        return 0  # dirty (true)
+    else
+        popd > /dev/null
+        return 1  # clean (false)
+    fi
+}
+
+# Function to handle git repository cloning with dirty/incomplete checks
+clone_repo() {
+    local repo_url=$1
+    local dir_name=$2
+    local key_file=$3
+    local commit_hash=$4
+
+    if [ -d "$dir_name" ]; then
+        # Check if directory has uncommitted changes (dirty)
+        if is_git_dirty "$dir_name"; then
+            echo "$dir_name directory is dirty, skipping clone"
+        # Check if clone failed (directory exists but not a valid git repo or missing key files)
+        elif [ ! -d "$dir_name/.git" ] || [ ! -f "$dir_name/$key_file" ]; then
+            echo "$dir_name directory exists but clone appears incomplete, cleaning up and re-cloning"
+            rm -rf "$dir_name"
+            git clone "$repo_url"
+            if [ -n "$commit_hash" ]; then
+                cd "$dir_name"
+                git checkout "$commit_hash"
+                cd ..
+            fi
+        else
+            echo "$dir_name directory exists and appears complete; manually update if needed"
+        fi
+    else
+        git clone "$repo_url"
+        if [ -n "$commit_hash" ]; then
+            cd "$dir_name"
+            git checkout "$commit_hash"
+            cd ..
+        fi
+    fi
+}
+
 # build and install pplx, require pytorch installed
 pushd $WORKSPACE
-git clone https://github.com/ppl-ai/pplx-kernels
+clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py" "c336faf"
 cd pplx-kernels
-# see https://github.com/pypa/pip/issues/9955#issuecomment-838065925
-# PIP_NO_BUILD_ISOLATION=0 disables build isolation
-PIP_NO_BUILD_ISOLATION=0 TORCH_CUDA_ARCH_LIST=9.0a+PTX pip install -vvv -e  .
+$PIP_CMD install --no-build-isolation -vvv -e .
 popd
 
 # build and install deepep, require pytorch installed
 pushd $WORKSPACE
-git clone https://github.com/deepseek-ai/DeepEP
+clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "73b6ea4"
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
-PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
+$PIP_CMD install --no-build-isolation -vvv -e .
 popd

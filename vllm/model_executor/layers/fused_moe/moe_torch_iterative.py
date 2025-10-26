@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +45,7 @@ def fused_moe(
     for expert_idx in range(num_experts):
         expert_w1 = w1[expert_idx]
         expert_w2 = w2[expert_idx]
-        expert_mask = (selected_experts == expert_idx)
+        expert_mask = selected_experts == expert_idx
         expert_weights = (topk_weights * expert_mask).sum(dim=-1, keepdim=True)
         x = F.linear(hidden_states, expert_w1)
         gate = F.silu(x[:, :intermediate_size])

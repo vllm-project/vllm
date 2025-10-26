@@ -15,18 +15,18 @@ NEW=/tmp/new_pr_body.txt
 gh pr view --json body --template "{{.body}}" "${PR_NUMBER}" > "${OLD}"
 cp "${OLD}" "${NEW}"
 
-# Remove "FIX #xxxx (*link existing issues this PR will resolve*)"
-sed -i '/FIX #xxxx.*$/d' "${NEW}"
+# Remove markdown comments (like the <!-- markdownlint-disable --> at the start)
+sed -i '/<!--.*-->$/d' "${NEW}"
 
-# Remove "FILL IN THE PR DESCRIPTION HERE"
-sed -i '/FILL IN THE PR DESCRIPTION HERE/d' "${NEW}"
+# Remove "PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS (AT THE BOTTOM) HAVE BEEN CONSIDERED."
+sed -i '/PLEASE FILL IN THE PR DESCRIPTION HERE.*$/d' "${NEW}"
 
 # Remove all lines after and including "**BEFORE SUBMITTING, PLEASE READ THE CHECKLIST BELOW AND FILL IN THE DESCRIPTION ABOVE**"
 sed -i '/\*\*BEFORE SUBMITTING, PLEASE READ.*\*\*/,$d' "${NEW}"
 
 # Remove HTML <details> section that includes <summary> text of "PR Checklist (Click to Expand)"
 python3 - <<EOF
-import re
+import regex as re
 
 with open("${NEW}", "r") as file:
     content = file.read()

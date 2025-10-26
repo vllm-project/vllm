@@ -1,186 +1,83 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-This is a demo script showing how to use the
-PrithviGeospatialMAE model with vLLM
-This script is based on: https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11/blob/main/inference.py # noqa
-
-Target model weights: https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11/resolve/main/Prithvi-EO-V2-300M-TL-Sen1Floods11.pt # noqa
-
-The requirements for running this script are:
-- Installing [terratorch, albumentations, rasterio] in your python environment
-- downloading the model weights in a 'model' folder local to the script
-  (temporary measure until the proper config.json file is uploaded to HF)
-- download an input example image (India_900498_S2Hand.tif) and place it in
-  the same folder with the script (or specify with the --data_file argument)
-
-Run the example:
-python prithvi_geospatial_mae.py
-
-""" # noqa: E501
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import datetime
 import os
-import re
-from typing import Union
 
 import albumentations
 import numpy as np
 import rasterio
+import regex as re
 import torch
 from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
 from vllm import LLM
 
+torch.set_default_dtype(torch.float16)
+
 NO_DATA = -9999
 NO_DATA_FLOAT = 0.0001
 OFFSET = 0
 PERCENTILE = 99
 
-model_config = """{
-  "architectures": ["PrithviGeoSpatialMAE"],
-  "num_classes": 0,
-  "pretrained_cfg": {
-    "task_args": {
-      "task": "SemanticSegmentationTask",
-      "model_factory": "EncoderDecoderFactory",
-      "loss": "ce",
-      "ignore_index": -1,
-      "lr": 0.001,
-      "freeze_backbone": false,
-      "freeze_decoder": false,
-      "plot_on_val": 10,
-      "optimizer": "AdamW",
-      "scheduler": "CosineAnnealingLR"
-    },
-    "model_args": {
-      "backbone_pretrained": false,
-      "backbone": "prithvi_eo_v2_300_tl",
-      "decoder": "UperNetDecoder",
-      "decoder_channels": 256,
-      "decoder_scale_modules": true,
-      "num_classes": 2,
-      "rescale": true,
-      "backbone_bands": [
-        "BLUE",
-        "GREEN",
-        "RED",
-        "NIR_NARROW",
-        "SWIR_1",
-        "SWIR_2"
-      ],
-      "head_dropout": 0.1,
-      "necks": [
-        {
-          "name": "SelectIndices",
-          "indices": [
-            5,
-            11,
-            17,
-            23
-          ]
-        },
-        {
-          "name": "ReshapeTokensToImage"
-        }
-      ]
-    },
-    "optimizer_params" : {
-      "lr": 5.0e-05,
-      "betas": [0.9, 0.999],
-      "eps": [1.0e-08],
-      "weight_decay": 0.05,
-      "amsgrad": false,
-      "maximize": false,
-      "capturable": false,
-      "differentiable": false
-    },
-    "scheduler_params" : {
-        "T_max": 50,
-        "eta_min": 0,
-        "last_epoch": -1,
-        "verbose": "deprecated"
-    }
-  },
-
-
-  "torch_dtype": "float32"
-}
-"""
-
-# Temporarily creating the "config.json" for the model.
-# This is going to disappear once the correct config.json is available on HF
-with open(os.path.join(os.path.dirname(__file__), "./model/config.json"),
-          'w') as config_file:
-    config_file.write(model_config)
-
 datamodule_config = {
-    'bands': ['BLUE', 'GREEN', 'RED', 'NIR_NARROW', 'SWIR_1', 'SWIR_2'],
-    'batch_size':
-    16,
-    'constant_scale':
-    0.0001,
-    'data_root':
-    '/dccstor/geofm-finetuning/datasets/sen1floods11',
-    'drop_last':
-    True,
-    'no_data_replace':
-    0.0,
-    'no_label_replace':
-    -1,
-    'num_workers':
-    8,
-    'test_transform': [
-        albumentations.Resize(always_apply=False,
-                              height=448,
-                              interpolation=1,
-                              p=1,
-                              width=448),
-        albumentations.pytorch.ToTensorV2(transpose_mask=False,
-                                          always_apply=True,
-                                          p=1.0)
+    "bands": ["BLUE", "GREEN", "RED", "NIR_NARROW", "SWIR_1", "SWIR_2"],
+    "batch_size": 16,
+    "constant_scale": 0.0001,
+    "data_root": "/dccstor/geofm-finetuning/datasets/sen1floods11",
+    "drop_last": True,
+    "no_data_replace": 0.0,
+    "no_label_replace": -1,
+    "num_workers": 8,
+    "test_transform": [
+        albumentations.Resize(
+            always_apply=False, height=448, interpolation=1, p=1, width=448
+        ),
+        albumentations.pytorch.ToTensorV2(
+            transpose_mask=False, always_apply=True, p=1.0
+        ),
     ],
 }
 
 
 class PrithviMAE:
-
-    def __init__(self):
-        print("Initializing PrithviMAE model")
-        self.model = LLM(model=os.path.join(os.path.dirname(__file__),
-                                            "./model"),
-                         skip_tokenizer_init=True,
-                         dtype="float32")
+    def __init__(self, model):
+        self.model = LLM(
+            model=model,
+            skip_tokenizer_init=True,
+            dtype="float16",
+            enforce_eager=True,
+            model_impl="terratorch",
+            enable_mm_embeds=True,
+        )
 
     def run(self, input_data, location_coords):
-        print("################ Running inference on vLLM ##############")
         # merge the inputs into one data structure
+        if input_data is not None and input_data.dtype == torch.float32:
+            input_data = input_data.to(torch.float16)
+            input_data = input_data[0]
+
         mm_data = {
-            "pixel_values":
-            torch.empty(0) if input_data is None else input_data,
-            "location_coords":
-            torch.empty(0) if location_coords is None else location_coords
+            "pixel_values": input_data,
+            "location_coords": location_coords,
         }
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
-
-        outputs = self.model.encode(prompt, use_tqdm=False)
-        print(
-            "################ Inference done (it took seconds)  ##############"
-        )
+        outputs = self.model.encode(prompt, pooling_task="plugin", use_tqdm=False)
 
         return outputs[0].outputs.data
 
 
 def generate_datamodule():
     datamodule = Sen1Floods11NonGeoDataModule(
-        data_root=datamodule_config['data_root'],
+        data_root=datamodule_config["data_root"],
         batch_size=datamodule_config["batch_size"],
         num_workers=datamodule_config["num_workers"],
         bands=datamodule_config["bands"],
         drop_last=datamodule_config["drop_last"],
-        test_transform=datamodule_config["test_transform"
-                                         ""])
+        test_transform=datamodule_config["test_transform"],
+    )
 
     return datamodule
 
@@ -189,11 +86,12 @@ def process_channel_group(orig_img, channels):
     """
     Args:
         orig_img: torch.Tensor representing original image (reference)
-                  with shape = (bands, H, W).
+        with shape = (bands, H, W).
         channels: list of indices representing RGB channels.
 
     Returns:
-        torch.Tensor with shape (num_channels, height, width) for original image
+        torch.Tensor with shape (num_channels, height, width)
+        for original image
     """
 
     orig_img = orig_img[channels, ...]
@@ -204,8 +102,7 @@ def process_channel_group(orig_img, channels):
     max_value = max(3000, np.percentile(orig_img[valid_mask], PERCENTILE))
     min_value = OFFSET
 
-    orig_img = torch.clamp((orig_img - min_value) / (max_value - min_value), 0,
-                           1)
+    orig_img = torch.clamp((orig_img - min_value) / (max_value - min_value), 0, 1)
 
     # No data as zeros
     orig_img[~valid_mask] = 0
@@ -263,16 +160,16 @@ def load_example(
     file_paths: list[str],
     mean: list[float] = None,
     std: list[float] = None,
-    indices: Union[list[int], None] = None,
+    indices: list[int] | None = None,
 ):
     """Build an input example by loading images in *file_paths*.
 
     Args:
         file_paths: list of file paths .
-        mean: list containing mean values for each band in the images
-              in *file_paths*.
-        std: list containing std values for each band in the images
-             in *file_paths*.
+        mean: list containing mean values for each band in the
+              images in *file_paths*.
+        std: list containing std values for each band in the
+             images in *file_paths*.
 
     Returns:
         np.array containing created example
@@ -300,97 +197,84 @@ def load_example(
             location_coords.append(coords)
 
         try:
-            match = re.search(r'(\d{7,8}T\d{6})', file)
+            match = re.search(r"(\d{7,8}T\d{6})", file)
             if match:
                 year = int(match.group(1)[:4])
-                julian_day = match.group(1).split('T')[0][4:]
+                julian_day = match.group(1).split("T")[0][4:]
                 if len(julian_day) == 3:
                     julian_day = int(julian_day)
                 else:
-                    julian_day = datetime.datetime.strptime(
-                        julian_day, '%m%d').timetuple().tm_yday
+                    julian_day = (
+                        datetime.datetime.strptime(julian_day, "%m%d")
+                        .timetuple()
+                        .tm_yday
+                    )
                 temporal_coords.append([year, julian_day])
         except Exception as e:
-            print(f'Could not extract timestamp for {file} ({e})')
+            print(f"Could not extract timestamp for {file} ({e})")
 
     imgs = np.stack(imgs, axis=0)  # num_frames, H, W, C
-    imgs = np.moveaxis(imgs, -1, 0).astype("float32")
+    imgs = np.moveaxis(imgs, -1, 0).astype("float32")  # C, num_frames, H, W
     imgs = np.expand_dims(imgs, axis=0)  # add batch di
 
     return imgs, temporal_coords, location_coords, metas
 
 
-def run_model(input_data,
-              temporal_coords,
-              location_coords,
-              model,
-              datamodule,
-              img_size,
-              lightning_model=None):
+def run_model(
+    input_data,
+    temporal_coords,
+    location_coords,
+    model,
+    datamodule,
+    img_size,
+    lightning_model=None,
+):
     # Reflect pad if not divisible by img_size
     original_h, original_w = input_data.shape[-2:]
     pad_h = (img_size - (original_h % img_size)) % img_size
     pad_w = (img_size - (original_w % img_size)) % img_size
-    input_data = np.pad(input_data,
-                        ((0, 0), (0, 0), (0, 0), (0, pad_h), (0, pad_w)),
-                        mode="reflect")
+    input_data = np.pad(
+        input_data, ((0, 0), (0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode="reflect"
+    )
 
     # Build sliding window
+
     batch_size = 1
-    batch = torch.tensor(input_data, device="cpu")
-    windows = (batch.unfold(3, img_size,
-                            img_size).unfold(4, img_size, img_size))
+    # batch = torch.tensor(input_data, device="cpu")
+    batch = torch.tensor(input_data)
+    windows = batch.unfold(3, img_size, img_size).unfold(4, img_size, img_size)
     h1, w1 = windows.shape[3:5]
-    windows = rearrange(windows,
-                        "b c t h1 w1 h w -> (b h1 w1) c t h w",
-                        h=img_size,
-                        w=img_size)
+    windows = rearrange(
+        windows, "b c t h1 w1 h w -> (b h1 w1) c t h w", h=img_size, w=img_size
+    )
 
     # Split into batches if number of windows > batch_size
-    num_batches = windows.shape[0] // batch_size if windows.shape[
-        0] > batch_size else 1
+    num_batches = windows.shape[0] // batch_size if windows.shape[0] > batch_size else 1
     windows = torch.tensor_split(windows, num_batches, dim=0)
 
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-
     if temporal_coords:
-        temporal_coords = torch.tensor(temporal_coords,
-                                       device=device).unsqueeze(0)
+        temporal_coords = torch.tensor(temporal_coords).unsqueeze(0)
     else:
         temporal_coords = None
     if location_coords:
-        location_coords = torch.tensor(location_coords[0],
-                                       device=device).unsqueeze(0)
+        location_coords = torch.tensor(location_coords[0]).unsqueeze(0)
     else:
         location_coords = None
 
-    # Run model
+    # Run Prithvi-EO-V2-300M-TL-Sen1Floods11
     pred_imgs = []
     for x in windows:
         # Apply standardization
-        x = datamodule.test_transform(
-            image=x.squeeze().numpy().transpose(1, 2, 0))
-        x = datamodule.aug(x)['image']
+        x = datamodule.test_transform(image=x.squeeze().numpy().transpose(1, 2, 0))
+        x = datamodule.aug(x)["image"]
 
         with torch.no_grad():
-            x = x.to(device)
             pred = model.run(x, location_coords=location_coords)
-            if lightning_model:
-                pred_lightning = lightning_model(
-                    x,
-                    temporal_coords=temporal_coords,
-                    location_coords=location_coords)
-                pred_lightning = pred_lightning.output.detach().cpu()
-                if not torch.equal(pred, pred_lightning):
-                    print("Inference output is not equal")
         y_hat = pred.argmax(dim=1)
 
-        y_hat = torch.nn.functional.interpolate(y_hat.unsqueeze(1).float(),
-                                                size=img_size,
-                                                mode="nearest")
+        y_hat = torch.nn.functional.interpolate(
+            y_hat.unsqueeze(1).float(), size=img_size, mode="nearest"
+        )
 
         pred_imgs.append(y_hat)
 
@@ -417,53 +301,18 @@ def run_model(input_data,
     return pred_imgs
 
 
-def parse_args():
-    parser = argparse.ArgumentParser("MAE run inference", add_help=False)
-
-    parser.add_argument(
-        "--data_file",
-        type=str,
-        default="./India_900498_S2Hand.tif",
-        help="Path to the file.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="output",
-        help="Path to the directory where to save outputs.",
-    )
-    parser.add_argument(
-        "--input_indices",
-        default=[1, 2, 3, 8, 11, 12],
-        type=int,
-        nargs="+",
-        help=
-        "0-based indices of the six Prithvi channels to be selected from the  "
-        "input. By default selects [1,2,3,8,11,12] for S2L1C data.",
-    )
-    parser.add_argument(
-        "--rgb_outputs",
-        action="store_true",
-        help="If present, output files will only contain RGB channels. "
-        "Otherwise, all bands will be saved.",
-    )
-
-
 def main(
     data_file: str,
+    model: str,
     output_dir: str,
     rgb_outputs: bool,
     input_indices: list[int] = None,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load model ---------------------------------------------------------------
-
-    model_obj = PrithviMAE()
+    model_obj = PrithviMAE(model=model)
     datamodule = generate_datamodule()
-    img_size = 256  # Size of Sen1Floods11
-
-    # Loading data -------------------------------------------------------------
+    img_size = 512  # Size of Sen1Floods11
 
     input_data, temporal_coords, location_coords, meta_data = load_example(
         file_paths=[data_file],
@@ -475,20 +324,18 @@ def main(
     if input_data.mean() > 1:
         input_data = input_data / 10000  # Convert to range 0-1
 
-    # Running model ------------------------------------------------------------
-
     channels = [
-        datamodule_config['bands'].index(b) for b in ["RED", "GREEN", "BLUE"]
+        datamodule_config["bands"].index(b) for b in ["RED", "GREEN", "BLUE"]
     ]  # BGR -> RGB
 
-    pred = run_model(input_data, temporal_coords, location_coords, model_obj,
-                     datamodule, img_size)
-
+    pred = run_model(
+        input_data, temporal_coords, location_coords, model_obj, datamodule, img_size
+    )
     # Save pred
     meta_data.update(count=1, dtype="uint8", compress="lzw", nodata=0)
     pred_file = os.path.join(
-        output_dir,
-        f"pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff")
+        output_dir, f"pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff"
+    )
     save_geotiff(_convert_np_uint8(pred), pred_file, meta_data)
 
     # Save image + pred
@@ -501,14 +348,15 @@ def main(
         orig_img=torch.Tensor(input_data[0, :, 0, ...]),
         channels=channels,
     )
+    rgb_orig = rgb_orig.to(torch.float32)
 
-    pred[pred == 0.] = np.nan
+    pred[pred == 0.0] = np.nan
     img_pred = rgb_orig * 0.7 + pred * 0.3
     img_pred[img_pred.isnan()] = rgb_orig[img_pred.isnan()]
 
     img_pred_file = os.path.join(
-        output_dir,
-        f"rgb_pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff")
+        output_dir, f"rgb_pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff"
+    )
     save_geotiff(
         image=_convert_np_uint8(img_pred),
         output_path=img_pred_file,
@@ -517,9 +365,11 @@ def main(
 
     # Save image rgb
     if rgb_outputs:
+        name_suffix = os.path.splitext(os.path.basename(data_file))[0]
         rgb_file = os.path.join(
-            output_dir, "original_rgb_"
-            f"{os.path.splitext(os.path.basename(data_file))[0]}.tiff")
+            output_dir,
+            f"original_rgb_{name_suffix}.tiff",
+        )
         save_geotiff(
             image=_convert_np_uint8(rgb_orig),
             output_path=rgb_file,
@@ -528,7 +378,42 @@ def main(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser("MAE run inference", add_help=False)
 
-    args = parse_args()
+    parser.add_argument(
+        "--data_file",
+        type=str,
+        default="./India_900498_S2Hand.tif",
+        help="Path to the file.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
+        help="Path to a checkpoint file to load from.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="output",
+        help="Path to the directory where to save outputs.",
+    )
+    parser.add_argument(
+        "--input_indices",
+        default=[1, 2, 3, 8, 11, 12],
+        type=int,
+        nargs="+",
+        help="""
+        0-based indices of the six Prithvi channels to be selected from the input.
+        By default selects [1,2,3,8,11,12] for S2L1C data.
+        """,
+    )
+    parser.add_argument(
+        "--rgb_outputs",
+        action="store_true",
+        help="If present, output files will only contain RGB channels. "
+        "Otherwise, all bands will be saved.",
+    )
+    args = parser.parse_args()
 
     main(**vars(args))

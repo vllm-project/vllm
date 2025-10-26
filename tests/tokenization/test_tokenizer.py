@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 from transformers import PreTrainedTokenizerBase
@@ -18,5 +19,5 @@ def test_tokenizer_revision(tokenizer_name: str):
     assert isinstance(tokenizer, PreTrainedTokenizerBase)
 
     # Assume that "never" branch always does not exist
-    with pytest.raises(OSError, match='not a valid git identifier'):
+    with pytest.raises(OSError, match="not a valid git identifier"):
         get_tokenizer(tokenizer_name, revision="never")

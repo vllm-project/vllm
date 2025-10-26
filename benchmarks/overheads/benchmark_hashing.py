@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import cProfile
 import pstats
 
 from vllm import LLM, SamplingParams
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # A very long prompt, total number of tokens is about 15k.
 LONG_PROMPT = ["You are an expert in large language models, aren't you?"] * 1000

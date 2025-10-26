@@ -1,51 +1,88 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-import warnings
-from collections.abc import Sequence
-from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 import torch.nn as nn
+from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
-from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
-                              BeamSearchSequence, get_beam_search_score)
-from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
-                         is_init_field)
-from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
-                                   TaskOption)
-from vllm.engine.llm_engine import LLMEngine
-from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         ChatTemplateContentFormatOption,
-                                         apply_hf_chat_template,
-                                         apply_mistral_chat_template,
-                                         parse_chat_messages,
-                                         resolve_chat_template_content_format)
-from vllm.entrypoints.score_utils import (_cosine_similarity,
-                                          _validate_score_input_lens)
-from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
-from vllm.inputs.parse import parse_and_batch_prompt
+from vllm.beam_search import (
+    BeamSearchInstance,
+    BeamSearchOutput,
+    BeamSearchSequence,
+    create_sort_beams_key_function,
+)
+from vllm.config import (
+    CompilationConfig,
+    PoolerConfig,
+    StructuredOutputsConfig,
+    is_init_field,
+)
+from vllm.config.model import (
+    ConvertOption,
+    HfOverrides,
+    ModelDType,
+    RunnerOption,
+    TokenizerMode,
+)
+from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    apply_hf_chat_template,
+    apply_mistral_chat_template,
+    parse_chat_messages,
+    resolve_chat_template_content_format,
+)
+from vllm.entrypoints.score_utils import (
+    ScoreContentPartParam,
+    ScoreMultiModalParam,
+    _cosine_similarity,
+    _validate_score_input_lens,
+    compress_token_type_ids,
+    get_score_prompt,
+)
+from vllm.entrypoints.utils import _validate_truncation_size, log_non_default_args
+from vllm.inputs import (
+    DataPrompt,
+    PromptType,
+    SingletonPrompt,
+    TextPrompt,
+    TokensPrompt,
+)
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding.guided_fields import (
-    GuidedDecodingRequest, LLMGuidedOptions)
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
-                          PoolingRequestOutput, RequestOutput,
-                          ScoringRequestOutput)
+from vllm.outputs import (
+    ClassificationRequestOutput,
+    EmbeddingRequestOutput,
+    PoolingRequestOutput,
+    RequestOutput,
+    ScoringRequestOutput,
+)
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
-from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
-                                               get_cached_tokenizer)
+from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
+from vllm.tasks import PoolingTask
+from vllm.transformers_utils.tokenizer import (
+    AnyTokenizer,
+    MistralTokenizer,
+    get_cached_tokenizer,
+)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
-                        is_list_of)
+from vllm.utils import Counter, Device
+from vllm.utils.collection_utils import as_iter, is_list_of
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.sample.logits_processor import LogitsProcessor
+
+if TYPE_CHECKING:
+    from vllm.v1.metrics.reader import Metric
 
 logger = init_logger(__name__)
 
@@ -75,13 +112,14 @@ class LLM:
             or videos from directories specified by the server file system.
             This is a security risk. Should only be enabled in trusted
             environments.
+        allowed_media_domains: If set, only media URLs that belong to this
+            domain can be used for multi-modal inputs.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
             we support `float32`, `float16`, and `bfloat16`. If `auto`, we use
-            the `torch_dtype` attribute specified in the model config file.
-            However, if the `torch_dtype` in the config is `float32`, we will
-            use `float16` instead.
+            the `dtype` attribute of the Transformers model's config. However,
+            if the `dtype` in the config is `float32`, we will use `float16` instead.
         quantization: The method used to quantize the model weights. Currently,
             we support "awq", "gptq", and "fp8" (experimental).
             If None, we first check the `quantization_config` attribute in the
@@ -98,6 +136,14 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
+        kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
+            this is set to None and vllm can automatically infer the kv cache
+            size based on gpu_memory_utilization. However, users may want to
+            manually specify the kv cache memory size. kv_cache_memory_bytes
+            allows more fine-grain control of how much memory gets used when
+            compared with using gpu_memory_utilization. Note that
+            kv_cache_memory_bytes (when not-None) ignores
+            gpu_memory_utilization
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
@@ -111,86 +157,69 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode. Additionally for encoder-decoder models, if the
-            sequence length of the encoder input is larger than this, we fall
-            back to the eager mode.
-        disable_custom_all_reduce: See {class}`~vllm.config.ParallelConfig`
-        disable_async_output_proc: Disable async output processing.
-            This may result in lower performance.
+        disable_custom_all_reduce: See
+            [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
             . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor. Overrides for the
+            multi-modal processor obtained from `AutoProcessor.from_pretrained`.
+            The available overrides depend on the model that is being run.
+            For example, for Phi-3-Vision: `{"num_crops": 4}`.
+        pooler_config: Initialize non-default pooling config for the pooling
+            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
+            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
+            whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
-            integer, it is used as the level of compilation optimization. If it
+            integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
-        **kwargs: Arguments for {class}`~vllm.EngineArgs`. (See
-            {ref}`engine-args`)
+        **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
-    :::{note}
-    This class is intended to be used for offline inference. For online
-    serving, use the {class}`~vllm.AsyncLLMEngine` class instead.
-    :::
+    Note:
+        This class is intended to be used for offline inference. For online
+        serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
     """
 
-    DEPRECATE_LEGACY: ClassVar[bool] = True
-    """A flag to toggle whether to deprecate the legacy generate/encode API."""
-
-    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
-    """
-    A flag to toggle whether to deprecate positional arguments in
-    {meth}`LLM.__init__`.
-    """
-
-    @classmethod
-    @contextmanager
-    def deprecate_legacy_api(cls):
-        cls.DEPRECATE_LEGACY = True
-
-        yield
-
-        cls.DEPRECATE_LEGACY = False
-
-    @deprecate_args(
-        start_index=2,  # Ignore self and model
-        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
-        additional_message=(
-            "All positional arguments other than `model` will be "
-            "replaced with keyword arguments in an upcoming version."),
-    )
     def __init__(
         self,
         model: str,
-        tokenizer: Optional[str] = None,
+        *,
+        runner: RunnerOption = "auto",
+        convert: ConvertOption = "auto",
+        tokenizer: str | None = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
+        allowed_media_domains: list[str] | None = None,
         tensor_parallel_size: int = 1,
         dtype: ModelDType = "auto",
-        quantization: Optional[QuantizationMethods] = None,
-        revision: Optional[str] = None,
-        tokenizer_revision: Optional[str] = None,
-        seed: Optional[int] = None,
+        quantization: QuantizationMethods | None = None,
+        revision: str | None = None,
+        tokenizer_revision: str | None = None,
+        seed: int | None = None,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
-        max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
-        disable_async_output_proc: bool = False,
-        hf_token: Optional[Union[bool, str]] = None,
-        hf_overrides: Optional[HfOverrides] = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        # After positional args are removed, move this right below `model`
-        task: TaskOption = "auto",
-        override_pooler_config: Optional[PoolerConfig] = None,
-        compilation_config: Optional[Union[int, dict[str, Any]]] = None,
-        **kwargs,
+        hf_token: bool | str | None = None,
+        hf_overrides: HfOverrides | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        pooler_config: PoolerConfig | None = None,
+        override_pooler_config: PoolerConfig | None = None,
+        structured_outputs_config: dict[str, Any]
+        | StructuredOutputsConfig
+        | None = None,
+        kv_cache_memory_bytes: int | None = None,
+        compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
+        logits_processors: list[str | type[LogitsProcessor]] | None = None,
+        **kwargs: Any,
     ) -> None:
         """LLM constructor."""
 
@@ -204,27 +233,79 @@ class LLM:
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        if "kv_transfer_config" in kwargs and isinstance(
+            kwargs["kv_transfer_config"], dict
+        ):
+            from vllm.config.kv_transfer import KVTransferConfig
+
+            raw_config_dict = kwargs["kv_transfer_config"]
+            try:
+                kwargs["kv_transfer_config"] = KVTransferConfig(**raw_config_dict)
+            except ValidationError as e:
+                logger.error(
+                    "Failed to convert 'kv_transfer_config' dict to "
+                    "KVTransferConfig object. Dict: %s. Error: %s",
+                    raw_config_dict,
+                    e,
+                )
+                # Consider re-raising a more specific vLLM error or ValueError
+                # to provide better context to the user.
+                raise ValueError(f"Invalid 'kv_transfer_config' provided: {e}") from e
+
+        if hf_overrides is None:
+            hf_overrides = {}
+
         if compilation_config is not None:
             if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    level=compilation_config)
+                compilation_config_instance = CompilationConfig(mode=compilation_config)
             elif isinstance(compilation_config, dict):
-                predicate = lambda x: is_init_field(CompilationConfig, x[0])
                 compilation_config_instance = CompilationConfig(
-                    **dict(filter(predicate, compilation_config.items())))
+                    **{
+                        k: v
+                        for k, v in compilation_config.items()
+                        if is_init_field(CompilationConfig, k)
+                    }
+                )
             else:
                 compilation_config_instance = compilation_config
         else:
-            compilation_config_instance = None
+            compilation_config_instance = CompilationConfig()
+
+        if structured_outputs_config is not None:
+            if isinstance(structured_outputs_config, dict):
+                structured_outputs_instance = StructuredOutputsConfig(
+                    **{
+                        k: v
+                        for k, v in structured_outputs_config.items()
+                        if is_init_field(StructuredOutputsConfig, k)
+                    }
+                )
+            else:
+                structured_outputs_instance = structured_outputs_config
+        else:
+            structured_outputs_instance = StructuredOutputsConfig()
+
+        # warn about single-process data parallel usage.
+        _dp_size = int(kwargs.get("data_parallel_size", 1))
+        _distributed_executor_backend = kwargs.get("distributed_executor_backend")
+        if _dp_size > 1 and not _distributed_executor_backend == "external_launcher":
+            raise ValueError(
+                f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
+                "process usage and may hang. Please use "
+                "the explicit multi-process data-parallel example at "
+                "'examples/offline_inference/data_parallel.py'."
+            )
 
         engine_args = EngineArgs(
             model=model,
-            task=task,
+            runner=runner,
+            convert=convert,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
             allowed_local_media_path=allowed_local_media_path,
+            allowed_media_domains=allowed_media_domains,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
@@ -232,169 +313,73 @@ class LLM:
             tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
+            kv_cache_memory_bytes=kv_cache_memory_bytes,
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
-            max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
-            disable_async_output_proc=disable_async_output_proc,
             hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooler_config=pooler_config,
             override_pooler_config=override_pooler_config,
+            structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
+            logits_processors=logits_processors,
             **kwargs,
         )
 
+        log_non_default_args(engine_args)
+
         # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
-            engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
+            engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
+        )
         self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
-        self.default_sampling_params: Union[dict[str, Any], None] = None
+        self.default_sampling_params: dict[str, Any] | None = None
 
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group().get_lora_tokenizer(
-            lora_request)
+        supported_tasks = self.llm_engine.get_supported_tasks()
+        logger.info("Supported tasks: %s", supported_tasks)
+        self.supported_tasks = supported_tasks
 
+        self.model_config = self.llm_engine.model_config
+        self.processor = self.llm_engine.processor
+        self.io_processor = self.llm_engine.io_processor
+
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer()
+
+    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        tokenizer_group = self.llm_engine.get_tokenizer_group()
-
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
         if tokenizer.__class__.__name__.startswith("Cached"):
-            tokenizer_group.tokenizer = tokenizer
+            self.llm_engine.tokenizer = tokenizer
         else:
-            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
+
+    def reset_mm_cache(self) -> None:
+        self.processor.clear_mm_cache()
+        self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
-            self.default_sampling_params = (
-                self.llm_engine.model_config.get_diff_sampling_param())
+            self.default_sampling_params = self.model_config.get_diff_sampling_param()
         if self.default_sampling_params:
             return SamplingParams.from_optional(**self.default_sampling_params)
         return SamplingParams()
 
-    @overload
     def generate(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
+        prompts: PromptType | Sequence[PromptType],
+        sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         *,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: str,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        prompt_token_ids: Optional[list[int]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: list[str],
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        prompt_token_ids: Optional[list[list[int]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: Optional[str] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        *,
-        prompt_token_ids: list[int],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: Optional[list[str]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        *,
-        prompt_token_ids: list[list[int]],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: None,
-        sampling_params: None,
-        prompt_token_ids: Union[list[int], list[list[int]]],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @deprecate_kwargs(
-        "prompt_token_ids",
-        is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-        additional_message="Please use the 'prompts' parameter instead.",
-    )
-    def generate(
-        self,
-        prompts: Union[Union[PromptType, Sequence[PromptType]],
-                       Optional[Union[str, list[str]]]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
-        prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-        priority: Optional[list[int]] = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -404,17 +389,18 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
-                for more details about the format of each prompts.
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
+                for more details about the format of each prompt.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
                 When it is a single value, it is applied to every prompt.
                 When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
 
@@ -422,68 +408,134 @@ class LLM:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
 
-        :::{note}
-        Using `prompts` and `prompt_token_ids` as keyword parameters is
-        considered legacy and may be deprecated in the future. You should
-        instead pass them via the `inputs` parameter.
-        :::
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
         """
-        runner_type = self.llm_engine.model_config.runner_type
-        if runner_type not in ["generate", "transcription"]:
-            messages = [
-                "LLM.generate() is only supported for (conditional) generation "
-                "models (XForCausalLM, XForConditionalGeneration).",
-            ]
-
-            supported_runner_types = self.llm_engine.model_config \
-                .supported_runner_types
-            if "generate" in supported_runner_types:
-                messages.append(
-                    "Your model supports the 'generate' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task generate`.")
-
-            raise ValueError(" ".join(messages))
-
-        if prompt_token_ids is not None:
-            parsed_prompts = self._convert_v1_inputs(
-                prompts=cast(Optional[Union[str, list[str]]], prompts),
-                prompt_token_ids=prompt_token_ids,
+        model_config = self.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "generate":
+            raise ValueError(
+                "LLM.generate() is only supported for generative models. "
+                "Try passing `--runner generate` to use the model as a "
+                "generative model."
             )
-        else:
-            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
-                                  prompts)
-
-        if isinstance(guided_options_request, dict):
-            if len(guided_options_request) > 1:
-                raise ValueError(
-                    "You can only use one guided decoding but multiple is "
-                    f"specified: {guided_options_request}")
-            guided_options_request = GuidedDecodingRequest(
-                **guided_options_request)
 
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
+        # Add any modality specific loras to the corresponding prompts
+        lora_request = self._get_modality_specific_lora_reqs(prompts, lora_request)
+
         self._validate_and_add_requests(
-            prompts=parsed_prompts,
+            prompts=prompts,
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
-            guided_options=guided_options_request,
             priority=priority,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
-    def collective_rpc(self,
-                       method: Union[str, Callable[..., _R]],
-                       timeout: Optional[float] = None,
-                       args: tuple = (),
-                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+    def _get_modality_specific_lora_reqs(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        lora_request: list[LoRARequest] | LoRARequest | None,
+    ):
+        # Grab the lora config off the vllm config on the engine,
+        # since this is the same for both v0 & v1.
+        lora_config = self.llm_engine.vllm_config.lora_config
+
+        # If there's no lora config / default_mm_loras, or the model
+        # isn't multimodal, leave the lora as is.
+        if (
+            lora_config is None
+            or not self.model_config.is_multimodal_model
+            or (lora_config and lora_config.default_mm_loras is None)
+        ):
+            return lora_request
+
+        if not isinstance(prompts, Sequence):
+            prompts = [prompts]
+
+        optional_loras = (
+            [lora_request] * len(prompts)
+            if not isinstance(lora_request, Sequence)
+            else lora_request
+        )
+
+        return [
+            self._resolve_single_prompt_mm_lora(
+                prompt,
+                opt_lora_req,
+                lora_config.default_mm_loras,
+            )
+            for prompt, opt_lora_req in zip(prompts, optional_loras)
+        ]
+
+    def _resolve_single_prompt_mm_lora(
+        self,
+        prompt: PromptType,
+        lora_request: LoRARequest | None,
+        default_mm_loras: dict[str, str] | None,
+    ):
+        if (
+            not default_mm_loras
+            or not isinstance(prompt, dict)
+            or not (mm_data := prompt.get("multi_modal_data") or {})
+        ):
+            return lora_request
+
+        intersection = set(
+            mm_data.keys()  # type: ignore
+        ).intersection(default_mm_loras.keys())
+        if not intersection:
+            return lora_request
+        if len(intersection) > 1:
+            # TODO: Would be nice to be able to have multiple loras per prompt
+            logger.warning(
+                "Multiple modality specific loras were registered and would be"
+                " used by a single prompt consuming several modalities; "
+                " currently we only support one lora per request; as such,"
+                " lora(s) registered with modalities: %s"
+                " will be skipped",
+                intersection,
+            )
+            return lora_request
+
+        # Build the LoRA request; the ID of the default mm lora is the
+        # index of the modality name sorted alphabetically + 1.
+        modality_name = intersection.pop()
+        modality_lora_path = default_mm_loras[modality_name]
+        modality_lora_id = sorted(default_mm_loras).index(modality_name) + 1
+
+        # If we have a collision, warn if there is a collision,
+        # but always send the explicitly provided request.
+        if lora_request:
+            if lora_request.lora_int_id != modality_lora_id:
+                logger.warning(
+                    "A modality with a registered lora and a lora_request "
+                    "with a different ID were provided; falling back to the "
+                    "lora_request as we only apply one LoRARequest per prompt"
+                )
+            return lora_request
+
+        return LoRARequest(
+            modality_name,
+            modality_lora_id,
+            modality_lora_path,
+        )
+
+    def collective_rpc(
+        self,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> list[_R]:
         """
         Execute an RPC call on all workers.
 
@@ -495,17 +547,16 @@ class LLM:
                 `self` argument, in addition to the arguments passed in `args`
                 and `kwargs`. The `self` argument will be the worker object.
             timeout: Maximum time in seconds to wait for execution. Raises a
-                {exc}`TimeoutError` on timeout. `None` means wait indefinitely.
+                [`TimeoutError`][] on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
 
         Returns:
             A list containing the results from each worker.
 
-        :::{note}
-        It is recommended to use this API to only pass control messages,
-        and set up data-plane communication to pass data.
-        :::
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
         """
 
         return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
@@ -514,14 +565,38 @@ class LLM:
         """
         Run a function directly on the model inside each worker,
         returning the result for each of them.
+
+        !!! warning
+            To reduce the overhead of data transfer, avoid returning large
+            arrays or tensors from this method. If you must return them,
+            make sure you move them to CPU first to avoid taking up additional
+            VRAM!
         """
-        executor = self.llm_engine.model_executor
-        return executor.apply_model(func)
+        return self.llm_engine.apply_model(func)
+
+    def _get_beam_search_lora_requests(
+        self,
+        lora_request: list[LoRARequest] | LoRARequest | None,
+        prompts: list[TokensPrompt | TextPrompt],
+    ) -> list[LoRARequest | None]:
+        """Get the optional lora request corresponding to each prompt."""
+        if isinstance(lora_request, Sequence) and len(lora_request) != len(prompts):
+            raise ValueError(
+                "Lora request list should be the same length as the prompts"
+            )
+
+        if lora_request is None or isinstance(lora_request, LoRARequest):
+            return [lora_request] * len(prompts)
+
+        raise TypeError(f"Invalid lora_request type {type(lora_request)}")
 
     def beam_search(
         self,
-        prompts: list[Union[TokensPrompt, TextPrompt]],
+        prompts: list[TokensPrompt | TextPrompt],
         params: BeamSearchParams,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        use_tqdm: bool = False,
+        concurrency_limit: int | None = None,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -530,6 +605,10 @@ class LLM:
             prompts: A list of prompts. Each prompt can be a string or a list
                 of token IDs.
             params: The beam search parameters.
+            lora_request: LoRA request to use for generation, if any.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            concurrency_limit: The maximum number of concurrent requests.
+                If None, the number of concurrent requests is unlimited.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -539,41 +618,48 @@ class LLM:
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
 
-        def sort_beams_key(x: BeamSearchSequence) -> float:
-            return get_beam_search_score(x.tokens, x.cum_logprob,
-                                         tokenizer.eos_token_id,
-                                         length_penalty)
+        lora_requests = self._get_beam_search_lora_requests(lora_request, prompts)
 
-        def create_tokens_prompt_from_beam(
-                beam: BeamSearchSequence) -> TokensPrompt:
-            token_prompt_kwargs: TokensPrompt = {
-                "prompt_token_ids": beam.tokens
-            }
+        tokenizer = self.get_tokenizer()
+        sort_beams_key = create_sort_beams_key_function(
+            tokenizer.eos_token_id,
+            length_penalty,
+        )
+
+        if use_tqdm and concurrency_limit is not None:
+            logger.warning(
+                "Progress bar is not supported when using concurrency_limit. "
+                "Disabling progress bar."
+            )
+            use_tqdm = False
+
+        if concurrency_limit is None:
+            concurrency_limit = len(prompts)
+
+        def create_tokens_prompt_from_beam(beam: BeamSearchSequence) -> TokensPrompt:
+            token_prompt_kwargs: TokensPrompt = {"prompt_token_ids": beam.tokens}
             if beam.multi_modal_data is not None:
                 token_prompt_kwargs["multi_modal_data"] = beam.multi_modal_data
 
             if beam.mm_processor_kwargs is not None:
-                token_prompt_kwargs[
-                    "mm_processor_kwargs"] = beam.mm_processor_kwargs
+                token_prompt_kwargs["mm_processor_kwargs"] = beam.mm_processor_kwargs
             return TokensPrompt(**token_prompt_kwargs)
 
-        tokenizer = self.get_tokenizer()
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
-        beam_search_params = SamplingParams(logprobs=2 * beam_width,
-                                            max_tokens=1,
-                                            temperature=temperature)
+        beam_search_params = SamplingParams(
+            logprobs=2 * beam_width, max_tokens=1, temperature=temperature
+        )
         instances: list[BeamSearchInstance] = []
 
-        for prompt in prompts:
+        for lora_req, prompt in zip(lora_requests, prompts):
             # Add multimodal processor kwargs & data
             mm_kwargs = {}
             if "multi_modal_data" in prompt:
                 mm_kwargs["multi_modal_data"] = prompt["multi_modal_data"]
             if "mm_processor_kwargs" in prompt:
-                mm_kwargs["mm_processor_kwargs"] = prompt[
-                    "mm_processor_kwargs"]
+                mm_kwargs["mm_processor_kwargs"] = prompt["mm_processor_kwargs"]
 
             if "prompt_token_ids" in prompt:
                 prompt = cast(TokensPrompt, prompt)  # Needed for mypy
@@ -582,68 +668,103 @@ class LLM:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
 
             instances.append(
-                BeamSearchInstance(prompt_tokens, logprobs=None, **mm_kwargs))
+                BeamSearchInstance(
+                    prompt_tokens,
+                    lora_request=lora_req,
+                    logprobs=None,
+                    **mm_kwargs,
+                ),
+            )
 
-        for _ in range(max_tokens):
-            all_beams: list[BeamSearchSequence] = list(
-                sum((instance.beams for instance in instances), []))
-            pos = [0] + list(
-                itertools.accumulate(
-                    len(instance.beams) for instance in instances))
-            instance_start_and_end: list[tuple[int, int]] = list(
-                zip(pos[:-1], pos[1:]))
+        for prompt_start in range(0, len(prompts), concurrency_limit):
+            instances_batch = instances[prompt_start : prompt_start + concurrency_limit]
 
-            if len(all_beams) == 0:
-                break
+            token_iter = range(max_tokens)
+            if use_tqdm:
+                token_iter = tqdm(
+                    token_iter, desc="Beam search", unit="token", unit_scale=False
+                )
+                logger.warning(
+                    "The progress bar shows the upper bound on token steps and "
+                    "may finish early due to stopping conditions. It does not "
+                    "reflect instance-level progress."
+                )
+            for _ in token_iter:
+                all_beams: list[BeamSearchSequence] = list(
+                    sum((instance.beams for instance in instances_batch), [])
+                )
+                pos = [0] + list(
+                    itertools.accumulate(
+                        len(instance.beams) for instance in instances_batch
+                    )
+                )
+                instance_start_and_end: list[tuple[int, int]] = list(
+                    zip(pos[:-1], pos[1:])
+                )
 
-            prompts_batch = [
-                create_tokens_prompt_from_beam(beam) for beam in all_beams
-            ]
+                if len(all_beams) == 0:
+                    break
 
-            # only runs for one step
-            # we don't need to use tqdm here
-            output = self.generate(prompts_batch,
-                                   sampling_params=beam_search_params,
-                                   use_tqdm=False)
+                # create corresponding batch entries for prompt & optional lora
+                prompts_batch, lora_req_batch = zip(
+                    *[
+                        (create_tokens_prompt_from_beam(beam), beam.lora_request)
+                        for beam in all_beams
+                    ]
+                )
 
-            for (start, end), instance in zip(instance_start_and_end,
-                                              instances):
-                instance_new_beams = []
-                for i in range(start, end):
-                    current_beam = all_beams[i]
-                    result = output[i]
+                # only runs for one step
+                # we don't need to use tqdm here
+                output = self.generate(
+                    prompts_batch,
+                    sampling_params=beam_search_params,
+                    use_tqdm=False,
+                    lora_request=lora_req_batch,
+                )
 
-                    if result.outputs[0].logprobs is not None:
-                        # if `result.outputs[0].logprobs` is None, it means
-                        # the sequence is completed because of the max-model-len
-                        # or abortion. we don't need to add it to the new beams.
-                        logprobs = result.outputs[0].logprobs[0]
-                        for token_id, logprob_obj in logprobs.items():
-                            new_beam = BeamSearchSequence(
-                                tokens=current_beam.tokens + [token_id],
-                                logprobs=current_beam.logprobs + [logprobs],
-                                cum_logprob=current_beam.cum_logprob +
-                                logprob_obj.logprob,
-                                multi_modal_data=current_beam.multi_modal_data,
-                                mm_processor_kwargs=current_beam.
-                                mm_processor_kwargs)
+                for (start, end), instance in zip(
+                    instance_start_and_end, instances_batch
+                ):
+                    instance_new_beams = []
+                    for i in range(start, end):
+                        current_beam = all_beams[i]
+                        result = output[i]
 
-                            if token_id == tokenizer.eos_token_id and \
-                                not ignore_eos:
-                                instance.completed.append(new_beam)
-                            else:
-                                instance_new_beams.append(new_beam)
-                sorted_beams = sorted(instance_new_beams,
-                                      key=sort_beams_key,
-                                      reverse=True)
-                instance.beams = sorted_beams[:beam_width]
+                        if result.outputs[0].logprobs is not None:
+                            # if `result.outputs[0].logprobs` is None, it means
+                            # the sequence is completed because of the
+                            # max-model-len or abortion. we don't need to add
+                            # it to the new beams.
+                            logprobs = result.outputs[0].logprobs[0]
+                            for token_id, logprob_obj in logprobs.items():
+                                new_beam = BeamSearchSequence(
+                                    tokens=current_beam.tokens + [token_id],
+                                    logprobs=current_beam.logprobs + [logprobs],
+                                    lora_request=current_beam.lora_request,
+                                    cum_logprob=current_beam.cum_logprob
+                                    + logprob_obj.logprob,
+                                    multi_modal_data=current_beam.multi_modal_data,
+                                    mm_processor_kwargs=current_beam.mm_processor_kwargs,
+                                )
+
+                                if (
+                                    token_id == tokenizer.eos_token_id
+                                    and not ignore_eos
+                                ):
+                                    instance.completed.append(new_beam)
+                                else:
+                                    instance_new_beams.append(new_beam)
+                    sorted_beams = sorted(
+                        instance_new_beams, key=sort_beams_key, reverse=True
+                    )
+                    instance.beams = sorted_beams[:beam_width]
 
         outputs = []
         for instance in instances:
             instance.completed.extend(instance.beams)
-            sorted_completed = sorted(instance.completed,
-                                      key=sort_beams_key,
-                                      reverse=True)
+            sorted_completed = sorted(
+                instance.completed, key=sort_beams_key, reverse=True
+            )
             best_beams = sorted_completed[:beam_width]
 
             for beam in best_beams:
@@ -652,84 +773,40 @@ class LLM:
 
         return outputs
 
-    def chat(
+    def preprocess_chat(
         self,
-        messages: Union[list[ChatCompletionMessageParam],
-                        list[list[ChatCompletionMessageParam]]],
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
-        chat_template: Optional[str] = None,
+        messages: list[ChatCompletionMessageParam]
+        | list[list[ChatCompletionMessageParam]],
+        chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
-        tools: Optional[list[dict[str, Any]]] = None,
-        chat_template_kwargs: Optional[dict[str, Any]] = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[RequestOutput]:
+        tools: list[dict[str, Any]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> list[TokensPrompt]:
         """
-        Generate responses for a chat conversation.
+        Generate prompt for a chat conversation. The pre-processed
+        prompt can then be used as input for the other LLM methods.
 
-        The chat conversation is converted into a text prompt using the
-        tokenizer and calls the {meth}`generate` method to generate the
-        responses.
-
-        Multi-modal inputs can be passed in the same way you would pass them
-        to the OpenAI API.
-
-        Args:
-            messages: A list of conversations or a single conversation.
-
-              - Each conversation is represented as a list of messages.
-              - Each message is a dictionary with 'role' and 'content' keys.
-
-            sampling_params: The sampling parameters for text generation.
-                If None, we use the default sampling parameters. When it
-                is a single value, it is applied to every prompt. When it
-                is a list, the list must have the same length as the
-                prompts and it is paired one by one with the prompt.
-            use_tqdm: Whether to use tqdm to display the progress bar.
-            lora_request: LoRA request to use for generation, if any.
-            chat_template: The template to use for structuring the chat.
-              If not provided, the model's default chat template will be used.
-            chat_template_content_format: The format to render message content.
-
-              - "string" will render the content as a string.
-                Example: ``"Who are you?"``
-              - "openai" will render the content as a list of dictionaries,
-                similar to OpenAI schema.
-                Example: ``[{"type": "text", "text": "Who are you?"}]``
-
-            add_generation_prompt: If True, adds a generation template
-                to each message.
-            continue_final_message: If True, continues the final message in
-                the conversation instead of starting a new one. Cannot be
-                ``True`` if ``add_generation_prompt`` is also ``True``.
-            chat_template_kwargs: Additional kwargs to pass to the chat
-                template.
-            mm_processor_kwargs: Multimodal processor kwarg overrides for this
-                chat request. Only used for offline requests.
-
+        Refer to `chat` for a complete description of the arguments.
         Returns:
-            A list of ``RequestOutput`` objects containing the generated
-            responses in the same order as the input messages.
+            A list of `TokensPrompts` objects containing the tokenized
+            prompt after chat template interpolation, and the
+            pre-processed multi-modal inputs.
         """
         list_of_messages: list[list[ChatCompletionMessageParam]]
 
         # Handle multi and single conversations
         if is_list_of(messages, list):
             # messages is list[list[...]]
-            list_of_messages = cast(list[list[ChatCompletionMessageParam]],
-                                    messages)
+            list_of_messages = cast(list[list[ChatCompletionMessageParam]], messages)
         else:
             # messages is list[...]
-            list_of_messages = [
-                cast(list[ChatCompletionMessageParam], messages)
-            ]
+            list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
 
-        tokenizer = self.get_tokenizer(lora_request)
-        model_config = self.llm_engine.get_model_config()
+        tokenizer = self.get_tokenizer()
+        model_config = self.model_config
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
             tools,
@@ -746,13 +823,13 @@ class LLM:
         )
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
-        prompts: list[Union[TokensPrompt, TextPrompt]] = []
+        prompts: list[TokensPrompt] = []
 
         for msgs in list_of_messages:
             # NOTE: _parse_chat_message_content_parts() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
-            conversation, mm_data = parse_chat_messages(
+            conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
                 model_config,
                 tokenizer,
@@ -774,18 +851,101 @@ class LLM:
                 )
                 # Special tokens are already included in chat templates so
                 # should not be added by the tokenizer in this case.
-                prompt_token_ids = tokenizer.encode(prompt_str,
-                                                    add_special_tokens=False)
+                prompt_token_ids = tokenizer.encode(
+                    prompt_str, add_special_tokens=False
+                )
 
             prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
 
             if mm_data is not None:
                 prompt["multi_modal_data"] = mm_data
 
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
+
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
             prompts.append(prompt)
+
+        return prompts
+
+    def chat(
+        self,
+        messages: list[ChatCompletionMessageParam]
+        | list[list[ChatCompletionMessageParam]],
+        sampling_params: SamplingParams | list[SamplingParams] | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: LoRARequest | None = None,
+        chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> list[RequestOutput]:
+        """
+        Generate responses for a chat conversation.
+
+        The chat conversation is converted into a text prompt using the
+        tokenizer and calls the [generate][vllm.LLM.generate] method to generate
+        the responses.
+
+        Multi-modal inputs can be passed in the same way you would pass them
+        to the OpenAI API.
+
+        Args:
+            messages: A list of conversations or a single conversation.
+
+                - Each conversation is represented as a list of messages.
+                - Each message is a dictionary with 'role' and 'content' keys.
+
+            sampling_params: The sampling parameters for text generation.
+                If None, we use the default sampling parameters. When it
+                is a single value, it is applied to every prompt. When it
+                is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
+            lora_request: LoRA request to use for generation, if any.
+            chat_template: The template to use for structuring the chat.
+                If not provided, the model's default chat template will be used.
+            chat_template_content_format: The format to render message content.
+
+                - "string" will render the content as a string.
+                  Example: `"Who are you?"`
+                - "openai" will render the content as a list of dictionaries,
+                  similar to OpenAI schema.
+                  Example: `[{"type": "text", "text": "Who are you?"}]`
+
+            add_generation_prompt: If True, adds a generation template
+                to each message.
+            continue_final_message: If True, continues the final message in
+                the conversation instead of starting a new one. Cannot be
+                `True` if `add_generation_prompt` is also `True`.
+            chat_template_kwargs: Additional kwargs to pass to the chat
+                template.
+            mm_processor_kwargs: Multimodal processor kwarg overrides for this
+                chat request. Only used for offline requests.
+
+        Returns:
+            A list of `RequestOutput` objects containing the generated
+            responses in the same order as the input messages.
+        """
+
+        prompts = self.preprocess_chat(
+            messages=messages,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+            chat_template_kwargs=chat_template_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
 
         return self.generate(
             prompts,
@@ -794,113 +954,16 @@ class LLM:
             lora_request=lora_request,
         )
 
-    @overload
     def encode(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        prompts: PromptType | Sequence[PromptType] | DataPrompt,
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         *,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: str,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        prompt_token_ids: Optional[list[int]] = None,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: list[str],
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        prompt_token_ids: Optional[list[list[int]]] = None,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: Optional[str] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        *,
-        prompt_token_ids: list[int],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: Optional[list[str]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        *,
-        prompt_token_ids: list[list[int]],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: None,
-        pooling_params: None,
-        prompt_token_ids: Union[list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @deprecate_kwargs(
-        "prompt_token_ids",
-        is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-        additional_message="Please use the 'prompts' parameter instead.",
-    )
-    def encode(
-        self,
-        prompts: Union[Union[PromptType, Sequence[PromptType]],
-                       Optional[Union[str, list[str]]]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        truncate_prompt_tokens: int | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        pooling_task: PoolingTask | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
         prompts.
@@ -911,86 +974,144 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
-                for more details about the format of each prompts.
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
+            pooling_task: Override the pooling task to use.
+            tokenization_kwargs: overrides tokenization_kwargs set in
+                pooling_params
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
 
-        :::{note}
-        Using `prompts` and `prompt_token_ids` as keyword parameters is
-        considered legacy and may be deprecated in the future. You should
-        instead pass them via the `inputs` parameter.
-        :::
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
         """
-        runner_type = self.llm_engine.model_config.runner_type
+
+        error_str = (
+            "pooling_task required for `LLM.encode`\n"
+            "Please use one of the more specific methods or set the "
+            "pooling_task when using `LLM.encode`:\n"
+            "  - For embeddings, use `LLM.embed(...)` "
+            'or `pooling_task="embed"`.\n'
+            "  - For classification logits, use `LLM.classify(...)` "
+            'or `pooling_task="classify"`.\n'
+            "  - For similarity scores, use `LLM.score(...)`.\n"
+            "  - For rewards, use `LLM.reward(...)` "
+            'or `pooling_task="token_classify"`\n'
+            "  - For token classification, "
+            'use `pooling_task="token_classify"`\n'
+            '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
+        )
+
+        if pooling_task is None:
+            raise ValueError(error_str)
+
+        model_config = self.model_config
+        runner_type = model_config.runner_type
         if runner_type != "pooling":
-            messages = ["LLM.encode() is only supported for pooling models."]
-
-            supported_runner_types = self.llm_engine.model_config \
-                .supported_runner_types
-            if "pooling" in supported_runner_types:
-                messages.append(
-                    "Your model supports the 'pooling' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task score` etc.")
-
-            raise ValueError(" ".join(messages))
-
-        if prompt_token_ids is not None:
-            parsed_prompts = self._convert_v1_inputs(
-                prompts=cast(Optional[Union[str, list[str]]], prompts),
-                prompt_token_ids=prompt_token_ids,
+            raise ValueError(
+                "LLM.encode() is only supported for pooling models. "
+                "Try passing `--runner pooling` to use the model as a "
+                "pooling model."
             )
-        else:
-            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
-                                  prompts)
 
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
-        elif isinstance(pooling_params, PoolingParams):
-            pooling_params.verify(self.llm_engine.model_config)
-        else:
-            for pooling_param in pooling_params:
-                pooling_param.verify(self.llm_engine.model_config)
+        io_processor_prompt = False
+        if isinstance(prompts, dict) and "data" in prompts:
+            io_processor_prompt = True
+            if self.io_processor is None:
+                raise ValueError(
+                    "No IOProcessor plugin installed. Please refer "
+                    "to the documentation and to the "
+                    "'prithvi_geospatial_mae_io_processor' "
+                    "offline inference example for more details."
+                )
 
-        tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
+            # Validate the request data is valid for the loaded plugin
+            validated_prompt = self.io_processor.parse_request(prompts)
+
+            # obtain the actual model prompts from the pre-processor
+            prompts = self.io_processor.pre_process(prompt=validated_prompt)
+
+        if io_processor_prompt:
+            assert self.io_processor is not None
+            if is_list_of(pooling_params, PoolingParams):
+                validated_pooling_params: list[PoolingParams] = []
+                for param in as_iter(pooling_params):
+                    validated_pooling_params.append(
+                        self.io_processor.validate_or_generate_params(param)
+                    )
+                pooling_params = validated_pooling_params
+            else:
+                assert not isinstance(pooling_params, Sequence)
+                pooling_params = self.io_processor.validate_or_generate_params(
+                    pooling_params
+                )
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
+
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
+
+        for param in as_iter(pooling_params):
+            param.verify(pooling_task, model_config)
+            # for backwards compatibility
+            if truncate_prompt_tokens is not None:
+                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         self._validate_and_add_requests(
-            prompts=parsed_prompts,
+            prompts=prompts,
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
-            prompt_adapter_request=prompt_adapter_request,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return self.engine_class.validate_outputs(outputs,
-                                                  PoolingRequestOutput)
+
+        model_outputs = self.engine_class.validate_outputs(
+            outputs, PoolingRequestOutput
+        )
+
+        if io_processor_prompt:
+            # get the post-processed model outputs
+            assert self.io_processor is not None
+            processed_outputs = self.io_processor.post_process(
+                model_output=model_outputs
+            )
+
+            return [
+                PoolingRequestOutput[Any](
+                    request_id="",
+                    outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
+                    prompt_token_ids=[],
+                    finished=True,
+                )
+            ]
+        else:
+            return model_outputs
 
     def embed(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
+        prompts: PromptType | Sequence[PromptType],
         *,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        truncate_prompt_tokens: int | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
     ) -> list[EmbeddingRequestOutput]:
         """
         Generate an embedding vector for each prompt.
@@ -1001,40 +1122,44 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
-                for more details about the format of each prompts.
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
 
         Returns:
-            A list of ``EmbeddingRequestOutput`` objects containing the
+            A list of `EmbeddingRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        if self.llm_engine.model_config.task != "embed":
+        if "embed" not in self.supported_tasks:
             raise ValueError(
-                "Embedding API is only enabled for `--task embed`")
+                "Embedding API is not supported by this model. "
+                "Try converting the model using `--convert embed`."
+            )
 
-        items = self.encode(prompts,
-                            truncate_prompt_tokens=truncate_prompt_tokens,
-                            use_tqdm=use_tqdm,
-                            pooling_params=pooling_params,
-                            lora_request=lora_request,
-                            prompt_adapter_request=prompt_adapter_request)
+        items = self.encode(
+            prompts,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            use_tqdm=use_tqdm,
+            pooling_params=pooling_params,
+            lora_request=lora_request,
+            pooling_task="embed",
+        )
 
         return [EmbeddingRequestOutput.from_base(item) for item in items]
 
     def classify(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
+        prompts: PromptType | Sequence[PromptType],
         *,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
     ) -> list[ClassificationRequestOutput]:
         """
         Generate class logits for each prompt.
@@ -1045,213 +1170,319 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
-                for more details about the format of each prompts.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
+                for more details about the format of each prompt.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
-            A list of ``ClassificationRequestOutput`` objects containing the
+            A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        if self.llm_engine.model_config.task != "classify":
+        if "classify" not in self.supported_tasks:
             raise ValueError(
-                "Classification API is only enabled for `--task classify`")
+                "Classification API is not supported by this model. "
+                "Try converting the model using `--convert classify`."
+            )
 
-        items = self.encode(prompts,
-                            use_tqdm=use_tqdm,
-                            lora_request=lora_request,
-                            prompt_adapter_request=prompt_adapter_request)
+        items = self.encode(
+            prompts,
+            use_tqdm=use_tqdm,
+            pooling_params=pooling_params,
+            lora_request=lora_request,
+            pooling_task="classify",
+        )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
+
+    def reward(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        /,
+        *,
+        truncate_prompt_tokens: int | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+    ) -> list[PoolingRequestOutput]:
+        """
+        Generate rewards for each prompt.
+
+        Args:
+            prompts: The prompts to the LLM. You may pass a sequence of prompts
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
+                for more details about the format of each prompt.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
+            lora_request: LoRA request to use for generation, if any.
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
+        Returns:
+            A list of `PoolingRequestOutput` objects containing the
+            pooled hidden states in the same order as the input prompts.
+        """
+
+        return self.encode(
+            prompts,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            pooling_task="token_classify",
+        )
 
     def _embedding_score(
         self,
         tokenizer: AnyTokenizer,
-        text_1: list[Union[str, TextPrompt, TokensPrompt]],
-        text_2: list[Union[str, TextPrompt, TokensPrompt]],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        text_1: list[str | TextPrompt | TokensPrompt],
+        text_2: list[str | TextPrompt | TokensPrompt],
+        truncate_prompt_tokens: int | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        pooling_params: PoolingParams | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
     ) -> list[ScoringRequestOutput]:
-
         encoded_output: list[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
             truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            pooling_params=pooling_params,
+            pooling_task="embed",
+        )
 
-        encoded_output_1: list[PoolingRequestOutput] = encoded_output[
-            0:len(text_1)]
-        encoded_output_2: list[PoolingRequestOutput] = encoded_output[
-            len(text_1):]
+        encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
+        encoded_output_2: list[PoolingRequestOutput] = encoded_output[len(text_1) :]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
 
-        scores = _cosine_similarity(tokenizer=tokenizer,
-                                    embed_1=encoded_output_1,
-                                    embed_2=encoded_output_2)
+        scores = _cosine_similarity(
+            tokenizer=tokenizer, embed_1=encoded_output_1, embed_2=encoded_output_2
+        )
 
-        items = self.engine_class.validate_outputs(scores,
-                                                   PoolingRequestOutput)
+        items = self.engine_class.validate_outputs(scores, PoolingRequestOutput)
         return [ScoringRequestOutput.from_base(item) for item in items]
 
     def _cross_encoding_score(
         self,
         tokenizer: AnyTokenizer,
-        text_1: list[str],
-        text_2: list[str],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        data_1: list[str] | list[ScoreContentPartParam],
+        data_2: list[str] | list[ScoreContentPartParam],
+        truncate_prompt_tokens: int | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        pooling_params: PoolingParams | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
     ) -> list[ScoringRequestOutput]:
+        model_config = self.model_config
 
         if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError(
-                "Score API is only enabled for `--task embed or score`")
+            raise ValueError("Score API is not supported for Mistral tokenizer")
 
-        if len(text_1) == 1:
-            text_1 = text_1 * len(text_2)
+        if len(data_1) == 1:
+            data_1 = data_1 * len(data_2)
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+        if pooling_params is None:
+            pooling_params = PoolingParams(task="score")
 
-        pooling_params = PoolingParams()
+        pooling_params.verify("score", model_config)
+        pooling_params_list = list[PoolingParams]()
 
         tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
 
-        parsed_prompts = []
+        _validate_truncation_size(
+            model_config.max_model_len, truncate_prompt_tokens, tokenization_kwargs
+        )
 
-        for q, t in input_pairs:
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
-            engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
-            parsed_prompts.append(engine_prompt)
+        prompts = list[PromptType]()
+
+        input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
+
+        for q, d in input_pairs:
+            _, engine_prompt = get_score_prompt(
+                model_config=model_config,
+                data_1=q,
+                data_2=d,
+                tokenizer=tokenizer,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+            if token_type_ids := engine_prompt.pop("token_type_ids", None):
+                params = pooling_params.clone()
+                compressed = compress_token_type_ids(token_type_ids)
+                params.extra_kwargs = {"compressed_token_type_ids": compressed}
+                pooling_params_list.append(params)
+            else:
+                pooling_params_list.append(pooling_params)
+
+            prompts.append(engine_prompt)
 
         self._validate_and_add_requests(
-            prompts=parsed_prompts,
-            params=pooling_params,
+            prompts=prompts,
+            params=pooling_params_list,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        items = self.engine_class.validate_outputs(outputs,
-                                                   PoolingRequestOutput)
+        items = self.engine_class.validate_outputs(outputs, PoolingRequestOutput)
 
         return [ScoringRequestOutput.from_base(item) for item in items]
 
     def score(
         self,
-        text_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
-        text_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        data_1: SingletonPrompt | Sequence[SingletonPrompt] | ScoreMultiModalParam,
+        data_2: SingletonPrompt | Sequence[SingletonPrompt] | ScoreMultiModalParam,
         /,
         *,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        truncate_prompt_tokens: int | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        pooling_params: PoolingParams | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
     ) -> list[ScoringRequestOutput]:
-        """Generate similarity scores for all pairs ``<text,text_pair>``.
+        """Generate similarity scores for all pairs `<text,text_pair>` or
+          `<multi-modal data, multi-modal data pair>`.
 
-        The inputs can be ``1 -> 1``, ``1 -> N`` or ``N -> N``.
-        In the ``1 - N`` case the ``text_1`` sentence will be replicated ``N``
-        times to pair with the ``text_2`` sentences.
+        The inputs can be `1 -> 1`, `1 -> N` or `N -> N`.
+        In the `1 - N` case the `data_1` input will be replicated `N`
+        times to pair with the `data_2` inputs.
         The input pairs are used to build a list of prompts for the
         cross encoder model. This class automatically batches the prompts,
         considering the memory constraint. For the best performance, put all
-        of your texts into a single list and pass it to this method.
+        of your inputs into a single list and pass it to this method.
+
+        Supports both text and multi-modal data (images, etc.) when used with
+        appropriate multi-modal models. For multi-modal inputs, ensure the
+        prompt structure matches the model's expected input format.
 
         Args:
-            text_1: can be a single prompt or a list of prompts, in which
-                case it has to have the same length as the ``text_2`` list
-            text_2: The texts to pair with the query to form the input
-                to the LLM. See {class}`~vllm.inputs.PromptType` for
-                more details about the format of each prompts.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            data_1: Can be a single prompt, a list of prompts or
+                `ScoreMultiModalParam`, which can contain either text or
+                multi-modal data. When a list, it must have the same length as
+                the `data_2` list.
+            data_2: The data to pair with the query to form the input to
+                the LLM. Can be text or multi-modal data. See [PromptType]
+                [vllm.inputs.PromptType] for more details about the format of
+                each prompt.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
-            A list of ``ScoringRequestOutput`` objects containing the
+            A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
         """
-        runner_type = self.llm_engine.model_config.runner_type
+        model_config = self.model_config
+        runner_type = model_config.runner_type
         if runner_type != "pooling":
-            messages = ["LLM.score() is only supported for pooling models."]
-
-            supported_runner_types = self.llm_engine.model_config \
-                .supported_runner_types
-            if "pooling" in supported_runner_types:
-                messages.append(
-                    "Your model supports the 'pooling' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task score` etc.")
-
-            raise ValueError(" ".join(messages))
-
-        if self.llm_engine.model_config.task not in ("embed", "score"):
             raise ValueError(
-                "Score API is only enabled for `--task embed or --task score`")
+                "LLM.score() is only supported for pooling models. "
+                "Try passing `--runner pooling` to use the model as a "
+                "pooling model."
+            )
+
+        supported_tasks = self.supported_tasks
+        if all(t not in supported_tasks for t in ("embed", "classify")):
+            raise ValueError(
+                "Score API is not supported by this model. "
+                "Try converting the model using "
+                "`--convert embed` or `--convert classify`."
+            )
+
+        if (
+            model_config.is_cross_encoder
+            and getattr(model_config.hf_config, "num_labels", 0) != 1
+        ):
+            raise ValueError("Score API is only enabled for num_labels == 1.")
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
         # lists of tokens to the `text` and `text_pair` kwargs
-        tokenizer = self.llm_engine.get_tokenizer()
+        tokenizer = self.get_tokenizer()
 
-        def ensure_str(prompt: SingletonPrompt):
-            if isinstance(prompt, dict):
-                if "multi_modal_data" in prompt:
-                    raise ValueError("Multi-modal prompt is not "
-                                     "supported for scoring")
-                elif "prompt_token_ids" in prompt:
-                    prompt = tokenizer.decode(
-                        cast(TokensPrompt, prompt)["prompt_token_ids"])
-                elif "prompt" in prompt:
-                    prompt = cast(TextPrompt, prompt)["prompt"]
-            assert type(prompt) is str
-            return prompt
+        if not model_config.is_multimodal_model:
 
-        if isinstance(text_1, (str, dict)):
-            # Convert a single prompt to a list.
-            text_1 = [text_1]
-        input_text_1: list[str] = [ensure_str(t) for t in text_1]
+            def check_data_type(
+                data: SingletonPrompt
+                | Sequence[SingletonPrompt]
+                | ScoreMultiModalParam,
+            ):
+                if isinstance(data, dict) and "content" in data:
+                    raise ValueError(
+                        "ScoreMultiModalParam is not supported "
+                        f"for {model_config.architecture}"
+                    )
 
-        if isinstance(text_2, (str, dict)):
-            # Convert a single prompt to a list.
-            text_2 = [text_2]
-        input_text_2: list[str] = [ensure_str(t) for t in text_2]
+            check_data_type(data_1)
+            check_data_type(data_2)
 
-        _validate_score_input_lens(input_text_1, input_text_2)
+            def ensure_str(prompt: SingletonPrompt):
+                if isinstance(prompt, dict):
+                    if "multi_modal_data" in prompt:
+                        raise ValueError(
+                            "Multi-modal prompt is not supported for scoring"
+                        )
+                    elif "prompt_token_ids" in prompt:
+                        prompt = tokenizer.decode(
+                            cast(TokensPrompt, prompt)["prompt_token_ids"]
+                        )
+                    elif "prompt" in prompt:
+                        prompt = cast(TextPrompt, prompt)["prompt"]
+                assert type(prompt) is str
+                return prompt
 
-        if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(tokenizer, input_text_1,
-                                              input_text_2,
-                                              truncate_prompt_tokens, use_tqdm,
-                                              lora_request,
-                                              prompt_adapter_request)
+            if isinstance(data_1, (str, dict)):
+                # Convert a single prompt to a list.
+                data_1 = [data_1]  # type: ignore[list-item]
+
+            data_1 = [ensure_str(t) for t in data_1]
+
+            if isinstance(data_2, (str, dict)):
+                # Convert a single prompt to a list.
+                data_2 = [data_2]  # type: ignore[list-item]
+
+            data_2 = [ensure_str(t) for t in data_2]
+
+        if isinstance(data_1, dict) and "content" in data_1:
+            data_1 = data_1.get("content")  # type: ignore[assignment]
+        elif isinstance(data_1, str):
+            data_1 = [data_1]
+
+        if isinstance(data_2, dict) and "content" in data_2:
+            data_2 = data_2.get("content")  # type: ignore[assignment]
+        elif isinstance(data_2, str):
+            data_2 = [data_2]
+
+        _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
+
+        if model_config.is_cross_encoder:
+            return self._cross_encoding_score(
+                tokenizer,
+                data_1,  # type: ignore[arg-type]
+                data_2,  # type: ignore[arg-type]
+                truncate_prompt_tokens,
+                use_tqdm,
+                pooling_params,
+                lora_request,
+            )
         else:
             return self._embedding_score(
                 tokenizer,
-                input_text_1,  # type: ignore[arg-type]
-                input_text_2,  # type: ignore[arg-type]
+                data_1,  # type: ignore[arg-type]
+                data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request,
-                prompt_adapter_request)
+            )
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -1259,7 +1490,7 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+    def reset_prefix_cache(self, device: Device | None = None) -> bool:
         return self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
@@ -1269,195 +1500,216 @@ class LLM:
         during the sleep period, before `wake_up` is called.
 
         Args:
-            level: The sleep level. Level 1 sleep will offload the model 
-                weights and discard the kv cache. The content of kv cache 
+            level: The sleep level. Level 1 sleep will offload the model
+                weights and discard the kv cache. The content of kv cache
                 is forgotten. Level 1 sleep is good for sleeping and waking
-                up the engine to run the same model again. The model weights 
-                are backed up in CPU memory. Please make sure there's enough 
-                CPU memory to store the model weights. Level 2 sleep will 
-                discard both the model weights and the kv cache. The content 
-                of both the model weights and kv cache is forgotten. Level 2 
+                up the engine to run the same model again. The model weights
+                are backed up in CPU memory. Please make sure there's enough
+                CPU memory to store the model weights. Level 2 sleep will
+                discard both the model weights and the kv cache. The content
+                of both the model weights and kv cache is forgotten. Level 2
                 sleep is good for sleeping and waking up the engine to run a
-                different model or update the model, where previous model 
+                different model or update the model, where previous model
                 weights are not needed. It reduces CPU memory pressure.
         """
         self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
-    def wake_up(self, tags: Optional[list[str]] = None):
+    def wake_up(self, tags: list[str] | None = None):
         """
-        Wake up the engine from sleep mode. See the {meth}`sleep` method
-        for more details.
-        
+        Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
+        method for more details.
+
         Args:
-            tags: An optional list of tags to reallocate the engine memory 
-                for specific memory allocations. Values must be in 
-                ("weights", "kv_cache",). If None, all memory is reallocated.
-                wake_up should be called with all tags (or None) before the 
+            tags: An optional list of tags to reallocate the engine memory
+                for specific memory allocations. Values must be in
+                `("weights", "kv_cache")`. If None, all memory is reallocated.
+                wake_up should be called with all tags (or None) before the
                 engine is used again.
         """
         self.llm_engine.wake_up(tags)
 
-    # LEGACY
-    def _convert_v1_inputs(
-        self,
-        prompts: Optional[Union[str, list[str]]],
-        prompt_token_ids: Optional[Union[list[int], list[list[int]]]],
-    ):
-        # skip_tokenizer_init is now checked in engine
+    def get_metrics(self) -> list["Metric"]:
+        """Return a snapshot of aggregated metrics from Prometheus.
 
-        if prompts is not None:
-            prompts = [p["content"] for p in parse_and_batch_prompt(prompts)]
-        if prompt_token_ids is not None:
-            prompt_token_ids = [
-                p["content"] for p in parse_and_batch_prompt(prompt_token_ids)
-            ]
+        Returns:
+            A `MetricSnapshot` instance capturing the current state
+            of all aggregated metrics from Prometheus.
 
-        num_requests = None
-        if prompts is not None:
-            num_requests = len(prompts)
-        if prompt_token_ids is not None:
-            if (num_requests is not None
-                    and num_requests != len(prompt_token_ids)):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
-
-            num_requests = len(prompt_token_ids)
-        if num_requests is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
-
-        parsed_prompts: list[PromptType] = []
-        for i in range(num_requests):
-            item: PromptType
-
-            if prompts is not None:
-                item = TextPrompt(prompt=prompts[i])
-            elif prompt_token_ids is not None:
-                item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
-            else:
-                raise AssertionError
-
-            parsed_prompts.append(item)
-
-        return parsed_prompts
+        Note:
+            This method is only available with the V1 LLM engine.
+        """
+        return self.llm_engine.get_metrics()
 
     def _validate_and_add_requests(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
-                      Sequence[PoolingParams]],
+        prompts: PromptType | Sequence[PromptType] | DataPrompt,
+        params: SamplingParams
+        | Sequence[SamplingParams]
+        | PoolingParams
+        | Sequence[PoolingParams],
         *,
-        use_tqdm: bool,
-        lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        guided_options: Optional[GuidedDecodingRequest] = None,
-        priority: Optional[list[int]] = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None,
+        priority: list[int] | None = None,
     ) -> None:
-        if guided_options is not None:
-            warnings.warn(
-                "guided_options_request is deprecated, use "
-                "SamplingParams.guided_decoding instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
-            prompts = [prompts]
+            prompts = [prompts]  # type: ignore[list-item]
 
         num_requests = len(prompts)
-        if isinstance(params, list) and len(params) != num_requests:
-            raise ValueError("The lengths of prompts and params "
-                             "must be the same.")
-        if isinstance(lora_request,
-                      list) and len(lora_request) != num_requests:
-            raise ValueError("The lengths of prompts and lora_request "
-                             "must be the same.")
+        if isinstance(params, Sequence) and len(params) != num_requests:
+            raise ValueError("The lengths of prompts and params must be the same.")
+        if isinstance(lora_request, Sequence) and len(lora_request) != num_requests:
+            raise ValueError(
+                "The lengths of prompts and lora_request must be the same."
+            )
 
-        for sp in params if isinstance(params, list) else (params, ):
+        for sp in params if isinstance(params, Sequence) else (params,):
             if isinstance(sp, SamplingParams):
-                self._add_guided_params(sp, guided_options)
-
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
         it = prompts
         if use_tqdm:
-            it = tqdm(it, desc="Adding requests")
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            it = tqdm_func(it, desc="Adding requests")
 
         for i, prompt in enumerate(it):
+            if isinstance(prompt, dict):
+                self._validate_mm_data_and_uuids(
+                    prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
+                )
+
             self._add_request(
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
-                tokenization_kwargs=tokenization_kwargs,
-                lora_request=lora_request[i] if isinstance(
-                    lora_request, Sequence) else lora_request,
-                prompt_adapter_request=prompt_adapter_request,
+                lora_request=lora_request[i]
+                if isinstance(lora_request, Sequence)
+                else lora_request,
                 priority=priority[i] if priority else 0,
             )
+
+    def _validate_mm_data_and_uuids(
+        self,
+        multi_modal_data: Any | None,  # MultiModalDataDict
+        multi_modal_uuids: Any | None,  # MultiModalUUIDDict
+    ):
+        """
+        Validate that if any multi-modal data is skipped (i.e. None),
+        then its corresponding UUID must be set.
+        """
+        if multi_modal_data is None:
+            return
+
+        for modality, data in multi_modal_data.items():
+            if isinstance(data, list):
+                for i, d in enumerate(data):
+                    if d is None:
+                        if (
+                            multi_modal_uuids is None
+                            or modality not in multi_modal_uuids
+                            or multi_modal_uuids[  # noqa: E501
+                                modality
+                            ]
+                            is None
+                        ):
+                            raise ValueError(
+                                f"Multi-modal data for {modality} is None "
+                                f"but UUID is not provided"
+                            )
+                        else:
+                            if (
+                                len(multi_modal_uuids[modality]) <= i
+                                or multi_modal_uuids[modality][i] is None
+                            ):
+                                raise ValueError(
+                                    f"Multi-modal data for {modality} is None "
+                                    f"but UUID is not provided"
+                                )
+            else:
+                if data is None and (
+                    multi_modal_uuids is None
+                    or modality not in multi_modal_uuids
+                    or multi_modal_uuids[modality] is None
+                ):
+                    raise ValueError(
+                        f"Multi-modal data for {modality} is None"
+                        f" but UUID is not provided"
+                    )
+
+    def _process_inputs(
+        self,
+        request_id: str,
+        engine_prompt: PromptType,
+        params: SamplingParams | PoolingParams,
+        *,
+        lora_request: LoRARequest | None,
+        priority: int,
+    ) -> tuple[EngineCoreRequest, dict[str, Any]]:
+        """Use the Processor to process inputs for LLMEngine."""
+        tokenization_kwargs: dict[str, Any] = {}
+        _validate_truncation_size(
+            self.model_config.max_model_len,
+            params.truncate_prompt_tokens,
+            tokenization_kwargs,
+        )
+
+        engine_request = self.processor.process_inputs(
+            request_id,
+            engine_prompt,
+            params,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
+        )
+        return engine_request, tokenization_kwargs
 
     def _add_request(
         self,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        params: SamplingParams | PoolingParams,
+        lora_request: LoRARequest | None = None,
         priority: int = 0,
     ) -> None:
+        prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(
+
+        engine_request, tokenization_kwargs = self._process_inputs(
             request_id,
             prompt,
             params,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
-            prompt_adapter_request=prompt_adapter_request,
             priority=priority,
         )
 
-    def _add_guided_params(
-            self,
-            params: SamplingParams,
-            guided_options: Optional[GuidedDecodingRequest] = None):
-        if guided_options is None:
-            return params
-
-        if params.guided_decoding is not None:
-            raise ValueError("Cannot set both guided_options_request and "
-                             "params.guided_decoding.")
-
-        params.guided_decoding = GuidedDecodingParams(
-            json=guided_options.guided_json,
-            regex=guided_options.guided_regex,
-            choice=guided_options.guided_choice,
-            grammar=guided_options.guided_grammar,
-            json_object=guided_options.guided_json_object,
-            backend=guided_options.guided_decoding_backend,
-            whitespace_pattern=guided_options.guided_whitespace_pattern,
-            structural_tag=guided_options.structural_tag,
+        self.llm_engine.add_request(
+            request_id,
+            engine_request,
+            params,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
+            prompt_text=prompt_text,
         )
-        return params
 
     def _run_engine(
-            self, *, use_tqdm: bool
-    ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
+        self, *, use_tqdm: bool | Callable[..., tqdm] = True
+    ) -> list[RequestOutput | PoolingRequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            pbar = tqdm_func(
                 total=num_requests,
                 desc="Processed prompts",
                 dynamic_ncols=True,
-                postfix=(f"est. speed input: {0:.2f} toks/s, "
-                         f"output: {0:.2f} toks/s"),
+                postfix=(f"est. speed input: {0:.2f} toks/s, output: {0:.2f} toks/s"),
             )
 
         # Run the engine.
-        outputs: list[Union[RequestOutput, PoolingRequestOutput]] = []
+        outputs: list[RequestOutput | PoolingRequestOutput] = []
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
@@ -1473,15 +1725,18 @@ class LLM:
                             total_in_toks += len(output.prompt_token_ids) * n
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
-                                len(stp.token_ids) for stp in output.outputs)
-                            out_spd = (total_out_toks /
-                                       pbar.format_dict["elapsed"])
+                                len(stp.token_ids) for stp in output.outputs
+                            )
+                            out_spd = total_out_toks / pbar.format_dict["elapsed"]
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
-                                f"output: {out_spd:.2f} toks/s")
+                                f"output: {out_spd:.2f} toks/s"
+                            )
                             pbar.update(n)
                         else:
                             pbar.update(1)
+                        if pbar.n == num_requests:
+                            pbar.refresh()
 
         if use_tqdm:
             pbar.close()

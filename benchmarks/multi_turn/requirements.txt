@@ -1,0 +1,5 @@
+numpy>=1.24
+pandas>=2.0.0
+aiohttp>=3.10
+transformers>=4.46
+xlsxwriter>=3.2.1

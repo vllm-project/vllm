@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer, convert_ids_list_to_tokens)
+    AnyTokenizer,
+    convert_ids_list_to_tokens,
+)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
@@ -19,29 +21,29 @@ NONES = itertools.repeat(None)
 
 @dataclass
 class LogprobsProcessor:
-
     # Tokenizer for this request,
     # None if detokenization is disabled.
-    tokenizer: Optional[AnyTokenizer]
+    tokenizer: AnyTokenizer | None
 
     # Logprobs for this request
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
-    cumulative_logprob: Optional[float]
-    num_logprobs: Optional[int]
-    num_prompt_logprobs: Optional[int]
+    logprobs: SampleLogprobs | None
+    prompt_logprobs: PromptLogprobs | None
+    cumulative_logprob: float | None
+    num_logprobs: int | None
+    num_prompt_logprobs: int | None
 
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: AnyTokenizer | None,
         request: EngineCoreRequest,
     ) -> "LogprobsProcessor":
+        assert request.sampling_params is not None
         num_logprobs = request.sampling_params.logprobs
         num_prompt_logprobs = request.sampling_params.prompt_logprobs
         return cls(
             tokenizer=tokenizer,
-            cumulative_logprob=(None if num_logprobs is None else 0.),
+            cumulative_logprob=(None if num_logprobs is None else 0.0),
             logprobs=(None if num_logprobs is None else []),
             # NOTE: logprob of first prompt token is None.
             prompt_logprobs=(None if num_prompt_logprobs is None else [None]),
@@ -64,14 +66,15 @@ class LogprobsProcessor:
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
 
-        token_ids_lst, logprobs_lst, ranks_lst = logprobs_lists
+        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
 
-        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst,
-                                             token_ids_lst):
-
+        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
             # Detokenize (non-incrementally).
-            decoded_tokens = NONES if self.tokenizer is None else (
-                convert_ids_list_to_tokens(self.tokenizer, token_ids))
+            decoded_tokens = (
+                NONES
+                if self.tokenizer is None
+                else (convert_ids_list_to_tokens(self.tokenizer, token_ids))
+            )
 
             # Sampler puts the sampled logprob in first.
             sampled_token_logprob = logprobs[0]
@@ -85,7 +88,8 @@ class LogprobsProcessor:
                     decoded_tokens,
                     rank,
                     self.num_logprobs,
-                ))
+                )
+            )
 
     def _update_prompt_logprobs(
         self,
@@ -107,9 +111,13 @@ class LogprobsProcessor:
 
         # Detokenize non-incrementally.
         # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
-        decoded_tokens = None if self.tokenizer is None else (
-            convert_ids_list_to_tokens(self.tokenizer,
-                                       token_ids.flatten().tolist()))
+        decoded_tokens = (
+            None
+            if self.tokenizer is None
+            else (
+                convert_ids_list_to_tokens(self.tokenizer, token_ids.flatten().tolist())
+            )
+        )
 
         # Recover shapes.
         num_prompt_tokens, num_logprobs = logprobs.shape
@@ -124,19 +132,24 @@ class LogprobsProcessor:
             # Handle flattening.
             offset = pos * num_logprobs
             offset_end = offset + num_logprobs
-            decoded_tokens_for_pos = NONES \
-            if decoded_tokens is None else decoded_tokens[offset:offset_end]
+            decoded_tokens_for_pos = (
+                NONES if decoded_tokens is None else decoded_tokens[offset:offset_end]
+            )
 
             # Update with the Logprob dictionary for this pos.
             self.prompt_logprobs.append(
-                self._make_logprob_dict(prompt_logprobs[pos], token_ids[pos],
-                                        decoded_tokens_for_pos,
-                                        prompt_token_ranks[pos],
-                                        self.num_prompt_logprobs))
+                self._make_logprob_dict(
+                    prompt_logprobs[pos],
+                    token_ids[pos],
+                    decoded_tokens_for_pos,
+                    prompt_token_ranks[pos],
+                    self.num_prompt_logprobs,
+                )
+            )
 
-    def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
+    def pop_prompt_logprobs(self) -> PromptLogprobs | None:
         """Pop and return all request prompt logprobs
-        
+
         The logprobs processor aggregates prompt chunk logprobs
         over one or more prefill chunks. This method returns
         all prompt logprobs at once and then forgets them.
@@ -157,7 +170,7 @@ class LogprobsProcessor:
     def _make_logprob_dict(
         logprobs: list[float],
         logprob_token_ids: list[int],
-        decoded_tokens: Iterable[Optional[str]],
+        decoded_tokens: Iterable[str | None],
         rank: int,
         num_logprobs: int,
     ) -> dict[int, Logprob]:
@@ -174,12 +187,13 @@ class LogprobsProcessor:
         Returns:
           dict[token id, Logprob]
         """
-
+        if num_logprobs == -1:
+            num_logprobs = len(logprobs)
         # We do not need a special case for the sampled token
         # being in the topk, since inserting duplicated data
         # into a dictionary twice is the same as doing it once.
         topk_ranks = range(1, num_logprobs + 1)
-        ranks = itertools.chain((rank, ), topk_ranks)
+        ranks = itertools.chain((rank,), topk_ranks)
 
         return {
             token_id: Logprob(
@@ -188,7 +202,8 @@ class LogprobsProcessor:
                 decoded_token=token,
             )
             for token_id, logprob, rank, token in zip(
-                logprob_token_ids, logprobs, ranks, decoded_tokens)
+                logprob_token_ids, logprobs, ranks, decoded_tokens
+            )
         }
 
     def update_from_output(self, output: EngineCoreOutput) -> None:

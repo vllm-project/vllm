@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
 
-requires_files = glob.glob('requirements/*.txt')
+requires_files = glob.glob("requirements/*.txt")
 requires_files += ["pyproject.toml"]
 for file in requires_files:
     print(f">>> cleaning {file}")
@@ -10,9 +11,9 @@ for file in requires_files:
         lines = f.readlines()
     if "torch" in "".join(lines).lower():
         print("removed:")
-        with open(file, 'w') as f:
+        with open(file, "w") as f:
             for line in lines:
-                if 'torch' not in line.lower():
+                if "torch" not in line.lower():
                     f.write(line)
                 else:
                     print(line.strip())

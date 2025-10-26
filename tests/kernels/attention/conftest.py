@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
-from vllm.utils import (create_kv_caches_with_random,
-                        create_kv_caches_with_random_flash)
+from vllm.utils.torch_utils import (
+    create_kv_caches_with_random,
+    create_kv_caches_with_random_flash,
+)
 
 
 @pytest.fixture()

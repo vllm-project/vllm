@@ -1,18 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from __future__ import annotations
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import import_from_path, is_list_of
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.import_utils import import_from_path
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        DeltaMessage,
+        ResponsesRequest,
+    )
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    ChatCompletionRequest = Any
+    DeltaMessage = Any
+    ResponsesRequest = Any
+    AnyTokenizer = Any
 
 logger = init_logger(__name__)
 
@@ -25,7 +36,7 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
         self.model_tokenizer = tokenizer
 
     @cached_property
@@ -35,7 +46,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 
@@ -65,8 +76,10 @@ class ReasoningParser:
 
     @abstractmethod
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
 
@@ -94,7 +107,7 @@ class ReasoningParser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Instance method that should be implemented for extracting reasoning
         from an incomplete response; for use when handling reasoning calls and
@@ -102,6 +115,17 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
+
+    def prepare_structured_tag(
+        self,
+        original_tag: str | None,
+        tool_server: ToolServer | None,
+    ) -> str:
+        """
+        Instance method that is implemented for preparing the structured tag
+        Otherwise, None is returned
+        """
+        return None
 
 
 class ReasoningParserManager:
@@ -117,19 +141,19 @@ class ReasoningParserManager:
         if name in cls.reasoning_parsers:
             return cls.reasoning_parsers[name]
 
-        raise KeyError(
-            f"reasoning helper: '{name}' not found in reasoning_parsers")
+        raise KeyError(f"reasoning helper: '{name}' not found in reasoning_parsers")
 
     @classmethod
     def _register_module(
         cls,
         module: type,
-        module_name: Optional[Union[str, list[str]]] = None,
+        module_name: str | list[str] | None = None,
         force: bool = True,
     ) -> None:
         if not issubclass(module, ReasoningParser):
-            raise TypeError("module must be subclass of ReasoningParser, "
-                            f"but got {type(module)}")
+            raise TypeError(
+                f"module must be subclass of ReasoningParser, but got {type(module)}"
+            )
         if module_name is None:
             module_name = module.__name__
         if isinstance(module_name, str):
@@ -137,17 +161,18 @@ class ReasoningParserManager:
         for name in module_name:
             if not force and name in cls.reasoning_parsers:
                 existed_module = cls.reasoning_parsers[name]
-                raise KeyError(f"{name} is already registered "
-                               f"at {existed_module.__module__}")
+                raise KeyError(
+                    f"{name} is already registered at {existed_module.__module__}"
+                )
             cls.reasoning_parsers[name] = module
 
     @classmethod
     def register_module(
         cls,
-        name: Optional[Union[str, list[str]]] = None,
+        name: str | list[str] | None = None,
         force: bool = True,
-        module: Union[type, None] = None,
-    ) -> Union[type, Callable]:
+        module: type | None = None,
+    ) -> type | Callable:
         """
         Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not
@@ -157,11 +182,11 @@ class ReasoningParserManager:
             raise TypeError(f"force must be a boolean, but got {type(force)}")
 
         # raise the error ahead of time
-        if not (name is None or isinstance(name, str)
-                or is_list_of(name, str)):
+        if not (name is None or isinstance(name, str) or is_list_of(name, str)):
             raise TypeError(
                 "name must be None, an instance of str, or a sequence of str, "
-                f"but got {type(name)}")
+                f"but got {type(name)}"
+            )
 
         # use it as a normal method: x.register_module(module=SomeClass)
         if module is not None:
@@ -186,6 +211,7 @@ class ReasoningParserManager:
         try:
             import_from_path(module_name, plugin_path)
         except Exception:
-            logger.exception("Failed to load module '%s' from %s.",
-                             module_name, plugin_path)
+            logger.exception(
+                "Failed to load module '%s' from %s.", module_name, plugin_path
+            )
             return

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
-from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Optional
+import uuid
+from collections.abc import Iterable
 
 import numpy as np
 import torch
@@ -11,61 +12,78 @@ from PIL import Image
 
 from vllm.logger import init_logger
 
-if TYPE_CHECKING:
-    from vllm.inputs import TokensPrompt
-
 logger = init_logger(__name__)
-
-MultiModalHashDict = Mapping[str, list[str]]
-"""
-A dictionary containing hashes for items in each modality.
-"""
 
 
 class MultiModalHasher:
-
     @classmethod
-    def serialize_item(cls, obj: object) -> bytes:
+    def serialize_item(cls, obj: object) -> Iterable[bytes | memoryview]:
         # Simple cases
+        if isinstance(obj, (bytes, memoryview)):
+            return (obj,)
         if isinstance(obj, str):
-            return obj.encode("utf-8")
-        if isinstance(obj, bytes):
-            return obj
+            return (obj.encode("utf-8"),)
         if isinstance(obj, (int, float)):
-            return np.array(obj).tobytes()
+            return (np.array(obj).tobytes(),)
 
         if isinstance(obj, Image.Image):
-            return cls.item_to_bytes("image", np.array(obj.convert("RGBA")))
+            exif = obj.getexif()
+            if Image.ExifTags.Base.ImageID in exif and isinstance(
+                exif[Image.ExifTags.Base.ImageID], uuid.UUID
+            ):
+                # If the image has exif ImageID tag, use that
+                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+            data = {"mode": obj.mode, "data": np.asarray(obj)}
+            if obj.palette is not None:
+                data["palette"] = obj.palette.palette
+                if obj.palette.rawmode is not None:
+                    data["palette_rawmode"] = obj.palette.rawmode
+            return cls.iter_item_to_bytes("image", data)
         if isinstance(obj, torch.Tensor):
-            return cls.item_to_bytes("tensor", obj.numpy())
+            tensor_obj: torch.Tensor = obj.cpu()
+            tensor_dtype = tensor_obj.dtype
+            tensor_shape = tensor_obj.shape
+
+            # NumPy does not support bfloat16.
+            # Workaround: View the tensor as a contiguous 1D array of bytes
+            if tensor_dtype == torch.bfloat16:
+                tensor_obj = tensor_obj.contiguous()
+                tensor_obj = tensor_obj.view((tensor_obj.numel(),)).view(torch.uint8)
+
+                return cls.iter_item_to_bytes(
+                    "tensor",
+                    {
+                        "original_dtype": str(tensor_dtype),
+                        "original_shape": tuple(tensor_shape),
+                        "data": tensor_obj.numpy(),
+                    },
+                )
+            return cls.iter_item_to_bytes("tensor", tensor_obj.numpy())
         if isinstance(obj, np.ndarray):
-            return cls.item_to_bytes(
-                "ndarray", {
+            # If the array is non-contiguous, we need to copy it first
+            arr_data = (
+                obj.view(np.uint8).data if obj.flags.c_contiguous else obj.tobytes()
+            )
+            return cls.iter_item_to_bytes(
+                "ndarray",
+                {
                     "dtype": obj.dtype.str,
                     "shape": obj.shape,
-                    "data": obj.data.tobytes(),
-                })
-
+                    "data": arr_data,
+                },
+            )
         logger.warning(
-            "No serialization method found for %s. "
-            "Falling back to pickle.", type(obj))
+            "No serialization method found for %s. Falling back to pickle.", type(obj)
+        )
 
-        return pickle.dumps(obj)
-
-    @classmethod
-    def item_to_bytes(
-        cls,
-        key: str,
-        obj: object,
-    ) -> bytes:
-        return b''.join(kb + vb for kb, vb in cls.iter_item_to_bytes(key, obj))
+        return (pickle.dumps(obj),)
 
     @classmethod
     def iter_item_to_bytes(
         cls,
         key: str,
         obj: object,
-    ) -> Iterable[tuple[bytes, bytes]]:
+    ) -> Iterable[bytes | memoryview]:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
@@ -74,42 +92,15 @@ class MultiModalHasher:
             for k, v in obj.items():
                 yield from cls.iter_item_to_bytes(f"{key}.{k}", v)
         else:
-            key_bytes = cls.serialize_item(key)
-            value_bytes = cls.serialize_item(obj)
-            yield key_bytes, value_bytes
+            yield key.encode("utf-8")
+            yield from cls.serialize_item(obj)
 
     @classmethod
     def hash_kwargs(cls, **kwargs: object) -> str:
         hasher = blake3()
 
         for k, v in kwargs.items():
-            for k_bytes, v_bytes in cls.iter_item_to_bytes(k, v):
-                hasher.update(k_bytes)
-                hasher.update(v_bytes)
+            for bytes_ in cls.iter_item_to_bytes(k, v):
+                hasher.update(bytes_)
 
         return hasher.hexdigest()
-
-    @classmethod
-    def hash_prompt_mm_data(
-            cls, prompt: "TokensPrompt") -> Optional["MultiModalHashDict"]:
-        """Hash multimodal data in the user input prompt if they exist."""
-
-        if "multi_modal_data" not in prompt:
-            return None
-
-        mm_data = prompt["multi_modal_data"]
-        if not mm_data:
-            # mm_data can be None or an empty dict.
-            return None
-
-        mm_items = {
-            modality: items if isinstance(items, list) else [items]
-            for modality, items in mm_data.items()
-        }
-
-        mm_hashes = {
-            modality: [cls.hash_kwargs(**{modality: item}) for item in items]
-            for modality, items in mm_items.items()
-        }
-
-        return mm_hashes

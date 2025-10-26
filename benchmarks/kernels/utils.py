@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from collections.abc import Iterable
-from typing import Any, Callable, Optional
+from collections.abc import Callable, Iterable
+from typing import Any
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -54,7 +55,7 @@ class Bench:
 
     def __init__(
         self,
-        cuda_graph_params: Optional[CudaGraphBenchParams],
+        cuda_graph_params: CudaGraphBenchParams | None,
         label: str,
         sub_label: str,
         description: str,

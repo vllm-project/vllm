@@ -45,6 +45,9 @@ struct SSMParamsBase {
     index_t out_d_stride;
     index_t out_z_batch_stride;
     index_t out_z_d_stride;
+    index_t ssm_states_batch_stride;
+    index_t ssm_states_dim_stride;  
+    index_t ssm_states_dstate_stride;
 
     // Common data pointers.
     void *__restrict__ A_ptr;

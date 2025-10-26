@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Description: Test the lazy import module
 # The utility function cannot be placed in `vllm.utils`
@@ -36,4 +37,5 @@ if use_blame:
 
 assert not any_module_imported(), (
     f"Some the modules in {module_names} are imported. To see the first"
-    f" import location, run the test with `use_blame=True`.")
+    f" import location, run the test with `use_blame=True`."
+)

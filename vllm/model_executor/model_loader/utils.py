@@ -1,50 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for selecting and loading models."""
-import contextlib
+
 import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
-import transformers
 from torch import nn
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from typing_extensions import assert_never
 
 from vllm.attention import Attention
-from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
-                         set_current_vllm_config)
+from vllm.attention.layer import MLAAttention
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.adapters import (as_classification_model,
-                                                 as_embedding_model,
-                                                 as_reward_model)
-from vllm.utils import is_pin_memory_available
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
+from vllm.model_executor.models.adapters import (
+    as_embedding_model,
+    as_reward_model,
+    as_seq_cls_model,
+    try_create_mm_pooling_model_cls,
+)
+from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
+from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
-
-
-@contextlib.contextmanager
-def set_default_torch_dtype(dtype: torch.dtype):
-    """Sets the default torch dtype to the given dtype."""
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
 
 
 def initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    model_class: Optional[type[nn.Module]] = None,
+    model_class: type[nn.Module] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
-    model_config = vllm_config.model_config
+    if model_config is None:
+        model_config = vllm_config.model_config
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
 
@@ -55,14 +51,16 @@ def initialize_model(
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with set_current_vllm_config(vllm_config, check_compile=True):
+        with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             return model_class(vllm_config=vllm_config, prefix=prefix)
 
-    msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
-           "input arguments. Possibly you have an old-style model class"
-           " registered from out of tree and it is used for new vLLM version. "
-           "Check https://docs.vllm.ai/en/latest/design/arch_overview.html "
-           "for the design and update the model class accordingly.")
+    msg = (
+        "vLLM model class should accept `vllm_config` and `prefix` as "
+        "input arguments. Possibly you have an old-style model class"
+        " registered from out of tree and it is used for new vLLM version. "
+        "Check https://docs.vllm.ai/en/latest/design/arch_overview.html "
+        "for the design and update the model class accordingly."
+    )
     warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
     logger.warning(
@@ -83,18 +81,21 @@ def initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
-    with set_current_vllm_config(vllm_config, check_compile=True):
+    with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         return model_class(**kwargs)
 
 
-def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
-                                  target_device: torch.device) -> None:
+def process_weights_after_loading(
+    model: nn.Module, model_config: ModelConfig, target_device: torch.device
+) -> None:
+    # to avoid circular dependency
+    from vllm.model_executor.model_loader.online_quantization import (
+        maybe_save_metadata_and_attributes_for_weight_reloading,
+    )
+
+    maybe_save_metadata_and_attributes_for_weight_reloading(model, model_config)
+
     for _, module in model.named_modules():
-        if isinstance(module, QKVCrossParallelLinear):
-            # NOTE(Isotr0py): special case for cross QKV layer because
-            # q and kv proj aren't registered as submodules intentionally
-            module.process_weights_after_loading()
-            continue
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
@@ -105,20 +106,19 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
 
-    # Currently only used by MLA.
-    # NOTE: This intentionally happens after other modules so we can easily
-    # decompress the weights for MLA.
+    # Initialize post-load attention weights for both Attention and MLA.
+    # NOTE: Happens after other modules so we can easily decompress weights.
     for _, module in model.named_modules():
-        if isinstance(module, Attention) and \
-            hasattr(module, "process_weights_after_loading"):
+        if isinstance(module, (Attention, MLAAttention)) and hasattr(
+            module, "process_weights_after_loading"
+        ):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
 
 
 @contextmanager
-def device_loading_context(module: torch.nn.Module,
-                           target_device: torch.device):
+def device_loading_context(module: torch.nn.Module, target_device: torch.device):
     if target_device.type == "cpu":
         # If target is CPU, no need to move anything
         yield module
@@ -159,91 +159,76 @@ def device_loading_context(module: torch.nn.Module,
         # New parameters or parameters already on target device are untouched
 
 
-def resolve_transformers_arch(model_config: ModelConfig,
-                              architectures: list[str]):
-    for i, arch in enumerate(architectures):
-        if arch == "TransformersForCausalLM":
-            continue
-        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
-                                           None) or dict()
-        # Make sure that config class is always initialized before model class,
-        # otherwise the model class won't be able to access the config class,
-        # the expected auto_map should have correct order like:
-        # "auto_map": {
-        #     "AutoConfig": "<your-repo-name>--<config-name>",
-        #     "AutoModel": "<your-repo-name>--<config-name>",
-        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
-        # },
-        auto_modules = {
-            name:
-            get_class_from_dynamic_module(module,
-                                          model_config.model,
-                                          revision=model_config.revision)
-            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
-        }
-        model_module = getattr(transformers, arch, None)
-        if model_module is None:
-            if "AutoModel" not in auto_map:
-                raise ValueError(
-                    f"Cannot find model module. '{arch}' is not a registered "
-                    "model in the Transformers library (only relevant if the "
-                    "model is meant to be in Transformers) and 'AutoModel' is "
-                    "not present in the model config's 'auto_map' (relevant "
-                    "if the model is custom).")
-            model_module = auto_modules["AutoModel"]
-        # TODO(Isotr0py): Further clean up these raises.
-        # perhaps handled them in _ModelRegistry._raise_for_unsupported?
-        if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not model_module.is_backend_compatible():
-                raise ValueError(
-                    f"The Transformers implementation of {arch} is not "
-                    "compatible with vLLM.")
-            architectures[i] = "TransformersForCausalLM"
-        if model_config.model_impl == ModelImpl.AUTO:
-            if not model_module.is_backend_compatible():
-                raise ValueError(
-                    f"{arch} has no vLLM implementation and the Transformers "
-                    "implementation is not compatible with vLLM. Try setting "
-                    "VLLM_USE_V1=0.")
-            logger.warning(
-                "%s has no vLLM implementation, falling back to Transformers "
-                "implementation. Some features may not be supported and "
-                "performance may not be optimal.", arch)
-            architectures[i] = "TransformersForCausalLM"
-    return architectures
+_MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
+"""Caches the outputs of `_get_model_architecture`."""
 
 
-def get_model_architecture(
-        model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
 
-    # Special handling for quantized Mixtral.
-    # FIXME(woosuk): This is a temporary hack.
-    mixtral_supported = [
-        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin", "quark"
-    ]
+    model_cls, arch = model_config.registry.resolve_model_cls(
+        architectures,
+        model_config=model_config,
+    )
 
-    if (model_config.quantization is not None
-            and model_config.quantization not in mixtral_supported
-            and "MixtralForCausalLM" in architectures):
-        architectures = ["QuantMixtralForCausalLM"]
+    if arch == model_config._get_transformers_backend_cls():
+        assert model_config.model_impl != "vllm"
+        if model_config.model_impl == "auto":
+            logger.warning_once(
+                "%s has no vLLM implementation, falling back to Transformers "
+                "implementation. Some features may not be supported and "
+                "performance may not be optimal.",
+                arch,
+            )
 
-    vllm_supported_archs = ModelRegistry.get_supported_archs()
-    vllm_not_supported = not any(arch in vllm_supported_archs
-                                 for arch in architectures)
-    if (model_config.model_impl == ModelImpl.TRANSFORMERS or
-            model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
-        architectures = resolve_transformers_arch(model_config, architectures)
+    convert_type = model_config.convert_type
+    if convert_type != "none" and supports_multimodal(model_cls):
+        logger.debug_once("Detected conversion of Multi Modal model.")
+        converted = try_create_mm_pooling_model_cls(model_cls)
+        if converted is not None:
+            logger.debug_once("Creating wrapper class to forward pooler.")
+            return converted, arch
+        else:
+            logger.debug_once("Attempting direct conversion.")
 
-    model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
-    if model_config.task == "embed":
+    if convert_type == "none":
+        pass
+    elif convert_type == "embed":
+        logger.debug_once("Converting to embedding model.")
         model_cls = as_embedding_model(model_cls)
-    elif model_config.task == "classify":
-        model_cls = as_classification_model(model_cls)
-    elif model_config.task == "reward":
+    elif convert_type == "classify":
+        logger.debug_once("Converting to sequence classification model.")
+        model_cls = as_seq_cls_model(model_cls)
+    elif convert_type == "reward":
+        logger.debug_once("Converting to reward model.")
         model_cls = as_reward_model(model_cls)
+    else:
+        assert_never(convert_type)
 
     return model_cls, arch
+
+
+def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    key = hash(
+        (
+            model_config.model,
+            model_config.convert_type,
+            model_config.runner_type,
+            model_config.trust_remote_code,
+            model_config.model_impl,
+            tuple(getattr(model_config.hf_config, "architectures", [])),
+        )
+    )
+    if key in _MODEL_ARCH_BY_HASH:
+        return _MODEL_ARCH_BY_HASH[key]
+
+    model_arch = _get_model_architecture(model_config)
+    _MODEL_ARCH_BY_HASH[key] = model_arch
+    return model_arch
+
+
+def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
+    return get_model_architecture(model_config)[0]
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
@@ -254,12 +239,12 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 class ParamMapping:
     """
     A class to handle parameter mapping for model weight loading.
-    It creates a bidirectional mapping between packed parameters and their 
+    It creates a bidirectional mapping between packed parameters and their
     constituent parts.
     """
+
     packed_mapping: dict[str, list[str]]
-    inverse_packed_mapping: dict[str, tuple[str,
-                                            int]] = field(default_factory=dict)
+    inverse_packed_mapping: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     def __post_init__(self):
         for packed_name, sub_params in self.packed_mapping.items():
@@ -272,29 +257,32 @@ class ParamMapping:
                     index,
                 )
 
-    def get_sub_modules(self,
-                        module_name: str) -> Optional[tuple[str, list[str]]]:
+    def get_sub_modules(self, module_name: str) -> tuple[str, list[str]] | None:
         for key, value in self.packed_mapping.items():
             if module_name.endswith(key):
                 return key, value
         return None
 
 
-def configure_quant_config(quant_config: QuantizationConfig,
-                           model_class: type[nn.Module]):
+def configure_quant_config(
+    quant_config: QuantizationConfig, model_class: type[nn.Module]
+):
     """
     Pass packed_modules_mapping by reference to quant_config so that
     quant_config can properly match fused modules
 
     Note that model attributes are passed by reference to quant_config,
     enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
+
+    Once the `SupportsQuant` mixin has been added to all models, this
+    function can be removed
     """
-    packed_mapping = getattr(model_class, "packed_modules_mapping", None)
-    if packed_mapping is not None:
-        # pass packed_modules_mapping by reference to quant_config
-        quant_config.packed_modules_mapping = packed_mapping
-    else:
-        logger.warning(
-            "The model class %s has not defined `packed_modules_mapping`, "
-            "this may lead to incorrect mapping of quantized or ignored "
-            "modules", model_class.__name__)
+    if not issubclass(model_class, SupportsQuant):
+        hf_to_vllm_mapper = getattr(model_class, "hf_to_vllm_mapper", None)
+        packed_mapping = getattr(model_class, "packed_modules_mapping", None)
+
+        # pass mappings by reference to quant_config
+        if hf_to_vllm_mapper is not None:
+            quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+        if packed_mapping is not None:
+            quant_config.packed_modules_mapping = packed_mapping

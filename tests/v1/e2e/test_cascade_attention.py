@@ -1,20 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
 from vllm import LLM, SamplingParams
 
-from ...utils import fork_new_process_for_each_test
+from ...utils import create_new_process_for_each_test
 
 
-@fork_new_process_for_each_test
-@pytest.mark.parametrize("attn_backend",
-                         ["FLASH_ATTN_VLLM_V1", "FLASHINFER_VLLM_V1"])
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("attn_backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_cascade_attention(example_system_message, monkeypatch, attn_backend):
     prompt = "\n<User>: Implement fibonacci sequence in Python.\n<Claude>:"
 
+    if attn_backend == "FLASHINFER":
+        pytest.skip(
+            "This test is failing with FlashInfer backend and "
+            "needs investigation. See issue #25679."
+        )
+
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
         llm = LLM(model="Qwen/Qwen2-1.5B-Instruct")

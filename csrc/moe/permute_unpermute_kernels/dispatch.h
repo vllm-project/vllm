@@ -14,12 +14,13 @@
     __VA_ARGS__();                                         \
     break;                                                 \
   }
-#define MOE_DISPATCH_FLOAT_CASE(...)                          \
-  MOE_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)       \
-  MOE_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)        \
-  MOE_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)    \
-  MOE_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__) \
-  MOE_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__)
+#define MOE_DISPATCH_FLOAT_CASE(...)                            \
+  MOE_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)         \
+  MOE_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)          \
+  MOE_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)      \
+  MOE_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__)   \
+  MOE_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
+  MOE_DISPATCH_CASE(at::ScalarType::Byte, __VA_ARGS__)
 
 #define MOE_DISPATCH(TYPE, ...) \
   MOE_SWITCH(TYPE, MOE_DISPATCH_FLOAT_CASE(__VA_ARGS__))
@@ -38,6 +39,11 @@ struct ScalarType2CudaType<at::ScalarType::Half> {
 template <>
 struct ScalarType2CudaType<at::ScalarType::BFloat16> {
   using type = __nv_bfloat16;
+};
+// uint8 for packed fp4
+template <>
+struct ScalarType2CudaType<at::ScalarType::Byte> {
+  using type = uint8_t;
 };
 
 // #if __CUDA_ARCH__ >= 890

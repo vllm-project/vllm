@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test:
 
@@ -11,22 +12,14 @@ import torch_xla
 import torch_xla.core
 import torch_xla.core.xla_model
 
-from vllm import envs
 from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.selector import _cached_get_attn_backend
 from vllm.platforms import current_platform
 
-if not envs.VLLM_USE_V1:
-    pytest.skip(
-        "Skipping V1 tests. Rerun with `VLLM_USE_V1=1` to test.",
-        allow_module_level=True,
-    )
-
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    """Clear lru cache to ensure each test case runs without caching.
-    """
+    """Clear lru cache to ensure each test case runs without caching."""
     _cached_get_attn_backend.cache_clear()
 
 
@@ -55,8 +48,7 @@ NUM_KV_HEADS = [1]
 HEAD_SIZES = [64, 80]
 
 
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This test needs a TPU")
+@pytest.mark.skipif(not current_platform.is_tpu(), reason="This test needs a TPU")
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -74,19 +66,12 @@ def test_mha_attn_forward(
     current_platform.seed_everything(0)
     # These are expected to be f32
     q = torch.randn(batch_size, seq_len, num_heads * head_size, device=device)
-    k = torch.randn(batch_size,
-                    seq_len,
-                    num_kv_heads * head_size,
-                    device=device)
-    v = torch.randn(batch_size,
-                    seq_len,
-                    num_kv_heads * head_size,
-                    device=device)
+    k = torch.randn(batch_size, seq_len, num_kv_heads * head_size, device=device)
+    v = torch.randn(batch_size, seq_len, num_kv_heads * head_size, device=device)
     scale = 1.0 / head_size**0.5
-    attn = MultiHeadAttention(num_heads,
-                              head_size,
-                              scale=scale,
-                              num_kv_heads=num_kv_heads)
+    attn = MultiHeadAttention(
+        num_heads, head_size, scale=scale, num_kv_heads=num_kv_heads
+    )
     output = attn(q, k, v)
 
     assert num_heads % num_kv_heads == 0

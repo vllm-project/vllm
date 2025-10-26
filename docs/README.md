@@ -1,43 +1,68 @@
-# vLLM documents
+---
+hide:
+  - navigation
+  - toc
+---
 
-## Build the docs
+# Welcome to vLLM
 
-- Make sure in `docs` directory
+<figure markdown="span">
+  ![](./assets/logos/vllm-logo-text-light.png){ align="center" alt="vLLM Light" class="logo-light" width="60%" }
+  ![](./assets/logos/vllm-logo-text-dark.png){ align="center" alt="vLLM Dark" class="logo-dark" width="60%" }
+</figure>
 
-```bash
-cd docs
-```
+<p style="text-align:center">
+<strong>Easy, fast, and cheap LLM serving for everyone
+</strong>
+</p>
 
-- Install the dependencies:
+<p style="text-align:center">
+<script async defer src="https://buttons.github.io/buttons.js"></script>
+<a class="github-button" href="https://github.com/vllm-project/vllm" data-show-count="true" data-size="large" aria-label="Star">Star</a>
+<a class="github-button" href="https://github.com/vllm-project/vllm/subscription" data-show-count="true" data-icon="octicon-eye" data-size="large" aria-label="Watch">Watch</a>
+<a class="github-button" href="https://github.com/vllm-project/vllm/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
+</p>
 
-```bash
-pip install -r ../requirements/docs.txt
-```
+vLLM is a fast and easy-to-use library for LLM inference and serving.
 
-- Clean the previous build (optional but recommended):
+Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
 
-```bash
-make clean
-```
+Where to get started with vLLM depends on the type of user. If you are looking to:
 
-- Generate the HTML documentation:
+- Run open-source models on vLLM, we recommend starting with the [Quickstart Guide](./getting_started/quickstart.md)
+- Build applications with vLLM, we recommend starting with the [User Guide](./usage)
+- Build vLLM, we recommend starting with [Developer Guide](./contributing)
 
-```bash
-make html
-```
+For information about the development of vLLM, see:
 
-## Open the docs with your browser
+- [Roadmap](https://roadmap.vllm.ai)
+- [Releases](https://github.com/vllm-project/vllm/releases)
 
-- Serve the documentation locally:
+vLLM is fast with:
 
-```bash
-python -m http.server -d build/html/
-```
+- State-of-the-art serving throughput
+- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
+- Continuous batching of incoming requests
+- Fast model execution with CUDA/HIP graph
+- Quantization: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), INT4, INT8, and FP8
+- Optimized CUDA kernels, including integration with FlashAttention and FlashInfer.
+- Speculative decoding
+- Chunked prefill
 
-This will start a local server at http://localhost:8000. You can now open your browser and view the documentation.
+vLLM is flexible and easy to use with:
 
-If port 8000 is already in use, you can specify a different port, for example:
+- Seamless integration with popular HuggingFace models
+- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
+- Tensor, pipeline, data and expert parallelism support for distributed inference
+- Streaming outputs
+- OpenAI-compatible API server
+- Support for NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, and TPU. Additionally, support for diverse hardware plugins such as Intel Gaudi, IBM Spyre and Huawei Ascend.
+- Prefix caching support
+- Multi-LoRA support
 
-```bash
-python -m http.server 3000 -d build/html/
-```
+For more information, check out the following:
+
+- [vLLM announcing blog post](https://vllm.ai) (intro to PagedAttention)
+- [vLLM paper](https://arxiv.org/abs/2309.06180) (SOSP 2023)
+- [How continuous batching enables 23x throughput in LLM inference while reducing p50 latency](https://www.anyscale.com/blog/continuous-batching-llm-inference) by Cade Daniel et al.
+- [vLLM Meetups](community/meetups.md)

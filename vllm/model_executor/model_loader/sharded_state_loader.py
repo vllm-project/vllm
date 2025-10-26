@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import collections
 import glob
 import os
 from collections.abc import Generator
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
 
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf, runai_safetensors_weights_iterator)
+    download_weights_from_hf,
+    runai_safetensors_weights_iterator,
+)
 from vllm.transformers_utils.s3_utils import glob as s3_glob
 from vllm.transformers_utils.utils import is_s3
 
@@ -33,29 +35,33 @@ class ShardedStateLoader(BaseModelLoader):
 
     DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
 
-    def __init__(self,
-                 load_config: LoadConfig,
-                 runai_model_streamer: bool = False):
+    def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
 
-        self.runai_model_streamer = runai_model_streamer
-        extra_config = ({} if load_config.model_loader_extra_config is None
-                        else load_config.model_loader_extra_config.copy())
+        extra_config = (
+            {}
+            if load_config.model_loader_extra_config is None
+            else load_config.model_loader_extra_config.copy()
+        )
         self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
         if extra_config:
-            raise ValueError(f"Unexpected extra config keys for load format "
-                             f"{load_config.load_format}: "
-                             f"{load_config.model_loader_extra_config.keys()}")
+            raise ValueError(
+                f"Unexpected extra config keys for load format "
+                f"{load_config.load_format}: "
+                f"{load_config.model_loader_extra_config.keys()}"
+            )
 
     @staticmethod
     def _filter_subtensors(
-        tensors: dict[str, torch.Tensor], ) -> dict[str, torch.Tensor]:
+        tensors: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
         """
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
         """
         same_storage_groups: dict[Any, list[tuple[str, torch.Tensor]]] = (
-            collections.defaultdict(list))
+            collections.defaultdict(list)
+        )
         for key, tensor in tensors.items():
             if tensor.numel():
                 ptr = tensor.untyped_storage().data_ptr()
@@ -83,8 +89,7 @@ class ShardedStateLoader(BaseModelLoader):
                     result[k] = t
         return result
 
-    def _prepare_weights(self, model_name_or_path: str,
-                         revision: Optional[str]):
+    def _prepare_weights(self, model_name_or_path: str, revision: str | None):
         if is_s3(model_name_or_path) or os.path.isdir(model_name_or_path):
             return model_name_or_path
         else:
@@ -100,11 +105,7 @@ class ShardedStateLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-        target_device = torch.device(device_config.device)
-
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         from vllm.distributed import get_tensor_model_parallel_rank
 
         model_weights = model_config.model
@@ -112,60 +113,54 @@ class ShardedStateLoader(BaseModelLoader):
             model_weights = model_config.model_weights
         local_model_path = model_weights
 
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config)
-                process_weights_after_loading(model, model_config,
-                                              target_device)
-            rank = get_tensor_model_parallel_rank()
-            pattern = os.path.join(
-                local_model_path,
-                self.pattern.format(rank=rank, part="*"),
-            )
+        rank = get_tensor_model_parallel_rank()
+        pattern = os.path.join(
+            local_model_path,
+            self.pattern.format(rank=rank, part="*"),
+        )
 
-            filepaths = []
-            if is_s3(local_model_path):
-                file_pattern = f"*{self.pattern.format(rank=rank, part=' * ')}"
-                filepaths = s3_glob(path=local_model_path,
-                                    allow_pattern=[file_pattern])
-            else:
-                filepaths = glob.glob(pattern)
-            if not filepaths:
-                # TODO: support un-sharded checkpoints too
-                raise ValueError(
-                    f"Could not find checkpoint files '{pattern}', only "
-                    f"pre-sharded checkpoints are currently supported!")
-            state_dict = self._filter_subtensors(model.state_dict())
-            for key, tensor in self.iterate_over_files(filepaths):
-                # If loading with LoRA enabled, additional padding may
-                # be added to certain parameters. We only load into a
-                # narrowed view of the parameter data.
-                param_data = state_dict[key].data
-                param_shape = state_dict[key].shape
-                for dim, size in enumerate(tensor.shape):
-                    if size < param_shape[dim]:
-                        param_data = param_data.narrow(dim, 0, size)
-                if tensor.shape != param_shape:
-                    logger.warning(
-                        "loading tensor of shape %s into "
-                        "parameter '%s' of shape %s",
-                        tensor.shape,
-                        key,
-                        param_shape,
-                    )
-                param_data.copy_(tensor)
-                state_dict.pop(key)
-            if state_dict:
-                raise ValueError(
-                    f"Missing keys {tuple(state_dict)} in loaded state!")
-        return model.eval()
+        filepaths = []
+        if is_s3(local_model_path):
+            file_pattern = f"*{self.pattern.format(rank=rank, part='*')}"
+            filepaths = s3_glob(path=local_model_path, allow_pattern=[file_pattern])
+        else:
+            filepaths = glob.glob(pattern)
+        if not filepaths:
+            # TODO: support un-sharded checkpoints too
+            raise ValueError(
+                f"Could not find checkpoint files '{pattern}', only "
+                f"pre-sharded checkpoints are currently supported!"
+            )
+        state_dict = self._filter_subtensors(model.state_dict())
+        for key, tensor in self.iterate_over_files(filepaths):
+            # If loading with LoRA enabled, additional padding may
+            # be added to certain parameters. We only load into a
+            # narrowed view of the parameter data.
+            param_data = state_dict[key].data
+            param_shape = state_dict[key].shape
+            for dim, size in enumerate(tensor.shape):
+                if size < param_shape[dim]:
+                    param_data = param_data.narrow(dim, 0, size)
+            if tensor.shape != param_shape:
+                logger.warning(
+                    "loading tensor of shape %s into parameter '%s' of shape %s",
+                    tensor.shape,
+                    key,
+                    param_shape,
+                )
+            param_data.copy_(tensor)
+            state_dict.pop(key)
+        if state_dict:
+            raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
 
     def iterate_over_files(
-            self, paths) -> Generator[tuple[str, torch.Tensor], None, None]:
-        if self.runai_model_streamer:
+        self, paths
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        if self.load_config.load_format == "runai_streamer_sharded":
             yield from runai_safetensors_weights_iterator(paths, True)
         else:
             from safetensors.torch import safe_open
+
             for path in paths:
                 with safe_open(path, framework="pt") as f:
                     for key in f.keys():  # noqa: SIM118
@@ -176,8 +171,8 @@ class ShardedStateLoader(BaseModelLoader):
     def save_model(
         model: torch.nn.Module,
         path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
+        pattern: str | None = None,
+        max_size: int | None = None,
     ) -> None:
         from safetensors.torch import save_file
 

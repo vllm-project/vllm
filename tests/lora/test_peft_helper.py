@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 import math
@@ -6,40 +7,28 @@ import shutil
 
 import pytest
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.lora.peft_helper import PEFTHelper
 
 ERROR_CASES = [
     (
         "test_rank",
-        {
-            "r": 1024
-        },
+        {"r": 1024},
         "is greater than max_lora_rank",
     ),
-    (
-        "test_bias",
-        {
-            "bias": "all"
-        },
-        "Adapter bias cannot be used without bias_enabled",
-    ),
-    ("test_dora", {
-        "use_dora": True
-    }, "does not yet support DoRA"),
+    ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
     (
         "test_modules_to_save",
-        {
-            "modules_to_save": ["lm_head"]
-        },
+        {"modules_to_save": ["lm_head"]},
         "only supports modules_to_save being None",
     ),
 ]
 
 
-def test_peft_helper_pass(long_context_lora_files_16k_1, tmp_path):
-    peft_helper = PEFTHelper.from_local_dir(long_context_lora_files_16k_1,
-                                            max_position_embeddings=4096)
+def test_peft_helper_pass(sql_lora_files, tmp_path):
+    peft_helper = PEFTHelper.from_local_dir(
+        sql_lora_files, max_position_embeddings=4096
+    )
     lora_config = LoRAConfig(max_lora_rank=16, max_cpu_loras=3, max_loras=2)
     peft_helper.validate_legal(lora_config)
     assert peft_helper.r == 8
@@ -55,15 +44,12 @@ def test_peft_helper_pass(long_context_lora_files_16k_1, tmp_path):
         "embed_tokens",
         "lm_head",
     ]
-    assert peft_helper.context_length == 16384
     assert peft_helper.vllm_max_position_embeddings == 4096
-    assert peft_helper.vllm_long_context_scaling_factor == float(
-        math.ceil(peft_helper.context_length /
-                  peft_helper.vllm_max_position_embeddings))
+
     # test RSLoRA
     rslora_config = dict(use_rslora=True)
     test_dir = tmp_path / "test_rslora"
-    shutil.copytree(long_context_lora_files_16k_1, test_dir)
+    shutil.copytree(sql_lora_files, test_dir)
 
     # Load and modify configuration
     config_path = test_dir / "adapter_config.json"
@@ -76,8 +62,7 @@ def test_peft_helper_pass(long_context_lora_files_16k_1, tmp_path):
     with open(config_path, "w") as f:
         json.dump(adapter_config, f)
 
-    peft_helper = PEFTHelper.from_local_dir(test_dir,
-                                            max_position_embeddings=4096)
+    peft_helper = PEFTHelper.from_local_dir(test_dir, max_position_embeddings=4096)
     peft_helper.validate_legal(lora_config)
     scaling = peft_helper.lora_alpha / math.sqrt(peft_helper.r)
     assert abs(peft_helper.vllm_lora_scaling_factor - scaling) < 1e-3
@@ -108,4 +93,5 @@ def test_peft_helper_error(
     # Test loading the adapter
     with pytest.raises(ValueError, match=expected_error):
         PEFTHelper.from_local_dir(
-            test_dir, max_position_embeddings=4096).validate_legal(lora_config)
+            test_dir, max_position_embeddings=4096
+        ).validate_legal(lora_config)
