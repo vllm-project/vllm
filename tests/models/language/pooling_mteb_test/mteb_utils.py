@@ -177,7 +177,7 @@ def mteb_test_embed_models(
     with vllm_runner(
         model_info.name,
         runner="pooling",
-        max_model_len=model_info.max_model_len,
+        max_model_len=None,
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
