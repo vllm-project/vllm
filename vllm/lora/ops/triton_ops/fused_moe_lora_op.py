@@ -209,6 +209,7 @@ def _fused_moe_lora_shrink(
     mul_routed_weight: bool = False,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
+    w1_lora_a_stacked = lora_a_stacked[0]
 
     shrink_config = {
         "BLOCK_SIZE_M": shrink_block_size_m,
