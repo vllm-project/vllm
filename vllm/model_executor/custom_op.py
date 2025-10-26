@@ -3,6 +3,7 @@
 
 from typing import Optional
 
+import torch
 import torch.nn as nn
 
 from vllm.config import get_cached_compilation_config
@@ -81,6 +82,12 @@ class CustomOp(nn.Module):
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
+
+        # TODO(girfan): This is likely not accurate and "True" even in dummy run etc.
+        # We should use a more accurate way to determine if the model is in training mode.
+        if torch.is_grad_enabled():
+            return self.forward_native
+
         compilation_config = get_cached_compilation_config()
         enabled = self.enabled()
         if enabled:

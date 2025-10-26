@@ -17,6 +17,7 @@ from vllm.lora.request import LoRARequest
 
 # Configuration - MATCHES PEFT exactly
 BASE_MODEL_PATH = "/home/girfan/models/Llama-3.2-1B-Instruct"
+DTYPE = "bfloat16"
 LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_qkv_zero_init_lora"
 LORA_DROPOUT = 0.05
 LORA_RANK = 8
@@ -86,6 +87,7 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 llm = LLM(
     model=BASE_MODEL_PATH,
+    dtype=DTYPE,
     max_model_len=MAX_LENGTH,
     max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
     gpu_memory_utilization=0.5,

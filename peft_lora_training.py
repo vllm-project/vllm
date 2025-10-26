@@ -12,6 +12,7 @@ from datasets import load_dataset, Dataset
 
 # Configuration - MATCHES vLLM exactly
 BASE_MODEL_PATH = "/home/girfan/models/Llama-3.2-1B-Instruct"
+DTYPE = torch.bfloat16
 LORA_RANK = 8
 LORA_ALPHA = 16
 LEARNING_RATE = 1e-4
@@ -97,7 +98,7 @@ print(f"Eval samples: {eval_size}")
 print("\n[2/5] Loading model and tokenizer...")
 model = AutoModelForCausalLM.from_pretrained(
     BASE_MODEL_PATH,
-    torch_dtype=torch.bfloat16,
+    torch_dtype=DTYPE,
     device_map="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)

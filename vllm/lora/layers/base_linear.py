@@ -70,6 +70,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
+                requires_grad=True,
             ) for _ in range(self.n_slices))
         self.lora_b_stacked = tuple(
             torch.zeros(
@@ -79,6 +80,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
+                requires_grad=True,
             ) for _ in range(self.n_slices))
         if lora_config.bias_enabled:
             lora_bias_out_size = lora_b_out_size
@@ -89,6 +91,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                     lora_bias_out_size,
                     dtype=lora_config.lora_dtype,
                     device=self.device,
+                    requires_grad=True,
                 ) for _ in range(self.n_slices))
         self.output_slices = (self.lora_b_stacked[0].shape[2], )
 
@@ -130,17 +133,17 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_bias = self.slice_bias(lora_bias)
 
         self.lora_a_stacked[0][index,
-                               0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                   lora_a.T, non_blocking=True)
+                               0, :lora_a.shape[1], :lora_a.shape[0]].detach().copy_(
+                                   lora_a.T, non_blocking=True).requires_grad_(True)
         self.lora_b_stacked[0][index,
-                               0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                   lora_b.T, non_blocking=True)
+                               0, :lora_b.shape[1], :lora_b.shape[0]].detach().copy_(
+                                   lora_b.T, non_blocking=True).requires_grad_(True)
         if lora_bias is not None:
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             assert len(self.lora_bias_stacked)
-            self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
-                lora_bias.T, non_blocking=True)
+            self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].detach().copy_(
+                lora_bias.T, non_blocking=True).requires_grad_(True)
         if is_trainable:
             self.lora_a_stacked[0].requires_grad_(True)
             self.lora_b_stacked[0].requires_grad_(True)
@@ -164,7 +167,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             # TODO(girfan): Do this conditionally only for training inputs.
             # Maybe by setting it in input_ids and checking if they require_grad?
             # Maybe we don't need this if it is already set higher up in the call chain?
-            x.requires_grad_(True)
+            # x.requires_grad_(True)
             return self._training_apply(x, output)
         else:
             return self._inference_apply(x, output)
@@ -192,11 +195,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output_offset = 0
             for slice_idx in range(len(self.lora_a_stacked)):
                 # Get LoRA weights for this slice
-                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :]  # [rank, input_size]
-                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :]  # [output_size, rank]
+                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :].clone().detach().requires_grad_(True)  # [rank, input_size]
+                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :].clone().detach().requires_grad_(True)  # [output_size, rank]
 
                 # Apply LoRA: x @ A^T @ B^T
-                lora_hidden = x[token_idx:token_idx+1] @ lora_a.T
+                # lora_hidden = x[token_idx:token_idx+1] @ lora_a.T
+                lora_hidden = torch.matmul(x[token_idx:token_idx+1], lora_a.T)
                 lora_output = lora_hidden @ lora_b.T
 
                 # Add to correct output slice

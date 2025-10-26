@@ -422,7 +422,6 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
-    @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -437,7 +436,7 @@ class Worker(WorkerBase):
 
         # Use inference_mode context manager conditionally instead of decorator
         # This allows gradient computation for training requests
-        ctx = torch.inference_mode() if not has_training_requests else nullcontext()
+        ctx = torch.inference_mode() if not has_training_requests else torch.enable_grad()
         with ctx:
             intermediate_tensors = None
             forward_pass = scheduler_output.total_num_scheduled_tokens > 0
