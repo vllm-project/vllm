@@ -662,7 +662,11 @@ def runai_safetensors_weights_iterator(
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
         is_cuda_alike = current_platform.is_cuda_alike()
-        device = f"cuda:{current_platform.current_device()}" if is_cuda_alike else "cpu"
+        device = (
+            f"cuda:{current_platform.current_device()}"
+            if is_distributed and is_cuda_alike
+            else "cpu"
+        )
 
         streamer.stream_files(
             hf_weights_files,
