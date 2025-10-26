@@ -103,7 +103,7 @@ if __name__ == "__main__":
     vocab_size_list = [4096, 16384]
     p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
     k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
-    func_list = [apply_top_k_top_p, apply_top_k_top_p_triton, apply_top_k_top_p_test2]
+    func_list = [apply_top_k_top_p, apply_top_k_top_p_test2]
 
     log_file = f"triton_topk_topp_test_{date_str}.log"
     csv_file = f"triton_topk_topp_test_{date_str}.csv"
@@ -169,20 +169,20 @@ if __name__ == "__main__":
             print_to_log(
                 b_str("torch_time_taken: ") + f"{time_list[0]}", log_file)
             print_to_log(
-                b_str("triton_time_taken: ") + f"{time_list[1]}",
+                b_str("test_time_taken: ") + f"{time_list[1]}",
                 log_file)
+            # print_to_log(
+            #     b_str("test_time_taken: ") + f"{time_list[2]}", log_file)
             print_to_log(
-                b_str("test_time_taken: ") + f"{time_list[2]}", log_file)
-            print_to_log(
-                g_str("Triton Speedup over Torch: ") +
+                g_str("test Speedup over Torch: ") +
                 f"{time_list[0] / time_list[1]:.8f}x", log_file)
-            print_to_log(
-                y_str("Test Speedup over Torch: ") +
-                f"{time_list[0] / time_list[2]:.8f}x", log_file)
+            # print_to_log(
+            #     y_str("Test Speedup over Torch: ") +
+                # f"{time_list[0] / time_list[2]:.8f}x", log_file)
             with open(csv_file, "a") as f:
                 f.write(f"{dist_generator},{batch_size},{vocab_size},{p},{k},"
-                        f"{correct_list[0]},{correct_list[1]},{time_list[0]},{time_list[1]},{time_list[2]},"
-                        f"{time_list[0] / time_list[1]:.8f}, {time_list[0] / time_list[2]:.8f}\n")
+                        f"{correct_list[0]},{time_list[0]},"
+                        f"{time_list[0] / time_list[1]:.8f}\n")
             print_to_log(y_str("--------------------------------\n"), log_file)
 
 """# SPDX-License-Identifier: Apache-2.0

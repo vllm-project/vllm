@@ -894,6 +894,8 @@ def apply_top_k_only(
 
     The logits tensor may be updated in-place.
     """
+    if k is None:
+        return logits
     max_top_k = k.max().item()
     
     # --- FIX: Handle k=0 edge case ---
@@ -1233,46 +1235,7 @@ def apply_top_k_top_p_test(
     # Apply top-p using binary search (no sort!)
     return apply_top_p_sorted_equivalent(logits, p)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# --------------------------------------------------------------------------------------
 
 @triton.jit
 def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.constexpr, VOCAB_SIZE:tl.constexpr, BLOCK_SIZE:tl.constexpr, WIDEN_NUM: tl.constexpr): 
@@ -1360,7 +1323,7 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
 
             if sum_outlier_probs > p:
                 min_range = outlier_prob
-                search_addr = PROBS_2_ROW
+                search_address = PROBS_2_ROW
                 search_range = tl.cast(num_outliers, tl.int32)
                 search_iters = tl.cast(
                     (num_outliers + BLOCK_SIZE - 1) // BLOCK_SIZE, tl.int32)
@@ -1429,7 +1392,7 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
                 force_remove_logit = tl.log(
                     min_larger_0 * sum_exp_logits) + max_logit
 
-            p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+            # p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
             p_pivot_logit = -float('inf')
 
             # -------- widen cutoff by 10% ----------------
@@ -1443,57 +1406,44 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
             current_num_force_remove = tl.zeros((), dtype=tl.uint32)
             kept_write_pos = 0
 
-            if p_pivot != -float('inf'):
-                for i in range(0, NUM_TILES):
-                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                    mask_n = offs_n < VOCAB_SIZE
-                    logits_blk = tl.load(LOGITS_ROW + offs_n,
-                                        mask=mask_n,
-                                        other=-float('inf'))
-
-                    if force_remove_logit != -float('inf'):
-                        # Force remove duplicates
-                        tolerance = 1e-5 * tl.maximum(1.0, tl.abs(force_remove_logit))
-                        force_remove_mask = tl.abs(
-                            logits_blk - force_remove_logit) < tolerance
-                        force_remove_count = tl.cumsum(force_remove_mask) + current_num_force_remove
-                        force_remove_count_mask = force_remove_count <= num_force_remove
-                        force_remove_mask = force_remove_count_mask & force_remove_mask
-                        logits_blk = tl.where(force_remove_mask, -float('inf'), logits_blk)
-                        current_num_force_remove = tl.max(force_remove_count)
-
-                    # Apply widened cutoff
-                    keep_mask = logits_blk > p_pivot_logit
-                    out_vals = tl.where(keep_mask, logits_blk, -float('inf'))
-                    tl.store(LOGITS_ROW + offs_n, out_vals, mask=mask_n)
-
-                    # ====== keeping track of L and indx_tensor ======
-                    n_kept = tl.sum(keep_mask, dtype=tl.int32)
-                    if n_kept > 0:
-                        cpos = tl.cast(tl.cumsum(keep_mask) - 1 + kept_write_pos, tl.int32)
-                        tl.store(IDX_ROW + cpos, offs_n, mask=keep_mask)
-                        kept_write_pos += n_kept
-            tl.store(L + row_id, tl.cast(kept_write_pos, tl.int32))
-        else:
-            IDX_ROW = idx_tensor + row_id * VOCAB_SIZE
-            LOGITS_ROW = LOGITS + row_id * VOCAB_SIZE
-            kept_write_pos = 0
-            
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < VOCAB_SIZE
+                logits_blk = tl.load(LOGITS_ROW + offs_n,
+                                    mask=mask_n,
+                                    other=-float('inf'))
+                # probs_blk = tl.load(PROBS_ROW + offs_n,
+                #                    mask=mask_n,
+                #                    other=0.0)
 
-                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
-                tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
+                if force_remove_logit != -float('inf'):
+                    # Force remove duplicates
+                    tolerance = 1e-5 * tl.maximum(1.0, tl.abs(force_remove_logit))
+                    force_remove_mask = tl.abs(
+                        logits_blk - force_remove_logit) < tolerance
+                    force_remove_count = tl.cumsum(force_remove_mask) + current_num_force_remove
+                    force_remove_count_mask = force_remove_count <= num_force_remove
+                    force_remove_mask = force_remove_count_mask & force_remove_mask
+                    logits_blk = tl.where(force_remove_mask, -float('inf'), logits_blk)
+                    current_num_force_remove = tl.max(force_remove_count)
 
-                n_kept = tl.sum(mask_n, dtype=tl.int32)
+                # Apply widened cutoff
+                keep_mask = logits_blk > p_pivot_logit
+                out_vals = tl.where(keep_mask, logits_blk, -float('inf'))
+                tl.store(LOGITS_ROW + offs_n, out_vals, mask=mask_n)
+
+                # ====== keeping track of L and idx_tensor ======
+                n_kept = tl.sum(keep_mask, dtype=tl.int32)
                 if n_kept > 0:
-                    cpos = tl.cast(tl.cumsum(mask_n) - 1 + kept_write_pos, tl.int32)
-                    tl.store(IDX_ROW + cpos, offs_n, mask=mask_n)
-                    kept_write_pos += n_kept
-            
-            tl.store(L + row_id, tl.cast(kept_write_pos, tl.int32))
+                    cpos = tl.cast(tl.cumsum(keep_mask) - 1 + kept_write_pos, tl.int32)
+                    write_idx = tl.where(keep_mask, cpos, 0) 
 
+                    tl.store(IDX_ROW + write_idx, offs_n, mask=keep_mask)
+                    # tl.store(PROBS_2_ROW + write_idx, probs_blk, mask=keep_mask)
+
+                    kept_write_pos += n_kept
+            tl.store(L + row_id, tl.cast(kept_write_pos, tl.int32))
+    
 def apply_top_p_filtered (
     logits: torch.Tensor,
     p: torch.Tensor,
@@ -1502,22 +1452,28 @@ def apply_top_p_filtered (
     Applies top-p using pivot-based filtering 
     """
     batch_size, vocab_size = logits.shape
-    original_logits = logits.clone()
-    probs = torch.empty_like(logits)
-    probs_2 = torch.full_like(probs, -float('inf'), device=logits.device)
-    l = torch.zeros((batch_size,), device=logits.device, dtype=torch.int32)
-    idx_tensor = torch.empty_like(logits, dtype=torch.int)
+    
+    probs = torch.full((batch_size, vocab_size), -float('inf'), device=logits.device)
+    probs_2 = torch.full((batch_size, vocab_size), -float('inf'), device=logits.device)
 
-    BLOCK_SIZE = 1024
-    SIGMA = 2.0
-    WIDEN_NUM = 90 
+    l = torch.zeros((batch_size,), device=logits.device, dtype=torch.int32)
+    idx_tensor = torch.full_like(logits, 0, dtype=torch.int32)
+
+    BLOCK_SIZE = 2048
+    SIGMA = 2.15   
+    NUM_WARPS = 16
+    NUM_STAGES = 3
+    WIDEN_NUM = 120
+
+    if not torch.any(p < 1.0):  
+        return logits
 
     grid = lambda meta: ((batch_size + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'], )
     top_p_pivot_filter[grid](
         logits,
+        l,
         probs,
         probs_2,
-        l,
         idx_tensor,
         p,
         batch_size,
@@ -1533,28 +1489,24 @@ def apply_top_p_filtered (
         return torch.full((batch_size, vocab_size), -float('inf'), device=logits.device)
 
     outliers = idx_tensor[:, :max_l]
+    filtered_logits = torch.gather(logits, 1, outliers)
+
+    filtered_logits_sort, sort_indices = torch.sort(
+        filtered_logits, dim=-1, descending=False
+    )
+    outliers_sorted = torch.gather(outliers, 1, sort_indices)
+    filtered_probs_sort = filtered_logits_sort.softmax(dim=-1)
+
+    probs_sum = torch.cumsum(filtered_probs_sort, dim=-1, out=filtered_probs_sort)
+    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+    top_p_mask[:, -1] = False
+
+    filtered_logits_sort.masked_fill_(top_p_mask, -float("inf")) 
+
+    logits.fill_(-float("inf"))
+    logits.scatter_(dim=1, index=outliers_sorted, src=filtered_logits_sort)
     
-    # --- FIX 5: Gather from the *original* logits clone ---
-    filtered_logits = torch.gather(original_logits, 1, outliers)  # shape [B, max_l]
-    
-    mask = torch.arange(max_l, device=logits.device).expand(batch_size, -1) < l.unsqueeze(1)
-    padded_logits = torch.where(mask, filtered_logits, -float('inf'))
-
-    # ====== sort the filtered top p ======
-    logits_sort, sort_indices = torch.sort(padded_logits, dim=-1, descending=True)
-    logits_idx_sorted = torch.gather(outliers, 1, sort_indices)
-
-    if torch.any(p < 1.0):
-        probs_sort = logits_sort.softmax(dim=-1) # Use dim=-1 for safety
-        probs_sum = torch.cumsum(probs_sort, dim=-1)
-
-        top_p_mask = probs_sum > p.unsqueeze(dim=1)
-        top_p_mask[:, 0] = False
-        logits_sort.masked_fill_(top_p_mask, -float("inf"))
-        
-    final_logits = torch.full_like(logits, -float("inf"))
-    final_logits.scatter_(dim=1, index=logits_idx_sorted, src=logits_sort)
-    return final_logits 
+    return logits
 
 
 def apply_top_k_top_p_test2(
@@ -1565,12 +1517,12 @@ def apply_top_k_top_p_test2(
     """
     Uses pivot-based algorithm to filter --> sort 
     """
-    if p is None:
-        if k is None:
-            return logits
+    if k is None and p is None: 
+        return logits 
+    elif p is None and k is not None: 
         return apply_top_k_only(logits, k)
-    top_p_logits = apply_top_p_filtered(logits.clone(), p)
-    if k is None:
-        return top_p_logits
-    top_k_logits = apply_top_k_only(logits, k)
-    return torch.maximum(top_p_logits, top_k_logits)
+    elif k is None and p is not None:
+        return apply_top_p_filtered(logits, p)
+    else:
+        logits_p = apply_top_p_filtered(logits, p)
+        return apply_top_k_only(logits_p, k)
