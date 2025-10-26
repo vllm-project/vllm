@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from copy import copy
-from typing import Optional
 
 import numpy as np
 import torch
@@ -22,7 +21,7 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
-from vllm.v1.kv_cache_interface import CrossAttentionSpec
+from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -138,8 +137,8 @@ class CrossAttention(Attention):
         num_heads: int,
         head_size: int,
         scale: float,
-        cache_config: Optional[CacheConfig] = None,
-        attn_type: Optional[str] = None,
+        cache_config: CacheConfig | None = None,
+        attn_type: str | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
@@ -174,4 +173,12 @@ class CrossAttention(Attention):
             attn_backend=attn_backend,
             attn_type=AttentionType.ENCODER_DECODER,
             **kwargs,
+        )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        return CrossAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+            dtype=self.kv_cache_torch_dtype,
         )

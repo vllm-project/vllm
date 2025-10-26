@@ -25,8 +25,8 @@
 """Inference-only Qwen3-VL-MoE model compatible with HuggingFace weights."""
 
 import typing
-from collections.abc import Iterable
-from typing import Callable, Optional, Union
+from collections.abc import Callable, Iterable
+from itertools import islice
 
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig
@@ -89,10 +89,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        deepstack_input_embeds: Optional[IntermediateTensors] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        deepstack_input_embeds: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -103,11 +103,9 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer_idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer]
+        for layer_idx, layer in islice(
+            enumerate(self.layers), self.start_layer, self.end_layer
         ):
-            layer_idx = layer_idx + self.start_layer
-
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -352,6 +350,14 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
@@ -377,6 +383,11 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         self.language_model = Qwen3MoeLLMForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+        )
+        # Whether to include the gate_up_proj mapping is determined by
+        # the language model.
+        self.packed_modules_mapping = (
+            self.packed_modules_mapping | self.language_model.packed_modules_mapping
         )
 
         self.make_empty_intermediate_tensors = (

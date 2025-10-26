@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import AsyncGenerator
-from typing import Optional, Union
 
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -34,26 +32,26 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="transcribe",
             log_error_stack=log_error_stack,
+            enable_force_include_usage=enable_force_include_usage,
         )
 
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest, raw_request: Request
-    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None], ErrorResponse]:
+    ) -> TranscriptionResponse | AsyncGenerator[str, None] | ErrorResponse:
         """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
@@ -95,26 +93,26 @@ class OpenAIServingTranslation(OpenAISpeechToText):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="translate",
             log_error_stack=log_error_stack,
+            enable_force_include_usage=enable_force_include_usage,
         )
 
     async def create_translation(
         self, audio_data: bytes, request: TranslationRequest, raw_request: Request
-    ) -> Union[TranslationResponse, AsyncGenerator[str, None], ErrorResponse]:
+    ) -> TranslationResponse | AsyncGenerator[str, None] | ErrorResponse:
         """Translation API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranslation

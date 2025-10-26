@@ -6,9 +6,10 @@ toc_depth: 4
 
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
-- **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Performance benchmarks][performance-benchmarks]**: Automated CI benchmarks for development
-- **[Nightly benchmarks][nightly-benchmarks]**: Comparative benchmarks against alternatives
+- **[Benchmark CLI](#benchmark-cli)**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
+- **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
+- **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
+- **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
 [Benchmark CLI]: #benchmark-cli
 
@@ -29,12 +30,13 @@ th {
 | Dataset | Online | Offline | Data Path |
 |---------|--------|---------|-----------|
 | ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |
-| ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
+| ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
 | ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
 | BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
 | RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| RandomForReranking | ✅ | ✅ | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
 | HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
@@ -713,7 +715,7 @@ Generate synthetic image inputs alongside random text prompts to stress-test vis
 
 Notes:
 
-- Works only with online benchmark via the OpenAI  backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Works only with online benchmark via the OpenAI backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
 - Video sampling is not yet implemented.
 
 Start the server (example):
@@ -821,7 +823,7 @@ you should set `--endpoint /v1/embeddings` to use the Embeddings API. The backen
 - CLIP: `--backend openai-embeddings-clip`
 - VLM2Vec: `--backend openai-embeddings-vlm2vec`
 
-For other models, please add your own implementation inside <gh-file:vllm/benchmarks/lib/endpoint_request_func.py> to match the expected instruction format.
+For other models, please add your own implementation inside [vllm/benchmarks/lib/endpoint_request_func.py](../../vllm/benchmarks/lib/endpoint_request_func.py) to match the expected instruction format.
 
 You can use any text or multi-modal dataset to benchmark the model, as long as the model supports it.
 For example, you can use ShareGPT and VisionArena to benchmark vision-language embeddings.
@@ -878,7 +880,207 @@ vllm bench serve \
 
 </details>
 
-[](){ #performance-benchmarks }
+#### Reranker Benchmark
+
+Benchmark the performance of rerank requests in vLLM.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--backend vllm-rerank` and `--endpoint /v1/rerank` to use the Reranker API.
+
+For reranking, the only supported dataset is `--dataset-name random-rerank`
+
+Start the server:
+
+```bash
+vllm serve BAAI/bge-reranker-v2-m3
+```
+
+Run the benchmark:
+
+```bash
+vllm bench serve \
+  --model BAAI/bge-reranker-v2-m3 \
+  --backend vllm-rerank \
+  --endpoint /v1/rerank \
+  --dataset-name random-rerank \
+  --tokenizer BAAI/bge-reranker-v2-m3 \
+  --random-input-len 512 \
+  --num-prompts 10 \
+  --random-batch-size 5
+```
+
+For reranker models, this will create `num_prompts / random_batch_size` requests with
+`random_batch_size` "documents" where each one has close to `random_input_len` tokens.
+In the example above, this results in 2 rerank requests with 5 "documents" each where
+each document has close to 512 tokens.
+
+Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
+with an embedding model, also set `--no_reranker`. Because in this case the query is
+treated as a individual prompt by the server, here we send `random_batch_size - 1` documents
+to account for the extra prompt which is the query. The token accounting to report the
+throughput numbers correctly is also adjusted.
+
+</details>
+
+## Parameter Sweeps
+
+### Online Benchmark
+
+[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
+
+Follow these steps to run the script:
+
+1. Construct the base command to `vllm serve`, and pass it to the `--serve-cmd` option.
+2. Construct the base command to `vllm bench serve`, and pass it to the `--bench-cmd` option.
+3. (Optional) If you would like to vary the settings of `vllm serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--serve-params`.
+
+    - Example: Tuning `--max-num-seqs` and `--max-num-batched-tokens`:
+
+    ```json
+    [
+        {
+            "max_num_seqs": 32,
+            "max_num_batched_tokens": 1024
+        },
+        {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024
+        },
+        {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 2048
+        },
+        {
+            "max_num_seqs": 128,
+            "max_num_batched_tokens": 2048
+        },
+        {
+            "max_num_seqs": 128,
+            "max_num_batched_tokens": 4096
+        },
+        {
+            "max_num_seqs": 256,
+            "max_num_batched_tokens": 4096
+        }
+    ]
+    ```
+
+4. (Optional) If you would like to vary the settings of `vllm bench serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--bench-params`.
+
+    - Example: Using different input/output lengths for random dataset:
+
+    ```json
+    [
+        {
+            "random_input_len": 128,
+            "random_output_len": 32
+        },
+        {
+            "random_input_len": 256,
+            "random_output_len": 64
+        },
+        {
+            "random_input_len": 512,
+            "random_output_len": 128
+        }
+    ]
+    ```
+
+5. Determine where you want to save the results, and pass that to `--output-dir`.
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.serve \
+    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --serve-params benchmarks/serve_hparams.json \
+    --bench-params benchmarks/bench_hparams.json \
+    -o benchmarks/results
+```
+
+!!! important
+    If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
+    You can use `--dry-run` to preview the commands to be run.
+
+    We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
+    Between each benchmark run, we call the `/reset_prefix_cache` and `/reset_mm_cache` endpoints to get a clean slate for the next run.
+    In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
+
+!!! note
+    By default, each parameter combination is run 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
+
+!!! tip
+    You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
+  
+### SLA Auto-Tuner
+
+[`vllm/benchmarks/sweep/serve_sla.py`](../../vllm/benchmarks/sweep/serve_sla.py) is a wrapper over [`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
+
+For example, to ensure E2E latency within different target values for 99% of requests:
+
+```json
+[
+    {
+        "p99_e2el_ms": "<=200"
+    },
+    {
+        "p99_e2el_ms": "<=500"
+    },
+    {
+        "p99_e2el_ms": "<=1000"
+    },
+    {
+        "p99_e2el_ms": "<=2000"
+    }
+]
+```
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.serve_sla \
+    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --serve-params benchmarks/serve_hparams.json \
+    --bench-params benchmarks/bench_hparams.json \
+    --sla-params benchmarks/sla_hparams.json \
+    --sla-variable max_concurrency \
+    -o benchmarks/results
+```
+
+The algorithm for adjusting the SLA variable is as follows:
+
+1. Run the benchmark with infinite QPS, and use the corresponding metrics to determine the initial value of the variable.
+    - For example, the initial request rate is set to the concurrency under infinite QPS.
+2. If the SLA is still satisfied, keep doubling the value until the SLA is no longer satisfied. This gives a relatively narrow window that contains the point where the SLA is barely satisfied.
+3. Apply binary search over the window to find the maximum value that still satisfies the SLA.
+
+!!! important
+    SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
+
+    For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
+
+### Visualizer
+
+[`vllm/benchmarks/sweep/plot.py`](../../vllm/benchmarks/sweep/plot.py) can be used to plot performance curves from parameter sweep results.
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
+    --var-x max_concurrency \
+    --row-by random_input_len \
+    --col-by random_output_len \
+    --curve-by api_server_count,max_num_batched_tokens \
+    --filter-by 'max_concurrency<=1024'
+```
+
+!!! tip
+    You can use `--dry-run` to preview the figures to be plotted.
 
 ## Performance Benchmarks
 
@@ -916,7 +1118,7 @@ For more results visualization, check the [visualizing the results](https://gith
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
 
 ### Continuous Benchmarking
 
@@ -942,12 +1144,10 @@ The benchmarking currently runs on a predefined set of models configured in the 
 
 All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-[](){ #nightly-benchmarks }
-
 ## Nightly Benchmarks
 
 These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lmdeploy`) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the `perf-benchmarks` and `nightly-benchmarks` labels.
 
 The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
 
-More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).
+More information on the nightly benchmarks and their parameters can be found [here](../../.buildkite/nightly-benchmarks/nightly-descriptions.md).

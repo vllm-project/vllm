@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -20,7 +19,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
     dummy_inputs=LlavaDummyInputsBuilder,
 )
 class MyLlava(LlavaForConditionalGeneration):
-    def compute_logits(self, hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         # this dummy model always predicts the first token
         logits = super().compute_logits(hidden_states)
         if logits is not None:

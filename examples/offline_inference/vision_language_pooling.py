@@ -11,7 +11,7 @@ on HuggingFace model repository.
 from argparse import Namespace
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
+from typing import Literal, NamedTuple, TypeAlias, TypedDict, get_args
 
 from PIL.Image import Image
 
@@ -47,15 +47,15 @@ class TextImagesQuery(TypedDict):
 
 
 QueryModality = Literal["text", "image", "text+image", "text+images"]
-Query = Union[TextQuery, ImageQuery, TextImageQuery, TextImagesQuery]
+Query: TypeAlias = TextQuery | ImageQuery | TextImageQuery | TextImagesQuery
 
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    image: Optional[Image] = None
-    query: Optional[str] = None
-    documents: Optional[ScoreMultiModalParam] = None
+    prompt: str | None = None
+    image: Image | None = None
+    query: str | None = None
+    documents: ScoreMultiModalParam | None = None
 
 
 def run_clip(query: Query) -> ModelRequestData:
@@ -100,6 +100,53 @@ def run_e5_v(query: Query) -> ModelRequestData:
         model="royokong/e5-v",
         runner="pooling",
         max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
+
+
+def run_jinavl_reranker(query: Query) -> ModelRequestData:
+    if query["modality"] != "text+images":
+        raise ValueError(f"Unsupported query modality: '{query['modality']}'")
+
+    engine_args = EngineArgs(
+        model="jinaai/jina-reranker-m0",
+        runner="pooling",
+        max_model_len=32768,
+        trust_remote_code=True,
+        mm_processor_kwargs={
+            "min_pixels": 3136,
+            "max_pixels": 602112,
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        query=query["text"],
+        documents=query["image"],
+    )
+
+
+def run_siglip(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""  # For image input, make sure that the prompt text is empty
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="google/siglip-base-patch16-224",
+        runner="pooling",
         limit_mm_per_prompt={"image": 1},
     )
 
@@ -211,29 +258,6 @@ def run_vlm2vec_qwen2vl(query: Query) -> ModelRequestData:
     )
 
 
-def run_jinavl_reranker(query: Query) -> ModelRequestData:
-    if query["modality"] != "text+images":
-        raise ValueError(f"Unsupported query modality: '{query['modality']}'")
-
-    engine_args = EngineArgs(
-        model="jinaai/jina-reranker-m0",
-        runner="pooling",
-        max_model_len=32768,
-        trust_remote_code=True,
-        mm_processor_kwargs={
-            "min_pixels": 3136,
-            "max_pixels": 602112,
-        },
-        limit_mm_per_prompt={"image": 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        query=query["text"],
-        documents=query["image"],
-    )
-
-
 def get_query(modality: QueryModality):
     if modality == "text":
         return TextQuery(modality="text", text="A dog sitting in the grass")
@@ -281,7 +305,7 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
+def run_encode(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -311,7 +335,7 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         print("-" * 50)
 
 
-def run_score(model: str, modality: QueryModality, seed: Optional[int]):
+def run_score(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -328,9 +352,10 @@ def run_score(model: str, modality: QueryModality, seed: Optional[int]):
 model_example_map = {
     "clip": run_clip,
     "e5_v": run_e5_v,
+    "jinavl_reranker": run_jinavl_reranker,
+    "siglip": run_siglip,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,
-    "jinavl_reranker": run_jinavl_reranker,
 }
 
 

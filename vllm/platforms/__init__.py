@@ -3,11 +3,12 @@
 import logging
 import traceback
 from itertools import chain
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm import envs
-from vllm.plugins import load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname, supports_xccl
+from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -31,7 +32,7 @@ def vllm_version_matches_substr(substr: str) -> bool:
     return substr in vllm_version
 
 
-def tpu_platform_plugin() -> Optional[str]:
+def tpu_platform_plugin() -> str | None:
     logger.debug("Checking if TPU platform is available.")
 
     # Check for Pathways TPU proxy
@@ -55,7 +56,7 @@ def tpu_platform_plugin() -> Optional[str]:
         return None
 
 
-def cuda_platform_plugin() -> Optional[str]:
+def cuda_platform_plugin() -> str | None:
     is_cuda = False
     logger.debug("Checking if CUDA platform is available.")
     try:
@@ -106,7 +107,7 @@ def cuda_platform_plugin() -> Optional[str]:
     return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
 
 
-def rocm_platform_plugin() -> Optional[str]:
+def rocm_platform_plugin() -> str | None:
     is_rocm = False
     logger.debug("Checking if ROCm platform is available.")
     try:
@@ -127,7 +128,7 @@ def rocm_platform_plugin() -> Optional[str]:
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
 
-def xpu_platform_plugin() -> Optional[str]:
+def xpu_platform_plugin() -> str | None:
     is_xpu = False
     logger.debug("Checking if XPU platform is available.")
     try:
@@ -154,7 +155,7 @@ def xpu_platform_plugin() -> Optional[str]:
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
 
-def cpu_platform_plugin() -> Optional[str]:
+def cpu_platform_plugin() -> str | None:
     is_cpu = False
     logger.debug("Checking if CPU platform is available.")
     try:
@@ -188,7 +189,7 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
-    platform_plugins = load_plugins_by_group("vllm.platform_plugins")
+    platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []
 
@@ -221,10 +222,12 @@ def resolve_current_platform_cls_qualname() -> str:
         )
     elif len(activated_builtin_plugins) == 1:
         platform_cls_qualname = builtin_platform_plugins[activated_builtin_plugins[0]]()
-        logger.info("Automatically detected platform %s.", activated_builtin_plugins[0])
+        logger.debug(
+            "Automatically detected platform %s.", activated_builtin_plugins[0]
+        )
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
-        logger.info("No platform detected, vLLM is running on UnspecifiedPlatform")
+        logger.debug("No platform detected, vLLM is running on UnspecifiedPlatform")
     return platform_cls_qualname
 
 
@@ -257,6 +260,16 @@ def __getattr__(name: str):
         return _current_platform
     elif name in globals():
         return globals()[name]
+    else:
+        raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
+
+
+def __setattr__(name: str, value):
+    if name == "current_platform":
+        global _current_platform
+        _current_platform = value
+    elif name in globals():
+        globals()[name] = value
     else:
         raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 

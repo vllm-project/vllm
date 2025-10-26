@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Callable
 from itertools import product
-from typing import Any, Callable
+from typing import Any
 
 import torch
 

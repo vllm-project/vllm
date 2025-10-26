@@ -3,7 +3,6 @@
 
 from io import BytesIO
 from pathlib import Path
-from typing import Union
 
 import pybase64
 import torch
@@ -26,7 +25,7 @@ def rescale_image_size(
 
 def rgba_to_rgb(
     image: Image.Image,
-    background_color: Union[tuple[int, int, int], list[int]] = (255, 255, 255),
+    background_color: tuple[int, int, int] | list[int] = (255, 255, 255),
 ) -> Image.Image:
     """Convert an RGBA image to RGB with filled background color."""
     assert image.mode == "RGBA"

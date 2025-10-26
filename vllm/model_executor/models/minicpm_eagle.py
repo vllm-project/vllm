@@ -26,7 +26,6 @@
 
 import math
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -61,8 +60,8 @@ class EagleMiniCPMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -118,7 +117,7 @@ class EagleMiniCPMDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
@@ -185,8 +184,8 @@ class EagleMiniCPMModel(nn.Module):
         self,
         prefix: str,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig],
-        quant_config: Optional[QuantizationConfig],
+        cache_config: CacheConfig | None,
+        quant_config: QuantizationConfig | None,
         start_layer: int,
     ):
         self.eagle_layers = nn.ModuleList(
@@ -210,7 +209,7 @@ class EagleMiniCPMModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         input_embeds = self.get_input_embeddings(input_ids)
         input_embeds = self.input_norm1(input_embeds)
         hidden_states = self.input_norm2(hidden_states)
@@ -389,7 +388,7 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

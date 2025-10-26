@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Parameter
 
 import vllm.model_executor.layers.fused_moe  # noqa
@@ -13,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -25,8 +28,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
     set_weight_attrs,
 )
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.awq import AWQConfig, is_layer_skipped_awq
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -47,10 +49,16 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     verify_marlin_supported,
     verify_marlin_supports_shape,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.transformers_utils.config import get_safetensors_params_metadata
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -70,7 +78,7 @@ class AWQMarlinConfig(QuantizationConfig):
         group_size: int,
         zero_point: bool,
         lm_head_quantized: bool,
-        modules_to_not_convert: Optional[list[str]],
+        modules_to_not_convert: list[str] | None,
         full_config: dict[str, Any],
     ) -> None:
         super().__init__()
@@ -104,7 +112,7 @@ class AWQMarlinConfig(QuantizationConfig):
         )
 
     @classmethod
-    def get_name(cls) -> QuantizationMethods:
+    def get_name(cls) -> "QuantizationMethods":
         return "awq_marlin"
 
     @classmethod
@@ -140,7 +148,7 @@ class AWQMarlinConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> Optional["QuantizationMethods"]:
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
         is_valid_user_quant = (
             user_quant is None or user_quant == "marlin" or user_quant == "awq_marlin"
@@ -169,7 +177,12 @@ class AWQMarlinConfig(QuantizationConfig):
         if isinstance(layer, LinearBase) or (
             isinstance(layer, ParallelLMHead) and self.lm_head_quantized
         ):
-            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+            if is_layer_skipped(
+                prefix,
+                self.modules_to_not_convert,
+                self.packed_modules_mapping,
+                skip_with_substr=True,
+            ):
                 return UnquantizedLinearMethod()
             # Check if the layer is supported by AWQMarlin.
             if not check_marlin_supports_layer(layer, self.group_size):
@@ -184,8 +197,10 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-            if is_layer_skipped_awq(
-                prefix, getattr(self, "modules_to_not_convert", [])
+            if is_layer_skipped(
+                prefix,
+                getattr(self, "modules_to_not_convert", []),
+                skip_with_substr=True,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
@@ -223,6 +238,27 @@ class AWQMarlinConfig(QuantizationConfig):
         return check_marlin_supported(
             quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
         )
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.modules_to_not_convert:
+            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
+                self.modules_to_not_convert
+            )
+
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        if self.modules_to_not_convert:
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        layers = {param_name.rsplit(".", 1)[0] for param_name in metadata}
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get("dtype", None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
+        }
+        self.modules_to_not_convert = list(layers - quant_layers)
 
 
 class AWQMarlinLinearMethod(LinearMethodBase):
@@ -360,7 +396,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return apply_awq_marlin_linear(
             input=x,
@@ -555,7 +591,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
@@ -566,21 +602,21 @@ class AWQMoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.fused_experts is None
 
         if enable_eplb:
@@ -603,7 +639,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        return torch.ops.vllm.fused_marlin_moe(
+        return fused_marlin_moe(
             x,
             layer.w13_qweight,
             layer.w2_qweight,

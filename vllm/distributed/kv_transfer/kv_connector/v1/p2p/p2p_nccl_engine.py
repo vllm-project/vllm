@@ -5,11 +5,10 @@ import logging
 import os
 import threading
 import time
-import typing
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import msgpack
 import torch
@@ -26,7 +25,8 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool,
 )
-from vllm.utils import current_stream, get_ip
+from vllm.utils.network_utils import get_ip
+from vllm.utils.torch_utils import current_stream
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class P2pNcclEngine:
         config: KVTransferConfig,
         hostname: str = "",
         port_offset: int = 0,
-        library_path: Optional[str] = None,
+        library_path: str | None = None,
     ) -> None:
         self.config = config
         self.rank = port_offset
@@ -187,7 +187,7 @@ class P2pNcclEngine:
             self.nccl_num_channels,
         )
 
-    def create_connect(self, remote_address: typing.Optional[str] = None):
+    def create_connect(self, remote_address: str | None = None):
         assert remote_address is not None
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
@@ -224,7 +224,7 @@ class P2pNcclEngine:
         self,
         tensor_id: str,
         tensor: torch.Tensor,
-        remote_address: typing.Optional[str] = None,
+        remote_address: str | None = None,
     ) -> bool:
         if remote_address is None:
             with self.recv_store_cv:
@@ -296,7 +296,7 @@ class P2pNcclEngine:
     def recv_tensor(
         self,
         tensor_id: str,
-        remote_address: typing.Optional[str] = None,
+        remote_address: str | None = None,
     ) -> torch.Tensor:
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
@@ -527,7 +527,7 @@ class P2pNcclEngine:
 
     def get_finished(
         self, finished_req_ids: set[str], no_compile_layers
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.

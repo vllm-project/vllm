@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -19,6 +17,13 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
+else:
+    KVConnectorMetadata = object
+    LoRARequest = object
+    MultiModalFeatureSpec = object
+    PoolingParams = object
+    SamplingParams = object
+    Request = object
 
 
 @bc_linter_include
@@ -32,14 +37,14 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: LoRARequest | None
-    prompt_embeds: torch.Tensor | None = None
+    prompt_embeds: "torch.Tensor | None" = None
 
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-    ) -> NewRequestData:
+    ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -98,6 +103,9 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
+    # If resumed_from_preemption is True, propogate the token ids to the
+    # connector, otherwise will be empty.
+    resumed_req_token_ids: list[list[int] | None]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
@@ -107,11 +115,12 @@ class CachedRequestData:
         return len(self.req_ids)
 
     @classmethod
-    def make_empty(cls) -> CachedRequestData:
+    def make_empty(cls) -> "CachedRequestData":
         return cls(
             req_ids=[],
             resumed_from_preemption=[],
             new_token_ids=[],
+            resumed_req_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -156,11 +165,12 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    # Dict of request ids to their index within the batch
-    # for filling the next token bitmask
-    structured_output_request_ids: dict[str, int]
+    # ids of structured outputs requests included in the bitmask, in the
+    # same order as the corresponding stacked rows of the bitmask.
+    # There may be more than one row per request in the case of speculative decoding.
+    structured_output_request_ids: list[str]
     # the bitmask for the whole batch
-    grammar_bitmask: npt.NDArray[np.int32] | None
+    grammar_bitmask: "npt.NDArray[np.int32] | None"
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None

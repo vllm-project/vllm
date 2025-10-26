@@ -18,7 +18,7 @@ def clear_cache():
 @pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 def test_selector(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
-        m.setenv(STR_BACKEND_ENV_VAR, "ROCM_FLASH")
+        m.setenv(STR_BACKEND_ENV_VAR, "ROCM_ATTN")
 
         # Set the current platform to ROCm using monkeypatch
         monkeypatch.setattr("vllm.attention.selector.current_platform", RocmPlatform())

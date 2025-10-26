@@ -19,7 +19,7 @@ def test_bert_models(
     dtype: str,
 ) -> None:
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.encode(example_prompts)
+        vllm_outputs = vllm_model.token_classify(example_prompts)
 
     with hf_runner(
         model, dtype=dtype, auto_cls=AutoModelForTokenClassification
@@ -50,7 +50,7 @@ def test_modernbert_models(
     dtype: str,
 ) -> None:
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.encode(example_prompts)
+        vllm_outputs = vllm_model.token_classify(example_prompts)
 
     with hf_runner(
         model, dtype=dtype, auto_cls=AutoModelForTokenClassification
@@ -67,4 +67,4 @@ def test_modernbert_models(
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = torch.tensor(hf_output).cpu().float()
         vllm_output = torch.tensor(vllm_output).cpu().float()
-        assert torch.allclose(hf_output, vllm_output, 1e-2)
+        assert torch.allclose(hf_output, vllm_output, atol=1e-2)

@@ -8,6 +8,7 @@ and that each field has a docstring.
 import ast
 import inspect
 import sys
+from itertools import pairwise
 
 import regex as re
 
@@ -19,19 +20,6 @@ def get_attr_docs(cls_node: ast.ClassDef) -> dict[str, str]:
     Adapted from https://davidism.com/attribute-docstrings/
     https://davidism.com/mit-license/
     """
-
-    def pairwise(iterable):
-        """
-        Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-
-        Can be removed when Python 3.9 support is dropped.
-        """
-        iterator = iter(iterable)
-        a = next(iterator, None)
-
-        for b in iterator:
-            yield a, b
-            a = b
 
     out = {}
 

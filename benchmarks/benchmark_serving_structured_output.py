@@ -31,8 +31,8 @@ import time
 import uuid
 import warnings
 from collections.abc import AsyncGenerator
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Optional
 
 import datasets
 import numpy as np
@@ -316,7 +316,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
-    goodput_config_dict: Optional[dict[str, float]] = None,
+    goodput_config_dict: dict[str, float] | None = None,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -436,9 +436,9 @@ async def benchmark(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[str],
     ignore_eos: bool,
-    max_concurrency: Optional[int],
+    max_concurrency: int | None,
     structured_output_ratio: float,
-    goodput_config_dict: Optional[dict[str, float]] = None,
+    goodput_config_dict: dict[str, float] | None = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -502,15 +502,9 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else nullcontext()
 
     async def limited_request_func(request_func_input, pbar):
-        if semaphore is None:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
         async with semaphore:
             return await request_func(request_func_input=request_func_input, pbar=pbar)
 

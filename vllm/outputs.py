@@ -4,7 +4,7 @@
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Any, Generic, Optional, Union
+from typing import Any, Generic
 
 import torch
 from typing_extensions import TypeVar
@@ -41,11 +41,11 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
-    cumulative_logprob: Optional[float]
-    logprobs: Optional[SampleLogprobs]
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    lora_request: Optional[LoRARequest] = None
+    cumulative_logprob: float | None
+    logprobs: SampleLogprobs | None
+    finish_reason: str | None = None
+    stop_reason: int | str | None = None
+    lora_request: LoRARequest | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -108,19 +108,19 @@ class RequestOutput:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[list[int]],
-        prompt_logprobs: Optional[PromptLogprobs],
+        prompt: str | None,
+        prompt_token_ids: list[int] | None,
+        prompt_logprobs: PromptLogprobs | None,
         outputs: list[CompletionOutput],
         finished: bool,
-        metrics: Optional[Union[RequestMetrics, RequestStateStats]] = None,
-        lora_request: Optional[LoRARequest] = None,
-        encoder_prompt: Optional[str] = None,
-        encoder_prompt_token_ids: Optional[list[int]] = None,
-        num_cached_tokens: Optional[int] = None,
+        metrics: RequestMetrics | RequestStateStats | None = None,
+        lora_request: LoRARequest | None = None,
+        encoder_prompt: str | None = None,
+        encoder_prompt_token_ids: list[int] | None = None,
+        num_cached_tokens: int | None = None,
         *,
-        multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
-        kv_transfer_params: Optional[dict[str, Any]] = None,
+        multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -201,14 +201,21 @@ class PoolingRequestOutput(Generic[_O]):
         request_id (str): A unique identifier for the pooling request.
         outputs (PoolingOutput): The pooling results for the given input.
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
+        num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
     def __init__(
-        self, request_id: str, outputs: _O, prompt_token_ids: list[int], finished: bool
+        self,
+        request_id: str,
+        outputs: _O,
+        prompt_token_ids: list[int],
+        num_cached_tokens: int,
+        finished: bool,
     ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
+        self.num_cached_tokens = num_cached_tokens
         self.finished = finished
         self.outputs = outputs
 
@@ -217,6 +224,7 @@ class PoolingRequestOutput(Generic[_O]):
             f"{type(self).__name__}(request_id={self.request_id!r}, "
             f"outputs={self.outputs!r}, "
             f"prompt_token_ids={self.prompt_token_ids}, "
+            f"num_cached_tokens={self.num_cached_tokens}, "
             f"finished={self.finished})"
         )
 
@@ -255,6 +263,7 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
             request_id=request_output.request_id,
             outputs=EmbeddingOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
 
@@ -294,6 +303,7 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
             request_id=request_output.request_id,
             outputs=ClassificationOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
 
@@ -330,5 +340,6 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
             request_id=request_output.request_id,
             outputs=ScoringOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )

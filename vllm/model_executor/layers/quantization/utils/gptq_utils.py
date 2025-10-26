@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from fractions import Fraction
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import regex as re
 import torch
@@ -25,7 +25,7 @@ else:
 
 # Match dynamic rules with module name (prefix) and override quantize
 # config if module (prefix) matches a rule
-def override_config(config: Union[GPTQConfig, GPTQMarlinConfig], prefix: str):
+def override_config(config: GPTQConfig | GPTQMarlinConfig, prefix: str):
     weight_bits = get_dynamic_override(config, prefix, "bits", config.weight_bits)
     if isinstance(weight_bits, int):
         config.weight_bits = weight_bits
@@ -60,11 +60,11 @@ def override_config(config: Union[GPTQConfig, GPTQMarlinConfig], prefix: str):
 
 
 def get_dynamic_override(
-    config: Union[GPTQConfig, GPTQMarlinConfig],
+    config: GPTQConfig | GPTQMarlinConfig,
     layer_name: str,
-    key: Optional[str] = None,
-    default_value: Union[int, bool, None] = None,
-) -> Union[dict, int, bool, None]:
+    key: str | None = None,
+    default_value: int | bool | None = None,
+) -> dict | int | bool | None:
     for pattern, pattern_dict in config.dynamic.items():
         # Negative match: matched modules are excluded from quantized init
         if pattern.startswith("-:"):
@@ -126,7 +126,7 @@ def is_layer_gptq_quantized(
 
 
 def get_linear_quant_method(
-    config: Union[GPTQConfig, GPTQMarlinConfig],
+    config: GPTQConfig | GPTQMarlinConfig,
     layer: torch.nn.Module,
     prefix: str,
     linear_method_cls: type,

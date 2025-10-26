@@ -15,13 +15,13 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
-    set_default_torch_dtype,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator,
 )
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 class GGUFModelLoader(BaseModelLoader):
@@ -72,6 +72,10 @@ class GGUFModelLoader(BaseModelLoader):
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
+        if model_type == "gemma3_text":
+            # Gemma3 models use "gemma3_text" in HuggingFace but
+            # "gemma3" in GGUF architecture naming
+            model_type = "gemma3"
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights

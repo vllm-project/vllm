@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import json
-import uuid
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 from xml.parsers.expat import ParserCreate
 
 import regex as re
 
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
@@ -39,7 +39,7 @@ class StreamingXMLToolCallParser:
         self.reset_streaming_state()
 
         # Tool configuration information
-        self.tools: Union[list[ChatCompletionToolsParam], None] = None
+        self.tools: list[ChatCompletionToolsParam] | None = None
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
         self.function_start_token: str = "<function="
@@ -341,7 +341,7 @@ class StreamingXMLToolCallParser:
         # Skip blank content
         return not element
 
-    def _find_next_complete_element(self, start_pos: int) -> tuple[Optional[str], int]:
+    def _find_next_complete_element(self, start_pos: int) -> tuple[str | None, int]:
         """
         Find next complete XML element from specified position
 
@@ -375,14 +375,21 @@ class StreamingXMLToolCallParser:
                 return buffer[: tag_end2 + 1], start_pos + tag_end2 + 1
             else:
                 # If currently not parsing tool calls (entering a tool_call),
-                # check if starts with <tool_call>
+                # check if starts with <tool_call> or <function=
                 if self.current_call_id is None:
                     # Check if might be start of <tool_call>
                     if buffer == "<tool_call>"[: len(buffer)]:
                         # Might be start of <tool_call>, wait for more data
                         return None, start_pos
+                    elif (
+                        buffer.startswith("<function=")
+                        or buffer == "<function="[: len(buffer)]
+                    ):
+                        # Might be start of <function=, wait for more data
+                        # to get the complete function tag
+                        return None, start_pos
                     else:
-                        # Not start of <tool_call>, treat as text
+                        # Not start of <tool_call> or <function=, treat as text
                         return buffer, start_pos + len(buffer)
                 else:
                     # When parsing tool calls,
@@ -584,7 +591,7 @@ class StreamingXMLToolCallParser:
         """Emit Delta response (streaming output)"""
         self.deltas.append(delta)
 
-    def _auto_close_open_parameter_if_needed(self, incoming_tag: Optional[str] = None):
+    def _auto_close_open_parameter_if_needed(self, incoming_tag: str | None = None):
         """Before starting to process new elements,
         if there are unclosed tags from before,
         automatically complete their endings to the parser.
@@ -621,7 +628,7 @@ class StreamingXMLToolCallParser:
             self._auto_close_open_parameter_if_needed("tool_call")
 
             self.parameters = {}
-            self.current_call_id = self._get_next_call_id()
+            self.current_call_id = make_tool_call_id()
             self.current_param_is_first = True
             self.tool_call_index += 1
         elif name.startswith("function") or (name == "function"):
@@ -953,15 +960,11 @@ class StreamingXMLToolCallParser:
         self.parser.EndElementHandler = self._end_element
         self.parser.CharacterDataHandler = self._char_data
 
-    def set_tools(self, tools: Union[list[ChatCompletionToolsParam], None]):
+    def set_tools(self, tools: list[ChatCompletionToolsParam] | None):
         """Set tool configuration information"""
         self.tools = tools
 
-    def _get_next_call_id(self):
-        """Generate unique call ID"""
-        return f"call_{uuid.uuid4().hex[:24]}"
-
-    def _extract_function_name(self, name: str, attrs: dict[str, str]) -> Optional[str]:
+    def _extract_function_name(self, name: str, attrs: dict[str, str]) -> str | None:
         """Extract function name from various formats"""
         if attrs and "name" in attrs:
             return attrs["name"]
@@ -973,9 +976,7 @@ class StreamingXMLToolCallParser:
 
         return None
 
-    def _extract_parameter_name(
-        self, name: str, attrs: dict[str, str]
-    ) -> Optional[str]:
+    def _extract_parameter_name(self, name: str, attrs: dict[str, str]) -> str | None:
         """Extract parameter name from various formats"""
         if attrs and "name" in attrs:
             return attrs["name"]
@@ -1170,6 +1171,10 @@ class Qwen3XMLToolParser(ToolParser):
         super().__init__(tokenizer)
         self.parser = StreamingXMLToolCallParser()
 
+        # Add missing attributes for compatibility with serving_chat.py
+        self.prev_tool_call_arr: list[dict] = []
+        self.streamed_args_for_tool: list[str] = []
+
         logger.info(
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
@@ -1180,6 +1185,9 @@ class Qwen3XMLToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         self.parser.reset_streaming_state()
+        # Reset tool call tracking arrays for new extraction
+        self.prev_tool_call_arr = []
+        self.streamed_args_for_tool = []
         if request:
             self.parser.set_tools(request.tools)
         result = self.parser.parse_single_streaming_chunks(model_output)
@@ -1203,6 +1211,34 @@ class Qwen3XMLToolParser(ToolParser):
                             ),
                         )
                     )
+
+                    # Update tool call tracking arrays for compatibility
+                    tool_index = (
+                        tool_call.index
+                        if tool_call.index is not None
+                        else len(self.prev_tool_call_arr) - 1
+                    )
+
+                    # Ensure we have enough entries in our tracking arrays
+                    while len(self.prev_tool_call_arr) <= tool_index:
+                        self.prev_tool_call_arr.append({"name": "", "arguments": ""})
+                    while len(self.streamed_args_for_tool) <= tool_index:
+                        self.streamed_args_for_tool.append("")
+
+                    # Update tool call information
+                    self.prev_tool_call_arr[tool_index]["name"] = (
+                        tool_call.function.name
+                    )
+                    self.prev_tool_call_arr[tool_index]["arguments"] = (
+                        tool_call.function.arguments
+                    )
+
+                    # Update streamed arguments
+                    if tool_call.function.arguments:
+                        self.streamed_args_for_tool[tool_index] = (
+                            tool_call.function.arguments
+                        )
+
             return ExtractedToolCallInformation(
                 tool_calls=tool_calls,
                 tools_called=len(tool_calls) > 0,
@@ -1218,9 +1254,12 @@ class Qwen3XMLToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if not previous_text:
             self.parser.reset_streaming_state()
+            # Reset tool call tracking arrays for new streaming session
+            self.prev_tool_call_arr = []
+            self.streamed_args_for_tool = []
             if request:
                 self.parser.set_tools(request.tools)
 
@@ -1232,20 +1271,48 @@ class Qwen3XMLToolParser(ToolParser):
             open_calls = current_text.count(
                 self.parser.tool_call_start_token
             ) - current_text.count(self.parser.tool_call_end_token)
-            if open_calls == 0 and self.parser.tool_call_index > 0:
-                # If current_call_id is None, use last_completed_call_id
-                call_id = (
-                    self.parser.current_call_id or self.parser.last_completed_call_id
-                )
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.parser.tool_call_index - 1,
-                            id=call_id,
-                            function=DeltaFunctionCall(arguments=""),
-                            type="function",
-                        )
-                    ]
-                )
+            if (
+                open_calls == 0
+                and self.parser.tool_call_index > 0
+                or not self.parser.tool_call_index
+                and current_text
+            ):
+                return DeltaMessage(content="")
+            return None
 
-        return self.parser.parse_single_streaming_chunks(delta_text)
+        # Parse the delta text and get the result
+        result = self.parser.parse_single_streaming_chunks(delta_text)
+
+        # Update tool call tracking arrays based on incremental parsing results
+        if result and result.tool_calls:
+            for tool_call in result.tool_calls:
+                if tool_call.function:
+                    tool_index = (
+                        tool_call.index
+                        if tool_call.index is not None
+                        else len(self.prev_tool_call_arr) - 1
+                    )
+
+                    # Ensure we have enough entries in our tracking arrays
+                    while len(self.prev_tool_call_arr) <= tool_index:
+                        self.prev_tool_call_arr.append({"name": "", "arguments": ""})
+                    while len(self.streamed_args_for_tool) <= tool_index:
+                        self.streamed_args_for_tool.append("")
+
+                    # Update tool name if provided
+                    if tool_call.function.name:
+                        self.prev_tool_call_arr[tool_index]["name"] = (
+                            tool_call.function.name
+                        )
+
+                    # Update arguments incrementally
+                    if tool_call.function.arguments is not None:
+                        # Concatenate the incremental arguments
+                        # to the existing streamed arguments
+                        self.prev_tool_call_arr[tool_index]["arguments"] += (
+                            tool_call.function.arguments
+                        )
+                        self.streamed_args_for_tool[tool_index] += (
+                            tool_call.function.arguments
+                        )
+        return result

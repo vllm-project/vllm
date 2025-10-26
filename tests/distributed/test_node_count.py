@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from vllm.distributed.parallel_state import _node_count
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import get_ip, get_open_port
+from vllm.utils.network_utils import get_ip, get_open_port
 
 if __name__ == "__main__":
     dist.init_process_group(backend="gloo")

@@ -3,11 +3,10 @@
 
 import warnings
 from collections.abc import Mapping
-from typing import Literal, Optional
+from typing import Literal
 
 import pytest
-from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
-from mistral_common.tokens.tokenizers.tekken import SpecialTokenInfo, Tekkenizer
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -71,6 +70,19 @@ def phi3v_model_config_mm_interleaved():
         limit_mm_per_prompt={
             "image": 2,
         },
+    )
+
+
+@pytest.fixture(scope="function")
+def phi3v_model_config_image_embeds():
+    return ModelConfig(
+        PHI3V_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+        enable_mm_embeds=True,
     )
 
 
@@ -153,9 +165,9 @@ def audio_url():
 
 
 def _assert_mm_data_is_image_input(
-    mm_data: Optional[MultiModalDataDict],
+    mm_data: MultiModalDataDict | None,
     image_count: int,
-    skipped_image_indices: Optional[list] = None,
+    skipped_image_indices: list | None = None,
 ) -> None:
     assert mm_data is not None
     assert set(mm_data.keys()) == {"image"}
@@ -170,9 +182,9 @@ def _assert_mm_data_is_image_input(
 
 
 def _assert_mm_uuids(
-    mm_uuids: Optional[MultiModalUUIDDict],
+    mm_uuids: MultiModalUUIDDict | None,
     media_count: int,
-    expected_uuids: list[Optional[str]],
+    expected_uuids: list[str | None],
     modality: str = "image",
 ) -> None:
     if len(expected_uuids) > 0:
@@ -194,9 +206,9 @@ MultiModalDataCounts = Mapping[ModalityType, int]
 
 
 def _assert_mm_data_inputs(
-    mm_data: Optional[MultiModalDataDict],
+    mm_data: MultiModalDataDict | None,
     data_count: MultiModalDataCounts,
-    skipped_media_indices: Optional[dict[str, list]] = None,  # modality -> list[int]
+    skipped_media_indices: dict[str, list] | None = None,  # modality -> list[int]
 ) -> None:
     assert mm_data is not None
     assert set(data_count.keys()) == (set(mm_data.keys()))
@@ -800,7 +812,7 @@ def test_parse_chat_messages_empty_pil_image_with_uuid(
 
 
 def test_parse_chat_messages_empty_image_embeds_with_uuid(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -814,7 +826,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -833,7 +845,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
 
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -847,7 +859,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -1730,7 +1742,9 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1811,6 +1825,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         "unsed_kwargs_2": "abc",
         # should not appear
         "chat_template": "{% Hello world! %}",
+        "tokenize": True,
         # used by tokenizer
         "continue_final_message": True,
         "tools": tools,
@@ -1829,7 +1844,9 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1847,10 +1864,21 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         tools=tools,
         model_config=model_config,
     )
+    with pytest.raises(
+        ValueError, match="Found unexpected chat template kwargs from request"
+    ):
+        # should raise error if `chat_template_kwargs` contains
+        # `chat_template` or `tokenize`
+        resolve_chat_template_kwargs(
+            tokenizer,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     resolved_chat_template_kwargs = resolve_chat_template_kwargs(
         tokenizer,
         chat_template=chat_template,
         chat_template_kwargs=chat_template_kwargs,
+        raise_on_unexpected=False,
     )
     assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
 
@@ -1879,7 +1907,9 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1937,7 +1967,9 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -2119,34 +2151,9 @@ def test_apply_mistral_chat_template_thinking_chunk():
         },
         {"role": "user", "content": "Thanks, what is 3+3?"},
     ]
-
-    # TODO(Julien): upon model release change to a tokenizer already configured.
-    # =================================================================
     mistral_tokenizer = MistralTokenizer.from_pretrained(
-        "mistralai/Devstral-Small-2507"
+        "mistralai/Magistral-Small-2509"
     )
-    assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
-    # Add think special tokens to the tokenizer
-    mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
-        rank=35, is_control=True, token_str=SpecialTokens.begin_think.value
-    )
-    mistral_tokenizer.tokenizer._all_special_tokens[36] = SpecialTokenInfo(
-        rank=36, is_control=True, token_str=SpecialTokens.end_think.value
-    )
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab = {
-        k: v
-        for k, v in mistral_tokenizer.tokenizer._special_tokens_reverse_vocab.items()
-        if v not in {35, 36}
-    }
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.begin_think.value
-    ] = 35
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.end_think.value
-    ] = 36
-    mistral_tokenizer.instruct.BEGIN_THINK = 35
-    mistral_tokenizer.instruct.END_THINK = 36
-    # =================================================================
 
     tokens_ids = apply_mistral_chat_template(
         mistral_tokenizer, messages, chat_template=None, tools=None

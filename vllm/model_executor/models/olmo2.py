@@ -27,7 +27,6 @@
 from collections.abc import Iterable
 from functools import partial
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -70,7 +69,7 @@ from vllm.transformers_utils.configs import Olmo3Config
 class Olmo2Attention(nn.Module):
     """
     This is the attention block where the output is computed as
-    ``Attention(LN(x))`` in ``MLP(LN(x + Attention(LN(x))))``
+    `Attention(LN(x))` in `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -191,7 +190,7 @@ class Olmo2Attention(nn.Module):
 class Olmo2MLP(nn.Module):
     """
     This is the MLP block where the output is computed as
-    ``MLP(x)`` in ``LN(MLP(x + LN(Attention(x))))``
+    `MLP(x)` in `LN(MLP(x + LN(Attention(x))))`
     (plus another skip connection).
     """
 
@@ -236,7 +235,7 @@ class Olmo2MLP(nn.Module):
 class Olmo2DecoderLayer(nn.Module):
     """
     This is a typical transformer block where the output is
-    computed as ``MLP(LN(x + Attention(LN(x))))``
+    computed as `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -312,9 +311,9 @@ class Olmo2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
         """
@@ -429,9 +428,9 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -443,7 +442,7 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

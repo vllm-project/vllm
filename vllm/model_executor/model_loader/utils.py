@@ -2,21 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for selecting and loading models."""
 
-import contextlib
 import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 from torch import nn
 from typing_extensions import assert_never
 
 from vllm.attention import Attention
+from vllm.attention.layer import MLAAttention
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -28,26 +26,17 @@ from vllm.model_executor.models.adapters import (
     try_create_mm_pooling_model_cls,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
-
-
-@contextlib.contextmanager
-def set_default_torch_dtype(dtype: torch.dtype):
-    """Sets the default torch dtype to the given dtype."""
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
 
 
 def initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    model_class: Optional[type[nn.Module]] = None,
-    model_config: Optional[ModelConfig] = None,
+    model_class: type[nn.Module] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     if model_config is None:
@@ -107,11 +96,6 @@ def process_weights_after_loading(
     maybe_save_metadata_and_attributes_for_weight_reloading(model, model_config)
 
     for _, module in model.named_modules():
-        if isinstance(module, QKVCrossParallelLinear):
-            # NOTE(Isotr0py): special case for cross QKV layer because
-            # q and kv proj aren't registered as submodules intentionally
-            module.process_weights_after_loading()
-            continue
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
@@ -122,11 +106,10 @@ def process_weights_after_loading(
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
 
-    # Currently only used by MLA.
-    # NOTE: This intentionally happens after other modules so we can easily
-    # decompress the weights for MLA.
+    # Initialize post-load attention weights for both Attention and MLA.
+    # NOTE: Happens after other modules so we can easily decompress weights.
     for _, module in model.named_modules():
-        if isinstance(module, Attention) and hasattr(
+        if isinstance(module, (Attention, MLAAttention)) and hasattr(
             module, "process_weights_after_loading"
         ):
             # TODO(lucas): see if there is a way to unify the signatures
@@ -274,7 +257,7 @@ class ParamMapping:
                     index,
                 )
 
-    def get_sub_modules(self, module_name: str) -> Optional[tuple[str, list[str]]]:
+    def get_sub_modules(self, module_name: str) -> tuple[str, list[str]] | None:
         for key, value in self.packed_mapping.items():
             if module_name.endswith(key):
                 return key, value
