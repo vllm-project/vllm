@@ -352,6 +352,67 @@ Supported models:
 
 Flags: `--tool-call-parser qwen3_xml`
 
+### Apertus Models (`apertus`)
+
+The Apertus tool parser supports models that generate tool calls in a custom format using special delimiter tokens.
+
+**Tool Call Format:**
+
+Apertus models generate tool calls enclosed between `<|tools_prefix|>` and `<|tools_suffix|>` tokens. Each tool call is represented as a JSON object where the key is the function name and the value is a dictionary of arguments:
+
+`<|tools_prefix|>[{"function_name": {"arg1": "value1", "arg2": "value2"}}, ...]<|tools_suffix|>`
+
+**Features:**
+
+* Supports both single and parallel tool calls
+* Streaming support with incremental argument updates
+* Handles incomplete JSON during streaming
+* Automatically extracts and parses tool calls from model output
+
+**Configuration Examples:**
+
+Basic server setup:
+
+```bash
+vllm serve <apertus-model-name> \
+    --enable-auto-tool-choice \
+    --tool-call-parser apertus 
+```
+
+If you god error when calling apertus the model with unction definition:
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "get_weather",
+    "description": "Determine weather in my location",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "location",
+        "unit"
+      ]
+    }
+  }
+}
+```
+
+The chat template got a bug, use the one in the VLLM project
+
+```bash
+vllm serve <apertus-model-name> \
+    --enable-auto-tool-choice \
+    --tool-call-parser apertus \
+    --chat-template examples/tool_chat_template_apertus.jinja
+```
 ### Olmo 3 Models (`olmo3`)
 
 Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).
