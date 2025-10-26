@@ -533,6 +533,24 @@ class FlexibleArgumentParser(ArgumentParser):
                 arg_duplicates = recursive_dict_update(dict_args[key], arg_dict)
                 duplicates |= {f"{key}.{d}" for d in arg_duplicates}
                 delete.add(i)
+            elif (processed_arg.startswith("-") 
+                  and i + 1 < len(processed_args) 
+                  and not processed_args[i + 1].startswith("-")):
+                # Handle standalone JSON arguments like -O '{"key": "value"}'
+                value_str = processed_args[i + 1]
+                try:
+                    parsed_json = json.loads(value_str)
+                    if isinstance(parsed_json, dict):
+                        # This is a JSON argument, merge it with existing dict_args
+                        key = processed_arg
+                        arg_duplicates = recursive_dict_update(dict_args[key],
+                                                               parsed_json)
+                        duplicates |= {f'{key}.{d}' for d in arg_duplicates}
+                        delete.add(i)
+                        delete.add(i + 1)
+                except json.decoder.JSONDecodeError:
+                    # Not a JSON argument, let it pass through normally
+                    pass
         # Filter out the dict args we set to None
         processed_args = [a for i, a in enumerate(processed_args) if i not in delete]
         if duplicates:
