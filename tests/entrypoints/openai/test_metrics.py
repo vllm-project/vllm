@@ -305,7 +305,7 @@ async def test_abort_metrics_reset(
     prompt_ids = tokenizer.encode(_PROMPT)
 
     running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
-        server
+        server,
     )
 
     # Expect no running requests or kvcache usage
