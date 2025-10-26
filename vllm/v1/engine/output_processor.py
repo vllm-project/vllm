@@ -35,9 +35,11 @@ class RequestOutputCollector:
     producer gets ahead of the consumer.
     """
 
-    def __init__(self,
-                 output_kind: RequestOutputKind,
-                 streaming_params: StreamingParams | None = None):
+    def __init__(
+        self,
+        output_kind: RequestOutputKind,
+        streaming_params: StreamingParams | None = None,
+    ):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
@@ -51,17 +53,17 @@ class RequestOutputCollector:
         else:
             if self.output is None:
                 self.output = output
-            elif isinstance(self.output,
-                            (RequestOutput, PoolingRequestOutput)):
+            elif isinstance(self.output, (RequestOutput, PoolingRequestOutput)):
                 # This ensures that request outputs with different request
                 # indexes(if n > 1) do not override each other.
                 self.output.add(output, aggregate=self.aggregate)
 
-            if isinstance(
-                    self.output, (RequestOutput, PoolingRequestOutput)) and (
-                        self.output.finished or self.streaming_params is None
-                        or sum(len(o.token_ids) for o in self.output.outputs)
-                        >= self.streaming_params.stream_n):
+            if isinstance(self.output, (RequestOutput, PoolingRequestOutput)) and (
+                self.output.finished
+                or self.streaming_params is None
+                or sum(len(o.token_ids) for o in self.output.outputs)
+                >= self.streaming_params.stream_n
+            ):
                 self.ready.set()
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:

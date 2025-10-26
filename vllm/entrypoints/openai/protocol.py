@@ -920,11 +920,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
-    
-    def to_streaming_params(self, ) -> StreamingParams:
+
+    def to_streaming_params(
+        self,
+    ) -> StreamingParams:
         stream_n = None
-        if self.stream_options is not None and \
-            self.stream_options.stream_n is not None:
+        if self.stream_options is not None and self.stream_options.stream_n is not None:
             stream_n = self.stream_options.stream_n
         return StreamingParams(stream_n=stream_n)
 
@@ -1420,11 +1421,12 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
-    
-    def to_streaming_params(self, ) -> StreamingParams:
+
+    def to_streaming_params(
+        self,
+    ) -> StreamingParams:
         stream_n = None
-        if self.stream_options is not None and \
-            self.stream_options.stream_n is not None:
+        if self.stream_options is not None and self.stream_options.stream_n is not None:
             stream_n = self.stream_options.stream_n
         return StreamingParams(stream_n=stream_n)
 
@@ -2736,12 +2738,11 @@ class TranscriptionRequest(OpenAIBaseModel):
             else RequestOutputKind.FINAL_ONLY,
             extra_args=self.vllm_xargs,
         )
-    
+
     def to_streaming_params(
         self,
     ) -> StreamingParams:  # stream_options not defined in transcription request
         return StreamingParams()
-
 
     @model_validator(mode="before")
     @classmethod

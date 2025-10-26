@@ -294,8 +294,9 @@ class AsyncLLM(EngineClient):
         is_pooling = isinstance(params, PoolingParams)
 
         # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind,
-                                       streaming_params=streaming_params)
+        queue = RequestOutputCollector(
+            output_kind=params.output_kind, streaming_params=streaming_params
+        )
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
