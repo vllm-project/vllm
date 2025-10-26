@@ -18,7 +18,7 @@ from vllm.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -639,8 +639,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.topk_indices_buffer = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability(100) else 64
 
-        # Reserve fixed workspace for prefill upconversion
-        vllm_config = indexer.vllm_config
+        vllm_config = get_current_vllm_config()
         prefill_workspace_size = get_prefill_workspace_size(vllm_config)
 
         self.prefill_workspace_spec = WorkspaceSpec(
@@ -755,24 +754,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
-
-        q = torch.cat([ql_nope, q_pe], dim=-1)
-
-        # CRITICAL: Write to KV cache FIRST before gathering/upconverting
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
         # prefill_workspace_starts has been adjusted in-place per chunk so
@@ -787,20 +768,32 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             workspace_starts=attn_metadata.prefill_workspace_starts,
         )
 
+        use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
+
+        q = torch.cat([ql_nope, q_pe], dim=-1)
+
+        # write the latent and rope to kv cache
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                k_c_normed,
+                k_pe.squeeze(1),
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=layer._k_scale,
+            )
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+
         if not use_fp8_cache:
             attn_out = self._forward_bf16_kv(
                 q, kv_cache, topk_indices_global, attn_metadata
             )
         else:
-            attn_out = q.new_empty(
-                (num_actual_toks, self.num_heads, self.kv_lora_rank),
-                dtype=q.dtype,
-                device=q.device,
-            )
-
             # Process decode tokens
             if num_decode_tokens > 0:
-                attn_out[:num_decode_tokens] = self._forward_fp8_kv(
+                attn_out = self._forward_fp8_kv(
                     q[:num_decode_tokens],
                     kv_cache,
                     topk_indices_global[:num_decode_tokens],
@@ -808,6 +801,14 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 )
 
             if num_prefill_tokens > 0:
+                decode_attn_out = attn_out
+                attn_out = q.new_empty(
+                    (num_actual_toks, self.num_heads, self.kv_lora_rank),
+                    dtype=q.dtype,
+                    device=q.device,
+                )
+                attn_out[:num_prefill_tokens] = decode_attn_out[:num_prefill_tokens]
+
                 assert attn_metadata.prefill_chunks is not None
                 prefill_bf16_workspace = current_workspace_manager().get(
                     self.prefill_workspace_spec
