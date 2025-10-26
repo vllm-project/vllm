@@ -128,6 +128,8 @@ class HFConfigParser(ConfigParserBase):
             "llm_cfg" in config_dict or "llm_config" in config_dict
         ) and file_or_path_exists(model, "llm/config.json", revision):
             try:
+                # Respect offline mode by passing through all kwargs, including
+                # local_files_only, rather than stripping it.
                 sub_cfg = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
@@ -135,7 +137,7 @@ class HFConfigParser(ConfigParserBase):
                     code_revision=code_revision,
                     token=_get_hf_token(),
                     subfolder="llm",
-                    **{k: v for k, v in kwargs.items() if k != "local_files_only"},
+                    **kwargs,
                 )
                 return config_dict, sub_cfg
             except ValueError as e:

@@ -130,14 +130,28 @@ class DefaultModelLoader(BaseModelLoader):
             hf_folder = model_name_or_path
 
         hf_weights_files: list[str] = []
+        matched_pattern: Optional[str] = None
         for pattern in allow_patterns:
-            hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
-            if len(hf_weights_files) > 0:
-                if pattern == "*.safetensors":
-                    use_safetensors = True
+            files = glob.glob(os.path.join(hf_folder, pattern))
+            if files:
+                hf_weights_files = files
+                matched_pattern = pattern
                 break
 
+        if hf_weights_files:
+            use_safetensors = any(f.endswith(".safetensors") for f in hf_weights_files)
+
         if use_safetensors:
+            # If weights live under a subfolder (e.g., 'llm/*.safetensors'), the index file will also be under that subfolder. Derive the prefix
+            # from the matched pattern or the first file's directory.
+            if matched_pattern and "/" in matched_pattern:
+                folder_prefix = matched_pattern.rsplit("/", 1)[0] + "/"
+            else:
+                first_dir_rel = os.path.relpath(
+                    os.path.dirname(hf_weights_files[0]), hf_folder
+                )
+                folder_prefix = "" if first_dir_rel in ("", ".") else first_dir_rel.rstrip("/") + "/"
+            index_file = folder_prefix + index_file
             # For models like Mistral-7B-Instruct-v0.3
             # there are both sharded safetensors files and a consolidated
             # safetensors file. Using both breaks.
