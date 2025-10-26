@@ -11,6 +11,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.eviction_policies import FrequencyCostEvictionPolicy
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -166,6 +167,25 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        # Optional frequency-cost policy (set via configure_eviction_policy)
+        self._policy: FrequencyCostEvictionPolicy | None = None
+
+    def configure_eviction_policy(
+        self,
+        policy: str,
+        *,
+        block_size: int,
+        alpha: float = 2.0,
+        time_decay: float = 0.0,
+    ) -> None:
+        """Configure optional eviction policy. Defaults to LRU if not set."""
+        if policy == "frequency_cost":
+            self._policy = FrequencyCostEvictionPolicy(
+                block_size=block_size, alpha=alpha, time_decay_factor=time_decay
+            )
+        else:
+            self._policy = None
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -278,19 +298,65 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        # Fast path: no policy configured -> original LRU behavior
+        if self._policy is None:
+            ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+            if self.enable_caching:
+                for block in ret:
+                    self._maybe_evict_cached_block(block)
+                    assert block.ref_cnt == 0
+                    block.ref_cnt += 1
+            else:
+                for block in ret:
+                    assert block.ref_cnt == 0
+                    block.ref_cnt += 1
+            return ret
 
-        # In order to only iterate the list once, we duplicated code a bit
+        # Policy path: prefer non-cached free blocks from LRU head, then
+        # choose cached-free blocks via policy ranking.
+        selected: list[KVCacheBlock] = []
+        deferred_cached: list[KVCacheBlock] = []
+
+        while len(selected) < num_blocks:
+            # Exhausted free blocks -> impossible due to initial check
+            blk = self.free_block_queue.popleft()
+            if blk.block_hash is None:
+                selected.append(blk)
+            else:
+                # remove from policy to avoid selecting it immediately
+                if self._policy is not None:
+                    self._policy.remove_block(blk)
+                deferred_cached.append(blk)
+            if self.get_num_free_blocks() == 0 and len(selected) < num_blocks:
+                break
+
+        if len(selected) < num_blocks:
+            need = num_blocks - len(selected)
+            # Ask policy for global cached-free candidates by block_id
+            ids = self._policy.get_eviction_candidates(need)
+            for block_id in ids:
+                blk = self.blocks[block_id]
+                # Remove from free list if still present
+                if blk.prev_free_block is not None and blk.next_free_block is not None:
+                    self.free_block_queue.remove(blk)
+                # Evict hash later below
+                selected.append(blk)
+
+        # Return deferred cached blocks to the free list tail to keep queue sound
+        for blk in deferred_cached:
+            self.free_block_queue.append(blk)
+
+        # Finalize selection: evict hashes for cached blocks; inc ref_cnt
         if self.enable_caching:
-            for block in ret:
-                self._maybe_evict_cached_block(block)
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
+            for blk in selected:
+                self._maybe_evict_cached_block(blk)
+                assert blk.ref_cnt == 0
+                blk.ref_cnt += 1
         else:
-            for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-        return ret
+            for blk in selected:
+                assert blk.ref_cnt == 0
+                blk.ref_cnt += 1
+        return selected
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
@@ -342,7 +408,11 @@ class BlockPool:
                 # candidate), so remove it.
                 if block.ref_cnt == 0 and not block.is_null:
                     self.free_block_queue.remove(block)
+                    if self._policy is not None:
+                        self._policy.remove_block(block)
                 block.ref_cnt += 1
+                if self._policy is not None:
+                    self._policy.on_block_access(block)
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
@@ -356,9 +426,15 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+        freed = [
+            block for block in blocks_list if block.ref_cnt == 0 and not block.is_null
+        ]
+        self.free_block_queue.append_n(freed)
+        if self._policy is not None:
+            for block in freed:
+                # Track only cached-free blocks
+                if block.block_hash is not None:
+                    self._policy.on_block_release(block)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -389,6 +465,9 @@ class BlockPool:
 
         if self.enable_kv_cache_events:
             self.kv_event_queue.append(AllBlocksCleared())
+
+        if self._policy is not None:
+            self._policy.reset()
 
         return True
 

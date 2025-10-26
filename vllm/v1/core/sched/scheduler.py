@@ -173,6 +173,9 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
+            eviction_policy=self.cache_config.prefix_cache_eviction_policy,
+            eviction_cost_alpha=self.cache_config.eviction_cost_alpha,
+            eviction_time_decay=self.cache_config.eviction_time_decay,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 

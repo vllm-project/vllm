@@ -417,6 +417,12 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
+    # Eviction policy flags for prefix caching
+    prefix_cache_eviction_policy: Literal["lru", "frequency_cost"] = (
+        CacheConfig.prefix_cache_eviction_policy
+    )
+    eviction_cost_alpha: float = CacheConfig.eviction_cost_alpha
+    eviction_time_decay: float = CacheConfig.eviction_time_decay
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
@@ -880,6 +886,16 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
+        )
+        cache_group.add_argument(
+            "--prefix-cache-eviction-policy",
+            **cache_kwargs["prefix_cache_eviction_policy"],
+        )
+        cache_group.add_argument(
+            "--eviction-cost-alpha", **cache_kwargs["eviction_cost_alpha"]
+        )
+        cache_group.add_argument(
+            "--eviction-time-decay", **cache_kwargs["eviction_time_decay"]
         )
         cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument(
@@ -1386,6 +1402,9 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
+            prefix_cache_eviction_policy=self.prefix_cache_eviction_policy,
+            eviction_cost_alpha=self.eviction_cost_alpha,
+            eviction_time_decay=self.eviction_time_decay,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,

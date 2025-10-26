@@ -24,6 +24,7 @@ BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
+PrefixCacheEvictionPolicy = Literal["lru", "frequency_cost"]
 
 
 @config
@@ -125,6 +126,17 @@ class CacheConfig:
     control of how much memory gets used when compared with using
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
+
+    # Eviction policy for prefix caching (experimental, opt-in)
+    prefix_cache_eviction_policy: PrefixCacheEvictionPolicy = "lru"
+    """Eviction policy for prefix caching free cached blocks. Default is LRU.
+    Set to "frequency_cost" to enable frequency × cost-aware eviction."""
+
+    eviction_cost_alpha: float = 2.0
+    """Alpha exponent for the compute cost term (block_size^alpha)."""
+
+    eviction_time_decay: float = 0.0
+    """Optional exponential time decay factor for the frequency term."""
 
     def compute_hash(self) -> str:
         """
