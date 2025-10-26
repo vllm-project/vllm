@@ -118,6 +118,13 @@ class DefaultModelLoader(BaseModelLoader):
         if allow_patterns_overrides is not None:
             allow_patterns = allow_patterns_overrides
 
+        # Prefer common subfolder variants (e.g., 'llm/') when available.
+        if is_local:
+            if os.path.isdir(os.path.join(model_name_or_path, "llm")):
+                allow_patterns = [f"llm/{p}" for p in allow_patterns] + allow_patterns
+        else:
+            allow_patterns = [f"llm/{p}" for p in allow_patterns] + allow_patterns
+
         if not is_local:
             hf_folder = download_weights_from_hf(
                 model_name_or_path,
