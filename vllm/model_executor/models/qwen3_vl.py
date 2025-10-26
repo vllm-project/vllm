@@ -898,16 +898,12 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Separate video processing from image processing. Because the videos
-        # are processed into serval image patches
-        if (
-            "videos" in mm_data
-            and isinstance(mm_data["videos"], list)
-            and len(mm_data["videos"]) > 0
-        ):
+        # are processed into several image patches
+        if videos := mm_data.pop("videos", []):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
 
-            for item_idx, item in enumerate(mm_data.pop("videos", [])):
+            for item in videos:
                 video_array, metadata = item
 
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
