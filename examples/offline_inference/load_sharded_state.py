@@ -25,7 +25,7 @@ python load_sharded_state.py \
 import dataclasses
 
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def parse_args():
