@@ -70,12 +70,11 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (
-    cdiv,
     check_use_alibi,
     length_from_prompt_token_ids_or_embeds,
-    round_up,
 )
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.platform_utils import is_pin_memory_available
