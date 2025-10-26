@@ -6,7 +6,7 @@ import torch
 
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
 
 logger = init_logger(__name__)

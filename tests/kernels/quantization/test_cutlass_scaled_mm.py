@@ -13,7 +13,7 @@ import torch
 from tests.kernels.utils import baseline_scaled_mm, opcheck, to_fp8, to_int8
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 MNK_FACTORS = [
     (1, 256, 128),

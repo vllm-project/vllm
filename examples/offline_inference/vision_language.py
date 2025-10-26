@@ -22,7 +22,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class ModelRequestData(NamedTuple):

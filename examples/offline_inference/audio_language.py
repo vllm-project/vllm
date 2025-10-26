@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {

@@ -34,12 +34,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_disable_q_quantization,
     use_trtllm_attention,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,

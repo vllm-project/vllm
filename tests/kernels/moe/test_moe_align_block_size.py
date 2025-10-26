@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 NUM_TOKENS = [1, 3, 256, 2256, 4096]
 NUM_EXPERTS = [32, 160, 256, 257]
