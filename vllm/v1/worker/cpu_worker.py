@@ -54,6 +54,8 @@ class CPUWorker(Worker):
                 )
             else:
                 self.local_omp_cpuid = "all"
+        elif omp_cpuids == "nobind":
+            self.local_omp_cpuid = "NA"
         else:
             local_dp_rank = self.parallel_config.data_parallel_rank_local
             omp_cpuids = omp_cpuids.split("|")
@@ -64,7 +66,7 @@ class CPUWorker(Worker):
                 ]
             self.local_omp_cpuid = omp_cpuids[self.rank]
 
-        if self.local_omp_cpuid != "all":
+        if self.local_omp_cpuid not in ["all", "NA"]:
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
