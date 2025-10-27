@@ -185,7 +185,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.moe = moe
         self.mxfp4_backend = get_mxfp4_backend()
         self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_capture_size
+            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
@@ -794,7 +794,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 )
             else:
                 raise NotImplementedError(
-                    "Incompatible Mxfp4 backend for EP batched experts format"
+                    f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for "
+                    "EP batched experts format"
                 )
         else:
             assert self.moe_quant_config is not None
@@ -813,8 +814,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 return TrtLlmGenExperts(self.moe, self.moe_quant_config, **kwargs)
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
                 return MarlinExperts(self.moe_quant_config)
-            else:
+            elif self.mxfp4_backend == Mxfp4Backend.TRITON:
                 return OAITritonExperts(self.moe_quant_config)
+            else:
+                raise NotImplementedError(
+                    f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
+                )
 
     def _route_and_experts(
         self,
