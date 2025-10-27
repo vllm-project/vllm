@@ -33,7 +33,7 @@ Currently, there are no pre-built ROCm wheels.
     - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
     - [PyTorch](https://pytorch.org/)
 
-    For installing PyTorch+Triton, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm7.0.2_ubuntu24.04_py3.12_pytorch_release_2.8.0`, `rocm/pytorch-nightly`, then skip to Step 2.
+    For installing PyTorch+Triton, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm7.0.2_ubuntu24.04_py3.12_pytorch_release_2.8.0`, `rocm/pytorch-nightly`, then skip to Step 3.
 
     Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
