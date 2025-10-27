@@ -1552,7 +1552,7 @@ class EngineArgs:
             not in ("mp", "uni", "external_launcher")
         ):
             raise ValueError(
-                "Currently, async scheduling only supports `mp` or `uni` or "
+                "Currently, async scheduling only supports `mp`, `uni` or "
                 "`external_launcher` distributed executor backend, but you choose "
                 f"`{parallel_config.distributed_executor_backend}`."
             )
