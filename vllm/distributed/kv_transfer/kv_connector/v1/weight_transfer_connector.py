@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
 
 from datetime import timedelta
 from typing import Any

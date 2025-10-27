@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
+
+# Changes:
+# - Add support for Pipeline parallel + Tensor parallel hybrid parallelism
+# - Add basic model and tensor count validation
+
 import os
 import threading
 import time

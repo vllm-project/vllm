@@ -1262,12 +1262,15 @@ def load_log_config(log_config_file: str | None) -> dict | None:
         return None
 
 
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
 @router.post("/init_weights_send_group_for_remote_instance")
 async def init_weights_send_group_for_remote_instance(
     obj: InitWeightsSendGroupForRemoteInstanceReqInput, request: Request
 ):
     results = await request.app.state.engine_client.collective_rpc(
-        "init_weights_send_group_for_remote_instance", args=(obj.dict(),), timeout=30.0
+        "init_weights_send_group_for_remote_instance",
+        args=(obj.model_dump(),),
+        timeout=30.0,
     )
     all_success = all(r["success"] for r in results)
     return JSONResponse(
@@ -1279,12 +1282,13 @@ async def init_weights_send_group_for_remote_instance(
     )
 
 
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
 @router.post("/send_weights_to_remote_instance")
 async def send_weights_to_remote_instance(
     obj: SendWeightsToRemoteInstanceReqInput, request: Request
 ):
     results = await request.app.state.engine_client.collective_rpc(
-        "send_weights_to_remote_instance", args=(obj.dict(),), timeout=60.0
+        "send_weights_to_remote_instance", args=(obj.model_dump(),), timeout=60.0
     )
     all_success = all(r["success"] for r in results)
     return JSONResponse(

@@ -3018,6 +3018,7 @@ class TranslationResponseVerbose(OpenAIBaseModel):
     """Extracted words and their corresponding timestamps."""
 
 
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
 class InitWeightsSendGroupForRemoteInstanceReqInput(OpenAIBaseModel):
     """Request to initialize weights send group for remote instance."""
 
@@ -3029,6 +3030,7 @@ class InitWeightsSendGroupForRemoteInstanceReqInput(OpenAIBaseModel):
     backend: str = Field(default="nccl", description="The backend")
 
 
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
 class SendWeightsToRemoteInstanceReqInput(OpenAIBaseModel):
     """Request to send weights to remote instance."""
 
