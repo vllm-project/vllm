@@ -80,6 +80,7 @@ from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -288,7 +289,7 @@ class LLM:
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
         _distributed_executor_backend = kwargs.get("distributed_executor_backend")
-        if _dp_size > 1 and not _distributed_executor_backend == "external_launcher":
+        if _dp_size > 1 and not _distributed_executor_backend == "external_launcher" and not current_platform.is_tpu():
             raise ValueError(
                 f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
                 "process usage and may hang. Please use "
