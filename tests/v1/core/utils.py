@@ -49,6 +49,7 @@ def create_scheduler(
     async_scheduling: bool = False,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    disable_hybrid_kv_cache_manager: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -73,6 +74,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         async_scheduling=async_scheduling,
+        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     model_config = ModelConfig(
         model=model,
