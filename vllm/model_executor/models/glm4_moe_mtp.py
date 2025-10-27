@@ -228,9 +228,10 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        mtp_start_layer_idx = self.model.mtp_start_layer_idx
         for name, loaded_weight in weights:
             if name == "lm_head.weight":
-                name = f"model.layers.{self.model.mtp_start_layer_idx}.shard_head.weight"
+                name = f"model.layers.{mtp_start_layer_idx}.shard_head.head.weight"
             elif name == "model.embed_tokens.weight":
                 pass
             else:
