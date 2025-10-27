@@ -99,7 +99,7 @@ class RayPPCommunicator(Communicator):
 
         # Ray actor IDs are 32-character hex strings (128 bits)
         ACTOR_ID_LEN = 32
-        actor_id_bytes = actor_id_str.encode("utf-8")
+        actor_id_bytes = bytearray(actor_id_str.encode("utf-8"))
         assert len(actor_id_bytes) == ACTOR_ID_LEN, (
             f"Unexpected actor ID length: {len(actor_id_bytes)}"
         )
