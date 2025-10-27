@@ -40,11 +40,10 @@ inline Vectorized<at::BFloat16> convert_from_float_ext<at::BFloat16>(const Vecto
 // this doesn't handle NaN.
 inline __m512bh cvt_e4m3_bf16_intrinsic_no_nan(__m256i fp8_vec) {
   const __m512i x = _mm512_cvtepu8_epi16(fp8_vec);
-
-  __m512i combined = _mm512_add_epi16(x, mm780);
+  __m512i combined = _mm512_add_epi16(x, _mm512_set1_epi16(0x0780));
   combined = _mm512_slli_epi16(combined, 4);
-  combined = _mm512_and_si512(combined, mm87f0);
-  combined = _mm512_add_epi16(combined, mm3c00);
+  combined = _mm512_and_si512(combined, _mm512_set1_epi16(0x87f0));
+  combined = _mm512_add_epi16(combined, _mm512_set1_epi16(0x3c00));
 
   const __mmask32 is_nonzero = _mm512_cmpneq_epi16_mask(x, _mm512_setzero_si512());
   return (__m512bh)_mm512_maskz_mov_epi16(is_nonzero, combined);
