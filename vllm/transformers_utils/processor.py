@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from functools import lru_cache
 import inspect
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
 from transformers import (
@@ -166,8 +166,9 @@ cached_get_processor = lru_cache(get_processor)
 def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
     try:
         # get kwargs annotations in processor
-        call_kwargs = inspect.signature(
-            type(processor).__call__).parameters.get("kwargs")
+        call_kwargs = inspect.signature(type(processor).__call__).parameters.get(
+            "kwargs"
+        )
         call_kwargs_annotations = call_kwargs.annotation if call_kwargs else None
         # if the processor has explicit kwargs annotation, use it
         if call_kwargs_annotations is not None:
