@@ -16,7 +16,7 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import import_pynvml
+from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -298,7 +298,9 @@ class CudaPlatformBase(Platform):
             )
 
             if use_cutlassmla:
-                logger.info_once("Using Cutlass MLA backend on V1 engine.")
+                logger.info_once(
+                    "Using Cutlass MLA backend on V1 engine.", scope="local"
+                )
                 return "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
             if use_flashinfermla:
                 from vllm.v1.attention.backends.utils import set_kv_cache_layout
