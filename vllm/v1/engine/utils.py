@@ -135,8 +135,8 @@ class CoreEngineProcManager:
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
                 # Adjust device control in DP for non-CUDA platforms
-                # For CUDA platforms, setting same device id for different DP
-                # processes affects NCCL init performance.
+                # as well as external and ray launchers
+                # For CUDA platforms, we use torch.cuda.set_device()
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
                     if (
