@@ -86,6 +86,10 @@ def test_multiple_priority(llm: LLM):
             PROMPTS, sampling_params=None, priority=[0] * (len(PROMPTS) - 1)
         )
 
+    # Exception raised, if the priority list is empty
+    with pytest.raises(ValueError):
+        outputs = llm.generate(PROMPTS, sampling_params=None, priority=[])
+
 
 def test_max_model_len():
     max_model_len = 20
