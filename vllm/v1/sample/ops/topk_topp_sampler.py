@@ -1397,7 +1397,7 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
 
             # -------- widen cutoff by 10% ----------------
             if p_pivot != -float('inf'):
-                # WIDEN_NUM (e.g., 90) / 100.0 = 0.9
+                # WIDEN_NUM 
                 widened_prob = p_pivot * (WIDEN_NUM / 100.0)
                 # clamp widened_prob to <= max possible prob
                 widened_prob = tl.minimum(widened_prob, max_range)
@@ -1412,9 +1412,9 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
                 logits_blk = tl.load(LOGITS_ROW + offs_n,
                                     mask=mask_n,
                                     other=-float('inf'))
-                # probs_blk = tl.load(PROBS_ROW + offs_n,
-                #                    mask=mask_n,
-                #                    other=0.0)
+                probs_blk = tl.load(PROBS_ROW + offs_n,
+                                   mask=mask_n,
+                                   other=0.0)
 
                 if force_remove_logit != -float('inf'):
                     # Force remove duplicates
@@ -1439,7 +1439,7 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
                     write_idx = tl.where(keep_mask, cpos, 0) 
 
                     tl.store(IDX_ROW + write_idx, offs_n, mask=keep_mask)
-                    # tl.store(PROBS_2_ROW + write_idx, probs_blk, mask=keep_mask)
+                    tl.store(PROBS_2_ROW + write_idx, probs_blk, mask=keep_mask)
 
                     kept_write_pos += n_kept
             tl.store(L + row_id, tl.cast(kept_write_pos, tl.int32))
@@ -1451,19 +1451,26 @@ def apply_top_p_filtered (
     """
     Applies top-p using pivot-based filtering 
     """
+    # logits = torch.ones((10,), device=logits.device, dtype=torch.float32).view(1, -1) 
+    logits_copy = logits.clone().detach()
+    # p = torch.full((logits.shape[0],), 0.65, dtype=torch.float32, device=logits.device)
+    # output  = apply_top_k_top_p(logits_copy, None, p)
+    # print(f"original value = {output}")
     batch_size, vocab_size = logits.shape
     
+    # print(f"logits: {logits}", flush=True)
     probs = torch.full((batch_size, vocab_size), -float('inf'), device=logits.device)
     probs_2 = torch.full((batch_size, vocab_size), -float('inf'), device=logits.device)
 
     l = torch.zeros((batch_size,), device=logits.device, dtype=torch.int32)
     idx_tensor = torch.full_like(logits, 0, dtype=torch.int32)
+    
 
     BLOCK_SIZE = 2048
     SIGMA = 2.15   
     NUM_WARPS = 16
     NUM_STAGES = 3
-    WIDEN_NUM = 120
+    WIDEN_NUM = 0
 
     if not torch.any(p < 1.0):  
         return logits
@@ -1482,30 +1489,67 @@ def apply_top_p_filtered (
         BLOCK_SIZE=BLOCK_SIZE,
         WIDEN_NUM=WIDEN_NUM
     )
+    # print(f"logits: {logits}", flush=True)
+    # print(f"l: {l}", flush=True)
+    # print(f"probs: {probs}", flush=True)
+    # print(f"probs_2: {probs_2}", flush=True)
+    # print(f"idx_tensor: {idx_tensor}", flush=True)
 
     max_l = torch.max(l)
 
-    if max_l.item() == 0:
-        return torch.full((batch_size, vocab_size), -float('inf'), device=logits.device)
+    # if max_l.item() == 0:
+    #     return torch.full((batch_size, vocab_size), -float('inf'), device=logits.device)
+     
+
+    # outliers = torch.arange(0, vocab_size, dtype=torch.int32, device=logits.device).unsqueeze(0).expand(logits.shape[0], -1)
+    # probs = torch.softmax(logits, dim=1) 
 
     outliers = idx_tensor[:, :max_l]
+    full_probs = logits_copy.softmax(dim=-1)
+    filtered_full_probs = torch.gather(full_probs, 1, outliers)
     filtered_logits = torch.gather(logits, 1, outliers)
+    # print(f"outliers: {outliers}", flush=True)
+    # print(f"filtered_logits: {filtered_logits}", flush=True)
+
+    probs = torch.gather(probs, 1, outliers) 
+    cum_sum = torch.sum(probs, dim=1)
+
+    # print(f"sum : {cum_sum}", flush=True)
+    
 
     filtered_logits_sort, sort_indices = torch.sort(
         filtered_logits, dim=-1, descending=False
     )
+
+    
+
+    # print(f"filtered_logits_sort: {filtered_logits_sort}", flush=True)
+
     outliers_sorted = torch.gather(outliers, 1, sort_indices)
-    filtered_probs_sort = filtered_logits_sort.softmax(dim=-1)
+    filtered_probs_sort = torch.gather(filtered_full_probs, 1, sort_indices)
+
+    # print(f"outliers_sorted: {outliers_sorted}", flush=True)
+    # print(f"filtered_probs_sort: {filtered_logits_sort}", flush=True)
+    
 
     probs_sum = torch.cumsum(filtered_probs_sort, dim=-1, out=filtered_probs_sort)
     top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
     top_p_mask[:, -1] = False
 
+    # print(f"probs_sum: {probs_sum}")
+    # print(f"top_p_mask = {top_p_mask}")
+
     filtered_logits_sort.masked_fill_(top_p_mask, -float("inf")) 
+
+    # print(f"top_p_mask = {filtered_logits_sort}")
+    
 
     logits.fill_(-float("inf"))
     logits.scatter_(dim=1, index=outliers_sorted, src=filtered_logits_sort)
-    
+
+    # print(f"final logits after scatter = {logits}")
+
+    # assert False 
     return logits
 
 
@@ -1524,5 +1568,5 @@ def apply_top_k_top_p_test2(
     elif k is None and p is not None:
         return apply_top_p_filtered(logits, p)
     else:
-        logits_p = apply_top_p_filtered(logits, p)
-        return apply_top_k_only(logits_p, k)
+        logits_k = apply_top_k_only(logits, k)
+        return apply_top_p_filtered(logits, p)

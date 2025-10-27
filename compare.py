@@ -70,7 +70,7 @@ def test_accuracy(logits, k, p, func_list):
                 torch.sort(original_logits[error_rows], descending=True).values
             original_logits_to_show = original_logits_to_show[:row_to_show, :20]
             print_to_log(f"original_logits: {original_logits_to_show}", log_file)
-
+            assert False
     return output_correct_list
 
 
