@@ -560,6 +560,7 @@ class EngineArgs:
     engine_recovery_timeout: int = FaultToleranceConfig.engine_recovery_timeout
     internal_fault_report_port: int = FaultToleranceConfig.internal_fault_report_port
     external_fault_notify_port: int = FaultToleranceConfig.external_fault_notify_port
+    gloo_comm_timeout: int = FaultToleranceConfig.gloo_comm_timeout
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1122,6 +1123,10 @@ class EngineArgs:
             "--external-fault-notify-port",
             **fault_tolerance_kwargs["external_fault_notify_port"],
         )
+        fault_tolerance_group.add_argument(
+            "--gloo-comm-timeout",
+            **fault_tolerance_kwargs["gloo_comm_timeout"],
+        )
         # Other arguments
         parser.add_argument(
             "--disable-log-stats",
@@ -1678,6 +1683,7 @@ class EngineArgs:
             or FaultToleranceConfig.internal_fault_report_port,
             external_fault_notify_port=self.external_fault_notify_port
             or FaultToleranceConfig.external_fault_notify_port,
+            gloo_comm_timeout=self.gloo_comm_timeout,
         )
 
         # Compilation config overrides

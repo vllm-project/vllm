@@ -45,6 +45,11 @@ class FaultToleranceConfig:
     to spin up the WorkerGuard.
     """
 
+    gloo_comm_timeout: int = 30
+    """
+    The timeout for gloo communication.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
