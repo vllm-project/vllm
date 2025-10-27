@@ -39,6 +39,7 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     supports_cross_encoding,
+    supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
@@ -496,6 +497,7 @@ class _ModelInfo:
     is_attention_free: bool
     is_hybrid: bool
     has_noops: bool
+    supports_mamba_prefix_caching: bool
     supports_transcription: bool
     supports_transcription_only: bool
 
@@ -518,6 +520,7 @@ class _ModelInfo:
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
+            supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only

@@ -45,7 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid
+from .interfaces import HasInnerState, IsHybrid, SupportsMambaPrefixCaching
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -824,7 +824,7 @@ class Zamba2Model(nn.Module):
         return loaded_params
 
 
-class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
+class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixCaching):
     """Zamba2 model with causal language modeling head.
 
     This class wraps the core Zamba2 model and adds:
