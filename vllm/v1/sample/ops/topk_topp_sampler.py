@@ -1382,9 +1382,9 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
                     p_pivot = p_pivot_0
 
             # At least one value should be greater than p_pivot
-            if p_pivot >= max_logit:
-                p_pivot = second_max_logit
-            elif num_min_larger_0 > 1:
+            # if p_pivot >= max_logit:
+            #     p_pivot = second_max_logit
+            if True:
                 # Force remove duplicates (p_pivot is made to include all
                 # duplicates if it falls on the duplicates)
                 num_force_remove = tl.cast((p_pivots_sum_0 - p) / min_larger_0,
@@ -1470,7 +1470,7 @@ def apply_top_p_filtered (
     SIGMA = 2.15   
     NUM_WARPS = 16
     NUM_STAGES = 3
-    WIDEN_NUM = 0
+    WIDEN_NUM = 0 # ----------------------------> ????????
 
     if not torch.any(p < 1.0):  
         return logits
@@ -1482,7 +1482,7 @@ def apply_top_p_filtered (
         probs,
         probs_2,
         idx_tensor,
-        p,
+        p*1.1,
         batch_size,
         SIGMA=SIGMA,
         VOCAB_SIZE=vocab_size,
