@@ -180,7 +180,7 @@ RequestLogitsProcessor = Union[
 
 While request-level logits processors are explicitly *not* supported in the vLLM engine, vLLM *does* provide a convenient process to wrap an existing `Callable` request-level logits processor and create a batch-level logits processor that is compatible with vLLM. The `Callable` must conform to the type annotation above; if your request-level logits processor has a different interface, then in order to wrap it, you may need to modify it or implement an additional wrapper layer to comply with the interface specification above.
 
-You can wrap the request-level logits processor by subclassing `AdapterLogitsProcessor` as shown in the example below (in this example, `DummyPerReqLogitsProcessor` is a stand-in for your request-level logits processor which needs to be wrapped.) Override `AdapterLogitsProcessor.is_argmax_invariant(self)` to accurately reflect whether your request-level logits processor may impact which token has the highest-value logit. Override `AdapterLogitsProcessor.new_req_logits_processor(self,params)` to create a new request-level logits processor instance from a `SamplingParams` instance:
+You can wrap the request-level logits processor by subclassing `AdapterLogitsProcessor` as shown in the example below (in this example, `DummyPerReqLogitsProcessor` is a stand-in for your request-level logits processor which needs to be wrapped.) Override `AdapterLogitsProcessor.validate_params(cls,params)` to validate input sampling parameters and raise error for invalid parameters. Override `AdapterLogitsProcessor.is_argmax_invariant(self)` to accurately reflect whether your request-level logits processor may impact which token has the highest-value logit. Override `AdapterLogitsProcessor.new_req_logits_processor(self,params)` to create a new request-level logits processor instance from a `SamplingParams` instance:
 
 ??? code "Example of Wrapping a Request-Level Logits Processor"
 
@@ -223,6 +223,16 @@ You can wrap the request-level logits processor by subclassing `AdapterLogitsPro
         def is_argmax_invariant(self) -> bool:
             return False
 
+        @classmethod
+        def validate_params(cls, params: SamplingParams):
+            target_token: Any | None = params.extra_args and params.extra_args.get(
+                "target_token"
+            )
+            if target_token is not None and not isinstance(target_token, int):
+                raise ValueError(
+                    f"target_token value {target_token} is not int"
+                )
+
         def new_req_logits_processor(
             self,
             params: SamplingParams,
@@ -240,17 +250,10 @@ You can wrap the request-level logits processor by subclassing `AdapterLogitsPro
             Returns:
             `Callable` request logits processor, or None
             """
-            target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+            target_token: Any | None = params.extra_args and params.extra_args.get(
                 "target_token"
             )
             if target_token is None:
-                return None
-            if not isinstance(target_token, int):
-                logger.warning(
-                    "target_token value %s is not int; not applying logits"
-                    " processor to request.",
-                    target_token,
-                )
                 return None
             return DummyPerReqLogitsProcessor(target_token)
     ```
