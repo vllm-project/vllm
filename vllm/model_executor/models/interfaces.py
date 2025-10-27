@@ -14,6 +14,7 @@ from typing import (
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch import Tensor
 from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
@@ -641,6 +642,9 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
+    moe_layers: Iterable[nn.Module]
+    """List of MoE layers in this model."""
+
     def set_eplb_state(
         self,
         expert_load_view: Tensor,
@@ -663,7 +667,15 @@ class MixtureOfExperts(Protocol):
             logical_to_physical_map: Mapping from logical to physical experts.
             logical_replica_count: Count of replicas for each logical expert.
         """
-        ...
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def update_physical_experts_metadata(
         self,

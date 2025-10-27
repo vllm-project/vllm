@@ -1948,6 +1948,7 @@ class FusedMoE(CustomOp):
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
             and not name.startswith("_shared_experts.")
+            and not name.startswith("_gate")
         ]
 
     def set_eplb_state(

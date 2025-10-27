@@ -62,7 +62,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -616,7 +616,7 @@ class Glm4MoeModel(nn.Module):
         return loaded_params
 
 
-class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -671,31 +671,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_moe is None:
-            raise RuntimeError("No Glm4MoE layer found in model.layers.")
-
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
+        extract_moe_parameters(self, example_moe)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -726,6 +702,23 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, Glm4MoE):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
+
 
 def get_spec_layer_idx_from_weight_name(
     config: Glm4MoeConfig, weight_name: str
@@ -738,3 +731,15 @@ def get_spec_layer_idx_from_weight_name(
             if f"layers.{layer_idx + i}." in weight_name:
                 return layer_idx + i
     return None
+
+
+def extract_moe_parameters(model: MixtureOfExperts, example_moe: Glm4MoE) -> None:
+    if example_moe is None:
+        raise RuntimeError("No Glm4MoE layer found in model.layers.")
+    else:
+        model.num_logical_experts = example_moe.n_logical_experts
+        model.num_physical_experts = example_moe.n_physical_experts
+        model.num_local_physical_experts = example_moe.n_local_physical_experts
+        model.num_routed_experts = example_moe.n_routed_experts
+        model.num_shared_experts = example_moe.n_shared_experts
+        model.num_redundant_experts = example_moe.n_redundant_experts

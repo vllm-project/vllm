@@ -739,7 +739,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
     def set_moe_parameters(self):
         self.expert_weights = []
 
-        self.moe_layers: list[SharedFusedMoE] = []
+        self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:
             assert isinstance(layer, Llama4DecoderLayer)
@@ -767,22 +767,6 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
             self.num_routed_experts = example_moe.n_routed_experts
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
 
     def update_physical_experts_metadata(
         self,

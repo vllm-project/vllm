@@ -47,8 +47,20 @@ def check_outputs(ref_outputs, spec_outputs):
             "eagle618/eagle-deepseek-v3-random",
             4,
         ),
-        ("deepseek_mtp", "eagle618/deepseek-v3-random", None, 2),
-        ("qwen3_next_mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 2),
+        pytest.param(
+            "deepseek_mtp",
+            "eagle618/deepseek-v3-random",
+            None,
+            2,
+            marks=pytest.mark.skip(reason="Skipping for CI test time savings"),
+        ),
+        pytest.param(
+            "qwen3_next_mtp",
+            "Qwen/Qwen3-Next-80B-A3B-Instruct",
+            None,
+            2,
+            marks=pytest.mark.skip(reason="Skipping for CI test time savings"),
+        ),
         pytest.param(
             (
                 "eagle",

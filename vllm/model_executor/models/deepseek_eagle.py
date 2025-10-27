@@ -22,7 +22,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
-    DeepseekV2MoE,
     DeepseekV3ForCausalLM,
 )
 from vllm.utils import init_logger
@@ -220,46 +219,11 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
         )
 
         # Set MoE hyperparameters
+        self.num_moe_layers = self.config.num_hidden_layers
         self.set_moe_parameters()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
-
-    def set_moe_parameters(self):
-        self.expert_weights = []
-
-        self.num_moe_layers = self.config.num_hidden_layers
-        self.num_expert_groups = self.config.n_group
-
-        self.moe_layers: list[FusedMoE] = []
-        example_moe = None
-        for layer in self.model.layers:
-            assert isinstance(layer, DeepseekV2DecoderLayer)
-            if isinstance(layer.mlp, DeepseekV2MoE):
-                # Pick last one layer since the first ones may be dense layers.
-                example_moe = layer.mlp
-                self.moe_layers.append(layer.mlp.experts)
-
-        if example_moe is None:
-            self.num_moe_layers = 0
-            self.num_expert_groups = 0
-            self.num_logical_experts = 0
-            self.num_physical_experts = 0
-            self.num_local_physical_experts = 0
-            self.num_routed_experts = 0
-            self.num_shared_experts = 0
-            self.num_redundant_experts = 0
-            logger.warning(
-                "EagleDeepseekV3ForCausalLM: No DeepseekV2MoE layer found in "
-                "model.layers."
-            )
-        else:
-            self.num_logical_experts = example_moe.n_logical_experts
-            self.num_physical_experts = example_moe.n_physical_experts
-            self.num_local_physical_experts = example_moe.n_local_physical_experts
-            self.num_routed_experts = example_moe.n_routed_experts
-            self.num_shared_experts = example_moe.n_shared_experts
-            self.num_redundant_experts = example_moe.n_redundant_experts
 
     def forward(
         self,

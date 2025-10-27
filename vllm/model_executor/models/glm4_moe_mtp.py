@@ -41,7 +41,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .glm4_moe import Glm4MoE, Glm4MoeDecoderLayer, get_spec_layer_idx_from_weight_name
+from .glm4_moe import (
+    Glm4MoE,
+    Glm4MoeDecoderLayer,
+    extract_moe_parameters,
+    get_spec_layer_idx_from_weight_name,
+)
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import maybe_prefix
 
@@ -198,35 +203,10 @@ class Glm4MoeMTP(nn.Module, SupportsPP, MixtureOfExperts):
             if isinstance(layer.mlp, Glm4MoE):
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
-
-        if example_moe is None:
-            raise RuntimeError("No Glm4MoE layer found in model.layers.")
-
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
+        extract_moe_parameters(self, example_moe)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
 
     def forward(
         self,

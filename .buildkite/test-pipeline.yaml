@@ -269,8 +269,8 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
-- label: V1 Test e2e + engine # 60min
-  timeout_in_minutes: 60
+- label: V1 Test e2e + engine # 50min
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
