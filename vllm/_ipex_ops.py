@@ -275,16 +275,16 @@ class ipex_ops:
         k: torch.Tensor,
         v: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
-        seqused_k: torch.Tensor,  # we don't support this in ipex kernel
         max_seqlen_q: int,
         max_seqlen_k: int,
         softmax_scale: float,
         causal: bool,
-        block_table: torch.Tensor,
-        alibi_slopes: torch.Tensor | None,
-        window_size: list[int] | None = None,
-        softcap: float | None = 0.0,
-        cu_seqlens_k: torch.Tensor | None = None,
+        block_table: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        window_size: Optional[list[int]] = None,
+        softcap: Optional[float] = 0.0,
+        seqused_k: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
         # The following parameters are not used in ipex kernel currently,
         # we keep API compatible to CUDA's.
         scheduler_metadata=None,
@@ -301,25 +301,37 @@ class ipex_ops:
         else:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])
-        return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
-            out,
-            q.contiguous(),
-            k,
-            v,
-            cu_seqlens_q,
-            seqused_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            softmax_scale,
-            causal,
-            block_table,
-            alibi_slopes,
-            softcap=softcap,
-            window_size_left=real_window_size[0],
-            window_size_right=real_window_size[1],
-            k_scale=1.0,
-            v_scale=1.0,
-        )
+
+        if block_table is None:
+            # need check use cu_seqlens_k or seqused_k!!!
+            ipex_ops.varlen_attention(q.contiguous(), k.contiguous(),
+                                      v.contiguous(), out, cu_seqlens_q,
+                                      cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                                      0.0, softmax_scale, False, causal, False,
+                                      None, real_window_size[0],
+                                      real_window_size[1], softcap)
+            return out
+        else:
+            return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
+                out,
+                q.contiguous(),
+                k,
+                v,
+                cu_seqlens_q,
+                seqused_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                softmax_scale,
+                causal,
+                block_table,
+                alibi_slopes,
+                sink=s_aux,
+                softcap=softcap,
+                window_size_left=real_window_size[0],
+                window_size_right=real_window_size[1],
+                k_scale=1.0,
+                v_scale=1.0,
+            )
 
     @staticmethod
     def get_scheduler_metadata(
