@@ -1619,10 +1619,6 @@ class ModelConfig:
         return is_encoder_decoder(self.hf_config)
 
     @property
-    def uses_mrope(self) -> bool:
-        return uses_mrope(self.hf_config)
-
-    @property
     def uses_alibi(self) -> bool:
         cfg = self.hf_text_config
 
@@ -1644,6 +1640,10 @@ class ModelConfig:
                 )
             )
         )
+
+    @property
+    def uses_mrope(self) -> bool:
+        return uses_mrope(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
