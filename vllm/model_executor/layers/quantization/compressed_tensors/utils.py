@@ -69,6 +69,12 @@ def should_ignore_layer(
         should_ignore_layer = check_equal_or_regex_match(
             layer_name=layer_name, targets=ignore
         )
+        if not should_ignore_layer:
+            prefix = f"{layer_name}."
+            should_ignore_layer = any(
+                target.startswith(prefix) and not target.startswith("re:")
+                for target in ignore
+            )
 
     assert should_ignore_layer is not None
     return should_ignore_layer
