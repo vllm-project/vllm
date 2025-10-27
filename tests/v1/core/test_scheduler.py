@@ -2387,6 +2387,7 @@ def test_ec_connector_text_only_request(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
+        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     NUM_PROMPT_TOKENS = 100
@@ -2431,6 +2432,7 @@ def test_ec_connector_cache_hit_external_load(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
+        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Create MM request
@@ -2483,6 +2485,7 @@ def test_ec_connector_cache_miss_computes_locally(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
+        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Verify consumer role
@@ -2537,6 +2540,7 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
+        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Create MM request
@@ -2679,6 +2683,7 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
+        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
     mm_hashes_list = [[f"hash_{i}"] for i in range(10)]
     mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]
@@ -2770,6 +2775,7 @@ def test_ec_connector_unable_to_allocate(use_kv_connector):
         num_blocks=NUM_BLOCKS,
         use_ec_connector=True,
         ec_role="ec_consumer",
+        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Mock ec_connector load external cache behavior
@@ -2867,6 +2873,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         block_size=16,  # standard block size
         use_ec_connector=True,
         ec_role="ec_consumer",
+        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Mock cache hit: Both cache exist in connector (at E->PD initially)
