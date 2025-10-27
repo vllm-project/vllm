@@ -1657,6 +1657,10 @@ class ModelConfig:
         return self._model_info.has_inner_state
 
     @property
+    def supports_mamba_prefix_caching(self) -> bool:
+        return self._model_info.supports_mamba_prefix_caching
+
+    @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
