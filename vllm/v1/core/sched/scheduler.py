@@ -231,17 +231,6 @@ class Scheduler(SchedulerInterface):
             has_decode_requests = self._has_decode_reqs
             if not has_decode_requests:
                 token_budget = self.prefill_max_num_scheduled_tokens
-                logger.info(
-                    "No decode requests in the running queue, "
-                    "using prefill token budget: %s",
-                    token_budget,
-                )
-            else:
-                logger.info(
-                    "Decode requests in the running queue, "
-                    "using normal token budget: %s",
-                    token_budget,
-                )
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
