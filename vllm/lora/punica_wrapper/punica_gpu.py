@@ -13,7 +13,7 @@ import torch
 
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (
