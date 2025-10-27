@@ -29,12 +29,21 @@ def _get_minicpmv_chat_template_fallback(tokenizer_name_or_path: str) -> Path | 
     return CHAT_TEMPLATES_DIR / "template_chatml.jinja"
 
 
+def _get_deepseek_vl_v2_chat_template_fallback(
+    tokenizer_name_or_path: str,
+) -> Path | None:
+    if tokenizer_name_or_path.endswith("-OCR"):
+        return CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja"
+
+    return CHAT_TEMPLATES_DIR / "template_deepseek_vl2.jinja"
+
+
 _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "blip-2": CHAT_TEMPLATES_DIR / "template_blip2.jinja",
     "chameleon": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "clip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "deepseek_ocr": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
-    "deepseek_vl_v2": CHAT_TEMPLATES_DIR / "template_deepseek_vl2.jinja",
+    "deepseek_vl_v2": _get_deepseek_vl_v2_chat_template_fallback,
     "fuyu": CHAT_TEMPLATES_DIR / "template_fuyu.jinja",
     "minicpmv": _get_minicpmv_chat_template_fallback,
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
