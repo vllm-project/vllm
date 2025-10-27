@@ -12,12 +12,10 @@ import signal
 import sys
 import tempfile
 import threading
-import traceback
 import uuid
 import warnings
-import weakref
 from collections.abc import Callable
-from functools import cache, partial, wraps
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import cloudpickle
@@ -27,34 +25,6 @@ import torch
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.ray.lazy_utils import is_in_ray_actor
-
-# Import utilities from specialized modules for backward compatibility
-from vllm.utils.argparse_utils import (
-    FlexibleArgumentParser,
-    SortedHelpFormatter,
-    StoreBoolean,
-)
-from vllm.utils.math_utils import (
-    cdiv,
-    next_power_of_2,
-    prev_power_of_2,
-    round_down,
-    round_up,
-)
-from vllm.utils.platform_utils import cuda_is_initialized, xpu_is_initialized
-
-__all__ = [
-    # Argparse utilities
-    "FlexibleArgumentParser",
-    "SortedHelpFormatter",
-    "StoreBoolean",
-    # Math utilities
-    "cdiv",
-    "next_power_of_2",
-    "prev_power_of_2",
-    "round_down",
-    "round_up",
-]
 
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
@@ -84,12 +54,8 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:
-    from argparse import Namespace
-
     from vllm.config import ModelConfig, VllmConfig
 else:
-    Namespace = object
-
     ModelConfig = object
     VllmConfig = object
 
@@ -149,35 +115,33 @@ class Counter:
         self.counter = 0
 
 
+class AtomicCounter:
+    """An atomic, thread-safe counter"""
+
+    def __init__(self, initial=0):
+        """Initialize a new atomic counter to given initial value"""
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def inc(self, num=1):
+        """Atomically increment the counter by num and return the new value"""
+        with self._lock:
+            self._value += num
+            return self._value
+
+    def dec(self, num=1):
+        """Atomically decrement the counter by num and return the new value"""
+        with self._lock:
+            self._value -= num
+            return self._value
+
+    @property
+    def value(self):
+        return self._value
+
+
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
-
-
-def update_environment_variables(envs: dict[str, str]):
-    for k, v in envs.items():
-        if k in os.environ and os.environ[k] != v:
-            logger.warning(
-                "Overwriting environment variable %s from '%s' to '%s'",
-                k,
-                os.environ[k],
-                v,
-            )
-        os.environ[k] = v
-
-
-@cache
-def is_pin_memory_available() -> bool:
-    from vllm.platforms import current_platform
-
-    return current_platform.is_pin_memory_available()
-
-
-@cache
-def is_uva_available() -> bool:
-    """Check if Unified Virtual Addressing (UVA) is available."""
-    # UVA requires pinned memory.
-    # TODO: Add more requirements for UVA if needed.
-    return is_pin_memory_available()
 
 
 # TODO: This function can be removed if transformer_modules classes are
@@ -210,47 +174,6 @@ def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
         )
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
-
-
-def weak_bind(
-    bound_method: Callable[..., Any],
-) -> Callable[..., None]:
-    """Make an instance method that weakly references
-    its associated instance and no-ops once that
-    instance is collected."""
-    ref = weakref.ref(bound_method.__self__)  # type: ignore[attr-defined]
-    unbound = bound_method.__func__  # type: ignore[attr-defined]
-
-    def weak_bound(*args, **kwargs) -> None:
-        if inst := ref():
-            unbound(inst, *args, **kwargs)
-
-    return weak_bound
-
-
-class AtomicCounter:
-    """An atomic, thread-safe counter"""
-
-    def __init__(self, initial=0):
-        """Initialize a new atomic counter to given initial value"""
-        self._value = initial
-        self._lock = threading.Lock()
-
-    def inc(self, num=1):
-        """Atomically increment the counter by num and return the new value"""
-        with self._lock:
-            self._value += num
-            return self._value
-
-    def dec(self, num=1):
-        """Atomically decrement the counter by num and return the new value"""
-        with self._lock:
-            self._value -= num
-            return self._value
-
-    @property
-    def value(self):
-        return self._value
 
 
 def kill_process_tree(pid: int):
@@ -303,13 +226,6 @@ def set_ulimit(target_soft_limit=65535):
             )
 
 
-# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/utils.py#L28 # noqa: E501
-def get_exception_traceback():
-    etype, value, tb = sys.exc_info()
-    err_str = "".join(traceback.format_exception(etype, value, tb))
-    return err_str
-
-
 def _maybe_force_spawn():
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
@@ -326,6 +242,8 @@ def _maybe_force_spawn():
 
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
+
+    from .platform_utils import cuda_is_initialized, xpu_is_initialized
 
     if cuda_is_initialized():
         reasons.append("CUDA is initialized")
@@ -354,55 +272,6 @@ def get_mp_context():
     _maybe_force_spawn()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
-
-
-def bind_kv_cache(
-    ctx: dict[str, Any],
-    kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
-    shared_kv_cache_layers: dict[str, str] | None = None,
-) -> None:
-    # Bind the kv_cache tensor to Attention modules, similar to
-    # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
-    # Special things handled here:
-    # 1. Some models have non-attention layers, e.g., Jamba
-    # 2. Pipeline parallelism, each rank only has a subset of layers
-    # 3. Encoder attention has no kv cache
-    # 4. Encoder-decoder models, encoder-decoder attention and decoder-only
-    #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
-    #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
-    #    tensor
-    # 5. Some models have attention layers that share kv cache with previous
-    #    layers, this is specified through shared_kv_cache_layers
-    if shared_kv_cache_layers is None:
-        shared_kv_cache_layers = {}
-    from vllm.attention import AttentionType
-    from vllm.model_executor.models.utils import extract_layer_index
-
-    layer_need_kv_cache = [
-        layer_name
-        for layer_name in ctx
-        if (
-            hasattr(ctx[layer_name], "attn_type")
-            and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)
-        )
-        and ctx[layer_name].kv_sharing_target_layer_name is None
-    ]
-    layer_index_sorted = sorted(
-        set(extract_layer_index(layer_name) for layer_name in layer_need_kv_cache)
-    )
-    for layer_name in layer_need_kv_cache:
-        kv_cache_idx = layer_index_sorted.index(extract_layer_index(layer_name))
-        forward_ctx = ctx[layer_name]
-        assert len(forward_ctx.kv_cache) == len(kv_cache)
-        for ve, ve_kv_cache in enumerate(kv_cache):
-            forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
-    if shared_kv_cache_layers is not None:
-        for layer_name, target_layer_name in shared_kv_cache_layers.items():
-            assert extract_layer_index(target_layer_name) < extract_layer_index(
-                layer_name
-            ), "v0 doesn't support interleaving kv sharing"
-            ctx[layer_name].kv_cache = ctx[target_layer_name].kv_cache
 
 
 def run_method(
