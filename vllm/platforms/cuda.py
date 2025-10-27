@@ -14,7 +14,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-from vllm.attention.selector import get_attn_backend
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml, resolve_obj_by_qualname
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -154,6 +153,8 @@ class CudaPlatformBase(Platform):
         # Attempt to set an appropriate block size based on what backend will be used.
         # TODO: per-layer block size configuration
         if cache_config and model_config:
+            from vllm.attention.selector import get_attn_backend
+
             backend = get_attn_backend(
                 head_size=model_config.get_head_size(),
                 dtype=model_config.dtype,
