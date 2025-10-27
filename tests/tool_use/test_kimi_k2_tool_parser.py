@@ -34,11 +34,11 @@ def assert_tool_calls(actual_tool_calls: list[ToolCall],
         assert actual_tool_call.type == "function"
         assert actual_tool_call.function == expected_tool_call.function
 
-        # assert tool call id format
-        assert actual_tool_call.id.startswith("functions.")
+        # assert tool call id format: should contain function name and numeric index
+        # Format can be either "functions.func_name:0" or "func_name:0"
         assert actual_tool_call.id.split(':')[-1].isdigit()
-        assert actual_tool_call.id.split('.')[1].split(
-            ':')[0] == expected_tool_call.function.name
+        assert actual_tool_call.id.split(':')[0].split(
+            '.')[-1] == expected_tool_call.function.name
 
 
 def test_extract_tool_calls_no_tools(kimi_k2_tool_parser):
