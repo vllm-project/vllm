@@ -331,13 +331,11 @@ vLLM's benchmark serving script provides sophisticated load pattern simulation c
 
 These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf`) to production-like scenarios with realistic arrival patterns and resource constraints.
 
-**Understanding Burstiness and Traffic Patterns:**
-
 The `--burstiness` parameter mathematically controls request arrival patterns using a Gamma distribution where:
 
-- **Shape parameter**: `burstiness` value
-- **Coefficient of Variation (CV)**: $\frac{1}{\sqrt{burstiness}}$
-- **Traffic characteristics**:
+- Shape parameter: `burstiness` value
+- Coefficient of Variation (CV): $\frac{1}{\sqrt{burstiness}}$
+- Traffic characteristics:
     - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
     - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
     - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
@@ -346,7 +344,7 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 *Figure: Load pattern examples for each use case. Top row: Request arrival timelines showing cumulative requests over time. Bottom row: Inter-arrival time distributions showing traffic variability patterns. Each column represents a different use case with its specific parameter settings and resulting traffic characteristics.*
 
-**Load Pattern Recommendations by Use Case:**
+Load Pattern Recommendations by Use Case:
 
 | Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
 | ---                | ---          | ---             | ---             | ---                                                       |
@@ -359,8 +357,6 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
 
-**Important Note on Production Architecture:**
-
 The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
 
 - Users send requests as fast as they can (infinite rate)
@@ -370,8 +366,6 @@ The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit
 
 This pattern helps determine optimal concurrency settings for your production load balancer configuration.
 
-**Interpreting KV Cache Configuration Logs:**
-
 To effectively configure load patterns, especially for **Capacity Planning** and **SLA Validation** use cases, you need to understand your system's resource limits. During startup, vLLM reports KV cache configuration that directly impacts your load testing parameters:
 
 ```text
@@ -379,18 +373,18 @@ GPU KV cache size: 15,728,640 tokens
 Maximum concurrency for 8,192 tokens per request: 1920
 ```
 
-**Understanding these metrics:**
+Where:
 
-- **GPU KV cache size**: Total tokens that can be cached across all concurrent requests
-- **Maximum concurrency**: Theoretical maximum concurrent requests for the given `max_model_len`
-- **Calculation**: `max_concurrency = kv_cache_size / max_model_len`
+- GPU KV cache size: Total tokens that can be cached across all concurrent requests
+- Maximum concurrency: Theoretical maximum concurrent requests for the given `max_model_len`
+- Calculation: `max_concurrency = kv_cache_size / max_model_len`
 
-**Using KV cache metrics for load pattern configuration:**
+Using KV cache metrics for load pattern configuration:
 
-- **For Capacity Planning**: Set `--max-concurrency` to 80-90% of the reported maximum to test realistic resource constraints
-- **For SLA Validation**: Use the reported maximum as your SLA limit to ensure compliance testing matches production capacity
-- **For Realistic Testing**: Monitor memory usage when approaching theoretical limits to understand sustainable request rates
-- **Request rate guidance**: Use the KV cache size to estimate sustainable request rates for your specific workload and sequence lengths
+- For Capacity Planning: Set `--max-concurrency` to 80-90% of the reported maximum to test realistic resource constraints
+- For SLA Validation: Use the reported maximum as your SLA limit to ensure compliance testing matches production capacity
+- For Realistic Testing: Monitor memory usage when approaching theoretical limits to understand sustainable request rates
+- Request rate guidance: Use the KV cache size to estimate sustainable request rates for your specific workload and sequence lengths
 
 </details>
 
