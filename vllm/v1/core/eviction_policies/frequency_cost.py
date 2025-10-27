@@ -4,8 +4,15 @@
 import heapq
 import math
 import time
+from dataclasses import dataclass
 
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+
+
+@dataclass
+class _Stats:
+    first_access_ts: float
+    access_count: int
 
 
 class FrequencyCostEvictionPolicy:
@@ -35,20 +42,22 @@ class FrequencyCostEvictionPolicy:
         self._heap: list[tuple[float, int, int]] = []
         self._entry_finder: dict[int, tuple[float, int, int]] = {}
         self._counter = 0
+        # Per-block stats keyed by block_id; kept internal to avoid mutating
+        # KVCacheBlock instances or relying on dynamic attributes.
+        self._stats: dict[int, _Stats] = {}
 
     def _score(self, block: KVCacheBlock) -> float:
         # If the block was never accessed through prefix hits, treat as lowest value.
-        first_ts = getattr(block, "first_access_ts", None)
-        access_count = getattr(block, "access_count", 0) or 0
-        if first_ts is None:
+        st = self._stats.get(block.block_id)
+        if st is None:
             return 0.0
         now = time.monotonic()
-        dt = max(self.min_time_window, now - first_ts)
+        dt = max(self.min_time_window, now - st.first_access_ts)
         if self.time_decay_factor > 0.0:
             w = math.exp(-self.time_decay_factor * dt)
-            freq = (access_count * w) / dt
+            freq = (st.access_count * w) / dt
         else:
-            freq = access_count / dt
+            freq = st.access_count / dt
         cost = float(self.block_size) ** self.alpha
         return min(freq * cost, 1e15)
 
@@ -63,11 +72,13 @@ class FrequencyCostEvictionPolicy:
         heapq.heappush(self._heap, entry)
 
     def on_block_access(self, block: KVCacheBlock) -> None:
-        # Minimal tracking on access for frequency stats
-        first_ts = getattr(block, "first_access_ts", None)
-        if first_ts is None:
-            block.first_access_ts = time.monotonic()
-        block.access_count = (getattr(block, "access_count", 0) or 0) + 1
+        # Minimal tracking on access for frequency stats (internal map)
+        now = time.monotonic()
+        st = self._stats.get(block.block_id)
+        if st is None:
+            self._stats[block.block_id] = _Stats(first_access_ts=now, access_count=1)
+        else:
+            st.access_count += 1
 
     def on_block_release(self, block: KVCacheBlock) -> None:
         # Block became cached-free
@@ -89,6 +100,7 @@ class FrequencyCostEvictionPolicy:
     def reset(self) -> None:
         self._heap.clear()
         self._entry_finder.clear()
+        self._stats.clear()
 
     @property
     def name(self) -> str:
