@@ -339,7 +339,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             vllm_config.speculative_config, labelnames, per_engine_labelvalues
         )
         self.kv_connector_prom = self._kv_connector_cls(
-            vllm_config.kv_transfer_config, labelnames, per_engine_labelvalues
+            vllm_config, labelnames, per_engine_labelvalues
         )
 
         #
