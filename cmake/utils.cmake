@@ -129,6 +129,44 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
 endfunction()
 
+# Find libgomp that gets shipped with PyTorch wheel and create a shim dir with:
+#   libgomp.so    -> libgomp-<hash>.so...
+#   libgomp.so.1  -> libgomp-<hash>.so...
+# OUTPUT: TORCH_GOMP_SHIM_DIR  ("" if not found)
+function(vllm_prepare_torch_gomp_shim TORCH_GOMP_SHIM_DIR)
+  set(${TORCH_GOMP_SHIM_DIR} "" PARENT_SCOPE)
+
+  # Use run_python to locate vendored libgomp; never throw on failure.
+  run_python(_VLLM_TORCH_GOMP_PATH
+    "
+import os, glob
+try:
+  import torch
+  torch_pkg = os.path.dirname(torch.__file__)
+  site_root = os.path.dirname(torch_pkg)
+  torch_libs = os.path.join(site_root, 'torch.libs')
+  print(glob.glob(os.path.join(torch_libs, 'libgomp-*.so*'))[0])
+except:
+  print('')
+"
+    "failed to probe torch.libs for libgomp")
+
+  if(_VLLM_TORCH_GOMP_PATH STREQUAL "" OR NOT EXISTS "${_VLLM_TORCH_GOMP_PATH}")
+    return()
+  endif()
+
+  # Create shim under the build tree
+  set(_shim "${CMAKE_BINARY_DIR}/gomp_shim")
+  file(MAKE_DIRECTORY "${_shim}")
+
+  execute_process(COMMAND ${CMAKE_COMMAND} -E rm -f "${_shim}/libgomp.so")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E rm -f "${_shim}/libgomp.so.1")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink "${_VLLM_TORCH_GOMP_PATH}" "${_shim}/libgomp.so")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink "${_VLLM_TORCH_GOMP_PATH}" "${_shim}/libgomp.so.1")
+
+  set(${TORCH_GOMP_SHIM_DIR} "${_shim}" PARENT_SCOPE)
+endfunction()
+
 # Macro for converting a `gencode` version number to a cmake version number.
 macro(string_to_ver OUT_VER IN_STR)
   string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})

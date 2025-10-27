@@ -403,7 +403,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         def get_repl_toks(tok: int) -> list[int]:
             if tok == newline_3:
-                return [newline_1, newline_2]
+                return [newline_2, newline_1]
             if tok == newline_4:
                 return [newline_2, newline_2]
 

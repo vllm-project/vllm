@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import getpass
 import hashlib
 import json
 import os
+import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -17,7 +21,7 @@ from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
@@ -205,6 +209,28 @@ class VllmConfig:
         # the caller should make sure the batch_size is within the range,
         # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
+
+    def enable_trace_function_call_for_thread(self) -> None:
+        """
+        Set up function tracing for the current thread,
+        if enabled via the `VLLM_TRACE_FUNCTION` environment variable.
+        """
+        if envs.VLLM_TRACE_FUNCTION:
+            tmp_dir = tempfile.gettempdir()
+            # add username to tmp_dir to avoid permission issues
+            tmp_dir = os.path.join(tmp_dir, getpass.getuser())
+            filename = (
+                f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                f"_thread_{threading.get_ident()}_at_{datetime.now()}.log"
+            ).replace(" ", "_")
+            log_path = os.path.join(
+                tmp_dir,
+                "vllm",
+                f"vllm-instance-{self.instance_id}",
+                filename,
+            )
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            enable_trace_function_call(log_path)
 
     @staticmethod
     def _get_quantization_config(
