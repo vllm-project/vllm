@@ -607,8 +607,8 @@ class VllmConfig:
                     "performance of vLLM on LLMs with sliding window attention "
                     "or Mamba attention. If you are a developer of kv connector"
                     ", please consider supporting hybrid kv cache manager for "
-                    "your connector using the abstraction in "
-                    "https://github.com/vllm-project/vllm/pull/25712."
+                    "your connector by making sure your connector is a subclass"
+                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
                 )
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
