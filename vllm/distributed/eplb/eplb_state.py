@@ -151,11 +151,11 @@ class EplbState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
-    eplb_load_path: Path | None = None
+    load_path: Path | None = None
     """
     Path for loading eplb initial state.
     """
-    eplb_save_dir: Path | None = None
+    save_dir: Path | None = None
     """
     Path where eplb states will be saved.
     """
@@ -298,7 +298,7 @@ class EplbState:
         )
 
         eplb_load_path = parallel_config.eplb_config.eplb_load_path
-        eplb_save_dir = parallel_config.eplb_config.eplb_save_dir
+        eplb_save_dir = parallel_config.eplb_config.save_dir
 
         eplb_step_interval = parallel_config.eplb_config.step_interval
         if eplb_load_path is not None or eplb_save_dir is not None:
@@ -498,8 +498,8 @@ class EplbState:
             time_start = time.perf_counter()
             logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
 
-        if self.eplb_load_path is not None and self.expert_rearrangement_step == 0:
-            global_expert_load_window = load_eplb_state(self.eplb_load_path).to(
+        if self.load_path is not None and self.expert_rearrangement_step == 0:
+            global_expert_load_window = load_eplb_state(self.load_path).to(
                 self.physical_to_logical_map.device
             )
         elif global_expert_load is None:

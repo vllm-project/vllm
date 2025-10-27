@@ -236,7 +236,7 @@ class MoEMixin(MixtureOfExperts):
         # Expert parallel load balancing kwargs
         enable_eplb = self.parallel_config.enable_eplb
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
-        eplb_record_metrics = self.parallel_config.eplb_config.eplb_record_metrics
+        eplb_record_metrics = self.parallel_config.eplb_config.record_metrics
 
         # MixtureOfExperts mixin settings
         ep_size = get_ep_group().world_size

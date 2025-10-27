@@ -62,15 +62,15 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
-    eplb_save_dir: Path | None = None
+    save_dir: Path | None = None
     """Directory to save expert load balance metrics."""
-    eplb_load_path: Path | None = None
+    load_path: Path | None = None
     """Path to load expert load balance metrics."""
 
     @property
-    def eplb_record_metrics(self) -> bool:
-        return self.eplb_save_dir is not None or (
-            self.eplb_save_dir is None and self.eplb_load_path is None
+    def record_metrics(self) -> bool:
+        return self.save_dir is not None or (
+            self.save_dir is None and self.load_path is None
         )
 
 
