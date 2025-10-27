@@ -324,11 +324,14 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_quant_config")
             )
+
+            def _matches_pattern(layer_name, pattern):
+                if "*" not in pattern:
+                    return layer_name in pattern
+                return fnmatch.fnmatch(layer_name, pattern)
+
             for name_pattern, config in layer_quant_config.items():
-                if (
-                    fnmatch.fnmatch(layer_name, name_pattern)
-                    or layer_name in name_pattern
-                ):
+                if _matches_pattern(layer_name, name_pattern):
                     return config
 
             layer_type = cast(str, type(module))
