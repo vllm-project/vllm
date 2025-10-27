@@ -785,7 +785,15 @@ class Indexer(nn.Module):
         )
         weights = weights.squeeze(-1)
 
-        return torch.ops.vllm.sparse_attn_indexer(
+        sparse_attn_indexer_func = torch.ops.vllm.sparse_attn_indexer
+        if current_platform.is_rocm():
+            from vllm.attention.ops.rocm_aiter_mla_sparse import (
+                rocm_sparse_attn_indexer,
+            )
+
+            sparse_attn_indexer_func = rocm_sparse_attn_indexer
+
+        return sparse_attn_indexer_func(
             hidden_states,
             self.k_cache.prefix,
             self.k_cache.kv_cache[0],
