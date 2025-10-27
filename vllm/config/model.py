@@ -2112,8 +2112,8 @@ def _get_and_verify_max_len(
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
-    # If the user specified a max length, make sure it is smaller than the
-    # derived length from the HF model config.
+    # If the user didn't specify `max_model_len`, then use that derived from
+    # the model config as a default value.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
         if current_platform.is_tpu():
@@ -2126,6 +2126,16 @@ def _get_and_verify_max_len(
                 "unnecessary degradation.",
                 max_model_len,
             )
+        elif current_platform.device_name == "npu" and max_model_len > 65536:
+            logger.warning(
+                "max_model_len is not specified and the default value"
+                "derived from the model config is {max_model_len}, which is"
+                "too large and will make the engine stuck in initializing"
+                "distributed communication. Set max_model_len to 65536."
+            )
+            max_model_len = 65536
+    # If the user specified a max length, make sure it is smaller than the
+    # derived length from the HF model config.
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
