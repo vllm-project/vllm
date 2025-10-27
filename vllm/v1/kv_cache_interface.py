@@ -76,7 +76,7 @@ class AttentionSpec(KVCacheSpec):
         )
 
     def find_compatible_kernel_block_sizes(
-        self, backend_cls: type[AttentionBackend], return_all: bool = False
+        self, backend_cls: "type[AttentionBackend]", return_all: bool = False
     ) -> list[int]:
         """Find compatible kernel block sizes for this spec and backend.
 
