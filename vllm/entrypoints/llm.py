@@ -427,7 +427,32 @@ class LLM:
             sampling_params = self.get_default_sampling_params()
 
         # Add any modality specific loras to the corresponding prompts
-        lora_request = self._get_modality_specific_lora_reqs(prompts, lora_request)
+        user_lora_request = lora_request
+        lora_request = self._get_modality_specific_lora_reqs(prompts, user_lora_request)
+
+        # TODO - currently generate always applies the io processor, but we should
+        # ensure this behavior is consistent with pooling, which looks for the `data`
+        # key in a dict.
+        if self.io_processor is not None:
+            # Validate the request data is valid for the loaded plugin
+            validated_prompt = self.io_processor.parse_request(prompts)
+
+            # obtain the actual model prompts from the pre-processor
+            prompts = self.io_processor.pre_process(
+                prompt=validated_prompt,
+                params=sampling_params,
+                llm_instance=self,
+                lora_request=lora_request,
+                priority=priority,
+            )
+
+            # reset the lora request unless it's one the user explicitly gave,
+            # because plugins may submit their own requests to the engine,
+            # which may change the modality.
+            if user_lora_request is None:
+                lora_request = self._get_modality_specific_lora_reqs(
+                    prompts, user_lora_request
+                )
 
         self._validate_and_add_requests(
             prompts=prompts,
@@ -438,6 +463,7 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
+        # TODO - handle output side of output plugins
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
@@ -458,7 +484,7 @@ class LLM:
         ):
             return lora_request
 
-        if not isinstance(prompts, Sequence):
+        if not isinstance(prompts, Sequence) or isinstance(prompts, str):
             prompts = [prompts]
 
         optional_loras = (
