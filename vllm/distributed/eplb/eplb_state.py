@@ -297,7 +297,7 @@ class EplbState:
             device=device,
         )
 
-        eplb_load_path = parallel_config.eplb_config.eplb_load_path
+        eplb_load_path = parallel_config.eplb_config.load_path
         eplb_save_dir = parallel_config.eplb_config.save_dir
 
         eplb_step_interval = parallel_config.eplb_config.step_interval

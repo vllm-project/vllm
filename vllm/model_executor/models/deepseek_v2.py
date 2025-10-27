@@ -246,7 +246,7 @@ class DeepseekV2MoE(nn.Module):
             else self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
-            eplb_record_metrics=eplb_config.eplb_record_metrics,
+            eplb_record_metrics=eplb_config.record_metrics,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts

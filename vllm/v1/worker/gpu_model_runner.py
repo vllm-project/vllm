@@ -1992,11 +1992,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         if not self.parallel_config.enable_eplb:
             return
-        if is_profile and self.parallel_config.eplb_config.eplb_load_path is not None:
+        if is_profile and self.parallel_config.eplb_config.load_path is not None:
             return
         if (
-            self.parallel_config.eplb_config.eplb_load_path is not None
-            and self.parallel_config.eplb_config.eplb_save_dir is None
+            self.parallel_config.eplb_config.load_path is not None
+            and self.parallel_config.eplb_config.save_dir is None
         ):
             return
 
@@ -2930,9 +2930,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 old_global_expert_indices,
                 rank_mapping,
             )
-            if self.parallel_config.eplb_config.eplb_load_path is not None:
+            if self.parallel_config.eplb_config.load_path is not None:
                 self.eplb_state.rearrange(self.model)
-                if self.parallel_config.eplb_config.eplb_save_dir is None:
+                if self.parallel_config.eplb_config.save_dir is None:
                     self.eplb_state = None
 
         if (
