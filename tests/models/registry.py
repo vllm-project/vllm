@@ -344,7 +344,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
-        is_available_online=False,
+        is_available_online=True,
     ),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo(
@@ -909,11 +909,11 @@ _TRANSFORMERS_BACKEND_MODELS = {
 
 _EXAMPLE_MODELS = {
     **_TEXT_GENERATION_EXAMPLE_MODELS,
-    **_EMBEDDING_EXAMPLE_MODELS,
-    **_SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS,
-    **_MULTIMODAL_EXAMPLE_MODELS,
-    **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
-    **_TRANSFORMERS_BACKEND_MODELS,
+    # **_EMBEDDING_EXAMPLE_MODELS,
+    # **_SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS,
+    # **_MULTIMODAL_EXAMPLE_MODELS,
+    # **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
+    # **_TRANSFORMERS_BACKEND_MODELS,
 }
 
 
