@@ -1034,14 +1034,14 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
             return None
         return remapped_name
 
-    # if any("mla_attn" in key for key in params_dict):
-    #     attn_str = "mla_attn.mla_attn"
-    #     logger.debug_once(
-    #         f"Found mla_attn with k_scale and v_scale in "
-    #         f"the checkpoint, using {attn_str} as attn_str"
-    #     )
-    # else:
-    attn_str = "attn"
+    if any("mla_attn" in key for key in params_dict):
+        attn_str = "mla_attn.mla_attn"
+        logger.debug_once(
+            f"Found mla_attn with k_scale and v_scale in "
+            f"the checkpoint, using {attn_str} as attn_str"
+        )
+    else:
+        attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
         # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
@@ -1068,14 +1068,13 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
             if re.search(pattern, name):
                 remapped_name = re.sub(pattern, replacement, name)
                 if remapped_name not in params_dict:
-                    # find the scale type in params_dict
-                    params_scale_name = "<not found>"
                     scale_type = name.split(".")[-1]
-                    print(params_dict.keys())
                     logger.warning_once(
-                        f"Found {scale_type} in the checkpoint (e.g. {name}), but not found the remapped name in the model "
-                        f" (e.g. {remapped_name}). {scale_type} is not loaded."
-                        # f"Expected format is {params_scale_name} ",  # noqa: E501
+                        "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
+                        scale_type,
+                        name,
+                        remapped_name,
+                        scale_type,
                     )
                     return None
                 return remapped_name
