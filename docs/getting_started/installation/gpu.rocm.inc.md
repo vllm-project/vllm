@@ -11,9 +11,9 @@ vLLM supports AMD GPUs with ROCm 6.3 or above.
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
-- GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201)
+- GPU: MI210/MI250 (gfx90a), MI300/MI325 (gfx942), MI350/MI355 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201)
 - ROCm 6.3 or above
-    - MI350 requires ROCm 7.0 or above
+    - MI350/MI355 requires ROCm 7.0 or above
 
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
@@ -28,12 +28,12 @@ Currently, there are no pre-built ROCm wheels.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
+1. Install prerequisites (skip if you are already in an environment/docker with the following installed):
 
     - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
     - [PyTorch](https://pytorch.org/)
 
-    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
+    For installing PyTorch+Triton, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm7.0.2_ubuntu24.04_py3.12_pytorch_release_2.8.0`, `rocm/pytorch-nightly`, then skip to Step 2.
 
     Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
@@ -43,58 +43,64 @@ Currently, there are no pre-built ROCm wheels.
     pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
     ```
 
-1. Install [Triton for ROCm](https://github.com/triton-lang/triton)
+    !!! note
+        For ROCm 7.0 wheels (with gfx950 support), please use the PyTorch nightly build:
+        ```bash
+        pip install --no-cache-dir --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+        ```
 
-    Install ROCm's Triton (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
+2. Install [Triton](https://github.com/triton-lang/triton)
+
+    Install Triton on ROCm following the instructions from [ROCm/triton](https://github.com/ROCm/triton); see [Dockerfile.rocm_base](../../../docker/Dockerfile.rocm_base) for the most recent commit:
 
     ```bash
-    python3 -m pip install ninja cmake wheel pybind11
     pip uninstall -y triton
-    git clone https://github.com/triton-lang/triton.git
+    git clone https://github.com/ROCm/triton
     cd triton
-    git checkout e5be006
-    if [ ! -f setup.py ]; then cd python; fi
-    python3 setup.py install
-    cd ../..
+    git checkout 57c693b6
+    pip install -r python/requirements.txt
+    pip install .
+    if [ -d python/triton_kernels ]; then
+        cd python/triton_kernels
+        pip install .
+        cd ../../
+    fi
+    cd ../
     ```
 
     !!! note
         If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
 
-2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention)
+3. Optionally, if you choose to use either Triton split attention or AITER multi-headed attention (See [Attention Backends](../../getting_started/quickstart.md#on-attention-backends)), you can install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention)
 
-    Install ROCm's flash attention (v2.7.2) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention#amd-rocm-support)
-    Alternatively, wheels intended for vLLM use can be accessed under the releases.
-
-    For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
+    Install ROCm's latest flash attention (v2.8.3) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention#amd-rocm-support); see [Dockerfile.rocm_base](../../../docker/Dockerfile.rocm_base) for the most recent commit:
 
     ```bash
     git clone https://github.com/Dao-AILab/flash-attention.git
     cd flash-attention
-    git checkout 1a7f4dfa
+    git checkout 0e60e394
     git submodule update --init
     GPU_ARCHS="gfx90a" python3 setup.py install
     cd ..
     ```
 
+    To get your gfx architecture, run `rocminfo | grep gfx`. Alternatively, wheels intended for vLLM use can be accessed under the releases.
+
     !!! note
         You might need to downgrade the "ninja" version to 1.10 as it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
-3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
+4. Optionally, to use AITER kernels, you can install [AITER](https://github.com/ROCm/aiter); see [Dockerfile.rocm_base](../../../docker/Dockerfile.rocm_base) for the most recent commit:
 
     ```bash
     python3 -m pip uninstall -y aiter
     git clone --recursive https://github.com/ROCm/aiter.git
     cd aiter
-    git checkout $AITER_BRANCH_OR_COMMIT
+    git checkout eef23c7f
     git submodule sync; git submodule update --init --recursive
     python3 setup.py develop
     ```
 
-    !!! note
-        You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
-
-4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
+5. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
     ??? console "Commands"
 
@@ -112,8 +118,8 @@ Currently, there are no pre-built ROCm wheels.
         pip install "numpy<2"
         pip install -r requirements/rocm.txt
 
-        # Build vLLM for MI210/MI250/MI300.
-        export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+        # Build vLLM for MI300/MI325/MI350/MI3550.
+        export PYTORCH_ROCM_ARCH="gfx942;gfx950"
         python3 setup.py develop
         ```
 
@@ -121,8 +127,6 @@ Currently, there are no pre-built ROCm wheels.
 
     !!! tip
         - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm-up step before collecting perf numbers.
-        - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
-        - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
         - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
 
 !!! tip
@@ -160,7 +164,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
-To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
+To build vllm on ROCm 7.0, you can use the default:
 
 ```bash
 DOCKER_BUILDKIT=1 docker build \
@@ -181,7 +185,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
-[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 6.3 by default, but also supports ROCm 5.7, 6.0, 6.1, and 6.2, in older vLLM branches.
+[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 7.0 by default, but also supports ROCm 5.7, 6.0, 6.1, 6.2, 6.3, and 6.4, in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 - `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)
@@ -189,7 +193,7 @@ It provides flexibility to customize the build of docker image using the followi
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
 
-To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
+To build vllm on ROCm 7.0, you can use the default:
 
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm-rocm .
