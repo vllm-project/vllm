@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.compilation.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     DeviceConfig,
     ModelConfig,
     PassConfig,
@@ -24,7 +25,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import (
@@ -340,6 +341,15 @@ def async_tp_pass_on_test_model(
     async_tp_pass = AsyncTPPass(vllm_config)
     backend = TestBackend(async_tp_pass)
 
+    assert (
+        async_tp_pass.compilation_config.splitting_ops
+        == vllm_config.compilation_config.splitting_ops
+    )
+    assert (
+        async_tp_pass.compilation_config.use_inductor_graph_partition
+        == vllm_config.compilation_config.use_inductor_graph_partition
+    )
+
     model = test_model_cls(hidden_size, dtype)  # Pass dtype to model constructor
 
     hidden_states = torch.randn(
@@ -400,7 +410,7 @@ def test_async_tp_pass_correctness(
         common_args.append("--enforce-eager")
 
     compilation_config = {
-        "level": 3,
+        "mode": CompilationMode.VLLM_COMPILE,
         "compile_sizes": [2, 4, 8],
         "splitting_ops": [],
         "pass_config": {"enable_async_tp": async_tp_enabled},

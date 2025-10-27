@@ -24,7 +24,7 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model
 
@@ -673,7 +673,9 @@ class MixtureOfExperts(Protocol):
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
-    return isinstance(model, MixtureOfExperts)
+    return (
+        isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
+    )
 
 
 @runtime_checkable

@@ -16,7 +16,8 @@ from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -26,12 +27,20 @@ else:
 logger = init_logger(__name__)
 
 
-class CompilationLevel:
-    # constants for the levels of the compilation process
-    NO_COMPILATION = 0
-    DYNAMO_AS_IS = 1
-    DYNAMO_ONCE = 2
-    PIECEWISE = 3
+class CompilationMode:
+    """The compilation approach used for torch.compile-based compilation of the
+    model."""
+
+    NONE = 0
+    """No torch.compile compilation is applied, model runs in fully eager pytorch mode.
+    The model runs as-is."""
+    STOCK_TORCH_COMPILE = 1
+    """The standard `torch.compile` compilation pipeline."""
+    DYNAMO_TRACE_ONCE = 2
+    """Single Dynamo trace through the model, avoiding recompilation."""
+    VLLM_COMPILE = 3
+    """Custom vLLM Inductor-based backend with caching, piecewise compilation,
+    shape specialization, and custom passes."""
 
 
 class CUDAGraphMode(enum.Enum):
@@ -134,7 +143,7 @@ class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
     - Top-level Compilation control:
-        - [`level`][vllm.config.CompilationConfig.level]
+        - [`mode`][vllm.config.CompilationConfig.mode]
         - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
         - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
         - [`backend`][vllm.config.CompilationConfig.backend]
@@ -145,6 +154,8 @@ class CompilationConfig:
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`max_cudagraph_capture_size`]
+        [vllm.config.CompilationConfig.max_cudagraph_capture_size]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
@@ -171,14 +182,26 @@ class CompilationConfig:
 
     # Top-level Compilation control
     level: int | None = None
-    """The level of compilation:
+    """
+    Level is deprecated and will be removed in the next release,
+    either 0.12.0 or 0.11.2 whichever is soonest.
+    Please use mode. Currently all levels are mapped to mode.
+    """
+    # Top-level Compilation control
+    mode: int | None = None
+    """The compilation approach used for torch.compile-based compilation of the
+    model.
 
-    - None: If None, we will select the default compilation level.
-      For V1 engine this is 3, for V0 engine this is 0.
-    - 0: no compilation.
-    - 1: dynamo as is.
-    - 2: dynamo once.
-    - 3: piecewise compilation."""
+    - None: If None, we will select the default compilation mode.
+      For V1 engine this is 3.
+    - 0: NONE: No torch.compile compilation is applied, model runs in fully
+         eager pytorch mode. The model runs as-is.
+    - 1: STOCK_TORCH_COMPILE: The standard `torch.compile` compilation pipeline.
+    - 2: DYNAMO_TRACE_ONCE: Single Dynamo trace through the model, avoiding
+         recompilation by removing guards.
+         Requires no dynamic-shape-dependent control-flow.
+    - 3: VLLM_COMPILE: Custom vLLM Inductor-based backend with caching,
+         piecewise compilation, shape specialization, and custom passes."""
     debug_dump_path: Path | None = None
     """The path to dump the debug information."""
     cache_dir: str = ""
@@ -195,11 +218,11 @@ class CompilationConfig:
 
     backend function.
     We use string to avoid serialization issues when using compilation in a
-    distributed setting. When the compilation level is 1 or 2, the backend is
+    distributed setting. When the compilation mode is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
-    compilation level is 3, the backend is used for the piecewise compilation
+    compilation mode is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph). The backend can not be custom for compilation
-    level 3, i.e. the backend must be either eager or inductor. Furthermore,
+    mode 3, i.e. the backend must be either eager or inductor. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
     use_inductor_graph_partition is off. Note that the default options for
     splitting ops are sufficient for piecewise compilation.
@@ -214,7 +237,7 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
+    disabled when running with Inductor: mode>=VLLM_COMPILE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
@@ -249,7 +272,7 @@ class CompilationConfig:
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
 
-    This setting is ignored if level<PIECEWISE.
+    This setting is ignored if mode<VLLM_COMPILE.
 
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
@@ -299,25 +322,23 @@ class CompilationConfig:
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
     compilation logic. While piecewise cudagraphs require piecewise 
-    compilation (level=PIECEWISE and non-empty splitting_ops), full
+    compilation (mode=VLLM_COMPILE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
     
     Warning: This flag is new and subject to change in addition 
     more modes may be added.
     """
     use_cudagraph: bool = True
-    """Whether to use cudagraph inside compilation.
-    - False: cudagraph inside compilation is not used.
+    """Whether to use cudagraph inside compilation:
+
+    - False: cudagraph inside compilation is not used.\n
     - True: cudagraph inside compilation is used. It requires
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
-    In the vLLM V1 Engine, this flag only applies for
-    CompilationLevel.PIECEWISE (aka -O3).
-    Note that this is orthogonal to the cudagraph capture logic
-    outside of compilation.
+
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=PIECEWISE
-    instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=FULL_AND
+    _PIECEWISE instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -345,6 +366,14 @@ class CompilationConfig:
     minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
     FULL_AND_PIECEWISE instead.
     """
+    cudagraph_specialize_lora: bool = True
+    """Whether to create separate cuda graphs for cases with and without active
+    LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
+    for all cases, incurring the overhead of running LoRA ops even when no
+    adapters are active. Setting this to True will remove this overhead at the
+    cost of increased startup time and slightly higher memory usage.
+    When `enable_lora` is False, this option has no effect.
+    """
 
     use_inductor_graph_partition: bool = False
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
@@ -369,8 +398,22 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_capture_size: int = field(default=None, init=False)  # type: ignore
-    """not configurable, computed after init"""
+    max_cudagraph_capture_size: int | None = field(default=None)
+    """The maximum cudagraph capture size.
+    
+    If cudagraph_capture_sizes is specified, this will be set to the largest 
+    size in that list (or checked for consistency if specified). If
+    cudagraph_capture_sizes is not specified, the list of sizes is generated
+    automatically following the pattern:
+
+        [1, 2, 4] + list(range(8, 256, 8)) + list(
+        range(256, max_cudagraph_capture_size + 1, 16))
+
+    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
+    512) by default. This voids OOM in tight memory scenarios with small 
+    max_num_seqs, and prevents capture of many large graphs (>512) that would
+    greatly increase startup time with limited performance benefit.
+    """
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
     bs_to_padded_graph_size: list[int] = field(
@@ -379,7 +422,7 @@ class CompilationConfig:
     )
     """optimization:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    since we know all keys are in a range [0, max_capture_size],
+    since we know all keys are in a range [0, max_cudagraph_capture_size],
     we can optimize it to list[int] for better lookup performance."""
 
     # keep track of enabled and disabled custom ops
@@ -426,7 +469,7 @@ class CompilationConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        factors.append(self.level)
+        factors.append(self.mode)
         factors.append(self.backend)
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
@@ -477,6 +520,17 @@ class CompilationConfig:
         return value
 
     def __post_init__(self) -> None:
+        if self.level is not None:
+            logger.warning(
+                "Level is deprecated and will be removed in the next release,"
+                "either 0.12.0 or 0.11.2 whichever is soonest."
+                "Use mode instead."
+                "If both level and mode are given,"
+                "only mode will be used."
+            )
+            if self.mode is None:
+                self.mode = self.level
+
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -574,7 +628,7 @@ class CompilationConfig:
         # Currently only eager and inductor backend are supported.
         # for piecewise compilation. Custom backends are not suppported for
         # piecewise compilation. Update when more backends are supported.
-        if self.level == CompilationLevel.PIECEWISE and self.backend not in [
+        if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
             "eager",
             "inductor",
@@ -602,24 +656,27 @@ class CompilationConfig:
         Returns:
             The backend for the compilation config.
         """
-        if self.level is None:
+        if self.mode is None:
             raise ValueError(
-                "No compilation level is set. This method should only be \
+                "No compilation mode is set. This method should only be \
                 called via vllm config where the level is set if none is \
                 provided."
             )
-        if self.level == CompilationLevel.NO_COMPILATION:
-            raise ValueError("No compilation level is set.")
+        if self.mode == CompilationMode.NONE:
+            raise ValueError("No compilation mode is set.")
 
         from torch._dynamo.backends.registry import list_backends
 
         torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
+        if self.mode in [
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+        ]:
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
 
-        assert self.level == CompilationLevel.PIECEWISE
+        assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:
             raise ValueError(
                 f"Invalid backend for piecewise compilation: {self.backend}"
@@ -629,25 +686,12 @@ class CompilationConfig:
 
         return VllmBackend(vllm_config)
 
-    def init_with_cudagraph_sizes(self, cudagraph_capture_sizes: list[int]) -> None:
-        """To complete the initialization of config,
-        we need to know the cudagraph sizes."""
-
-        if self.cudagraph_capture_sizes is None:
-            self.cudagraph_capture_sizes = cudagraph_capture_sizes
-        else:
-            # de-duplicate the sizes provided by the config
-            dedup_sizes = list(set(self.cudagraph_capture_sizes))
-            if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
-                logger.info(
-                    (
-                        "cudagraph sizes specified by model runner"
-                        " %s is overridden by config %s"
-                    ),
-                    cudagraph_capture_sizes,
-                    dedup_sizes,
-                )
-            self.cudagraph_capture_sizes = dedup_sizes
+    def post_init_cudagraph_sizes(self) -> None:
+        """To complete the initialization after cudagraph related
+        configs are set. This includes:
+        - initialize compile_sizes
+        - pre-compute the mapping bs_to_padded_graph_size
+        """
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
@@ -665,30 +709,31 @@ class CompilationConfig:
                     computed_compile_sizes.append(x)
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
-        # sort to make sure cudagraph capture sizes are in descending order
-        self.cudagraph_capture_sizes.sort(reverse=True)
-        self.max_capture_size = (
-            self.cudagraph_capture_sizes[0] if self.cudagraph_capture_sizes else 0
-        )
+        # make sure the sizes are in ascending order
+        self.cudagraph_capture_sizes.sort()
+        if self.cudagraph_capture_sizes:
+            assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
         # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [0 for i in range(self.max_capture_size + 1)]
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_cudagraph_capture_size + 1)
+        ]
         for end, start in zip(
-            self.cudagraph_capture_sizes, self.cudagraph_capture_sizes[1:] + [0]
+            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
+            [0] + self.cudagraph_capture_sizes,
         ):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        # NOTE: this function needs to be called only when level is
-        # CompilationLevel.PIECEWISE
-        assert self.level == CompilationLevel.PIECEWISE, (
+        # NOTE: this function needs to be called only when mode is
+        # CompilationMode.VLLM_COMPILE
+        assert self.mode == CompilationMode.VLLM_COMPILE, (
             "set_splitting_ops_for_v1 should only be called when "
-            "level is CompilationLevel.PIECEWISE"
+            "mode is CompilationMode.VLLM_COMPILE"
         )
 
         if self.use_inductor_graph_partition:
@@ -769,12 +814,10 @@ class CompilationConfig:
 
         if not self.use_inductor_graph_partition:
             # Dynamo-level FX split case
-            return self.level == CompilationLevel.PIECEWISE
+            return self.mode == CompilationMode.VLLM_COMPILE
 
         # Inductor partition case
-        return (
-            self.backend == "inductor" and self.level > CompilationLevel.NO_COMPILATION
-        )
+        return self.backend == "inductor" and self.mode > CompilationMode.NONE
 
     def custom_op_log_check(self):
         """

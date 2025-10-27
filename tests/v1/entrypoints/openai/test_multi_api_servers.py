@@ -10,7 +10,7 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 from tests.v1.utils import check_request_balancing
 
-MODEL_NAME = "ibm-research/PowerMoE-3b"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 DP_SIZE = os.getenv("DP_SIZE", "1")
 

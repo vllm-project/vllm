@@ -13,8 +13,8 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_mori, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_all2all
+from vllm.utils.import_utils import has_deep_ep, has_pplx, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -281,7 +281,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         num_rdma_bytes = None
         num_qps_per_rank = None
 
-        if self.internode:
+        if self.internode and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE:
             num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
@@ -367,6 +367,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=True,
             num_qps_per_rank=num_qps_per_rank,
+            allow_nvlink_for_low_latency_mode=envs.VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK,
+            allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
         )
 
     def get_handle(self, kwargs):
