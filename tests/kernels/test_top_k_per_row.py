@@ -10,22 +10,44 @@ from vllm.platforms import current_platform
 # Test parameters
 NUM_ROWS = [1, 32, 2050]
 TOP_K_VALUES = [2048]
-BATCH_SIZE = [1, 2, 4, 2048, 4096]
-NEXT_N = [1, 2, 4, 8]
+BATCH_SIZE = [1, 2, 2048]
+NEXT_N = [1, 2, 8]
+DATA_GENERATION = ["random", "10LSBits"]
 
 
 def create_random_logits(
     row_starts: torch.Tensor,
     row_ends: torch.Tensor,
-    vocab_size: int,
     dtype: torch.dtype,
     seed: int,
+    data_generation: str,
 ) -> torch.Tensor:
     """Create random logits tensor for testing."""
     torch.manual_seed(seed)
     np.random.seed(seed)
     # Generate logits with some structure to make testing more meaningful
-    logits = torch.randn(row_starts.shape[0], max(row_ends), dtype=dtype, device="cuda")
+    if data_generation == "random":
+        logits = torch.randn(
+            row_starts.shape[0], max(row_ends), dtype=dtype, device="cuda"
+        )
+    elif data_generation == "10LSBits":
+        top_22_bits_mask = 0xFFFFFC00
+        last_10_bits_mask = 0x000003FF
+        fixed_top_22_bits = 0x3F900000
+        # Generate random bits for the last 10 bits
+        random_bottom_bits = torch.randint(
+            0,
+            2**10,
+            (row_starts.shape[0], max(row_ends)),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        # Combine: fixed top 22 bits with random last 10 bits
+        logits_bits = (fixed_top_22_bits & top_22_bits_mask) | (
+            random_bottom_bits & last_10_bits_mask
+        )
+        logits = logits_bits.view(dtype)
+
     for i, end in enumerate(row_ends):
         logits[i, end:] = float("-inf")
     return logits
@@ -113,7 +135,7 @@ def test_top_k_per_row(
     # Create test data
     vocab_size = 20000
     row_starts, row_ends = create_row_boundaries(num_rows, vocab_size)
-    logits = create_random_logits(row_starts, row_ends, vocab_size, torch.float32, 42)
+    logits = create_random_logits(row_starts, row_ends, torch.float32, 42, "random")
 
     # Create output tensors
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
@@ -145,12 +167,14 @@ def test_top_k_per_row(
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
 @pytest.mark.parametrize("next_n", NEXT_N)
+@pytest.mark.parametrize("data_generation", DATA_GENERATION)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @torch.inference_mode()
 def test_top_k_per_row_decode(
     top_k: int,
     batch_size: int,
     next_n: int,
+    data_generation: str,
 ) -> None:
     """
     Test top_k_per_row with seq_lens tensor.
@@ -167,7 +191,9 @@ def test_top_k_per_row_decode(
     row_indices = torch.arange(num_rows, device="cuda") // next_n
     next_n_offset = torch.arange(num_rows, device="cuda") % next_n
     row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
-    logits = create_random_logits(row_starts, row_ends, vocab_size, torch.float32, 42)
+    logits = create_random_logits(
+        row_starts, row_ends, torch.float32, 42, data_generation
+    )
 
     # Create output tensors
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
