@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -53,7 +54,11 @@ from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     dispatch_rotary_emb_function,
@@ -100,7 +105,11 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
+from .vision import (
+    conv3d_to_linear_weight,
+    get_vit_attn_backend,
+    run_dp_sharded_mrope_vision_model,
+)
 
 logger = init_logger(__name__)
 
@@ -320,6 +329,7 @@ class Qwen2VisionAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -355,6 +365,7 @@ class Qwen2VisionAttention(nn.Module):
         self.attn_backend = get_vit_attn_backend(
             head_size=self.hidden_size_per_attention_head,
             dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         self.use_upstream_fa = False
 
@@ -362,6 +373,7 @@ class Qwen2VisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
@@ -423,7 +435,7 @@ class Qwen2VisionAttention(nn.Module):
         q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
 
-        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
+        q, k, v = (rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
         if rotary_pos_emb is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
@@ -450,6 +462,12 @@ class Qwen2VisionAttention(nn.Module):
             ).contiguous()
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
+            from vllm.platforms import current_platform
+
+            if current_platform.is_rocm():
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
             outputs = []
             for i in range(1, len(cu_seqlens)):
                 start_idx = cu_seqlens[i - 1]
@@ -497,6 +515,7 @@ class Qwen2VisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -512,6 +531,7 @@ class Qwen2VisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.mlp = Qwen2VisionMLP(
             dim,
@@ -556,18 +576,15 @@ class Qwen2VisionPatchEmbed(nn.Module):
         self.embed_dim = embed_dim
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = nn.Conv3d(
-            in_channels,
+        self.proj = ReplicatedLinear(
+            in_channels * math.prod(kernel_size),
             embed_dim,
-            kernel_size=kernel_size,
-            stride=kernel_size,
             bias=False,
+            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
-        x = self.proj(x).view(L, self.embed_dim)
+        x = self.proj(x)
         return x
 
 
@@ -662,6 +679,7 @@ class Qwen2VisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
 
@@ -703,6 +721,7 @@ class Qwen2VisionTransformer(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
+                    attn_backend_override=attn_backend_override,
                 )
                 for layer_idx in range(depth)
             ]
@@ -716,7 +735,9 @@ class Qwen2VisionTransformer(nn.Module):
             use_data_parallel=use_data_parallel,
         )
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
             torch.get_default_dtype()
@@ -826,6 +847,9 @@ class Qwen2VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            if name.endswith("patch_embed.proj.weight"):
+                loaded_weight = conv3d_to_linear_weight(loaded_weight)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1356,12 +1380,18 @@ class Qwen2VLForConditionalGeneration(
         if multimodal_config.get_limit_per_prompt(
             "image"
         ) or multimodal_config.get_limit_per_prompt("video"):
+            attn_backend_override = (
+                multimodal_config.mm_encoder_attn_backend
+                if multimodal_config is not None
+                else None
+            )
             self.visual = Qwen2VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
+                attn_backend_override=attn_backend_override,
             )
         else:
             self.visual = None
@@ -1561,12 +1591,12 @@ class Qwen2VLForConditionalGeneration(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 

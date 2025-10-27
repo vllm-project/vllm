@@ -2,23 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
 
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 else:
     _Backend = None
 
@@ -81,7 +78,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74bd": "AMD_Instinct_MI300X_HF",
 }
 
-# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
+# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
 if "HIP_VISIBLE_DEVICES" in os.environ:
     val = os.environ["HIP_VISIBLE_DEVICES"]
     if cuda_val := os.environ.get("CUDA_VISIBLE_DEVICES", None):
@@ -208,12 +205,16 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        from importlib.util import find_spec
+
         from vllm.attention.backends.registry import _Backend
 
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             return _Backend.ROCM_AITER_FA
-        if on_gfx9():
+
+        if on_gfx9() and find_spec("flash_attn") is not None:
             return _Backend.FLASH_ATTN
+
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -477,49 +478,12 @@ class RocmPlatform(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
-    def stateless_init_device_torch_dist_pg(
-        cls,
-        backend: str,
-        prefix_store: PrefixStore,
-        group_rank: int,
-        group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
-        assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(
-            prefix_store, group_rank, group_size, backend_options
-        )
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-        pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
-
-    @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        return True
-
-    @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()
                 gpu_name = cls.get_device_name()

@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from itertools import islice
@@ -56,7 +57,11 @@ from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -79,7 +84,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -107,7 +112,11 @@ from .utils import (
     _merge_multimodal_embeddings,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
+from .vision import (
+    conv3d_to_linear_weight,
+    get_vit_attn_backend,
+    run_dp_sharded_mrope_vision_model,
+)
 
 logger = init_logger(__name__)
 
@@ -129,18 +138,15 @@ class Qwen3_VisionPatchEmbed(nn.Module):
         self.hidden_size = hidden_size
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = nn.Conv3d(
-            in_channels,
+        self.proj = ReplicatedLinear(
+            in_channels * math.prod(kernel_size),
             hidden_size,
-            kernel_size=kernel_size,
-            stride=kernel_size,
             bias=True,
+            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
-        x = self.proj(x).view(L, self.hidden_size)
+        x = self.proj(x)
         return x
 
 
@@ -300,6 +306,7 @@ class Qwen3_VisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = vision_config.hidden_size
@@ -359,7 +366,9 @@ class Qwen3_VisionTransformer(nn.Module):
         )
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         use_upstream_fa = False
         if (
@@ -379,7 +388,6 @@ class Qwen3_VisionTransformer(nn.Module):
             raise RuntimeError(
                 f"Qwen3-VL does not support {self.attn_backend} backend now."
             )
-
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
@@ -574,6 +582,9 @@ class Qwen3_VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            if name.endswith("patch_embed.proj.weight"):
+                loaded_weight = conv3d_to_linear_weight(loaded_weight)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -735,9 +746,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         if do_sample_frames:
             # here video_fps is the fps of the sampled video, and
             # metadata["fps"] refers to the fps of the original video.
-            video_fps = sampled_fps if sampled_fps else video_processor.fps
+            sampled_fps = sampled_fps if sampled_fps else video_processor.fps
             total_num_frames = metadata["total_num_frames"]
-            num_frames = int(total_num_frames / metadata["fps"] * video_fps)
+            num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
             num_frames = min(
                 min(
                     max(num_frames, video_processor.min_frames),
@@ -887,16 +898,12 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Separate video processing from image processing. Because the videos
-        # are processed into serval image patches
-        if (
-            "videos" in mm_data
-            and isinstance(mm_data["videos"], list)
-            and len(mm_data["videos"]) > 0
-        ):
+        # are processed into several image patches
+        if videos := mm_data.pop("videos", []):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
 
-            for item_idx, item in enumerate(mm_data.pop("videos", [])):
+            for item in videos:
                 video_array, metadata = item
 
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
@@ -1214,12 +1221,18 @@ class Qwen3VLForConditionalGeneration(
         ) and not multimodal_config.get_limit_per_prompt("video"):
             self.visual = None
         else:
+            attn_backend_override = (
+                multimodal_config.mm_encoder_attn_backend
+                if multimodal_config is not None
+                else None
+            )
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
+                attn_backend_override=attn_backend_override,
             )
 
         self.language_model = Qwen3LLMForCausalLM(
@@ -1472,9 +1485,8 @@ class Qwen3VLForConditionalGeneration(
                 )
         return mm_input_by_modality
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,
@@ -1601,11 +1613,11 @@ class Qwen3VLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                vision_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
         return multimodal_embeddings
 
     def _compute_deepstack_embeds(
@@ -1776,6 +1788,6 @@ class Qwen3VLForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="model.visual.merger",
-            tower_model="model.visual.",
+            connector="visual.merger",
+            tower_model="visual.",
         )

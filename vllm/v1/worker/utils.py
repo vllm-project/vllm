@@ -42,10 +42,10 @@ class MultiModalBudget:
 
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
 
-        max_tokens_by_modality = (
-            mm_registry.get_max_tokens_per_item_by_nonzero_modality(
-                model_config, cache=cache
-            )
+        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
+            model_config,
+            cache=cache,
+            profiler_limits=self.mm_limits,
         )
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
@@ -328,8 +328,12 @@ def is_residual_scattered_for_sp(
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled, and the number of
-    input tokens is one of the compilation sizes.
+    parallelism and tensor parallelism is enabled.
+
+    This follows the same logic as SequenceParallelismPass.is_applicable():
+    - In full-graph compilation mode (no splitting ops or using inductor graph
+      partition), SP is always applied
+    - Otherwise, SP is only applied for specific shapes in compile_sizes
     """
     if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
         return False
@@ -343,5 +347,10 @@ def is_residual_scattered_for_sp(
     # to be a multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
 
-    # Currently, SP is only enabled for static size fx graphs.
+    if (
+        not vllm_config.compilation_config.splitting_ops
+        or vllm_config.compilation_config.use_inductor_graph_partition
+    ):
+        return True
+
     return num_input_tokens in vllm_config.compilation_config.compile_sizes

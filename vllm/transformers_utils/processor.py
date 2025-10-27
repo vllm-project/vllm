@@ -16,7 +16,8 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.transformers_utils.utils import convert_model_repo_to_path
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -94,8 +95,8 @@ def get_processor(
     """Load a processor for the given model name via HuggingFace."""
     if revision is None:
         revision = "main"
-
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
             processor = AutoProcessor.from_pretrained(
                 processor_name,
@@ -168,6 +169,7 @@ def get_feature_extractor(
     """Load an audio feature extractor for the given model name
     via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             processor_name,
             *args,
@@ -217,6 +219,7 @@ def get_image_processor(
 ):
     """Load an image processor for the given model name via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         processor = AutoImageProcessor.from_pretrained(
             processor_name,
             *args,
@@ -268,6 +271,7 @@ def get_video_processor(
 ):
     """Load a video processor for the given model name via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         processor_cls = processor_cls_overrides or AutoVideoProcessor
         processor = processor_cls.from_pretrained(
             processor_name,

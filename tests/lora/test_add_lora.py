@@ -12,7 +12,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
-from vllm.utils import merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
 
 MODEL_PATH = "zai-org/chatglm3-6b"
 LORA_RANK = 64

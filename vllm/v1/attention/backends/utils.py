@@ -21,7 +21,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionImpl
@@ -345,6 +345,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         use_sliding_window: bool,
         use_local_attention: bool,
         num_sms: int,
+        dcp_world_size: int,
     ) -> bool:
         return False
 

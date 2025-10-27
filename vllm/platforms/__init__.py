@@ -6,8 +6,9 @@ from itertools import chain
 from typing import TYPE_CHECKING
 
 from vllm import envs
-from vllm.plugins import load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname, supports_xccl
+from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -188,7 +189,7 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
-    platform_plugins = load_plugins_by_group("vllm.platform_plugins")
+    platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []
 
@@ -221,10 +222,12 @@ def resolve_current_platform_cls_qualname() -> str:
         )
     elif len(activated_builtin_plugins) == 1:
         platform_cls_qualname = builtin_platform_plugins[activated_builtin_plugins[0]]()
-        logger.info("Automatically detected platform %s.", activated_builtin_plugins[0])
+        logger.debug(
+            "Automatically detected platform %s.", activated_builtin_plugins[0]
+        )
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
-        logger.info("No platform detected, vLLM is running on UnspecifiedPlatform")
+        logger.debug("No platform detected, vLLM is running on UnspecifiedPlatform")
     return platform_cls_qualname
 
 
