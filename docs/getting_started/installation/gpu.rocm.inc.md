@@ -136,8 +136,12 @@ Currently, there are no pre-built ROCm wheels.
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
-docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
+```bash
+docker pull rocm/vllm:latest
+```
+
+The [rocm/vllm Dockerhub repository](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
+docker image designed for validating inference performance on the AMD Instinct™ MI300X, MI325X, MMI350X, and MI355X accelerators.
 
 !!! tip
     Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
@@ -146,9 +150,7 @@ docker image designed for validating inference performance on the AMD Instinct�
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
-Building the Docker image from source is the recommended way to use vLLM with ROCm.
-
-#### (Optional) Build an image with ROCm software stack
+#### (Optional) Build a base image with the ROCm software stack
 
 Build a docker image from [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base) which setup ROCm software stack needed by the vLLM.
 **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.**
@@ -188,7 +190,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 7.0 by default, but also supports ROCm 5.7, 6.0, 6.1, 6.2, 6.3, and 6.4, in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
-- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)
+- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)
 - `ARG_PYTORCH_ROCM_ARCH`: Allows to override the gfx architecture values from the base docker image
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
