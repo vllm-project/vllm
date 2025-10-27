@@ -462,7 +462,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        core_attn_out = torch.empty(
+        core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
