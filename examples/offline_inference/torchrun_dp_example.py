@@ -11,7 +11,15 @@ $ torchrun --nproc-per-node=2 examples/offline_inference/torchrun_dp_example.py
 ```
 """
 
+import os
+
 from vllm import LLM, SamplingParams
+
+tp_size = int(os.getenv("TP_SIZE", "1"))
+pp_size = int(os.getenv("PP_SIZE", "1"))
+dp_size = int(os.getenv("DP_SIZE", "2"))
+enable_ep = bool(int(os.getenv("ENABLE_EP", "0")))
+
 
 # Create prompts, the same across all ranks
 prompts = [
@@ -31,10 +39,10 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # deterministic across ranks.
 llm = LLM(
     model="microsoft/Phi-mini-MoE-instruct",
-    tensor_parallel_size=1,
-    data_parallel_size=2,
-    pipeline_parallel_size=1,
-    enable_expert_parallel=False,
+    tensor_parallel_size=tp_size,
+    data_parallel_size=dp_size,
+    pipeline_parallel_size=pp_size,
+    enable_expert_parallel=enable_ep,
     distributed_executor_backend="external_launcher",
     max_model_len=4096,
     gpu_memory_utilization=0.6,
