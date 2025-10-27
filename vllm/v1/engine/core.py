@@ -318,8 +318,11 @@ class EngineCore:
             return {}, False
         with record_function_or_nullcontext("Step:Schedule"):
             scheduler_output = self.scheduler.schedule()
-        
-        with self.log_error_detail(scheduler_output), record_function_or_nullcontext("Step:Model"):
+
+        with (
+            self.log_error_detail(scheduler_output),
+            record_function_or_nullcontext("Step:Model"),
+        ):
             model_output = self.model_executor.execute_model(scheduler_output)
 
         with record_function_or_nullcontext("Step:Output"):
