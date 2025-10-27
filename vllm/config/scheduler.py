@@ -251,18 +251,18 @@ class SchedulerConfig:
         if isinstance(self.scheduler_cls, str):
             self.load_external_parameters()
 
-        def load_external_parameters(self):
-            module_name, class_name = self.scheduler_cls.rsplit(".", 1)
-            module = importlib.import_module(module_name)
-            cls = getattr(module, class_name)
+    def load_external_parameters(self):
+        module_name, class_name = self.scheduler_cls.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        cls = getattr(module, class_name)
 
-            module_file = inspect.getfile(cls)
-            module_dir = os.path.dirname(module_file)
+        module_file = inspect.getfile(cls)
+        module_dir = os.path.dirname(module_file)
 
-            config_path = os.path.join(module_dir, "config.json")
-            if os.path.exists(config_path):
-                with open(config_path, "r") as f:
-                    self.external_parameters = json.load(f)
+        config_path = os.path.join(module_dir, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                self.external_parameters = json.load(f)
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:

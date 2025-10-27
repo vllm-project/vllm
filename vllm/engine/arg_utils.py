@@ -22,6 +22,8 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    Optional,
+
 )
 
 import huggingface_hub
