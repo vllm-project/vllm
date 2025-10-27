@@ -43,17 +43,17 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    int sf_m = round_up(numRows, 128);
-    int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
-    int sf_n = round_up(sf_n_unpadded, 4) / 4;
-    for(int row = numRows; row < sf_m; row += 1) {
-      for(int col = sf_n_unpadded; col < sf_n; col +=1) {
-        SFout[row * sf_n + col] = 0x00;
-      }
+  int sf_m = round_up(numRows, 128);
+  int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
+  int sf_n_uint32 = round_up(sf_n_unpadded, 4) / 4;
+  for (int row = numRows + blockIdx.x; row < sf_m; row += gridDim.x) {
+    // Each thread writes 4 uint32_t elements.
+    for (int col = sf_n_unpadded + threadIdx.x * 4; col < sf_n_uint32;
+         col += blockDim.x * 4) {
+      SFout[row * sf_n_uint32 + col] = 0x00000000;
     }
-  } 
-  
+  }
+
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
   // (448.f / (Alpha_A / 6.f)).
