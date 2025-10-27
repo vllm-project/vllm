@@ -134,12 +134,9 @@ class CoreEngineProcManager:
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # For CUDA platforms, setting same device id for different DP
-                # processes affects NCCL init performance.
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (data_parallel and not current_platform.is_cuda_alike())
+                    if (data_parallel)
                     else contextlib.nullcontext()
                 ):
                     proc.start()
@@ -497,6 +494,8 @@ class CoreEngineActorManager:
                 )
                 placement_groups.append(pg)
                 local_dp_ranks.append(i)
+                if len(placement_groups) == dp_size:
+                    break
 
         if len(placement_groups) < dp_size:
             raise ValueError(
@@ -506,6 +505,13 @@ class CoreEngineActorManager:
                 "Available resources: "
                 f"{available_resources}"
             )
+        assert len(placement_groups) == dp_size, (
+            f"Created {len(placement_groups)} DP placement groups, expected {dp_size}"
+        )
+        assert len(local_dp_ranks) == dp_size, (
+            f"local_dp_ranks length {len(local_dp_ranks)} does not match "
+            f"expected {dp_size}"
+        )
         return placement_groups, local_dp_ranks
 
     @staticmethod

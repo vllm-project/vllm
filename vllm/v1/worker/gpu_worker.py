@@ -20,7 +20,10 @@ from vllm.distributed import (
     set_custom_all_reduce,
 )
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tp_group,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -170,27 +173,6 @@ class Worker(WorkerBase):
         if self.device_config.device.type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            if (
-                self.parallel_config.data_parallel_size > 1
-                and self.parallel_config.data_parallel_size_local > 0
-                and self.parallel_config.data_parallel_backend != "ray"
-            ):
-                # Use local DP rank if available, otherwise use global DP rank.
-                dp_local_rank = self.parallel_config.data_parallel_rank_local
-                if dp_local_rank is None:
-                    dp_local_rank = self.parallel_config.data_parallel_rank
-
-                tp_pp_world_size = (
-                    self.parallel_config.pipeline_parallel_size
-                    * self.parallel_config.tensor_parallel_size
-                )
-
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
-                assert self.local_rank <= torch.cuda.device_count(), (
-                    f"DP adjusted local rank {self.local_rank} is out of bounds. "
-                )
-
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
@@ -335,9 +317,10 @@ class Worker(WorkerBase):
             GiB(free_gpu_memory - unrequested_memory),
         )
         logger.debug(profile_result)
-        logger.info(
+        logger.info_once(
             "Available KV cache memory: %.2f GiB",
             GiB(self.available_kv_cache_memory_bytes),
+            scope="local",
         )
         gc.collect()
 
@@ -348,6 +331,15 @@ class Worker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        connector_vllm_config = copy.copy(self.vllm_config)
+        connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
+        ensure_kv_transfer_initialized(connector_vllm_config)
 
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator
@@ -826,5 +818,3 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
-
-    ensure_kv_transfer_initialized(vllm_config)

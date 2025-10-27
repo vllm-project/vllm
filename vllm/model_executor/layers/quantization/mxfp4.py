@@ -48,9 +48,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_s
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import round_up
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -185,7 +185,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.moe = moe
         self.mxfp4_backend = get_mxfp4_backend()
         self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_capture_size
+            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
@@ -794,7 +794,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 )
             else:
                 raise NotImplementedError(
-                    "Incompatible Mxfp4 backend for EP batched experts format"
+                    f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for "
+                    "EP batched experts format"
                 )
         else:
             assert self.moe_quant_config is not None
@@ -813,8 +814,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 return TrtLlmGenExperts(self.moe, self.moe_quant_config, **kwargs)
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
                 return MarlinExperts(self.moe_quant_config)
-            else:
+            elif self.mxfp4_backend == Mxfp4Backend.TRITON:
                 return OAITritonExperts(self.moe_quant_config)
+            else:
+                raise NotImplementedError(
+                    f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
+                )
 
     def _route_and_experts(
         self,

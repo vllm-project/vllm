@@ -131,6 +131,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
+    "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
@@ -209,6 +210,7 @@ _EMBEDDING_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
