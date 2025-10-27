@@ -622,7 +622,11 @@ def get_config(
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:
         if config.model_type not in MODEL_MAPPING_NAMES:
-            config.update({"architectures": ["AutoModel"]})
+            logger.warning(
+                "Model config does not have a top-level 'architectures' field: "
+                "expecting `hf_overrides={'architectures': ['...']}` to be passed "
+                "in engine args."
+            )
         else:
             model_type = MODEL_MAPPING_NAMES[config.model_type]
             config.update({"architectures": [model_type]})
