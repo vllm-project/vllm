@@ -39,16 +39,6 @@ if is_rocm_aiter_fp8bmm_enabled():
         batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,  # noqa: E501
     )
 
-    def dynamic_per_batched_tensor_quant(
-        x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
-    ):
-        DTYPE_MAX = torch.finfo(dtype).max
-        min_val, max_val = x.aminmax()
-        amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
-        scale = DTYPE_MAX / amax
-        x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
-        return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
-
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
