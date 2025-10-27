@@ -38,11 +38,14 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
+from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionToolsParam,
     ResponseInputOutputItem,
+    ResponsesRequest,
 )
 from vllm.utils import random_uuid
 
@@ -228,7 +231,7 @@ def parse_response_input(
     return msg
 
 
-def parse_chat_input(chat_msg) -> list[Message]:
+def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     if not isinstance(chat_msg, dict):
         # Handle Pydantic models
         chat_msg = chat_msg.model_dump(exclude_none=True)
@@ -277,6 +280,40 @@ def parse_chat_input(chat_msg) -> list[Message]:
         contents = [TextContent(text=c.get("text", "")) for c in content]
     msg = Message.from_role_and_contents(role, contents)
     return [msg]
+
+
+def construct_harmony_previous_input_messages(
+    request: ResponsesRequest,
+) -> list[OpenAIHarmonyMessage]:
+    messages: list[OpenAIHarmonyMessage] = []
+    if request.previous_input_messages:
+        for message in request.previous_input_messages:
+            # Handle both OpenAIHarmonyMessage objects and dictionary inputs
+            if isinstance(message, OpenAIHarmonyMessage):
+                message_role = message.author.role
+                # To match OpenAI, instructions, reasoning and tools are
+                # always taken from the most recent Responses API request
+                # not carried over from previous requests
+                if (
+                    message_role == OpenAIHarmonyRole.SYSTEM
+                    or message_role == OpenAIHarmonyRole.DEVELOPER
+                ):
+                    continue
+                messages.append(message)
+            else:
+                harmony_messages = parse_input_to_harmony_message(message)
+                for harmony_msg in harmony_messages:
+                    message_role = harmony_msg.author.role
+                    # To match OpenAI, instructions, reasoning and tools are
+                    # always taken from the most recent Responses API request
+                    # not carried over from previous requests
+                    if (
+                        message_role == OpenAIHarmonyRole.SYSTEM
+                        or message_role == OpenAIHarmonyRole.DEVELOPER
+                    ):
+                        continue
+                    messages.append(harmony_msg)
+    return messages
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
