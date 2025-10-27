@@ -13,14 +13,11 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import (
-    enable_trace_function_call_for_thread,
-    run_method,
-    warn_for_unimplemented_methods,
-)
+from vllm.utils import warn_for_unimplemented_methods
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -231,7 +228,7 @@ class WorkerWrapperBase:
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker"
         )
-        enable_trace_function_call_for_thread(self.vllm_config)
+        self.vllm_config.enable_trace_function_call_for_thread()
 
         from vllm.plugins import load_general_plugins
 
