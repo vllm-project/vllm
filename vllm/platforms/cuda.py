@@ -232,7 +232,7 @@ class CudaPlatformBase(Platform):
                     head_size,
                     dtype,
                     kv_cache_dtype,
-                    None,  # ignore block_size here, it will be adjusted if needed
+                    block_size,
                     use_mla,
                     has_sink,
                     use_sparse,
@@ -279,7 +279,7 @@ class CudaPlatformBase(Platform):
                     head_size,
                     dtype,
                     kv_cache_dtype,
-                    None,  # ignore block_size here, it will be adjusted if needed
+                    block_size,
                     use_mla,
                     has_sink,
                     use_sparse,
