@@ -157,13 +157,6 @@ def create_qwen2_5_omni_thinker_field_factory(
 
         num_videos = len(video_grid_sizes)
 
-        print(
-            {
-                k: v.shape if isinstance(v, torch.Tensor) else [e.shape for e in v]
-                for k, v in hf_inputs.items()
-            }
-        )
-
         return dict(
             input_audio_features=MultiModalFieldConfig.flat_from_sizes(
                 "audio", audio_feature_lengths, dim=1
