@@ -350,6 +350,7 @@ class Qwen2Model(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
+        self._intermediate_tensors_cls = IntermediateTensors
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -387,7 +388,7 @@ class Qwen2Model(nn.Module):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
+            return self._intermediate_tensors_cls(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
