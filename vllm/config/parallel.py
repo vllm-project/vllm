@@ -438,19 +438,9 @@ class ParallelConfig:
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
                 gpu_count = cuda_device_count_stateless()
-                logger.warning(
-                    "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                    "This will likely cause issues. Consider reducing "
-                    "tensor_parallel_size to %d or less, or ensure you have "
-                    "access to %d GPUs via Ray cluster.", self.world_size,
-                    gpu_count, gpu_count, self.world_size)
-                if not ray_found:
-                    raise ValueError("Unable to load Ray: "
-                                     f"{ray_utils.ray_import_err}. Ray is "
-                                     "required for multi-node inference, "
-                                     "please install Ray with `pip install "
-                                     "ray`.")
-                backend = "ray"
+                raise ValueError(
+                    f"Tensor parallel size ({self.world_size}) cannot be "
+                    f"larger than the number of available GPUs ({gpu_count}).")
             elif self.data_parallel_backend == "ray":
                 logger.info("Using ray distributed inference because "
                             "data_parallel_backend is ray")
