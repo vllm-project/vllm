@@ -11,6 +11,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
+    get_dp_group,
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -18,6 +19,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -32,9 +34,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
-from .interfaces import SupportsEagle3, SupportsPP
+from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -313,8 +315,13 @@ class GptOssModel(nn.Module):
         use_ep = self.parallel_config.enable_expert_parallel
         num_experts = self.config.num_local_experts
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+        # In MoE, we need to flatten the tensor parallel size across the data
+        # parallel size when EP is disabled.
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+            tp_size=get_tensor_model_parallel_world_size(),
+            dp_size=get_dp_group().world_size,
+            dp_rank=get_dp_group().rank_in_group,
+        )
 
         intermediate_size = self.config.intermediate_size
         intermediate_size_block = intermediate_size // mxfp4_block
@@ -496,8 +503,13 @@ class GptOssModel(nn.Module):
 
         use_ep = self.parallel_config.enable_expert_parallel
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+        # In MoE, we need to flatten the tensor parallel size across the data
+        # parallel size when EP is disabled.
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+            tp_size=get_tensor_model_parallel_world_size(),
+            dp_size=get_dp_group().world_size,
+            dp_rank=get_dp_group().rank_in_group,
+        )
 
         intermediate_size = self.config.intermediate_size
         per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
@@ -635,7 +647,7 @@ class GptOssModel(nn.Module):
             )
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -703,6 +715,17 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, weight scales, activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_local_experts,
+            num_redundant_experts=0,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
