@@ -13,7 +13,7 @@ import json
 import ssl
 from argparse import Namespace
 from collections.abc import AsyncGenerator
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -26,7 +26,8 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
+from vllm.utils import random_uuid, set_ulimit
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -101,7 +102,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 async def init_app(
     args: Namespace,
-    llm_engine: Optional[AsyncLLMEngine] = None,
+    llm_engine: AsyncLLMEngine | None = None,
 ) -> FastAPI:
     app = build_app(args)
 
@@ -120,7 +121,7 @@ async def init_app(
 
 
 async def run_server(
-    args: Namespace, llm_engine: Optional[AsyncLLMEngine] = None, **uvicorn_kwargs: Any
+    args: Namespace, llm_engine: AsyncLLMEngine | None = None, **uvicorn_kwargs: Any
 ) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)

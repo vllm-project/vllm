@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -115,7 +114,7 @@ class Lfm2MoeConfig(PretrainedConfig):
         use_expert_bias: bool = True,
         routed_scaling_factor: float = 1.0,
         norm_topk_prob: bool = True,
-        layer_types: Optional[list[str]] = None,
+        layer_types: list[str] | None = None,
         **kwargs,
     ):
         self.vocab_size = vocab_size

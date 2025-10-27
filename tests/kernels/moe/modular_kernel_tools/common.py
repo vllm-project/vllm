@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 
@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -35,7 +35,7 @@ from .mk_objects import (
 from .parallel_utils import ProcessGroupInfo
 
 
-def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
+def _describe_tensor(t: torch.Tensor | None, name: str) -> str:
     if t is None:
         return f"{name} : None"
     else:
@@ -44,21 +44,21 @@ def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
 
 @dataclass
 class Config:
-    Ms: Union[list[int], int]
+    Ms: list[int] | int
     K: int
     N: int
     E: int
-    topks: Union[list[int], int]
+    topks: list[int] | int
     dtype: torch.dtype
-    quant_config: Optional[TestMoEQuantConfig]
+    quant_config: TestMoEQuantConfig | None
 
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute
 
-    fused_moe_chunk_size: Optional[int]
+    fused_moe_chunk_size: int | None
     world_size: int
 
-    torch_trace_dir_path: Optional[str] = None
+    torch_trace_dir_path: str | None = None
 
     def __post_init__(self):
         if self.quant_config is None:
@@ -93,7 +93,7 @@ class Config:
         return self.Ms
 
     @property
-    def quant_dtype(self) -> Union[torch.dtype, str, None]:
+    def quant_dtype(self) -> torch.dtype | str | None:
         assert self.quant_config is not None
         return self.quant_config.quant_dtype
 
@@ -112,7 +112,7 @@ class Config:
         return self.quant_config.per_out_ch_quant
 
     @property
-    def quant_block_shape(self) -> Optional[list[int]]:
+    def quant_block_shape(self) -> list[int] | None:
         assert self.quant_config is not None
         return self.quant_config.block_shape
 
@@ -209,7 +209,7 @@ class Config:
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend
 
-    def is_valid(self) -> tuple[bool, Optional[str]]:
+    def is_valid(self) -> tuple[bool, str | None]:
         # Check prepare-finalize and fused-experts compatibility
         if self.is_batched_prepare_finalize():
             if not self.is_batched_fused_experts():
@@ -280,10 +280,10 @@ class Config:
 class WeightTensors:
     w1: torch.Tensor
     w2: torch.Tensor
-    w1_scale: Optional[torch.Tensor]
-    w2_scale: Optional[torch.Tensor]
-    w1_gs: Optional[torch.Tensor] = None
-    w2_gs: Optional[torch.Tensor] = None
+    w1_scale: torch.Tensor | None
+    w2_scale: torch.Tensor | None
+    w1_gs: torch.Tensor | None = None
+    w2_gs: torch.Tensor | None = None
 
     def describe(self):
         s = ""
@@ -351,11 +351,11 @@ class WeightTensors:
 @dataclass
 class RankTensors:
     hidden_states: torch.Tensor
-    hidden_states_scale: Optional[torch.Tensor]
+    hidden_states_scale: torch.Tensor | None
 
     topk_weights: torch.Tensor
     topk_ids: torch.Tensor
-    expert_map: Optional[torch.Tensor]
+    expert_map: torch.Tensor | None
 
     def describe(self):
         s = ""
@@ -370,7 +370,7 @@ class RankTensors:
     @staticmethod
     def make_hidden_states(
         config: Config,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         Return hidden_states
         """

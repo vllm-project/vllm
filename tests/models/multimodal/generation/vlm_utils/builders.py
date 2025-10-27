@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers for building inputs that can be leveraged for different test types."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import PosixPath
-from typing import Callable, Optional, Union
 
 import torch
 
@@ -47,9 +46,9 @@ def replace_test_placeholder(
 
 def get_model_prompts(
     base_prompts: Iterable[str],
-    img_idx_to_prompt: Optional[Callable[[int], str]],
-    video_idx_to_prompt: Optional[Callable[[int], str]],
-    audio_idx_to_prompt: Optional[Callable[[int], str]],
+    img_idx_to_prompt: Callable[[int], str] | None,
+    video_idx_to_prompt: Callable[[int], str] | None,
+    audio_idx_to_prompt: Callable[[int], str] | None,
     prompt_formatter: Callable[[str], str],
 ) -> list[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
@@ -93,7 +92,7 @@ def build_single_image_inputs_from_test_info(
     test_info: VLMTestInfo,
     image_assets: ImageTestAssets,
     size_wrapper: ImageSizeWrapper,
-    tmp_path: Optional[PosixPath] = None,
+    tmp_path: PosixPath | None = None,
 ) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build single image inputs")
@@ -147,7 +146,7 @@ def build_multi_image_inputs_from_test_info(
     test_info: VLMTestInfo,
     image_assets: ImageTestAssets,
     size_wrapper: ImageSizeWrapper,
-    tmp_path: Optional[PosixPath] = None,
+    tmp_path: PosixPath | None = None,
 ) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build multi image inputs")
@@ -266,9 +265,7 @@ def build_video_inputs_from_test_info(
     ]
 
 
-def apply_image_size_scaling(
-    image, size: Union[float, tuple[int, int]], size_type: SizeType
-):
+def apply_image_size_scaling(image, size: float | tuple[int, int], size_type: SizeType):
     """Applies a size scaler to one image; this can be an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we

@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Rotary Positional Embeddings Base Class."""
 
-from typing import Optional
-
 import torch
 
 from vllm.model_executor.custom_op import CustomOp
@@ -92,8 +90,8 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
         positions = positions.flatten()
         num_tokens = positions.shape[0]
@@ -121,8 +119,8 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_flashinfer:
             torch.ops.vllm.flashinfer_rotary_embedding(
                 positions,
@@ -154,8 +152,8 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.is_rocm_triton_rotary_embedding_enabled:
             self._match_cos_sin_cache_dtype(query)
             rocm_aiter_rotary_emb(
@@ -167,18 +165,15 @@ class RotaryEmbedding(CustomOp):
                 self.rotary_dim,
                 self.is_neox_style,
             )
-        else:
-            # ops.rotary_embedding() is an in-place operation
-            # that updates the query and key tensors.
-            self.forward_cuda(positions, query, key)
-        return query, key
+            return query, key
+        return self.forward_cuda(positions, query, key)
 
     def forward_xpu(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from vllm._ipex_ops import ipex_ops as ops
 
         self._match_cos_sin_cache_dtype(query)

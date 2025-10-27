@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+import json
 
 import numpy as np
 import openai
@@ -14,8 +15,18 @@ import torch.nn.functional as F
 from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import EmbeddingResponse
+from vllm.entrypoints.openai.protocol import (
+    EmbeddingResponse,
+    PoolingResponse,
+)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils.serial_utils import (
+    EMBED_DTYPE_TO_TORCH_DTYPE,
+    ENDIANNESS,
+    MetadataItem,
+    binary2tensor,
+    decode_pooling_output,
+)
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -246,6 +257,116 @@ async def test_batch_base64_embedding(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_base64_embed_dtype_and_endianness(
+    server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ]
+
+    responses_float = await client.embeddings.create(
+        input=input_texts, model=model_name, encoding_format="float"
+    )
+    float_data = [d.embedding for d in responses_float.data]
+
+    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+        for endianness in ENDIANNESS:
+            responses_base64 = requests.post(
+                server.url_for("/v1/embeddings"),
+                json={
+                    "model": model_name,
+                    "input": input_texts,
+                    "encoding_format": "base64",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                },
+            )
+
+            base64_data = []
+            for data in responses_base64.json()["data"]:
+                binary = base64.b64decode(data["embedding"])
+                tensor = binary2tensor(binary, (-1,), embed_dtype, endianness)
+                base64_data.append(tensor.to(torch.float32).tolist())
+
+            check_embeddings_close(
+                embeddings_0_lst=float_data,
+                embeddings_1_lst=base64_data,
+                name_0="float_data",
+                name_1="base64_data",
+                tol=1e-2,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_bytes_embed_dtype_and_endianness(
+    server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ]
+
+    responses_float = await client.embeddings.create(
+        input=input_texts, model=model_name, encoding_format="float"
+    )
+    float_data = [d.embedding for d in responses_float.data]
+
+    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+        for endianness in ENDIANNESS:
+            responses_bytes = requests.post(
+                server.url_for("/v1/embeddings"),
+                json={
+                    "model": model_name,
+                    "input": input_texts,
+                    "encoding_format": "bytes",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                },
+            )
+
+            metadata = json.loads(responses_bytes.headers["metadata"])
+            body = responses_bytes.content
+            items = [MetadataItem(**x) for x in metadata["data"]]
+
+            bytes_data = decode_pooling_output(items=items, body=body)
+            bytes_data = [x.to(torch.float32).tolist() for x in bytes_data]
+
+            check_embeddings_close(
+                embeddings_0_lst=float_data,
+                embeddings_1_lst=bytes_data,
+                name_0="float_data",
+                name_1="bytes_data",
+                tol=1e-2,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("param_name", ["encoding_format", "embed_dtype", "endianness"])
+async def test_params_not_supported(
+    server: RemoteOpenAIServer, model_name: str, param_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ]
+
+    responses_base64 = requests.post(
+        server.url_for("/v1/embeddings"),
+        json={
+            "model": model_name,
+            "input": input_texts,
+            "encoding_format": "base64",
+            param_name: f"bad_{param_name}",
+        },
+    )
+
+    assert responses_base64.status_code == 400
+    assert "literal_error" in responses_base64.json()["error"]["message"]
+    assert f"bad_{param_name}" in responses_base64.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_embedding_truncation(client: openai.AsyncOpenAI, model_name: str):
     input_texts = [
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
@@ -437,3 +558,20 @@ async def test_normalize(server: RemoteOpenAIServer, model_name: str):
     assert torch.allclose(w_normal, F.normalize(wo_normal, p=2, dim=-1), atol=1e-2), (
         "w_normal should be close to normal(wo_normal)."
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_pooling(server: RemoteOpenAIServer, model_name: str):
+    input_text = ["The chef prepared a delicious meal."]
+
+    response = requests.post(
+        server.url_for("pooling"),
+        json={"model": model_name, "input": input_text, "encoding_format": "float"},
+    )
+
+    poolings = PoolingResponse.model_validate(response.json())
+
+    assert len(poolings.data) == 1
+    assert len(poolings.data[0].data) == 11
+    assert len(poolings.data[0].data[0]) == 384

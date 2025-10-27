@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -21,6 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import AutoWeightsLoader, maybe_prefix
@@ -33,7 +34,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        config: Optional[LlamaConfig] = None,
+        config: LlamaConfig | None = None,
         layer_idx: int = 0,
     ) -> None:
         super().__init__(vllm_config, prefix=prefix, config=config)
@@ -64,7 +65,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         else:
             self._residual_norm = self._norm_after_residual
 
-    def get_quant_config(self, vllm_config: VllmConfig) -> Optional[QuantizationConfig]:
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
         draft_model_config = vllm_config.speculative_config.draft_model_config
         draft_load_config = vllm_config.load_config
@@ -94,7 +95,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         positions: torch.Tensor,
         embeds: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.layer_idx == 0:
             # First layer: concatenate embeds with hidden_states
@@ -119,6 +120,15 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
+@support_torch_compile(
+    # torch.compile is disabled for multimodal EAGLE3 models due to constraint
+    # violations with dynamic shapes during tensor concatenation operations.
+    # See: https://github.com/vllm-project/vllm/pull/22872/files#r2362028132
+    # Non-multimodal EAGLE3 models can still use torch.compile safely.
+    enable_if=lambda vllm_config: not MULTIMODAL_REGISTRY.supports_multimodal_inputs(
+        vllm_config.model_config
+    ),
+)
 class LlamaModel(nn.Module):
     def __init__(
         self,
@@ -171,7 +181,7 @@ class LlamaModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        input_embeds: Optional[torch.Tensor] = None,
+        input_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if input_embeds is None:
             input_embeds = self.get_input_embeddings(input_ids)
@@ -257,8 +267,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
-        is_multimodal: Optional[torch.Tensor] = None,
+        multimodal_embeddings: NestedTensors | None = None,
+        is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -267,14 +277,14 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, (

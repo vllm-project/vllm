@@ -188,32 +188,77 @@ else()
     message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA, ARMv8 or RISC-V support.")
 endif()
 
-#
-# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 /ARM platforms)
-# Flag to enable ACL kernels for AARCH64 platforms
-if (VLLM_BUILD_ACL STREQUAL "ON")
-    set(USE_ACL ON)
-else()
-    set(USE_ACL OFF)
-endif()
 
+# Build oneDNN for GEMM kernels (only for x86-AVX512 /ARM platforms)
 if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
-    FetchContent_Declare(
-        oneDNN
-        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG v3.9
-        GIT_PROGRESS TRUE
-        GIT_SHALLOW TRUE
-    )
-
-    if(USE_ACL)
-        find_library(ARM_COMPUTE_LIBRARY NAMES arm_compute PATHS $ENV{ACL_ROOT_DIR}/build/)
-        if(NOT ARM_COMPUTE_LIBRARY)
-            message(FATAL_ERROR "Could not find ARM Compute Library: please set ACL_ROOT_DIR")
+    # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
+    # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
+    if(ASIMD_FOUND)
+        if(DEFINED ENV{ACL_ROOT_DIR} AND IS_DIRECTORY "$ENV{ACL_ROOT_DIR}")
+            message(STATUS "Using ACL from specified source directory: $ENV{ACL_ROOT_DIR}")
+        else()
+            message(STATUS "Downloading Arm Compute Library (ACL) from GitHub")
+            FetchContent_Populate(arm_compute
+                SUBBUILD_DIR "${FETCHCONTENT_BASE_DIR}/arm_compute-subbuild"
+                SOURCE_DIR   "${FETCHCONTENT_BASE_DIR}/arm_compute-src"
+                GIT_REPOSITORY https://github.com/ARM-software/ComputeLibrary.git
+                GIT_TAG        v52.2.0
+                GIT_SHALLOW    TRUE
+                GIT_PROGRESS   TRUE
+            )
+            set(ENV{ACL_ROOT_DIR} "${arm_compute_SOURCE_DIR}")
         endif()
+
+        # Build ACL with scons
+        include(ProcessorCount)
+        ProcessorCount(_NPROC)
+        set(_scons_cmd
+        scons -j${_NPROC}
+            Werror=0 debug=0 neon=1 examples=0 embed_kernels=0 os=linux
+            arch=armv8.2-a build=native benchmark_examples=0 fixed_format_kernels=1
+            multi_isa=1 openmp=1 cppthreads=0
+        )
+
+        # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
+        # and create a local shim dir with it
+        include("${CMAKE_CURRENT_LIST_DIR}/utils.cmake")
+        vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
+
+        if(NOT VLLM_TORCH_GOMP_SHIM_DIR STREQUAL "")
+            list(APPEND _scons_cmd extra_link_flags=-L${VLLM_TORCH_GOMP_SHIM_DIR})
+        endif()
+
+        execute_process(
+            COMMAND ${_scons_cmd}
+            WORKING_DIRECTORY "$ENV{ACL_ROOT_DIR}"
+            RESULT_VARIABLE _acl_rc
+        )
+        if(NOT _acl_rc EQUAL 0)
+            message(FATAL_ERROR "ACL SCons build failed (exit ${_acl_rc}).")
+        endif()
+
         set(ONEDNN_AARCH64_USE_ACL "ON")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ENV{ACL_ROOT_DIR}/build/")
         add_compile_definitions(VLLM_USE_ACL)
+    endif()
+
+    set(FETCHCONTENT_SOURCE_DIR_ONEDNN "$ENV{FETCHCONTENT_SOURCE_DIR_ONEDNN}" CACHE PATH "Path to a local oneDNN source directory.")
+
+    if(FETCHCONTENT_SOURCE_DIR_ONEDNN)
+        message(STATUS "Using oneDNN from specified source directory: ${FETCHCONTENT_SOURCE_DIR_ONEDNN}")
+        FetchContent_Declare(
+            oneDNN
+            SOURCE_DIR ${FETCHCONTENT_SOURCE_DIR_ONEDNN}
+        )
+    else()
+        message(STATUS "Downloading oneDNN from GitHub")
+        FetchContent_Declare(
+            oneDNN
+            GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+            GIT_TAG v3.9
+            GIT_PROGRESS TRUE
+            GIT_SHALLOW TRUE
+        )
     endif()
 
     set(ONEDNN_LIBRARY_TYPE "STATIC")
@@ -227,7 +272,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
     set(ONEDNN_ENABLE_ITT_TASKS "OFF")
     set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
     set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
-    set(ONEDNN_VERBOSE "ON")
+    set(ONEDNN_VERBOSE "OFF")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
     FetchContent_MakeAvailable(oneDNN)

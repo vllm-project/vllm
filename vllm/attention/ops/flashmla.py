@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/flash_mla/flash_mla_interface.py
-from typing import Optional
 
 import torch
 
@@ -31,7 +30,7 @@ else:
     _flashmla_extension_C_AVAILABLE = False
 
 
-def _is_flashmla_available() -> tuple[bool, Optional[str]]:
+def _is_flashmla_available() -> tuple[bool, str | None]:
     if not _flashmla_C_AVAILABLE:
         return (
             False,
@@ -49,7 +48,7 @@ def _is_flashmla_available() -> tuple[bool, Optional[str]]:
     return True, None
 
 
-def is_flashmla_dense_supported() -> tuple[bool, Optional[str]]:
+def is_flashmla_dense_supported() -> tuple[bool, str | None]:
     """
     Return: is_supported_flag, unsupported_reason (optional).
     """
@@ -61,7 +60,7 @@ def is_flashmla_dense_supported() -> tuple[bool, Optional[str]]:
     return True, None
 
 
-def is_flashmla_sparse_supported() -> tuple[bool, Optional[str]]:
+def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
     """
     Return: is_supported_flag, unsupported_reason (optional).
     """
@@ -80,9 +79,9 @@ def get_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_q_tokens_per_head_k: int,
     num_heads_k: int,
-    num_heads_q: Optional[int] = None,
+    num_heads_q: int | None = None,
     is_fp8_kvcache: bool = False,
-    topk: Optional[int] = None,
+    topk: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
@@ -103,6 +102,12 @@ def get_mla_metadata(
             (num_sm_parts, TileSchedulerMetaDataSize), dtype torch.int32.
     - num_splits: (batch_size + 1), dtype torch.int32.
     """
+    if is_fp8_kvcache and topk is None:
+        return torch.ops._flashmla_extension_C.get_mla_decoding_metadata_dense_fp8(
+            cache_seqlens,
+            num_q_tokens_per_head_k,
+            num_heads_k,
+        )
     return torch.ops._flashmla_C.get_mla_decoding_metadata(
         cache_seqlens,
         num_q_tokens_per_head_k,
@@ -121,12 +126,12 @@ def flash_mla_with_kvcache(
     head_dim_v: int,
     tile_scheduler_metadata: torch.Tensor,
     num_splits: torch.Tensor,
-    softmax_scale: Optional[float] = None,
+    softmax_scale: float | None = None,
     causal: bool = False,
-    descale_q: Optional[torch.Tensor] = None,
-    descale_k: Optional[torch.Tensor] = None,
+    descale_q: torch.Tensor | None = None,
+    descale_k: torch.Tensor | None = None,
     is_fp8_kvcache: bool = False,
-    indices: Optional[torch.Tensor] = None,
+    indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:

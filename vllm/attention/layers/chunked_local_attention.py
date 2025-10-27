@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 
@@ -9,6 +9,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
+from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -16,6 +17,7 @@ from vllm.v1.attention.backends.utils import (
     make_local_attention_virtual_batches,
     subclass_attention_backend,
 )
+from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, KVCacheSpec
 
 from ..layer import Attention
 
@@ -60,13 +62,14 @@ class ChunkedLocalAttention(Attention):
         head_size: int,
         scale: float,
         attention_chunk_size: int,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[list[float]] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        kv_sharing_target_layer_name: str | None = None,
         prefix: str = "",
     ):
+        self.attention_chunk_size = attention_chunk_size
         dtype = torch.get_default_dtype()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
@@ -98,4 +101,14 @@ class ChunkedLocalAttention(Attention):
             prefix=prefix,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             attn_backend=attn_backend,
+        )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        assert self.attention_chunk_size
+        return ChunkedLocalAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+            dtype=self.kv_cache_torch_dtype,
+            attention_chunk_size=self.attention_chunk_size,
         )

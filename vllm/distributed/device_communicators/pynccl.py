@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 # ===================== import region =====================
 import torch
@@ -20,7 +19,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils import current_stream
+from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
 
@@ -31,7 +30,7 @@ def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
         nccl_symm_mem_context,
     )
-    from vllm.utils import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     global _NCCL_SYMM_OPS_REGISTERED
     if _NCCL_SYMM_OPS_REGISTERED:
@@ -59,9 +58,9 @@ def register_nccl_symmetric_ops(pynccl_comm):
 class PyNcclCommunicator:
     def __init__(
         self,
-        group: Union[ProcessGroup, StatelessProcessGroup],
-        device: Union[int, str, torch.device],
-        library_path: Optional[str] = None,
+        group: ProcessGroup | StatelessProcessGroup,
+        device: int | str | torch.device,
+        library_path: str | None = None,
     ):
         """
         Args:
@@ -106,11 +105,12 @@ class PyNcclCommunicator:
         self.disabled = False
 
         self.nccl_version = self.nccl.ncclGetRawVersion()
-        logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
-
         if self.rank == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
+            logger.info_once(
+                "vLLM is using nccl==%s", self.nccl.ncclGetVersion(), scope="local"
+            )
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()

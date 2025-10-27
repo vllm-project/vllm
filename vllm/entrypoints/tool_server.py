@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
@@ -80,7 +80,7 @@ class ToolServer(ABC):
         pass
 
     @abstractmethod
-    def get_tool_description(self, tool_name: str) -> Optional[ToolNamespaceConfig]:
+    def get_tool_description(self, tool_name: str) -> ToolNamespaceConfig | None:
         """
         Return the tool description for the given tool name.
         If the tool is not supported, return None.
@@ -89,7 +89,7 @@ class ToolServer(ABC):
 
     @abstractmethod
     def new_session(
-        self, tool_name: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, tool_name: str, session_id: str, headers: dict[str, str] | None = None
     ) -> AbstractAsyncContextManager[Any]:
         """
         Create a session for the tool.
@@ -152,7 +152,7 @@ class MCPToolServer(ToolServer):
 
     @asynccontextmanager
     async def new_session(
-        self, tool_name: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, tool_name: str, session_id: str, headers: dict[str, str] | None = None
     ):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
@@ -190,7 +190,7 @@ class DemoToolServer(ToolServer):
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self.tools
 
-    def get_tool_description(self, tool_name: str) -> Optional[ToolNamespaceConfig]:
+    def get_tool_description(self, tool_name: str) -> ToolNamespaceConfig | None:
         if tool_name not in self.tools:
             return None
         if tool_name == "browser":
@@ -202,7 +202,7 @@ class DemoToolServer(ToolServer):
 
     @asynccontextmanager
     async def new_session(
-        self, tool_name: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, tool_name: str, session_id: str, headers: dict[str, str] | None = None
     ):
         if tool_name not in self.tools:
             raise KeyError(f"Tool '{tool_name}' is not supported")

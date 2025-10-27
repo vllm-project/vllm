@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -53,7 +53,9 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available, prev_power_of_2
+from vllm.utils import LayerBlockType
+from vllm.utils.math_utils import cdiv, prev_power_of_2
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (
     TPU_STR_DTYPE_TO_TORCH_DTYPE,
     PallasAttentionBackend,
@@ -140,7 +142,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        original_parallel_config: Optional[ParallelConfig] = None,
+        original_parallel_config: ParallelConfig | None = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -370,6 +372,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         else:
             self.sample_from_logits_func = self.sample_from_logits
+
+    def reset_mm_cache(self) -> None:
+        if self.mm_budget:
+            self.mm_budget.reset_cache()
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -1046,7 +1052,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_model_inputs(
         self,
         input_ids: torch.Tensor,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]],
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
     ):
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -1072,7 +1078,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
@@ -1216,7 +1222,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+        prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
@@ -1959,12 +1965,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.grammar_bitmask_cpu.zero_()
         self.require_structured_out_cpu.zero_()
 
-        sorted_struct_requests = sorted(
-            scheduler_output.structured_output_request_ids.items(),
-            key=lambda item: item[1],
-        )
         cumulative_mask_idx = 0
-        for req_id, _ in sorted_struct_requests:
+        for req_id in scheduler_output.structured_output_request_ids:
             if req_id not in self.input_batch.req_id_to_index:
                 continue
             batch_index = self.input_batch.req_id_to_index[req_id]
@@ -2123,13 +2125,12 @@ def replace_set_lora(model):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        embeddings_tensor: torch.Tensor | None,
     ):
         # TODO: The integer index leads to a recompilation, but converting it
         # to a tensor doesn't seem to work anymore. This might be fixed with a
         # later release of torch_xla.
-        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
+        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor)
         torch_xla.sync(wait=False)
 
     def _tpu_reset_lora(self, index: int):

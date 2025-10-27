@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Union
 
 import numpy as np
 import torch
 
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
 
 logger = init_logger(__name__)
@@ -215,7 +214,7 @@ class BlockTable:
         return self.block_table.np
 
     def _make_buffer(
-        self, *size: Union[int, torch.SymInt], dtype: torch.dtype
+        self, *size: int | torch.SymInt, dtype: torch.dtype
     ) -> CpuGpuBuffer:
         return CpuGpuBuffer(
             *size, dtype=dtype, device=self.device, pin_memory=self.pin_memory

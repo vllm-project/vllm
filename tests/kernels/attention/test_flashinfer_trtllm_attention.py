@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import flashinfer
 import pytest
@@ -11,7 +10,7 @@ from tests.kernels.quantization.nvfp4_utils import (
     get_nvfp4_global_scale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 if not current_platform.is_device_capability(100):
     pytest.skip(
@@ -68,9 +67,7 @@ NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 @torch.inference_mode
 def test_flashinfer_trtllm_decode_with_baseline(
     dtype: torch.dtype,
-    quant_dtypes: tuple[
-        Optional[torch.dtype], Optional[torch.dtype], Optional[torch.dtype]
-    ],
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
     max_seq_lens: tuple[int, int],
     num_heads: tuple[int, int],
@@ -78,7 +75,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
     kv_layout: str,
     block_size: int,
     window_left: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     has_sinks: bool,
 ) -> None:
     torch.set_default_device("cuda")
@@ -267,9 +264,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
 @torch.inference_mode
 def test_flashinfer_trtllm_prefill_with_baseline(
     dtype: torch.dtype,
-    quant_dtypes: tuple[
-        Optional[torch.dtype], Optional[torch.dtype], Optional[torch.dtype]
-    ],
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
     max_seq_lens: tuple[int, int],
     num_heads: tuple[int, int],
@@ -277,7 +272,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     kv_layout: str,
     block_size: int,
     window_left: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     has_sinks: bool,
 ) -> None:
     torch.set_default_device("cuda")

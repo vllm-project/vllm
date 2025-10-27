@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from vllm.platforms import current_platform
-from vllm.utils import identity
+from vllm.utils.func_utils import identity
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -109,8 +109,7 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 4},
             )
         ],
-        # TODO: Revert to "auto" when CPU backend can use torch > 2.6
-        dtype="bfloat16" if current_platform.is_cpu() else "auto",
+        vllm_runner_kwargs={"enable_mm_embeds": True},
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "paligemma": VLMTestInfo(
@@ -707,8 +706,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
-        # FIXME: https://github.com/huggingface/transformers/issues/38358
-        marks=[pytest.mark.skip("Model initialization fails")],
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],

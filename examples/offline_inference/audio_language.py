@@ -10,7 +10,7 @@ on HuggingFace model repository.
 
 import os
 from dataclasses import asdict
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
@@ -30,11 +30,11 @@ question_per_audio_count = {
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    prompt_token_ids: Optional[dict[str, list[int]]] = None
-    multi_modal_data: Optional[dict[str, Any]] = None
-    stop_token_ids: Optional[list[int]] = None
-    lora_requests: Optional[list[LoRARequest]] = None
+    prompt: str | None = None
+    prompt_token_ids: dict[str, list[int]] | None = None
+    multi_modal_data: dict[str, Any] | None = None
+    stop_token_ids: list[int] | None = None
+    lora_requests: list[LoRARequest] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
