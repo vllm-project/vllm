@@ -1564,6 +1564,8 @@ class LLM:
             raise ValueError(
                 "The lengths of prompts and lora_request must be the same."
             )
+        if priority is not None and len(priority) != num_requests:
+            raise ValueError("The lengths of prompts and priority must be the same.")
 
         for sp in params if isinstance(params, Sequence) else (params,):
             if isinstance(sp, SamplingParams):
