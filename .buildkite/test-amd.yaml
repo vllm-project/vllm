@@ -390,11 +390,11 @@ steps:
     - python3 offline_inference/vision_language_pooling.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
     - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
-    # encoder-decoder is not supported on AMD yet
+    # encoder-decoder and encoder-only models are not supported on AMD yet - TritonAttentionImpl only supports DECODER attention
     # - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
+    # - python3 offline_inference/basic/embed.py
+    # - python3 offline_inference/basic/score.py
     - python3 offline_inference/basic/classify.py
-    - python3 offline_inference/basic/embed.py
-    - python3 offline_inference/basic/score.py
     - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
@@ -636,9 +636,11 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
-  - vllm/model_executor/models/whisper.py
+  # encoder-decoder (whisper) is not supported on AMD yet - TritonAttentionImpl doesn't support encoder attention
+  # - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
-  - pytest -s entrypoints/openai/correctness/
+  # encoder-decoder (whisper) tests disabled for AMD
+  - pytest -s entrypoints/openai/correctness/test_lmeval.py
 
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
@@ -857,7 +859,8 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
-    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    # encoder-decoder (whisper) is not supported on AMD yet - TritonAttentionImpl doesn't support encoder attention
+    # - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
   mirror_hardwares: [amdexperimental]
@@ -1146,7 +1149,8 @@ steps:
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
+  # encoder-decoder (whisper) is not supported on AMD yet - TritonAttentionImpl doesn't support encoder attention
+  # - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
