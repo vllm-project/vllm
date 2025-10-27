@@ -478,7 +478,11 @@ class Scheduler(SchedulerInterface):
                     # Apply dynamic token budget constraints
                     effective_budget = self.get_dynamic_token_budget(request, token_budget)
                     num_new_tokens = min(num_new_tokens, effective_budget)
-                    assert num_new_tokens > 0
+                    # assert num_new_tokens > 0
+                    if num_new_tokens == 0:
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
