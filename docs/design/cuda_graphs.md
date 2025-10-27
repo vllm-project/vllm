@@ -218,16 +218,6 @@ outputs = model.generate(
 )
 ```
 
-### Migration from legacy flags
-
-Legacy `use_cudagraph` and `full_cuda_graph` are unified by `cudagraph_mode`:
-
-* `use_cudagraph=False` → `NONE`.
-* `use_cudagraph=True` and `full_cuda_graph=False` → `PIECEWISE`.
-* `full_cuda_graph=True` → directly set `FULL` and rely on the graceful fallback policy.
-
-As they are deprecated and will be removed in the next major or minor release, i.e., v0.11.0 or v1.0.0, we recommend using cudagraph_mode instead.
-
 ### Piecewise compilation and full graph custom passes (attention fusion, sequence parallelism)
 
 Unfortunately, some custom compile passes have to see the whole graph to be effective and hence aren't compatible with piecewise compilation. This includes `AttnFusionPass` and `SequenceParallelismPass`. As a short-term solution, we automatically disable piecewise compilation (by setting `splitting_ops=[]`) when attention fusion is enabled. We use CUDA Graph modes `FULL` or `FULL_DECODE_ONLY` (depending on backend support). However, this leads to another optimization incompatibility and confusing performance tradeoffs.

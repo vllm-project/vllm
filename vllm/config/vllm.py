@@ -536,14 +536,6 @@ class VllmConfig:
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
 
-            # final migrate the deprecated flags
-            self.compilation_config.use_cudagraph = (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            )
-            self.compilation_config.full_cuda_graph = (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            )
-
         if self.parallel_config.enable_dbo:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
@@ -720,6 +712,12 @@ class VllmConfig:
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
                 cudagraph_capture_sizes = dedup_sizes
+                # filter out sizes larger than max_cudagraph_capture_size
+                cudagraph_capture_sizes = [
+                    i
+                    for i in cudagraph_capture_sizes
+                    if i <= max_cudagraph_capture_size
+                ]
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:

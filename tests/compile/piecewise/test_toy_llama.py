@@ -449,7 +449,6 @@ def benchmark():
         if piecewise:
             compilation_config = CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                use_cudagraph=True,
                 splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
