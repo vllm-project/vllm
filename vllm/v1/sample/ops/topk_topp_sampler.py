@@ -13,13 +13,6 @@ from vllm.platforms import CpuArchEnum, current_platform
 
 logger = init_logger(__name__)
 
-try:
-    import flashinfer.sampling
-
-    is_flashinfer_available = True
-except ImportError:
-    is_flashinfer_available = False
-
 
 class TopKTopPSampler(nn.Module):
     """
@@ -38,34 +31,27 @@ class TopKTopPSampler(nn.Module):
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and current_platform.is_cuda()
         ):
-            if is_flashinfer_available:
-                flashinfer_version = flashinfer.__version__
-                if version.parse(flashinfer_version) < version.parse("0.2.3"):
-                    logger.warning_once(
-                        "FlashInfer version >= 0.2.3 required. "
-                        "Falling back to default sampling implementation."
-                    )
-                    self.forward = self.forward_native
-                elif envs.VLLM_USE_FLASHINFER_SAMPLER:
-                    # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
-                    logger.info_once("Using FlashInfer for top-p & top-k sampling.")
-                    self.forward = self.forward_cuda
-                else:
-                    logger.debug_once(
-                        "FlashInfer top-p/top-k sampling is available but disabled "
-                        "by default. Set VLLM_USE_FLASHINFER_SAMPLER=1 to opt in "
-                        "after verifying accuracy for your workloads."
-                    )
-                    self.forward = self.forward_native
+            if envs.VLLM_USE_FLASHINFER_SAMPLER:
+                # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
+                logger.info_once(
+                    "Using FlashInfer for top-p & top-k sampling.",
+                    scope="global",
+                )
+                self.forward = self.forward_cuda
             else:
-                logger.warning_once(
-                    "FlashInfer is not available. Falling back to the PyTorch-"
-                    "native implementation of top-p & top-k sampling. For the "
-                    "best performance, please install FlashInfer."
+                logger.debug_once(
+                    "FlashInfer top-p/top-k sampling is available but disabled "
+                    "by default. Set VLLM_USE_FLASHINFER_SAMPLER=1 to opt in "
+                    "after verifying accuracy for your workloads."
                 )
                 self.forward = self.forward_native
+
         elif current_platform.is_cpu():
-            if current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
+            arch = current_platform.get_cpu_architecture()
+            # Fall back to native implementation for POWERPC and RISCV.
+            # On PowerPC argmax produces incorrect output with torch.compile.
+            # PR: https://github.com/vllm-project/vllm/pull/26987
+            if arch in (CpuArchEnum.RISCV, CpuArchEnum.POWERPC):
                 self.forward = self.forward_native
             else:
                 self.forward = self.forward_cpu
@@ -274,6 +260,13 @@ def flashinfer_sample(
     does not. Call this function at the end of the forward pass to minimize
     the synchronization overhead.
     """
+    import flashinfer
+
+    if version.parse(flashinfer.__version__) < version.parse("0.2.3"):
+        raise ImportError(
+            "FlashInfer version >= 0.2.3 required for top-k and top-p sampling. "
+        )
+
     assert not (k is None and p is None)
     if k is None:
         # Top-p only.
