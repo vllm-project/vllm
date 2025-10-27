@@ -9,7 +9,7 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import AttentionLayer
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,

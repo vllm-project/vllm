@@ -143,7 +143,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
             # Prefer to use the MarlinMoE kernel when it is supported.
-            if not check_moe_marlin_supports_layer(layer, group_size):
+            if (
+                not check_moe_marlin_supports_layer(layer, group_size)
+                or current_platform.is_rocm()
+            ):
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
                     and weight_quant.actorder
@@ -305,10 +308,12 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         layer.w13_weight = torch.nn.Parameter(
             layer.w13_weight_packed.data, requires_grad=False
         )
+        delattr(layer, "w13_weight_packed")
 
         layer.w2_weight = torch.nn.Parameter(
             layer.w2_weight_packed.data, requires_grad=False
         )
+        delattr(layer, "w2_weight_packed")
 
         # reorder GEMM1 weights and block scales for FlashInfer CUTLASS kernel.
         if self.allow_flashinfer:
