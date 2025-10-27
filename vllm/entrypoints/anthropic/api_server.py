@@ -51,9 +51,9 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
-from vllm.utils import set_ulimit
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
+from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
