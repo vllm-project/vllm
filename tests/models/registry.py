@@ -341,6 +341,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniMaxM1ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M1-40k", trust_remote_code=True
     ),
+    "MiniMaxM2ForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M2",
+        trust_remote_code=True,
+    ),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -471,6 +475,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
     ),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"),
+    "SiglipModel": _HfExamplesInfo("google/siglip-base-patch16-224"),
     "PrithviGeoSpatialMAE": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         dtype="float16",
