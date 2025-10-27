@@ -361,13 +361,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# TODO (huydhn): Remove this once xformers is released for 2.9.0
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-    . /etc/environment
-    uv pip install --system \
-        "https://download.pytorch.org/whl/cu129/xformers-0.0.33%2B5d4b92a5.d20251026-cp39-abi3-linux_x86_64.whl"
-BASH
-
 # Install FlashInfer pre-compiled kernel cache and binaries
 # https://docs.flashinfer.ai/installation.html
 RUN --mount=type=cache,target=/root/.cache/uv \
