@@ -233,6 +233,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
             if name == "lm_head.weight":
                 name = f"model.layers.{mtp_start_layer_idx}.shard_head.head.weight"
             elif name == "model.embed_tokens.weight":
+                # This name is same with local model, rewriting is not needed.
                 pass
             else:
                 spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
