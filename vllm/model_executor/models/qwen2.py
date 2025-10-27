@@ -25,6 +25,8 @@
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 
+from __future__ import annotations
+
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
