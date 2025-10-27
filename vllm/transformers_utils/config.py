@@ -622,7 +622,7 @@ def get_config(
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:
         if config.model_type not in MODEL_MAPPING_NAMES:
-            raise ValueError(f"Model type {config.model_type} not supported")
+            raise ValueError(f"Cannot find architecture name for {config.model_type}")
         model_type = MODEL_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
