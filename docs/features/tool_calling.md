@@ -321,7 +321,7 @@ Supported models:
 Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
-* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
 ### LongCat-Flash-Chat Models (`longcat`)
 
