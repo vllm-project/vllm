@@ -62,8 +62,8 @@ class WorkerGuard:
     def __init__(self, vllm_config: VllmConfig):
         zmq_ctx = zmq.Context()
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.tp_rank = get_tp_group().local_rank
-        self.pp_rank = get_pp_group().local_rank
+        self.tp_rank = get_tp_group().rank_in_group
+        self.pp_rank = get_pp_group().rank_in_group
         identity = f"{self.tp_rank}_{self.pp_rank}".encode()
         worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
         self.cmd_socket = make_zmq_socket(
