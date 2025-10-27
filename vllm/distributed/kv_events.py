@@ -51,7 +51,7 @@ class BlockStored(KVCacheEvent):
     parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
-    lora_id: int | None
+    lora_name: str | None
     medium: str | None
 
 

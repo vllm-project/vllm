@@ -402,7 +402,7 @@ class OffloadingConnectorScheduler:
                     block_hashes=event.block_hashes,
                     parent_block_hash=None,
                     token_ids=[],
-                    lora_id=None,
+                    lora_name=None,
                     block_size=event.block_size,
                     medium=event.medium,
                 )
