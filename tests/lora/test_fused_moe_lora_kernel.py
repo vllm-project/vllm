@@ -142,6 +142,8 @@ def use_fused_moe_lora_kernel(
         num_experts,
         block_size,
         max_loras,
+        max_num_tokens_padded,
+        max_num_m_blocks,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
@@ -152,6 +154,7 @@ def use_fused_moe_lora_kernel(
         "BLOCK_SIZE_N": 32,
         "BLOCK_SIZE_K": 64,
         "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
     }
 
     mul_routed_weight = False
@@ -173,6 +176,7 @@ def use_fused_moe_lora_kernel(
         config["BLOCK_SIZE_N"],
         config["BLOCK_SIZE_K"],
         config["GROUP_SIZE_M"],
+        config["SPLIT_K"],
         mul_routed_weight,
     )
 
