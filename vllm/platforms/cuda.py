@@ -14,6 +14,7 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+from vllm.attention.selector import get_attn_backend
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml, resolve_obj_by_qualname
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -148,8 +149,34 @@ class CudaPlatformBase(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         cache_config = vllm_config.cache_config
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+        model_config = vllm_config.model_config
+
+        # Attempt to set an appropriate block size based on what backend will be used.
+        # TODO: per-layer block size configuration
+        if cache_config and model_config:
+            backend = get_attn_backend(
+                head_size=model_config.get_head_size(),
+                dtype=model_config.dtype,
+                kv_cache_dtype=cache_config.cache_dtype,
+                block_size=None,
+                use_mla=model_config.use_mla,
+                has_sink=False,  # Model isn't loaded yet, can't determine this
+                use_sparse=hasattr(model_config.hf_config, "index_topk"),
+            )
+            if cache_config.block_size and not backend.supports_block_size(
+                cache_config.block_size
+            ):
+                new_block_size = backend.get_default_block_size()
+                logger.info(
+                    "Adjusting KV cache block size from %d to %d for %s backend.",
+                    cache_config.block_size,
+                    new_block_size,
+                    backend.get_name(),
+                )
+                cache_config.block_size = new_block_size
+        else:
+            if cache_config.block_size is None:
+                cache_config.block_size = 16  # default block size
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
@@ -254,7 +281,7 @@ class CudaPlatformBase(Platform):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
-        block_size: int,
+        block_size: int | None,
         use_v1: bool,
         use_mla: bool,
         has_sink: bool,

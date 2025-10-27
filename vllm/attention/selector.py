@@ -69,7 +69,7 @@ def get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     kv_cache_dtype: str | None,
-    block_size: int,
+    block_size: int | None,
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
@@ -96,7 +96,7 @@ def _cached_get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     kv_cache_dtype: str | None,
-    block_size: int,
+    block_size: int | None,
     use_v1: bool = False,
     use_mla: bool = False,
     has_sink: bool = False,
@@ -151,23 +151,6 @@ def _cached_get_attn_backend(
             f"Invalid attention backend for {current_platform.device_name}"
         )
     backend = resolve_obj_by_qualname(attention_cls)
-
-    # Adjust block size if the selected backend doesn't support it
-    # The hybrid block table will handle mapping between allocation and kernel sizes
-    # TODO: per-layer block size configuration
-    if not backend.supports_block_size(block_size):
-        from vllm.config import get_current_vllm_config
-
-        vllm_config = get_current_vllm_config()
-        if vllm_config and vllm_config.cache_config:
-            new_block_size = backend.get_default_block_size()
-            logger.info(
-                "Adjusting KV cache block size from %d to %d for %s backend.",
-                block_size,
-                new_block_size,
-                backend.get_name(),
-            )
-            vllm_config.cache_config.block_size = new_block_size
 
     # Adjust kv cache layout if the selected backend requires a specific one
     device_capability = current_platform.get_device_capability()
