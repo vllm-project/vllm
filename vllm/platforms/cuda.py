@@ -15,8 +15,7 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 from vllm.logger import init_logger
-from vllm.utils import import_pynvml
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import import_pynvml, resolve_obj_by_qualname
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
