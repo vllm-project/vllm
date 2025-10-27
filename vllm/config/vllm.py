@@ -41,10 +41,13 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     PretrainedConfig = Any
 
     QuantizationConfig = Any
+
+    KVCacheConfig = Any
 
 logger = init_logger(__name__)
 
@@ -570,9 +573,6 @@ class VllmConfig:
             # warning message here and will log it later.
             if not current_platform.support_hybrid_kv_cache():
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
-            if self.kv_transfer_config is not None:
-                # Hybrid KV cache manager is not compatible with KV transfer.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
