@@ -108,10 +108,10 @@ from vllm.entrypoints.utils import (
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, set_ulimit
+from vllm.utils import Device
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
-from vllm.utils.system_utils import decorate_logs
+from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION

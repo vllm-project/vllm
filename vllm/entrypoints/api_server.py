@@ -26,8 +26,9 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid, set_ulimit
+from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
