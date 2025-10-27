@@ -164,17 +164,26 @@ class CudaPlatformBase(Platform):
                 has_sink=False,  # Model isn't loaded yet, can't determine this
                 use_sparse=hasattr(model_config.hf_config, "index_topk"),
             )
-            if cache_config.block_size and not backend.supports_block_size(
-                cache_config.block_size
-            ):
-                new_block_size = backend.get_default_block_size()
+            backend_default = backend.get_default_block_size()
+
+            if cache_config.block_size is None:
+                cache_config.block_size = backend_default
+                logger.info(
+                    "Setting KV cache block size to %d for %s backend.",
+                    backend_default,
+                    backend.get_name(),
+                )
+            elif not backend.supports_block_size(cache_config.block_size):
                 logger.info(
                     "Adjusting KV cache block size from %d to %d for %s backend.",
                     cache_config.block_size,
-                    new_block_size,
+                    backend_default,
                     backend.get_name(),
                 )
-                cache_config.block_size = new_block_size
+                cache_config.block_size = backend_default
+            else:
+                # user-specified block size is supported
+                pass
         else:
             if cache_config.block_size is None:
                 cache_config.block_size = 16  # default block size
