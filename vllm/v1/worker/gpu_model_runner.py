@@ -3925,7 +3925,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         class AttentionGroupKey(NamedTuple):
             attn_backend: type[AttentionBackend]
-            kv_cache_spec: KVCacheSpec
+            kv_cache_spec: AttentionSpec
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -3953,6 +3953,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                assert isinstance(layer_kv_cache_spec, AttentionSpec), (
+                    f"Expected AttentionSpec for attention layer {layer_name}, "
+                    f"but got {type(layer_kv_cache_spec)}"
+                )
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend, layer_kv_cache_spec
