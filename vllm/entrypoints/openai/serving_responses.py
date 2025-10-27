@@ -63,6 +63,7 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
+    construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
@@ -246,6 +247,13 @@ class OpenAIServingResponses(OpenAIServing):
                     "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
                     "the vLLM server."
                 ),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if request.previous_input_messages and request.previous_response_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Only one of `previous_input_messages` and "
+                "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
         return None
@@ -941,6 +949,8 @@ class OpenAIServingResponses(OpenAIServing):
                     instructions=request.instructions, tools=request.tools
                 )
                 messages.append(dev_msg)
+            messages += construct_harmony_previous_input_messages(request)
+
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
