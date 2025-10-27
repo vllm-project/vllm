@@ -568,9 +568,12 @@ def _get_config_dtype_str_compatible(
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    **kwargs,
+    ocp_mx_scheme: str | None = None,
 ) -> str | None:
-    """Multi-level import fallback for _get_config_dtype_str function."""
+    """
+    Multi-level import fallback for _get_config_dtype_str function.
+    Returns a string used to construct the filename for tuning info.
+    """
     try:
         from vllm.model_executor.layers.fused_moe.config import (
             _get_config_dtype_str as _original_func,
@@ -581,60 +584,24 @@ def _get_config_dtype_str_compatible(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
-            **kwargs,
+            ocp_mx_scheme=ocp_mx_scheme,
         )
-    except ImportError:
-        try:
-            from vllm.model_executor.layers.fused_moe import (
-                _get_config_dtype_str as _original_func,
-            )
-
-            return _original_func(
-                dtype,
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                use_int4_w4a16=use_int4_w4a16,
-                **kwargs,
-            )
-        except ImportError:
-            try:
-                from vllm.model_executor.layers.fused_moe.layer import (
-                    _get_config_dtype_str as _original_func,
-                )
-
-                return _original_func(
-                    dtype,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    use_int8_w8a16=use_int8_w8a16,
-                    use_int4_w4a16=use_int4_w4a16,
-                    **kwargs,
-                )
-            except ImportError:
-                try:
-                    from vllm.model_executor.layers.fused_moe import FusedMoE
-
-                    if hasattr(FusedMoE, "_get_config_dtype_str"):
-                        return FusedMoE._get_config_dtype_str(
-                            dtype,
-                            use_fp8_w8a8=use_fp8_w8a8,
-                            use_int8_w8a16=use_int8_w8a16,
-                            use_int4_w4a16=use_int4_w4a16,
-                            **kwargs,
-                        )
-                except ImportError:
-                    pass
-                # Fallback implementation that mimics the original function's logic
-                if use_fp8_w8a8:
-                    return "fp8_w8a8"
-                elif use_int8_w8a16:
-                    return "int8_w8a16"
-                elif use_int4_w4a16:
-                    return "int4_w4a16"
-                elif dtype == torch.float:
-                    # avoiding cases where kernel fails when float32 MoE
-                    # use fp16/bfloat16 configs
-                    return "float32"
-                return None
+    except (ImportError, TypeError):
+        # Fallback implementation that mimics the original function's logic
+        if use_fp8_w8a8:
+            return "fp8_w8a8"
+        elif use_int8_w8a16:
+            return "int8_w8a16"
+        elif use_int4_w4a16:
+            return "int4_w4a16"
+        elif ocp_mx_scheme is not None:
+            # For OCP MX execution simulation
+            return None
+        elif dtype == torch.float:
+            # avoiding cases where kernel fails when float32 MoE
+            # use fp16/bfloat16 configs
+            return "float32"
+        return None
 
 
 def make_quant_config_compatible(
@@ -650,7 +617,7 @@ def make_quant_config_compatible(
             "w2_scale": w2_scale,
             "a1_scale": a1_scale,
             "a2_scale": a2_scale,
-            "block_quant_shape": block_quant_shape,
+            "block_shape": block_quant_shape,
         },
         {
             "quant_dtype": quant_dtype,
