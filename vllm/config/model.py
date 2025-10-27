@@ -2129,9 +2129,10 @@ def _get_and_verify_max_len(
         elif current_platform.device_name == "npu" and max_model_len > 65536:
             logger.warning(
                 "max_model_len is not specified and the default value"
-                "derived from the model config is {max_model_len}, which is"
-                "too large and will make the engine stuck in initializing"
-                "distributed communication. Set max_model_len to 65536."
+                "derived from the model config is %s, which is too large"
+                "and will make the engine stuck in initializing distributed"
+                "communication. Set max_model_len to 65536.",
+                max_model_len,
             )
             max_model_len = 65536
     # If the user specified a max length, make sure it is smaller than the
