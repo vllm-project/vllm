@@ -231,19 +231,16 @@ run_tests_for_model() {
       VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
       UCX_NET_DEVICES=all \
       VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
-      UCX_LOG_LEVEL=debug \
       UCX_FAULT_DEBUG=1 \
-      NCCL_DEBUG=INFO \
-      NIXL_LOG_LEVEL=DEBUG \
-      VLLM_LOGGING_LEVEL=DEBUG \
+      RUST_LOG=debug \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
       VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-      RUST_LOG=debug \
       LD_PRELOAD=$UCX_FAULT_INJECTOR_LIB \
       vllm serve $model_name \
       --port $PORT \
       --enforce-eager \
       --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      --disable-hybrid-kv-cache-manager \
       --kv-transfer-config '$KV_CONFIG'"
     else
       BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
@@ -254,6 +251,7 @@ run_tests_for_model() {
       --port $PORT \
       --enforce-eager \
       --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      --disable-hybrid-kv-cache-manager \
       --kv-transfer-config '$KV_CONFIG'"
     fi
   # DP-EP attention mode
@@ -301,9 +299,11 @@ run_tests_for_model() {
 
     # Set fault pattern (fault every 16th operation)
     $UCX_FAULT_CLIENT pattern OOOOOOOOOOOOOOOX
+    sleep 1
 
     # Enable fault injection
     $UCX_FAULT_CLIENT toggle
+    sleep 1
 
     # Verify configuration
     echo "Fault injection status:"
