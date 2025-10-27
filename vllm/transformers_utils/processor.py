@@ -3,6 +3,7 @@
 
 import importlib
 from functools import lru_cache
+import inspect
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
 from transformers import (
@@ -164,10 +165,19 @@ cached_get_processor = lru_cache(get_processor)
 @lru_cache
 def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
     try:
-        call_kwargs = type(processor).__call__.__annotations__.get("kwargs", None)
+        # get kwargs annotations in processor
+        call_kwargs = inspect.signature(
+            type(processor).__call__).parameters.get("kwargs")
+        call_kwargs_annotations = call_kwargs.annotation if call_kwargs else None
         # if the processor has explicit kwargs annotation, use it
-        if call_kwargs is not None:
-            processor_kwargs = set(get_type_hints(get_args(call_kwargs)[0]).keys())
+        if call_kwargs_annotations is not None:
+            # get_type_hints will parse all type annotations at runtime,
+            # and if an annotation refers to a type or
+            # name that hasn’t been imported or defined, it will raise an error.
+            # So we use __annotations__ to get the raw annotations directly.
+            processor_kwargs = set(
+                (get_args(call_kwargs_annotations)[0].__annotations__).keys()
+            )
             return processor_kwargs
         # otherwise, try to get from ProcessingKwargs
         else:
