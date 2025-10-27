@@ -199,6 +199,7 @@ class MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
   struct ClassMatmulCacheKey {
     dnnl_dim_t b_n_size;
     dnnl_dim_t b_k_size;
+    dnnl::memory::data_type b_type;
 
     friend bool operator==(const ClassMatmulCacheKey& l,
                            const ClassMatmulCacheKey& r);

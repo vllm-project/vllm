@@ -9,7 +9,7 @@ from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 try:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 

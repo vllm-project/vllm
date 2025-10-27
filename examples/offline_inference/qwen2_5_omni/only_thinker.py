@@ -13,7 +13,7 @@ from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.multimodal.image import convert_image_mode
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class QueryResult(NamedTuple):

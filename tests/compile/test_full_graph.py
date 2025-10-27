@@ -198,7 +198,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)
-        else CompilationConfig(level=compile_config)
+        else CompilationConfig(mode=compile_config)
     )
 
     prompts = [

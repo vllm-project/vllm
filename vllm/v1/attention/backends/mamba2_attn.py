@@ -7,7 +7,7 @@ import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,

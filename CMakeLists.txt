@@ -49,8 +49,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.8.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.8.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.9.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.9.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -883,6 +883,7 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
+  "csrc/moe/moe_lora_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")

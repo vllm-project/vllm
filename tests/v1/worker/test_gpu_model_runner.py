@@ -21,8 +21,8 @@ from vllm.distributed.parallel_state import (
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import update_environment_variables
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (

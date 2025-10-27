@@ -33,7 +33,10 @@ class TopKTopPSampler(nn.Module):
         ):
             if envs.VLLM_USE_FLASHINFER_SAMPLER:
                 # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
-                logger.info_once("Using FlashInfer for top-p & top-k sampling.")
+                logger.info_once(
+                    "Using FlashInfer for top-p & top-k sampling.",
+                    scope="global",
+                )
                 self.forward = self.forward_cuda
             else:
                 logger.debug_once(

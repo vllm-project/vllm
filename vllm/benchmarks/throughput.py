@@ -221,6 +221,7 @@ async def run_vllm_async(
                     detokenize=not disable_detokenize,
                 )
             )
+            prompts.append(prompt)
             lora_requests.append(request.lora_request)
 
         generators = []

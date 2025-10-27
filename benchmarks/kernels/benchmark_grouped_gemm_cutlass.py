@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
     fused_topk,
 )
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = [
     "nm-testing/Mixtral-8x7B-Instruct-v0.1",

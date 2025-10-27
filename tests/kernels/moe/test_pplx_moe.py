@@ -45,7 +45,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch

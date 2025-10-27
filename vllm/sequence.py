@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import msgspec
 import torch
 
 if TYPE_CHECKING:
@@ -92,12 +91,3 @@ class IntermediateTensors:
 
     def __repr__(self) -> str:
         return f"IntermediateTensors(tensors={self.tensors})"
-
-
-class ExecuteModelRequest(
-    msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
-    omit_defaults=True,
-):  # type: ignore[call-arg]
-    # Placeholder. Remove.
-    pass

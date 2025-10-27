@@ -42,8 +42,6 @@ from typing_extensions import TypeVar
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.resampler import (
     BaseResampler,
     Resampler2,
@@ -1514,11 +1512,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (4, 0)
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        if isinstance(quant_config, (AWQConfig, AWQMarlinConfig)):
-            return None
-        return quant_config
-
     def init_llm(
         self,
         vllm_config: VllmConfig,
@@ -1532,7 +1525,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
@@ -1550,7 +1542,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         with set_default_torch_dtype(torch.float16):
             # The resampler in 4.0 remains consistent with the one in 2.5/2.6.
             resampler = Resampler2_5(
@@ -1619,11 +1610,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (4, 5)
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        if isinstance(quant_config, (AWQConfig, AWQMarlinConfig)):
-            return None
-        return quant_config
-
     def init_llm(
         self,
         vllm_config: VllmConfig,
@@ -1637,7 +1623,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
@@ -1655,7 +1640,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
-        quant_config = self._maybe_ignore_quant_config(quant_config)
         with set_default_torch_dtype(torch.float16):
             # The resampler in 4.0 remains consistent with the one in 2.5/2.6.
             resampler = Resampler4_5(

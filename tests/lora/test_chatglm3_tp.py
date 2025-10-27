@@ -109,7 +109,7 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=True,
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=0.8,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
         ),

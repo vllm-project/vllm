@@ -25,7 +25,7 @@ if HAS_TRITON:
     from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_expand, lora_shrink
     from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_TP_SIZES = [1]

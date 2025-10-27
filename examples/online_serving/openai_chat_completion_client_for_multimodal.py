@@ -26,7 +26,7 @@ import requests
 from openai import OpenAI
 from utils import get_first_model
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"

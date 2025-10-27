@@ -10,7 +10,7 @@ from tests.kernels.quantization.nvfp4_utils import (
     get_nvfp4_global_scale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 if not current_platform.is_device_capability(100):
     pytest.skip(

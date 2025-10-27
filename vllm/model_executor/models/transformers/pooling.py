@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import AutoModelForSequenceClassification
 
+from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import (
     ClassifierPooler,
     CLSPool,
@@ -82,14 +83,14 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
             if hasattr(module, "pooler") and module.pooler is None:
                 self.model.pooler = None
                 break
-        if self.model.pooler is not None:
-            raise ValueError(
-                "Sequence classification models with pooling layers are not "
-                "supported yet in the Transformers backend."
-            )
 
         # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
-        self.classifier = seq_cls_model.classifier
+        self.classifier = getattr_iter(seq_cls_model, ["classifier", "score"], None)
+        if self.classifier is None:
+            raise ValueError(
+                "Could not find `classifier` or `score` layer in the "
+                "`AutoModelForSequenceClassification` instance."
+            )
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
         class ClassifierWithReshape(self.classifier.__class__):

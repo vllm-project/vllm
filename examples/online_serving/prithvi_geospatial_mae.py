@@ -11,14 +11,15 @@ import requests
 # image as input, process it using the multimodal data processor, and
 # perform inference.
 # Requirements :
-# - install plugin at:
-#   https://github.com/christian-pinto/prithvi_io_processor_plugin
+# - install TerraTorch v1.1 (or later):
+#   pip install terratorch>=v1.1
 # - start vllm in serving mode with the below args
 #   --model='christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM'
 #   --model-impl terratorch
 #   --task embed --trust-remote-code
 #   --skip-tokenizer-init --enforce-eager
-#   --io-processor-plugin prithvi_to_tiff
+#   --io-processor-plugin terratorch_segmentation
+#   --enable-mm-embeds
 
 
 def main():
@@ -34,7 +35,6 @@ def main():
         },
         "priority": 0,
         "model": "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
-        "softmax": False,
     }
 
     ret = requests.post(server_endpoint, json=request_payload_url)

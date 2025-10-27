@@ -292,6 +292,7 @@ def run_embedding_input_test(
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
         default_torch_num_threads=1,
+        enable_mm_embeds=True,
     ) as vllm_model:
         outputs_per_case_for_original_input = [
             vllm_model.generate_greedy_logprobs(

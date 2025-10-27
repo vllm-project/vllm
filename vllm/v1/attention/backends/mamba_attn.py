@@ -36,7 +36,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.compilation_config = vllm_config.compilation_config
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs,
-            self.compilation_config.max_capture_size,
+            self.compilation_config.max_cudagraph_capture_size,
         )
         self.state_indices_tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),

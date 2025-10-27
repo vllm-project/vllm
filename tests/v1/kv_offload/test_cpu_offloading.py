@@ -27,6 +27,7 @@ def test_cpu_offloading(cpu_block_size: int) -> None:
         model="meta-llama/Llama-3.2-1B-Instruct",
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
+        disable_hybrid_kv_cache_manager=True,
     )
 
     prompts = ["Hi " * 100]

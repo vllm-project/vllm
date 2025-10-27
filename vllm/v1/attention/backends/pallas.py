@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 

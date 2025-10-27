@@ -25,7 +25,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import (

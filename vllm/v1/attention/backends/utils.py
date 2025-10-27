@@ -21,7 +21,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionImpl

@@ -7,7 +7,7 @@ import pytest
 
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from ...utils import VLLM_PATH
 
