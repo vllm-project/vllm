@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from functools import lru_cache, partial
 
 import torch
 
-from vllm.sampling_params import LogitsProcessor
+from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.v1.sample.logits_processor import (
+    AdapterLogitsProcessor,
+    _load_custom_logitsprocs,
+)
 
 
 class AllowedTokenIdsLogitsProcessor:
@@ -90,3 +94,15 @@ def get_logits_processors(
         )
 
     return logits_processors
+
+
+def validate_logits_processors_parameters(
+    logits_processors: Sequence[str | LogitsProcessor] | None,
+    sampling_params: SamplingParams,
+):
+    if logits_processors is None:
+        return None
+
+    for logits_procs in _load_custom_logitsprocs(logits_processors):  # type: ignore[arg-type]
+        if isinstance(logits_procs, AdapterLogitsProcessor):
+            logits_procs.validate_params(sampling_params)

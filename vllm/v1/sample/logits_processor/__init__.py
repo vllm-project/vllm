@@ -245,6 +245,18 @@ class AdapterLogitsProcessor(LogitsProcessor):
         # was when the partial was created.
         self.req_info: dict[int, partial[torch.Tensor]] = {}
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        """Validate sampling params for this logits processor.
+
+        Raise ValueError if params are invalid.
+
+        Args:
+          params: request sampling params
+
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def new_req_logits_processor(
         self,
