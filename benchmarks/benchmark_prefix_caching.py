@@ -37,7 +37,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 try:
     from vllm.transformers_utils.tokenizer import get_tokenizer
