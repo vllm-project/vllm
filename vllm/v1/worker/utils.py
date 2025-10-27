@@ -15,7 +15,7 @@ from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
@@ -139,13 +139,13 @@ class AttentionGroup:
     # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
-    kv_cache_spec: AttentionSpec
+    kv_cache_spec: KVCacheSpec
 
     @staticmethod
     def create_with_metadata_builders(
         backend: type[AttentionBackend],
         layer_names: list[str],
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         vllm_config: VllmConfig,
         device: torch.device,
         num_metadata_builders: int = 1,
