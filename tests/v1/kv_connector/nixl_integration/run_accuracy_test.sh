@@ -300,7 +300,7 @@ run_tests_for_model() {
     sleep 2  # give the file watcher time to fully initialize
 
     # Set fault pattern (fault every 16th operation)
-    $UCX_FAULT_CLIENT set-pattern OOOOOOOOOOOOOOOX
+    $UCX_FAULT_CLIENT pattern OOOOOOOOOOOOOOOX
 
     # Enable fault injection
     $UCX_FAULT_CLIENT toggle
