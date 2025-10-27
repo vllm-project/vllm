@@ -539,12 +539,12 @@ class EplbState:
 
             if (
                 is_main_rank
-                and self.eplb_save_dir is not None
+                and self.save_dir is not None
                 and not is_profile
                 and self.expert_rearrangement_step > 0
             ):
                 save_eplb_state(
-                    global_expert_load_window, self.eplb_save_dir, self.save_dir_iter
+                    global_expert_load_window, self.save_dir, self.save_dir_iter
                 )
                 self.save_dir_iter += 1
 
