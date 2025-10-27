@@ -1506,6 +1506,8 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - request.num_cached_tokens
                     )
                     request.num_computed_tokens = request.num_cached_tokens
+                # Prefill is to be recomputed locally.
+                request.num_external_computed_tokens = 0
 
                 affected_req_ids.add(request.request_id)
 
