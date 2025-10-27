@@ -93,8 +93,7 @@ class MultiprocExecutor(Executor):
             f"({self.parallel_config.distributed_node_size}). "
         )
         self.local_world_size = (
-            self.parallel_config.world_size
-            // self.parallel_config.distributed_node_size
+            self.world_size // self.parallel_config.distributed_node_size
         )
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
         pp_parallel_size = self.parallel_config.pipeline_parallel_size
@@ -124,11 +123,11 @@ class MultiprocExecutor(Executor):
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
+            global_start_rank = (
+                self.local_world_size * self.parallel_config.distributed_node_rank
+            )
             for local_rank in range(self.local_world_size):
-                global_rank = (
-                    self.local_world_size * self.parallel_config.distributed_node_rank
-                    + local_rank
-                )
+                global_rank = global_start_rank + local_rank
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
@@ -432,14 +431,15 @@ class WorkerProcHandle:
     rpc_response_mqs: list[MessageQueue | None] = EMPTY_LIST
     death_writer: Connection | None = None
 
-    @staticmethod
+    @classmethod
     def from_unready_handle(
+        cls,
         unready_handle: UnreadyWorkerProcHandle,
         worker_response_mq: MessageQueue | None,
         rpc_response_mqs: list[MessageQueue | None] = EMPTY_LIST,
         **kwargs,
     ) -> "WorkerProcHandle":
-        return WorkerProcHandle(
+        return cls(
             proc=unready_handle.proc,
             rank=unready_handle.rank,
             worker_response_mq=worker_response_mq,
@@ -471,7 +471,7 @@ class WorkerProc:
             # generate mq broadcaster from world group
             # for cross-node communication
             self.rpc_broadcast_mq = get_world_group().create_mq_broadcaster(
-                extra_writer_handler=input_shm_handle,
+                extra_writer_handle=input_shm_handle,
                 # we will wait until ready later
                 blocking=False,
             )
@@ -641,14 +641,6 @@ class WorkerProc:
         destroy_distributed_environment()
 
     @staticmethod
-    def get_ready_proc_handles(worker: "WorkerProc") -> dict[str, Any]:
-        return {
-            "status": WorkerProc.READY_STR,
-            "handle": worker.worker_response_mq.export_handle(),
-            "rpc_response_handles": worker.rpc_response_handles,
-        }
-
-    @staticmethod
     def worker_main(*args, **kwargs):
         """Worker initialization and execution loops.
         This runs a background process"""
@@ -698,7 +690,13 @@ class WorkerProc:
             worker = WorkerProc(*args, **kwargs)
 
             # Send READY once we know everything is loaded
-            ready_writer.send(WorkerProc.get_ready_proc_handles(worker))
+            ready_writer.send(
+                {
+                    "status": WorkerProc.READY_STR,
+                    "handle": worker.worker_response_mq.export_handle(),
+                    "rpc_response_handles": worker.rpc_response_handles,
+                }
+            )
 
             # Ensure message queues are ready. Will deadlock if re-ordered.
             # Must be kept consistent with the Executor

@@ -386,7 +386,7 @@ class GroupCoordinator:
         )
 
     def create_mq_broadcaster(
-        self, writer_rank=0, extra_writer_handler=None, blocking=True
+        self, writer_rank=0, extra_writer_handle=None, blocking=True
     ):
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
@@ -395,7 +395,7 @@ class GroupCoordinator:
             1 << 22,
             6,
             writer_rank=writer_rank,
-            extra_writer_handler=extra_writer_handler,
+            extra_writer_handle=extra_writer_handle,
             blocking=blocking,
         )
 

@@ -185,6 +185,8 @@ class CoreEngineProcManagerExecutorOnly(CoreEngineProcManager):
         self.process = context.Process(
             target=target_fn, name=f"EngineCore_{global_index}", kwargs=common_kwargs
         )
+
+        self._finalizer = weakref.finalize(self, shutdown, self.process)
         self.process.start()
 
     def finished_procs(self) -> dict[str, int]:
@@ -196,6 +198,9 @@ class CoreEngineProcManagerExecutorOnly(CoreEngineProcManager):
     def join_first(self):
         """Wait for any process to exit."""
         connection.wait(self.process.sentinel)
+
+    def close(self):
+        self._finalizer()
 
 
 @contextlib.contextmanager

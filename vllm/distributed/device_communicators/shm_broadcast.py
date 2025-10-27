@@ -628,7 +628,7 @@ class MessageQueue:
         max_chunk_bytes,
         max_chunks,
         writer_rank: int = 0,
-        extra_writer_handler=None,
+        extra_writer_handle=None,
         blocking: bool = True,
     ) -> "MessageQueue":
         if isinstance(pg, ProcessGroup):
@@ -646,15 +646,13 @@ class MessageQueue:
         n_reader = group_world_size - 1
         n_local_reader = len(same_node_ranks) - 1
         local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
-        if extra_writer_handler is not None:
-            n_reader = group_world_size
-            n_local_reader = len(same_node_ranks)
-        buffer_io: MessageQueue
         if group_rank == writer_rank:
-            if extra_writer_handler is not None:
+            if extra_writer_handle is not None:
                 buffer_io = MessageQueue.create_from_handle(
-                    extra_writer_handler, group_rank
+                    extra_writer_handle, group_rank
                 )
+                n_reader = group_world_size
+                n_local_reader = len(same_node_ranks)
             else:
                 buffer_io = MessageQueue(
                     n_reader=n_reader,
