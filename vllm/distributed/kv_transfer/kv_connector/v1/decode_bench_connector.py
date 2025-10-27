@@ -42,7 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
