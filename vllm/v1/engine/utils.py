@@ -83,7 +83,7 @@ class EngineZmqAddresses:
     # ZMQ client_cmd socket address of client guard
     client_cmd_addr: str | None = None
     # identities of engine_core_guard
-    engine_core_guard_identities: dict[int, bytes] | None = None
+    engine_core_guard_identities: list[bytes] | None = None
     # ZMQ fault_pub_socket address of client guard
     fault_pub_socket_addr: str | None = None
 
@@ -898,15 +898,11 @@ def launch_core_engines(
         addresses.client_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
         )
-        engine_ids = [i for i in range(dp_size)]
-        engine_core_identities = generate_identity_group(
+        addresses.engine_core_guard_identities = generate_identity_group(
             peer1="client",
             peer2="engine_core_guard",
             use="report and cmd",
             n=dp_size,
-        )
-        addresses.engine_core_guard_identities = dict(
-            zip(engine_ids, engine_core_identities)
         )
         addresses.fault_pub_socket_addr = get_engine_client_zmq_addr(
             local_only=False,
@@ -1231,7 +1227,7 @@ class FaultHandler:
     def __init__(
         self,
         cmd_socket: zmq.Socket,
-        client_cmd_registry: dict,
+        client_cmd_registry: list,
         engine_exception_q: asyncio.Queue[FaultInfo],
         engine_exception_q_lock: asyncio.Lock,
     ) -> None:
@@ -1248,16 +1244,17 @@ class FaultHandler:
         unhealthy_engine_list = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
         )
-        engine_identities = [identity for identity in self.client_cmd_registry.values()]
 
         if instruction == "pause":
-            for unhealthy_engine in unhealthy_engine_list:
-                engine_identities.remove(
-                    self.client_cmd_registry[int(unhealthy_engine.engine_id)]
-                )
+            unhealthy_ids = {int(e.engine_id) for e in unhealthy_engine_list}
+            self.client_cmd_registry = [
+                identity
+                for i, identity in enumerate(self.client_cmd_registry)
+                if i not in unhealthy_ids
+            ]
 
         kwargs = {"timeout": timeout}
-        for identity in engine_identities:
+        for identity in self.client_cmd_registry:
             serialized_instruction = serialize_method_call(instruction, **kwargs)
             self.cmd_socket.send_multipart(
                 [identity, b"", serialized_instruction.encode("utf-8")]
@@ -1266,18 +1263,18 @@ class FaultHandler:
         poller = zmq.Poller()
         poller.register(self.cmd_socket, zmq.POLLIN)
 
-        while engine_identities:
+        while self.client_cmd_registry:
             socks = dict(poller.poll(timeout * 1000))
             if self.cmd_socket not in socks:
                 logger.error(
                     "Timeout while waiting for responses from engines: %s",
-                    engine_identities,
+                    self.client_cmd_registry,
                 )
                 return False
             try:
                 identity, response = recv_msg(self.cmd_socket)
-                if identity.encode("utf-8") in engine_identities:
-                    engine_identities.remove(identity.encode("utf-8"))
+                if identity.encode("utf-8") in self.client_cmd_registry:
+                    self.client_cmd_registry.remove(identity.encode("utf-8"))
                 assert response is not None
                 response_dict = json.loads(response)
                 engine_id = response_dict.get("engine_index")
