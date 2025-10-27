@@ -232,8 +232,10 @@ class ModelConfig:
     output will contain token ids."""
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
-    `prompt_embeds` key. Note that enabling this will double the time required
-    for graph compilation."""
+    `prompt_embeds` key.
+
+    WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!"""
     served_model_name: str | list[str] | None = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -303,6 +305,7 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
@@ -421,6 +424,7 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         limit_mm_per_prompt: dict[str, int] | None,
+        enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
@@ -731,6 +735,7 @@ class ModelConfig:
 
             mm_config_kwargs = dict(
                 limit_per_prompt=limit_mm_per_prompt,
+                enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
@@ -788,25 +793,20 @@ class ModelConfig:
         cls += "MoE" if self.get_num_experts() > 1 else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
-        convert = None
+        task = None
         if defaults := try_match_architecture_defaults(self.architectures[0]):
-            _, (runner, convert) = defaults
-        # Overwrite with user-specified values
+            _, (runner, task) = defaults
+        # User specified value take precedence
         if self.runner != "auto":
             runner = self.runner
-        if self.convert not in {"auto", "none"}:
-            convert = self.convert
-        # Fall back to default values if still not set
-        if runner is None:
-            runner = "generate"
-        if convert in {None, "none"}:
-            convert = "embed"
-        # Resolve Transformers backend task
-        if runner == "pooling":
-            if convert == "embed":
-                return cls + "EmbeddingModel"
-            if convert == "classify":
-                return cls + "ForSequenceClassification"
+        # Only consider Transformers backend pooling classes if we're wrapping an
+        # architecture that defaults to pooling. Otherwise, we return the LM class
+        # and use adapters.
+        if runner == "pooling" and task in {"embed", "classify"}:
+            if task == "embed":
+                cls += "EmbeddingModel"
+            elif task == "classify":
+                cls += "ForSequenceClassification"
         else:
             cls += "ForCausalLM"
         return cls
@@ -1619,6 +1619,29 @@ class ModelConfig:
         return is_encoder_decoder(self.hf_config)
 
     @property
+    def uses_alibi(self) -> bool:
+        cfg = self.hf_text_config
+
+        return (
+            getattr(cfg, "alibi", False)  # Falcon
+            or "BloomForCausalLM" in self.architectures  # Bloom
+            or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
+            or (
+                hasattr(cfg, "attn_config")  # MPT
+                and (
+                    (
+                        isinstance(cfg.attn_config, dict)
+                        and cfg.attn_config.get("alibi", False)
+                    )
+                    or (
+                        not isinstance(cfg.attn_config, dict)
+                        and getattr(cfg.attn_config, "alibi", False)
+                    )
+                )
+            )
+        )
+
+    @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
 
@@ -1655,6 +1678,10 @@ class ModelConfig:
     @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
+
+    @property
+    def supports_mamba_prefix_caching(self) -> bool:
+        return self._model_info.supports_mamba_prefix_caching
 
     @property
     def use_mla(self) -> bool:
@@ -2112,20 +2139,13 @@ def _get_and_verify_max_len(
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
-    # If the user specified a max length, make sure it is smaller than the
-    # derived length from the HF model config.
+    # If the user didn't specify `max_model_len`, then use that derived from
+    # the model config as a default value.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
-        if current_platform.is_tpu():
-            logger.warning(
-                "--max-model-len is not specified, "
-                "it's currently using model's default length %s, "
-                "which might be too large."
-                "Please input with --max-model-len based on your "
-                "request input length and output length, to avoid "
-                "unnecessary degradation.",
-                max_model_len,
-            )
+        max_model_len = current_platform.check_max_model_len(max_model_len)
+    # If the user specified a max length, make sure it is smaller than the
+    # derived length from the HF model config.
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
