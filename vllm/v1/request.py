@@ -118,8 +118,11 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
-        # The number of requests being preempted by the scheduler
+        # The number of requests being preempted by the scheduler.
         self.num_preemptions = 0
+
+        # The number of tokens that have been computed remotely.
+        self.num_external_computed_tokens = 0
 
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None

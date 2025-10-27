@@ -538,6 +538,7 @@ class Scheduler(SchedulerInterface):
                     self._update_connector_prefix_cache_stats(
                         request, num_external_computed_tokens
                     )
+                    request.num_external_computed_tokens += num_external_computed_tokens
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
@@ -1033,6 +1034,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        num_external_computed_tokens=request.num_external_computed_tokens,
                     )
                 )
             else:

@@ -121,6 +121,8 @@ class EngineCoreOutput(
     trace_headers: Mapping[str, str] | None = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    # The number of tokens that have been computed remotely.
+    num_external_computed_tokens: int = 0
 
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
