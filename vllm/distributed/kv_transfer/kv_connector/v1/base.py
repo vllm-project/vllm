@@ -70,6 +70,45 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
+class SupportsHMA(ABC):
+    """
+    The class that indicates the corresponding connector supports hybrid memory
+    allocator (HMA).
+    This is required to use the connector together with hybrid memory allocator.
+    """
+
+    @abstractmethod
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        Called exactly once when a request has finished for all kv cache groups,
+        before its blocks are freed for each group.
+
+        NOTE(Kuntai): This function is only supported by connectors that support HMA.
+
+        The connector may assumes responsibility for freeing the blocks
+        asynchronously by returning True.
+
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+        raise NotImplementedError
+
+
+def supports_hma(connector: Any) -> bool:
+    if isinstance(connector, type):
+        return issubclass(connector, SupportsHMA)
+    else:
+        return isinstance(connector, SupportsHMA)
+
+
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0
@@ -391,7 +430,7 @@ class KVConnectorBase_V1(ABC):
         Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the the blocks
+        The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:

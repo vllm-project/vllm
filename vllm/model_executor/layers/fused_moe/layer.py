@@ -55,9 +55,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, round_up
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -368,11 +368,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is available for EP"
                     " but not enabled, consider setting"
-                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it."
+                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
+                    scope="local",
                 )
             elif self.moe.moe_parallel_config.dp_size > 1:
                 logger.info_once(
-                    "FlashInfer CUTLASS MoE is currently not available for DP."
+                    "FlashInfer CUTLASS MoE is currently not available for DP.",
+                    scope="local",
                 )
             self.flashinfer_cutlass_moe = None  # type: ignore
 
