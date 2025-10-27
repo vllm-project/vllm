@@ -368,7 +368,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int] | None = None,
-    ):
+    ) -> Mapping[str, int]:
         """
         Returns the maximum length of the multimodal (image placeholders+text)
         tokens, including any break/text tokens in-between image embeddings.
