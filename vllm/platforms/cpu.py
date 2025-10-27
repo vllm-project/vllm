@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import glob
 import json
 import os
 import platform
@@ -151,7 +152,7 @@ class CpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         import vllm.envs as envs
-        from vllm.utils import GiB_bytes
+        from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
         if kv_cache_space is None:
@@ -297,9 +298,12 @@ class CpuPlatform(Platform):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
+        # Disable multi-stream for shared experts as no Stream on CPU
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+
         # Intel OpenMP setting
-        ld_prealod_str = os.getenv("LD_PRELOAD", "")
-        if "libiomp5.so" in ld_prealod_str:
+        ld_preload_str = os.getenv("LD_PRELOAD", "")
+        if "libiomp5.so" in ld_preload_str:
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
             os.environ["KMP_BLOCKTIME"] = "1"
@@ -309,6 +313,31 @@ class CpuPlatform(Platform):
             os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
+
+        if (
+            platform.system() == "Linux"
+            and Platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
+        ):
+            # We need to LD_PRELOAD PyTorch's libgomp, otherwise only
+            # one core will be properly utilized when we thread-bind
+            # See: https://github.com/vllm-project/vllm/issues/27369
+            # TODO: Remove once:
+            # https://github.com/pytorch/pytorch/issues/166087 is fixed
+
+            # We need to find the location of PyTorch's libgomp
+            torch_pkg = os.path.dirname(torch.__file__)
+            site_root = os.path.dirname(torch_pkg)
+            torch_libs = os.path.join(site_root, "torch.libs")
+            pytorch_libgomp_so_candidates = glob.glob(
+                os.path.join(torch_libs, "libgomp-*.so*")
+            )
+            if pytorch_libgomp_so_candidates:
+                pytorch_libgomp_so = pytorch_libgomp_so_candidates[0]
+                if ld_preload_str:
+                    ld_preload_str += ":"
+                ld_preload_str += pytorch_libgomp_so
+                os.environ["LD_PRELOAD"] = ld_preload_str
 
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(

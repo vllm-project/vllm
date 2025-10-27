@@ -34,8 +34,8 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils.asyncio import merge_async_iterators
-from vllm.utils.collections import as_list
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 
@@ -399,7 +399,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         # has_echoed[i] is reused here to indicate whether
                         # we have already returned the prompt token IDs.
-                        if not has_echoed[i]:
+                        if not has_echoed[i] and request.return_token_ids:
                             prompt_token_ids_to_return = prompt_token_ids
                             has_echoed[i] = True
 

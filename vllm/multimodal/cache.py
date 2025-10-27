@@ -17,9 +17,9 @@ from vllm.distributed.device_communicators.shm_object_storage import (
     SingleWriterShmRingBuffer,
 )
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, MiB_bytes
 from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
+from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 
 from .inputs import (
     MultiModalBatchedField,
