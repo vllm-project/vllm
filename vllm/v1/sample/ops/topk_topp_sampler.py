@@ -1416,16 +1416,16 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
                                    mask=mask_n,
                                    other=0.0)
 
-                if force_remove_logit != -float('inf'):
-                    # Force remove duplicates
-                    tolerance = 1e-5 * tl.maximum(1.0, tl.abs(force_remove_logit))
-                    force_remove_mask = tl.abs(
-                        logits_blk - force_remove_logit) < tolerance
-                    force_remove_count = tl.cumsum(force_remove_mask) + current_num_force_remove
-                    force_remove_count_mask = force_remove_count <= num_force_remove
-                    force_remove_mask = force_remove_count_mask & force_remove_mask
-                    logits_blk = tl.where(force_remove_mask, -float('inf'), logits_blk)
-                    current_num_force_remove = tl.max(force_remove_count)
+                # if force_remove_logit != -float('inf'):
+                #     # Force remove duplicates
+                #     tolerance = 1e-5 * tl.maximum(1.0, tl.abs(force_remove_logit))
+                #     force_remove_mask = tl.abs(
+                #         logits_blk - force_remove_logit) < tolerance
+                #     force_remove_count = tl.cumsum(force_remove_mask) + current_num_force_remove
+                #     force_remove_count_mask = force_remove_count <= num_force_remove
+                #     force_remove_mask = force_remove_count_mask & force_remove_mask
+                #     logits_blk = tl.where(force_remove_mask, -float('inf'), logits_blk)
+                #     current_num_force_remove = tl.max(force_remove_count)
 
                 # Apply widened cutoff
                 keep_mask = logits_blk > p_pivot_logit
