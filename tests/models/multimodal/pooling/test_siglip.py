@@ -19,7 +19,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     }
 )
 
-MODELS = ["google/siglip-base-patch16-224"]
+MODELS = ["google/siglip-base-patch16-224", "google/siglip2-base-patch16-224"]
 
 
 def _run_test(
