@@ -32,6 +32,8 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
         # dict(min_tokens=20),
         dict(presence_penalty=-1.0),
         dict(bad_words=["the", " the"]),
+        dict(logprobs=2),
+        dict(logprobs=2, presence_penalty=-1.0),
     ]
 
     default_params = dict(
