@@ -42,12 +42,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .glm4_moe import (
+    Glm4MixtureOfExperts,
     Glm4MoE,
     Glm4MoeDecoderLayer,
-    extract_moe_parameters,
     get_spec_layer_idx_from_weight_name,
 )
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 
@@ -180,7 +180,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, SupportsPP, MixtureOfExperts):
+class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -195,6 +195,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP, MixtureOfExperts):
         self.num_expert_groups = self.config.n_group
 
         self.moe_layers: list[FusedMoE] = []
+        self.moe_mlp_layers: list[Glm4MoE] = []
         example_moe = None
         for layer in self.model.layers.values():
             assert isinstance(layer, Glm4MoeMultiTokenPredictor)
@@ -202,8 +203,9 @@ class Glm4MoeMTP(nn.Module, SupportsPP, MixtureOfExperts):
             assert isinstance(layer, Glm4MoeDecoderLayer)
             if isinstance(layer.mlp, Glm4MoE):
                 example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
-        extract_moe_parameters(self, example_moe)
+        self.extract_moe_parameters(self, example_moe)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)

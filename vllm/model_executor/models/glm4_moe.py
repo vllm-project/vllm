@@ -616,7 +616,35 @@ class Glm4MoeModel(nn.Module):
         return loaded_params
 
 
-class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
+class Glm4MixtureOfExperts(MixtureOfExperts):
+    def extract_moe_parameters(self, example_moe: Glm4MoE | None) -> None:
+        if example_moe is None:
+            raise RuntimeError("No Glm4MoE layer found in model.layers.")
+        else:
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+
+class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -659,7 +687,9 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
         self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = config.n_group
 
-        self.moe_layers: list[SharedFusedMoE] = []
+        self.moe_layers = []
+        self.moe_mlp_layers: list[Glm4MoE] = []
+
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
@@ -669,9 +699,10 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
             if isinstance(layer.mlp, Glm4MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
 
-        extract_moe_parameters(self, example_moe)
+        self.extract_moe_parameters(example_moe)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -702,23 +733,6 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for layer in self.model.layers:
-            if isinstance(layer.mlp, Glm4MoE):
-                moe = layer.mlp
-                moe.n_local_physical_experts = num_local_physical_experts
-                moe.n_physical_experts = num_physical_experts
-                moe.n_redundant_experts = self.num_redundant_experts
-                moe.experts.update_expert_map()
-
 
 def get_spec_layer_idx_from_weight_name(
     config: Glm4MoeConfig, weight_name: str
@@ -731,15 +745,3 @@ def get_spec_layer_idx_from_weight_name(
             if f"layers.{layer_idx + i}." in weight_name:
                 return layer_idx + i
     return None
-
-
-def extract_moe_parameters(model: MixtureOfExperts, example_moe: Glm4MoE) -> None:
-    if example_moe is None:
-        raise RuntimeError("No Glm4MoE layer found in model.layers.")
-    else:
-        model.num_logical_experts = example_moe.n_logical_experts
-        model.num_physical_experts = example_moe.n_physical_experts
-        model.num_local_physical_experts = example_moe.n_local_physical_experts
-        model.num_routed_experts = example_moe.n_routed_experts
-        model.num_shared_experts = example_moe.n_shared_experts
-        model.num_redundant_experts = example_moe.n_redundant_experts

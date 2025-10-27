@@ -133,7 +133,7 @@ class Ernie4_5_MoeMoE(nn.Module):
 
         self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", None)
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_groupn_group
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.moe_num_experts
         self.n_shared_experts: int = self.moe_num_shared_experts
