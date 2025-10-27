@@ -56,7 +56,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_pplx, has_mori
+from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -99,12 +99,8 @@ if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk_aiter,
     )
-
-    grouped_topk_impl = rocm_aiter_grouped_topk
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
-
-    grouped_topk_impl = grouped_topk
 
 if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
