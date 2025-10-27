@@ -302,11 +302,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.disable_split_kv = False
 
         self.compilation_config = vllm_config.compilation_config
-        max_num_pages_per_req = cdiv(
-            self.model_config.max_model_len, self.kv_cache_spec.block_size
-        )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        max_num_pages = max_num_reqs * max_num_pages_per_req
         speculative_config = vllm_config.speculative_config
         num_spec_tokens = (
             speculative_config.num_speculative_tokens
@@ -358,6 +354,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "FlashInfer: Using page_size=%d (matches kv_manager_block_size)",
                 self.page_size,
             )
+
+        # Calculate buffer sizes using the actual kernel block size (page_size)
+        # to ensure buffers are correctly sized in hybrid mode
+        max_num_pages_per_req = cdiv(self.model_config.max_model_len, self.page_size)
+        max_num_pages = max_num_reqs * max_num_pages_per_req
 
         self.cache_dtype = self.cache_config.cache_dtype
         if self.cache_dtype.startswith("fp8"):
