@@ -75,7 +75,7 @@ from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
-from vllm.ray.lazy_utils import is_ray_initialized
+from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import (
@@ -84,7 +84,6 @@ from vllm.transformers_utils.config import (
     maybe_override_with_speculators,
 )
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import is_in_ray_actor
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
