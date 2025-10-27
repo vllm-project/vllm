@@ -72,7 +72,7 @@ def get_diff(diff_type: str) -> str:
 
 def main():
     all_violations = []
-    for diff_type in ["staged", "unstaged"]:
+    for diff_type in ["staged", "unstaged", "pr_commits"]:
         try:
             diff_output = get_diff(diff_type)
             violations = parse_diff(diff_output)
