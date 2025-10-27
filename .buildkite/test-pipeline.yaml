@@ -207,9 +207,9 @@ steps:
 
 - label: Distributed Tests (8 GPUs) # ?min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace/tests"
+  gpu: h100
   num_gpus: 8
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - examples/offline_inference/torchrun_dp_example.py
   - vllm/config/parallel.py
