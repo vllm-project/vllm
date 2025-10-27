@@ -124,8 +124,8 @@ def test_ngram_correctness(
 @pytest.mark.parametrize(
     "model_path",
     [
-        "nm-testing/SpeculatorLlama3-1-8B-Eagle3-converted-0717-quantized",
-        "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized",
+        "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
+        "RedHatAI/Qwen3-8B-speculator.eagle3",
     ],
     ids=["llama3_eagle3_speculator", "qwen3_eagle3_speculator"],
 )
