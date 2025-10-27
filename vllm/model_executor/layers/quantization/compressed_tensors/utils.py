@@ -19,6 +19,47 @@ def is_activation_quantization_format(format: str) -> bool:
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 
 
+def _is_equal_or_regex_match(
+    value: str, target: str, check_contains: bool = False
+) -> bool:
+    """
+    Checks whether a value is exactly equal or a regex match for target
+    if target starts with 're:'. If check_contains is set to True,
+    additionally checks if the target string is contained within the value.
+    """
+
+    if target.startswith("re:"):
+        pattern = target[3:]
+        if re.match(pattern, value):
+            return True
+    elif check_contains:
+        if target.lower() in value.lower():
+            return True
+    elif target == value:
+        return True
+    return False
+
+
+def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
+    """
+    Checks whether a layer_name is exactly equal or a regex match for
+    if target starts with 're:' to any target in list.
+    """
+    return any(_is_equal_or_regex_match(layer_name, target) for target in targets)
+
+
+def _matches_layer_or_children(layer_name: str, targets: Iterable[str]) -> bool:
+    """Check if a layer or any non-regex child under it appears in targets."""
+
+    if check_equal_or_regex_match(layer_name, targets):
+        return True
+
+    prefix = f"{layer_name}."
+    return any(
+        target.startswith(prefix) and not target.startswith("re:") for target in targets
+    )
+
+
 def should_ignore_layer(
     layer_name: str | None,
     ignore: Iterable[str] = tuple(),
@@ -26,6 +67,8 @@ def should_ignore_layer(
 ) -> bool:
     if layer_name is None:
         return False
+
+    ignore = tuple(ignore)
 
     # layer_name = model.layers.0.self_attn.qkv_proj
     # proj_name = qkv_proj
@@ -47,7 +90,7 @@ def should_ignore_layer(
         # Layer should be ignored if shards are ignored.
         should_ignore_layer = None
         for shard_name in shard_names:
-            should_ignore_shard = check_equal_or_regex_match(
+            should_ignore_shard = _matches_layer_or_children(
                 layer_name=shard_name, targets=ignore
             )
 
@@ -66,28 +109,12 @@ def should_ignore_layer(
     # Unfused layers like down_proj and o_proj will match
     # the safetensors checkpoint already.
     else:
-        should_ignore_layer = check_equal_or_regex_match(
+        should_ignore_layer = _matches_layer_or_children(
             layer_name=layer_name, targets=ignore
         )
-        if not should_ignore_layer:
-            # Handle configs that list only child params so the containing
-            # module inherits their ignore state.
-            prefix = f"{layer_name}."
-            should_ignore_layer = any(
-                target.startswith(prefix) and not target.startswith("re:")
-                for target in ignore
-            )
 
     assert should_ignore_layer is not None
     return should_ignore_layer
-
-
-def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
-    """
-    Checks whether a layer_name is exactly equal or a regex match for
-    if target starts with 're:' to any target in list.
-    """
-    return any(_is_equal_or_regex_match(layer_name, target) for target in targets)
 
 
 def find_matched_target(
@@ -156,27 +183,6 @@ def _find_first_match(
         if _is_equal_or_regex_match(value, target, check_contains=check_contains):
             return target
     return None
-
-
-def _is_equal_or_regex_match(
-    value: str, target: str, check_contains: bool = False
-) -> bool:
-    """
-    Checks whether a value is exactly equal or a regex match for target
-    if target starts with 're:'. If check_contains is set to True,
-    additionally checks if the target string is contained within the value.
-    """
-
-    if target.startswith("re:"):
-        pattern = target[3:]
-        if re.match(pattern, value):
-            return True
-    elif check_contains:
-        if target.lower() in value.lower():
-            return True
-    elif target == value:
-        return True
-    return False
 
 
 def _match_fused_layer(
