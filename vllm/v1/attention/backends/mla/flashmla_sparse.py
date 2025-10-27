@@ -25,7 +25,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,

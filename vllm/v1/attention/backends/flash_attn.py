@@ -39,7 +39,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
