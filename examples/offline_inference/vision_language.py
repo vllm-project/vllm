@@ -22,7 +22,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class ModelRequestData(NamedTuple):
@@ -319,8 +319,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=2048,
         max_num_seqs=2,
-        # TODO: Support this in transformers backend
-        # mm_processor_kwargs={"do_pan_and_scan": True},
+        mm_processor_kwargs={"do_pan_and_scan": True},
         limit_mm_per_prompt={modality: 1},
     )
 
