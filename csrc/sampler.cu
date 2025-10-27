@@ -44,10 +44,15 @@ __global__ void apply_repetition_penalties_kernel(
   }
 }
 
-template <int step>
-static inline __device__ uint32_t extractBinIdx(float x) {
+static inline __device__ uint32_t floatAsSortableUint(float x) {
   uint32_t bits = __float_as_uint(x);
   bits = (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
+  return bits;
+}
+
+template <int step>
+static inline __device__ uint32_t extractBinIdx(float x) {
+  uint32_t bits = floatAsSortableUint(x);
 
   if constexpr (step == 0) {
     return bits >> 21;
@@ -63,8 +68,7 @@ static inline __device__ bool isPartialMatch(float x, uint32_t pattern) {
   if constexpr (shift == 0) {
     return true;
   }
-  uint32_t bits = __float_as_uint(x);
-  bits = (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
+  uint32_t bits = floatAsSortableUint(x);
   return (bits ^ pattern) >> shift == 0;
 }
 
@@ -252,7 +256,7 @@ static __device__ void topKPerRowJob(const float* logits, int rowStart,
   if (rowLen <= kTopK) {
     for (int rowIt = threadIdx.x; rowIt < rowLen;
          rowIt += kNumThreadsPerBlock) {
-      outIndices[rowIt] = rowIt;
+      outIndices[rowIt] = rowIt - rowStart;
     }
     for (int rowIt = rowLen + threadIdx.x; rowIt < kTopK;
          rowIt += kNumThreadsPerBlock) {
@@ -371,7 +375,7 @@ static __device__ void topKPerRowJob(const float* logits, int rowStart,
     for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
       int srcIdx = ii * kNumThreadsPerBlock + threadIdx.x;
       const auto index = smemIndices[srcIdx];
-      const auto logit = logits[rowStart + index * stride1];
+      const auto logit = logits[index * stride1];
       finalLogits[ii] = logit;
       finalIndices[ii] = index;
     }
@@ -387,7 +391,7 @@ static __device__ void topKPerRowJob(const float* logits, int rowStart,
 #pragma unroll
     for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
       int srcIdx = ii * kNumThreadsPerBlock + threadIdx.x;
-      outIndices[srcIdx] = finalIndices[ii];
+      outIndices[srcIdx] = finalIndices[ii] - rowStart;
     }
   }
 
@@ -395,7 +399,7 @@ static __device__ void topKPerRowJob(const float* logits, int rowStart,
     // Store to global memory.
 #pragma unroll
     for (int i = threadIdx.x; i < kTopK; i += kNumThreadsPerBlock) {
-      outIndices[i] = smemIndices[i];
+      outIndices[i] = smemIndices[i] - rowStart;
     }
   }
 }
