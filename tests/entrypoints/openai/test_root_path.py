@@ -51,26 +51,31 @@ class TestCase(NamedTuple):
             model_name=MODEL_NAME,
             base_url=["v1"],  # http://localhost:8000/v1
             api_key=ERROR_API_KEY,
-            expected_error=openai.AuthenticationError),
+            expected_error=openai.AuthenticationError,
+        ),
         TestCase(
             model_name=MODEL_NAME,
             base_url=[ROOT_PATH, "v1"],  # http://localhost:8000/llm/v1
             api_key=ERROR_API_KEY,
-            expected_error=openai.AuthenticationError),
+            expected_error=openai.AuthenticationError,
+        ),
         TestCase(
             model_name=MODEL_NAME,
             base_url=["v1"],  # http://localhost:8000/v1
             api_key=API_KEY,
-            expected_error=None),
+            expected_error=None,
+        ),
         TestCase(
             model_name=MODEL_NAME,
             base_url=[ROOT_PATH, "v1"],  # http://localhost:8000/llm/v1
             api_key=API_KEY,
-            expected_error=None),
+            expected_error=None,
+        ),
     ],
 )
-async def test_chat_session_root_path_with_api_key(server: RemoteOpenAIServer,
-                                                   test_case: TestCase):
+async def test_chat_session_root_path_with_api_key(
+    server: RemoteOpenAIServer, test_case: TestCase
+):
     saying: str = "Here is a common saying about apple. An apple a day, keeps"
     ctx = contextlib.nullcontext()
     if test_case.expected_error is not None:
@@ -79,20 +84,16 @@ async def test_chat_session_root_path_with_api_key(server: RemoteOpenAIServer,
         client = openai.AsyncOpenAI(
             api_key=test_case.api_key,
             base_url=server.url_for(*test_case.base_url),
-            max_retries=0)
+            max_retries=0,
+        )
         chat_completion = await client.chat.completions.create(
             model=test_case.model_name,
-            messages=[{
-                "role": "user",
-                "content": "tell me a common saying"
-            }, {
-                "role": "assistant",
-                "content": saying
-            }],
-            extra_body={
-                "continue_final_message": True,
-                "add_generation_prompt": False
-            })
+            messages=[
+                {"role": "user", "content": "tell me a common saying"},
+                {"role": "assistant", "content": saying},
+            ],
+            extra_body={"continue_final_message": True, "add_generation_prompt": False},
+        )
 
         assert chat_completion.id is not None
         assert len(chat_completion.choices) == 1

@@ -4,10 +4,10 @@
 import dataclasses
 import importlib
 import pickle
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from inspect import isclass
 from types import FunctionType
-from typing import Any, Callable, Optional, Union
+from typing import Any, TypeAlias
 
 import cloudpickle
 import msgspec
@@ -18,16 +18,20 @@ from msgspec import msgpack
 
 from vllm import envs
 from vllm.logger import init_logger
-# yapf: disable
-from vllm.multimodal.inputs import (BaseMultiModalField,
-                                    MultiModalBatchedField,
-                                    MultiModalFieldConfig, MultiModalFieldElem,
-                                    MultiModalFlatField, MultiModalKwargs,
-                                    MultiModalKwargsItem,
-                                    MultiModalKwargsItems,
-                                    MultiModalSharedField, NestedTensors)
-# yapf: enable
+from vllm.multimodal.inputs import (
+    BaseMultiModalField,
+    MultiModalBatchedField,
+    MultiModalFieldConfig,
+    MultiModalFieldElem,
+    MultiModalFlatField,
+    MultiModalKwargs,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    MultiModalSharedField,
+    NestedTensors,
+)
 from vllm.v1.engine import UtilityResult
+from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
 
@@ -44,15 +48,17 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
     MultiModalBatchedField: "batched",
 }
 
-bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
+bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
 
 
 def _log_insecure_serialization_warning():
-    logger.warning_once("Allowing insecure serialization using pickle due to "
-                        "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+    logger.warning_once(
+        "Allowing insecure serialization using pickle due to "
+        "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
+    )
 
 
-def _typestr(val: Any) -> Optional[tuple[str, str]]:
+def _typestr(val: Any) -> tuple[str, str] | None:
     if val is None:
         return None
     t = type(val)
@@ -72,8 +78,8 @@ def _encode_type_info_recursive(obj: Any) -> Any:
 
 
 def _decode_type_info_recursive(
-        type_info: Any, data: Any, convert_fn: Callable[[Sequence[str], Any],
-                                                        Any]) -> Any:
+    type_info: Any, data: Any, convert_fn: Callable[[Sequence[str], Any], Any]
+) -> Any:
     """Recursively decode type information for nested structures of
     lists/dicts."""
     if type_info is None:
@@ -85,8 +91,9 @@ def _decode_type_info_recursive(
             for k in type_info
         }
     if isinstance(type_info, list) and (
-            # Exclude serialized tensors/numpy arrays.
-            len(type_info) != 2 or not isinstance(type_info[0], str)):
+        # Exclude serialized tensors/numpy arrays.
+        len(type_info) != 2 or not isinstance(type_info[0], str)
+    ):
         assert isinstance(data, list)
         return [
             _decode_type_info_recursive(ti, d, convert_fn)
@@ -101,25 +108,25 @@ class MsgpackEncoder:
     Note that unlike vanilla `msgspec` Encoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
 
-    By default, arrays below 256B are serialized inline Larger will get sent 
+    By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
     """
 
-    def __init__(self, size_threshold: Optional[int] = None):
+    def __init__(self, size_threshold: int | None = None):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
         # This is used as a local stash of buffers that we can then access from
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
-        self.aux_buffers: Optional[list[bytestr]] = None
+        self.aux_buffers: list[bytestr] | None = None
         self.size_threshold = size_threshold
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
-            self.aux_buffers = bufs = [b'']
+            self.aux_buffers = bufs = [b""]
             bufs[0] = self.encoder.encode(obj)
             # This `bufs` list allows us to collect direct pointers to backing
             # buffers of tensors and np arrays, and return them along with the
@@ -143,14 +150,15 @@ class MsgpackEncoder:
             return self._encode_tensor(obj)
 
         # Fall back to pickle for object or void kind ndarrays.
-        if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
+        if isinstance(obj, np.ndarray) and obj.dtype.kind not in ("O", "V"):
             return self._encode_ndarray(obj)
 
         if isinstance(obj, slice):
             # We are assuming only int-based values will be used here.
             return tuple(
                 int(v) if v is not None else None
-                for v in (obj.start, obj.stop, obj.step))
+                for v in (obj.start, obj.stop, obj.step)
+            )
 
         if isinstance(obj, MultiModalKwargsItem):
             return self._encode_mm_item(obj)
@@ -171,21 +179,24 @@ class MsgpackEncoder:
             return _encode_type_info_recursive(result), result
 
         if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-            raise TypeError(f"Object of type {type(obj)} is not serializable"
-                            "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
-                            "fallback to pickle-based serialization.")
+            raise TypeError(
+                f"Object of type {type(obj)} is not serializable"
+                "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
+                "fallback to pickle-based serialization."
+            )
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
             # problems serializing methods.
             return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
 
-        return msgpack.Ext(CUSTOM_TYPE_PICKLE,
-                           pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
+        return msgpack.Ext(
+            CUSTOM_TYPE_PICKLE, pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+        )
 
     def _encode_ndarray(
         self, obj: np.ndarray
-    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+    ) -> tuple[str, tuple[int, ...], int | memoryview]:
         assert self.aux_buffers is not None
         # If the array is non-contiguous, we need to copy it first
         arr_data = obj.data if obj.flags.c_contiguous else obj.tobytes()
@@ -205,17 +216,17 @@ class MsgpackEncoder:
 
     def _encode_tensor(
         self, obj: torch.Tensor
-    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+    ) -> tuple[str, tuple[int, ...], int | memoryview]:
         assert self.aux_buffers is not None
         # view the tensor as a contiguous 1D array of bytes
-        arr = obj.flatten().contiguous().cpu().view(torch.uint8).numpy()
+        arr_data = tensor_data(obj)
         if obj.nbytes < self.size_threshold:
             # Smaller tensors are encoded inline, just like ndarrays.
-            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr_data)
         else:
             # Otherwise encode index of backing buffer to avoid copy.
             data = len(self.aux_buffers)
-            self.aux_buffers.append(arr.data)
+            self.aux_buffers.append(arr_data)
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
@@ -225,27 +236,22 @@ class MsgpackEncoder:
             for modality, itemlist in items.items()
         }
 
-    def _encode_mm_item(self,
-                        item: MultiModalKwargsItem) -> list[dict[str, Any]]:
+    def _encode_mm_item(self, item: MultiModalKwargsItem) -> list[dict[str, Any]]:
         return [self._encode_mm_field_elem(elem) for elem in item.values()]
 
-    def _encode_mm_field_elem(self,
-                              elem: MultiModalFieldElem) -> dict[str, Any]:
+    def _encode_mm_field_elem(self, elem: MultiModalFieldElem) -> dict[str, Any]:
         return {
-            "modality":
-            elem.modality,
-            "key":
-            elem.key,
-            "data": (None if elem.data is None else
-                     self._encode_nested_tensors(elem.data)),
-            "field":
-            self._encode_mm_field(elem.field),
+            "modality": elem.modality,
+            "key": elem.key,
+            "data": (
+                None if elem.data is None else self._encode_nested_tensors(elem.data)
+            ),
+            "field": self._encode_mm_field(elem.field),
         }
 
     def _encode_mm_kwargs(self, kw: MultiModalKwargs) -> dict[str, Any]:
         return {
-            modality: self._encode_nested_tensors(data)
-            for modality, data in kw.items()
+            modality: self._encode_nested_tensors(data) for modality, data in kw.items()
         }
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -264,8 +270,7 @@ class MsgpackEncoder:
             raise TypeError(f"Unsupported field type: {field.__class__}")
         # We just need to copy all of the field values in order
         # which will be then used to reconstruct the field.
-        field_values = (getattr(field, f.name)
-                        for f in dataclasses.fields(field))
+        field_values = (getattr(field, f.name) for f in dataclasses.fields(field))
         return name, *field_values
 
 
@@ -276,19 +281,17 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
     """
 
-    def __init__(self, t: Optional[Any] = None):
-        args = () if t is None else (t, )
-        self.decoder = msgpack.Decoder(*args,
-                                       ext_hook=self.ext_hook,
-                                       dec_hook=self.dec_hook)
+    def __init__(self, t: Any | None = None):
+        args = () if t is None else (t,)
+        self.decoder = msgpack.Decoder(
+            *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
+        )
         self.aux_buffers: Sequence[bytestr] = ()
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
-    def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
-        if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
-            # TODO - This check can become `isinstance(bufs, bytestr)`
-            # as of Python 3.10.
+    def decode(self, bufs: bytestr | Sequence[bytestr]) -> Any:
+        if isinstance(bufs, bytestr):  # type: ignore
             return self.decoder.decode(bufs)
 
         self.aux_buffers = bufs
@@ -320,11 +323,14 @@ class MsgpackDecoder:
         result_type, result = obj
         if result_type is not None:
             if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-                raise TypeError("VLLM_ALLOW_INSECURE_SERIALIZATION must "
-                                "be set to use custom utility result types")
+                raise TypeError(
+                    "VLLM_ALLOW_INSECURE_SERIALIZATION must "
+                    "be set to use custom utility result types"
+                )
             # Use recursive decoding to handle nested structures
-            result = _decode_type_info_recursive(result_type, result,
-                                                 self._convert_result)
+            result = _decode_type_info_recursive(
+                result_type, result, self._convert_result
+            )
         return UtilityResult(result)
 
     def _convert_result(self, result_type: Sequence[str], result: Any) -> Any:
@@ -347,8 +353,7 @@ class MsgpackDecoder:
         # Copy from inline representation, to decouple the memory storage
         # of the message from the original buffer. And also make Torch
         # not complain about a readonly memoryview.
-        buffer = self.aux_buffers[data] if isinstance(data, int) \
-            else bytearray(data)
+        buffer = self.aux_buffers[data] if isinstance(data, int) else bytearray(data)
         torch_dtype = getattr(torch, dtype)
         assert isinstance(torch_dtype, torch.dtype)
         if not buffer:  # torch.frombuffer doesn't like empty buffers
@@ -360,17 +365,19 @@ class MsgpackDecoder:
         return arr.view(torch_dtype).view(shape)
 
     def _decode_mm_items(self, obj: dict[str, Any]) -> MultiModalKwargsItems:
-        return MultiModalKwargsItems({
-            modality: [self._decode_mm_item(item) for item in itemlist]
-            for modality, itemlist in obj.items()
-        })
+        return MultiModalKwargsItems(
+            {
+                modality: [self._decode_mm_item(item) for item in itemlist]
+                for modality, itemlist in obj.items()
+            }
+        )
 
     def _decode_mm_item(self, obj: list[Any]) -> MultiModalKwargsItem:
         return MultiModalKwargsItem.from_elems(
-            [self._decode_mm_field_elem(v) for v in obj])
+            [self._decode_mm_field_elem(v) for v in obj]
+        )
 
-    def _decode_mm_field_elem(self, obj: dict[str,
-                                              Any]) -> MultiModalFieldElem:
+    def _decode_mm_field_elem(self, obj: dict[str, Any]) -> MultiModalFieldElem:
         if obj["data"] is not None:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 
@@ -387,10 +394,12 @@ class MsgpackDecoder:
         return MultiModalFieldElem(**obj)
 
     def _decode_mm_kwargs(self, obj: dict[str, Any]) -> MultiModalKwargs:
-        return MultiModalKwargs({
-            modality: self._decode_nested_tensors(data)
-            for modality, data in obj.items()
-        })
+        return MultiModalKwargs(
+            {
+                modality: self._decode_nested_tensors(data)
+                for modality, data in obj.items()
+            }
+        )
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
         if isinstance(obj, (int, float)):
@@ -419,5 +428,4 @@ class MsgpackDecoder:
             if code == CUSTOM_TYPE_CLOUDPICKLE:
                 return cloudpickle.loads(data)
 
-        raise NotImplementedError(
-            f"Extension type code {code} is not supported")
+        raise NotImplementedError(f"Extension type code {code} is not supported")

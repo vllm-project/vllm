@@ -6,11 +6,12 @@ import copy
 import json
 import pickle
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -24,7 +25,7 @@ if HAS_TRITON:
     from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_expand, lora_shrink
     from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_TP_SIZES = [1]
@@ -79,9 +80,9 @@ def make_rand_lora_weight_tensor(
 
 
 def make_rand_tensors(
-    a_shape: tuple[int],
-    b_shape: tuple[int],
-    c_shape: tuple[int],
+    a_shape: tuple[int, ...],
+    b_shape: tuple[int, ...],
+    c_shape: tuple[int, ...],
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
@@ -158,7 +159,7 @@ def ref_group_gemm(
     seq_lens_cpu: torch.Tensor,
     prompt_lora_mapping_cpu: torch.Tensor,
     scaling: float,
-    add_inputs: Optional[bool],
+    add_inputs: bool | None,
 ):
     """
     Torch group gemm reference implementation to test correctness of
@@ -243,7 +244,7 @@ class OpType(Enum):
         lora_rank: int,
         num_loras: int,
         num_slices: int,
-    ) -> tuple[tuple[int], tuple[int], tuple[int]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Given num_slices, return the shapes of the A, B, and C matrices
         in A x B = C, for the op_type
@@ -316,8 +317,8 @@ class BenchmarkContext:
     lora_rank: int
     sort_by_lora_id: bool
     dtype: torch.dtype
-    seq_length: Optional[int] = None
-    num_slices: Optional[int] = None  # num_slices for slice based ops
+    seq_length: int | None = None
+    num_slices: int | None = None  # num_slices for slice based ops
 
     def with_seq_length(self, seq_length: int) -> "BenchmarkContext":
         ctx = copy.copy(self)
@@ -561,7 +562,7 @@ class BenchmarkTensors:
         }
 
     def bench_fn_kwargs(
-        self, op_type: OpType, add_inputs: Optional[bool] = None
+        self, op_type: OpType, add_inputs: bool | None = None
     ) -> dict[str, Any]:
         if op_type.is_shrink_fn():
             assert add_inputs is None
@@ -575,7 +576,7 @@ class BenchmarkTensors:
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(
-        self, op_type: OpType, expand_fn_add_inputs: Optional[bool]
+        self, op_type: OpType, expand_fn_add_inputs: bool | None
     ) -> bool:
         """
         Test correctness of op_type implementation against a grouped gemm
@@ -611,8 +612,8 @@ def bench_optype(
     ctx: BenchmarkContext,
     arg_pool_size: int,
     op_type: OpType,
-    cuda_graph_nops: Optional[int] = None,
-    expand_fn_add_inputs: Optional[bool] = None,
+    cuda_graph_nops: int | None = None,
+    expand_fn_add_inputs: bool | None = None,
     test_correctness: bool = False,
 ) -> TMeasurement:
     assert arg_pool_size >= 1
@@ -679,7 +680,7 @@ def bench_torch_mm(
     ctx: BenchmarkContext,
     arg_pool_size: int,
     op_type: OpType,
-    cuda_graph_nops: Optional[int] = None,
+    cuda_graph_nops: int | None = None,
 ) -> TMeasurement:
     """
     Benchmark basic torch.mm as a roofline.
@@ -744,7 +745,7 @@ def use_cuda_graph_recommendation() -> str:
             """
 
 
-def print_timers(timers: list[TMeasurement], args: Optional[argparse.Namespace] = None):
+def print_timers(timers: list[TMeasurement], args: argparse.Namespace | None = None):
     compare = TBenchmark.Compare(timers)
     compare.print()
 

@@ -20,16 +20,14 @@ def test_cpu_offloading(cpu_block_size: int) -> None:
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
-        kv_connector_extra_config={
-            "num_cpu_blocks": 100,
-            "block_size": cpu_block_size
-        },
+        kv_connector_extra_config={"num_cpu_blocks": 100, "block_size": cpu_block_size},
     )
 
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
+        disable_hybrid_kv_cache_manager=True,
     )
 
     prompts = ["Hi " * 100]

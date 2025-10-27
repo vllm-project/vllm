@@ -3,18 +3,19 @@
 import copy
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.factory import (
-    KVConnectorFactory)
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats)
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -32,7 +33,7 @@ logger = init_logger(__name__)
 @dataclass
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
-    extra_async_saves: Optional[dict[str, int]] = None
+    extra_async_saves: dict[str, int] | None = None
 
 
 @dataclass
@@ -58,8 +59,7 @@ class MultiKVConnectorStats(KVConnectorStats):
     def reduce(self) -> dict[str, Any]:
         # TODO (NickLucche) Adjust for logging on separate lines
         return {
-            connector_id: stats.reduce()
-            for connector_id, stats in self.data.items()
+            connector_id: stats.reduce() for connector_id, stats in self.data.items()
         }
 
     def is_empty(self) -> bool:
@@ -86,17 +86,17 @@ class MultiConnector(KVConnectorBase_V1):
         super().__init__(vllm_config=vllm_config, role=role)
         self._connectors: list[KVConnectorBase_V1] = []
         self._ktc_kv_transfer_config = []
-        ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "connectors")
+        ktcs = self._kv_transfer_config.kv_connector_extra_config.get("connectors")
         assert ktcs is not None
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
-            engine_id = ktc.get("engine_id",
-                                vllm_config.kv_transfer_config.engine_id)
+            engine_id = ktc.get("engine_id", self._kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
-                **ktc, engine_id=engine_id)
+                **ktc, engine_id=engine_id
+            )
             self._connectors.append(
-                KVConnectorFactory.create_connector(temp_config, role))
+                KVConnectorFactory.create_connector(temp_config, role)
+            )
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         # A mapping from request id to the index of the connector chosen to
@@ -116,12 +116,10 @@ class MultiConnector(KVConnectorBase_V1):
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
     # MultiKVConnectorMetadata.
-    def bind_connector_metadata(
-            self, connector_metadata: KVConnectorMetadata) -> None:
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         if connector_metadata.extra_async_saves:
-            self._extra_async_saves.update(
-                connector_metadata.extra_async_saves)
+            self._extra_async_saves.update(connector_metadata.extra_async_saves)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
 
@@ -130,13 +128,14 @@ class MultiConnector(KVConnectorBase_V1):
             c.clear_connector_metadata()
 
     def shutdown(self):
-        exception: Optional[Exception] = None
+        exception: Exception | None = None
         for c in self._connectors:
             try:
                 c.shutdown()
             except Exception as e:
-                logger.exception("Exception during connector %s shutdown.",
-                                 c.__class__.__name__)
+                logger.exception(
+                    "Exception during connector %s shutdown.", c.__class__.__name__
+                )
                 exception = e
         if exception:
             raise exception
@@ -144,8 +143,7 @@ class MultiConnector(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         for c in self._connectors:
             c.start_load_kv(forward_context, **kwargs)
 
@@ -153,8 +151,13 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_layer_load(layer_name)
 
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs,
+    ) -> None:
         for c in self._connectors:
             c.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
@@ -164,7 +167,7 @@ class MultiConnector(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
         for c in self._connectors:
@@ -189,6 +192,12 @@ class MultiConnector(KVConnectorBase_V1):
 
         return finished_sending or None, finished_recving or None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        agg_block_ids: set[int] = set()
+        for c in self._connectors:
+            agg_block_ids |= c.get_block_ids_with_load_errors()
+        return agg_block_ids
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -196,11 +205,12 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
-                request, num_computed_tokens)
+                request, num_computed_tokens
+            )
             # If there is a connector still looking up the matches,
             # we return None to indicate that we are not done yet.
             if toks is None:
@@ -212,27 +222,27 @@ class MultiConnector(KVConnectorBase_V1):
                 to_return = (toks, load_async)
         return to_return
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
-        chosen_connector = self._requests_to_connector.get(
-            request.request_id, -1)
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
+        chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
-                c.update_state_after_alloc(request, blocks,
-                                           num_external_tokens)
+                c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
                 # Call with empty blocks for other connectors.
                 c.update_state_after_alloc(request, empty_blocks, 0)
 
     def build_connector_meta(
-            self,
-            scheduler_output: SchedulerOutput) -> MultiKVConnectorMetadata:
-        metadata = MultiKVConnectorMetadata(metadata=tuple(
-            c.build_connector_meta(scheduler_output)
-            for c in self._connectors))
+        self, scheduler_output: SchedulerOutput
+    ) -> MultiKVConnectorMetadata:
+        metadata = MultiKVConnectorMetadata(
+            metadata=tuple(
+                c.build_connector_meta(scheduler_output) for c in self._connectors
+            )
+        )
         if self._extra_async_saves:
             metadata.extra_async_saves = self._extra_async_saves
             self._extra_async_saves = {}
@@ -246,7 +256,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         blocks: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         async_saves = 0
         kv_txfer_params = None
         for c in self._connectors:
@@ -258,7 +268,8 @@ class MultiConnector(KVConnectorBase_V1):
                     # TODO we can probably change this to merge the dicts here,
                     # checking for key clashes.
                     raise RuntimeError(
-                        "Only one connector can produce KV transfer params")
+                        "Only one connector can produce KV transfer params"
+                    )
                 kv_txfer_params = txfer_params
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
@@ -273,8 +284,7 @@ class MultiConnector(KVConnectorBase_V1):
             yield from c.take_events()
 
     @classmethod
-    def get_required_kvcache_layout(
-            cls, vllm_config: "VllmConfig") -> Optional[str]:
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """
         Get the required KV cache layout for this connector.
         Args:
@@ -284,39 +294,75 @@ class MultiConnector(KVConnectorBase_V1):
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
         """
+        assert vllm_config.kv_transfer_config is not None
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "connectors")
+            "connectors"
+        )
         assert ktcs is not None
         layouts: set[str] = set()
         temp_vllm_config = copy.copy(vllm_config)
         for ktc in ktcs:
             kv_transfer_config = KVTransferConfig(**ktc)
             temp_vllm_config.kv_transfer_config = kv_transfer_config
-            connector_cls = KVConnectorFactory.get_connector_class(
-                kv_transfer_config)
-            required_kvcache_layout = (
-                connector_cls.get_required_kvcache_layout(temp_vllm_config))
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            required_kvcache_layout = connector_cls.get_required_kvcache_layout(
+                temp_vllm_config
+            )
             if required_kvcache_layout is not None:
                 layouts.add(required_kvcache_layout)
 
         if len(layouts) > 1:
-            raise ValueError(f"KV cache layout mismatch: "
-                             f"found {len(layouts)} different layouts "
-                             f"({', '.join(layouts) })."
-                             f"All connectors must use the same layout.")
+            raise ValueError(
+                f"KV cache layout mismatch: "
+                f"found {len(layouts)} different layouts "
+                f"({', '.join(layouts)})."
+                f"All connectors must use the same layout."
+            )
         return next(iter(layouts), None)
 
     @classmethod
     def build_kv_connector_stats(
-            cls,
-            data: Optional[dict[str,
-                                Any]] = None) -> Optional[KVConnectorStats]:
-        return MultiKVConnectorStats(data=data) if data is not None \
-            else MultiKVConnectorStats()
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        if data is None:
+            return MultiKVConnectorStats()
 
-    def get_kv_connector_stats(self) -> Optional[MultiKVConnectorStats]:
+        # data is a dict mapping connector name to their stats data.
+        # The stats data can be either:
+        # 1. Already-instantiated KVConnectorStats objects (same process)
+        # 2. Serialized dicts (cross-process after serialization)
+        # We need to reconstruct proper KVConnectorStats objects from dicts
+        reconstructed_data = {}
+        for connector_name, stats_value in data.items():
+            # If already a KVConnectorStats object, use it directly
+            if isinstance(stats_value, KVConnectorStats):
+                reconstructed_data[connector_name] = stats_value
+                continue
+
+            # Otherwise, reconstruct from serialized dict
+            # Get the connector class to reconstruct its stats
+            connector_cls = KVConnectorFactory.get_connector_class_by_name(
+                connector_name
+            )
+
+            # stats_value is the serialized dataclass which contains {'data': {...}}
+            # We need to extract the inner 'data' field to avoid double-nesting
+            assert isinstance(stats_value, dict) and "data" in stats_value, (
+                f"Expected a dict with a 'data' field, got {stats_value}"
+            )
+            inner_data = stats_value["data"]
+
+            # Use the connector's build_kv_connector_stats to reconstruct
+            if reconstructed_stats := connector_cls.build_kv_connector_stats(
+                data=inner_data
+            ):
+                reconstructed_data[connector_name] = reconstructed_stats
+
+        return MultiKVConnectorStats(data=reconstructed_data)
+
+    def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
         # Group connector stats by connector type.
-        stats_by_connector: Optional[MultiKVConnectorStats] = None
+        stats_by_connector: MultiKVConnectorStats | None = None
         for c in self._connectors:
             stats = c.get_kv_connector_stats()
             if stats is None:
