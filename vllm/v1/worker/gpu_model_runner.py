@@ -2875,14 +2875,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.model, self.vllm_config, self.device
                 )
             if hasattr(self, "drafter"):
-                logger.info("Loading drafter model...")
+                logger.info_once("Loading drafter model...")
                 self.drafter.load_model(self.model)
                 if (
                     hasattr(self.drafter, "model")
                     and is_mixture_of_experts(self.drafter.model)
                     and self.parallel_config.enable_eplb
                 ):
-                    logger.info(
+                    logger.info_once(
                         "EPLB is enabled for drafter model %s.",
                         self.vllm_config.speculative_config.draft_model_config.model,
                     )
@@ -2942,7 +2942,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
-            logger.info("EPLB is enabled for model %s.", self.model_config.model)
+            logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
             global_expert_load = (
                 global_expert_loads[eplb_models] if global_expert_loads else None
             )
