@@ -346,6 +346,9 @@ def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
     return _has_module("deep_ep")
 
+def has_mori() -> bool:
+    """Whether the optional `mori` package is available."""
+    return _has_module("mori")
 
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
