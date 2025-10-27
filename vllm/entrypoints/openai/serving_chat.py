@@ -27,8 +27,8 @@ from vllm.entrypoints.harmony_utils import (
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
     get_system_message,
-    parse_chat_input,
     parse_chat_output,
+    parse_input_to_harmony_message,
     render_for_completion,
 )
 from vllm.entrypoints.logger import RequestLogger
@@ -1351,11 +1351,13 @@ class OpenAIServingChat(OpenAIServing):
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason="tool_calls"
-                    if (tool_call_info is not None and tool_call_info.tools_called)
-                    else output.finish_reason
-                    if output.finish_reason
-                    else "stop",
+                    finish_reason=(
+                        "tool_calls"
+                        if (tool_call_info is not None and tool_call_info.tools_called)
+                        else output.finish_reason
+                        if output.finish_reason
+                        else "stop"
+                    ),
                     stop_reason=output.stop_reason,
                 )
                 choices.append(choice_data)
@@ -1522,11 +1524,13 @@ class OpenAIServingChat(OpenAIServing):
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason="tool_calls"
-                if auto_tools_called
-                else output.finish_reason
-                if output.finish_reason
-                else "stop",
+                finish_reason=(
+                    "tool_calls"
+                    if auto_tools_called
+                    else output.finish_reason
+                    if output.finish_reason
+                    else "stop"
+                ),
                 stop_reason=output.stop_reason,
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
@@ -1685,9 +1689,11 @@ class OpenAIServingChat(OpenAIServing):
                             should_return_as_token_id,
                         ),
                         logprob=max(step_token.logprob, -9999.0),
-                        bytes=None
-                        if step_decoded is None
-                        else list(step_decoded.encode("utf-8", errors="replace")),
+                        bytes=(
+                            None
+                            if step_decoded is None
+                            else list(step_decoded.encode("utf-8", errors="replace"))
+                        ),
                         top_logprobs=self._get_top_logprobs(
                             step_top_logprobs,
                             num_output_top_logprobs,
@@ -1764,7 +1770,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Add user message.
         for chat_msg in request.messages:
-            messages.extend(parse_chat_input(chat_msg))
+            messages.extend(parse_input_to_harmony_message(chat_msg))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
