@@ -1246,8 +1246,12 @@ class FaultHandler:
         )
 
         if instruction == "pause":
-            for unhealthy_engine in unhealthy_engine_list:
-                del self.client_cmd_registry[int(unhealthy_engine.engine_id)]
+            unhealthy_ids = {int(e.engine_id) for e in unhealthy_engine_list}
+            self.client_cmd_registry = [
+                identity
+                for i, identity in enumerate(self.client_cmd_registry)
+                if i not in unhealthy_ids
+            ]
 
         kwargs = {"timeout": timeout}
         for identity in self.client_cmd_registry:
