@@ -14,6 +14,7 @@ ruff
 -f https://download.pytorch.org/whl/cpu
 cachetools
 cloudpickle
+py-cpuinfo
 msgspec
 pydantic
 torch
