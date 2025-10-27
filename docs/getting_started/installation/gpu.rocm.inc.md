@@ -118,7 +118,7 @@ Currently, there are no pre-built ROCm wheels.
         pip install "numpy<2"
         pip install -r requirements/rocm.txt
 
-        # Build vLLM for MI300/MI325/MI350/MI3550.
+        # Build vLLM for MI300/MI325/MI350/MI355.
         export PYTORCH_ROCM_ARCH="gfx942;gfx950"
         python3 setup.py develop
         ```
