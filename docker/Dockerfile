@@ -86,14 +86,15 @@ ARG GET_PIP_URL
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo python3-pip \
+    && apt-get install -y --no-install-recommends ccache software-properties-common git curl sudo python3-pip \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
     && rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
     && ln -s /opt/venv/bin/python3 /usr/bin/python3 \
     && ln -s /opt/venv/bin/python3-config /usr/bin/python3-config \
     && ln -s /opt/venv/bin/pip /usr/bin/pip \
-    && python3 --version && python3 -m pip --version
+    && python3 --version && python3 -m pip --version \
+    && rm -rf /var/lib/apt/lists/*
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -114,11 +115,11 @@ ENV UV_LINK_MODE=copy
 
 # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
 # as it was causing spam when compiling the CUTLASS kernels
-RUN apt-get install -y gcc-10 g++-10
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
-RUN <<EOF
-gcc --version
-EOF
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends gcc-10 g++-10 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+    && gcc --version \
+    && rm -rf /var/lib/apt/lists/*
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -256,7 +257,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
@@ -293,8 +294,8 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
+    && apt-get install -y --no-install-recommends ccache software-properties-common git curl wget sudo vim python3-pip \
+    && apt-get install -y --no-install-recommends ffmpeg libsm6 libxext6 libgl1 \
     && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
@@ -309,12 +310,13 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         done ; \
     fi \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
+    && apt-get install -y --no-install-recommends python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
+    && python3 --version && python3 -m pip --version \
+    && rm -rf /var/lib/apt/lists/*
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -353,15 +355,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             --pre pytorch_triton==3.3.0+gitab727c40 ; \
     fi
 
-# Install vllm wheel first, so that torch etc will be installed.
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/uv \
-    # TODO: remove apache-tvm-ffi once FlashInfer is fixed https://github.com/flashinfer-ai/flashinfer/issues/1962
-    uv pip install --system --pre apache-tvm-ffi==0.1.0b15 \
-    && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-
 # TODO (huydhn): Remove this once xformers is released for 2.9.0
+# Install xformers BEFORE vLLM wheel to cache this expensive build step
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
     . /etc/environment
     export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
@@ -375,14 +370,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && uv pip install --system flashinfer-jit-cache==0.4.1 \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
-
-COPY examples examples
-COPY benchmarks benchmarks
-COPY ./vllm/collect_env.py .
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-uv pip list
 
 # Even when we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
@@ -414,6 +401,23 @@ COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
 RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
     && bash install_python_libraries.sh
+
+# Install vllm wheel after expensive compilation steps to maximize cache hits
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/uv \
+    # TODO: remove apache-tvm-ffi once FlashInfer is fixed https://github.com/flashinfer-ai/flashinfer/issues/1962
+    uv pip install --system --pre apache-tvm-ffi==0.1.0b15 \
+    && uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+. /etc/environment && \
+uv pip list
+
+# Copy examples and benchmarks near the end as they change frequently
+COPY examples examples
+COPY benchmarks benchmarks
+COPY ./vllm/collect_env.py .
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
