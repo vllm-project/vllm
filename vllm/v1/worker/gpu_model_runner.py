@@ -958,10 +958,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         >>> pcp_world_size = 2
         >>> pcp_rank = 0
         >>> _update_tokens_for_pcp(tokens)
-        ([1, 4, 4], [0, 2, 3, 4, 5, 2, 3, 4, 5])
+        ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
         >>> pcp_rank = 1
         >>> _update_tokens_for_pcp(tokens)
-        ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
+        ([1, 4, 4], [0, 2, 3, 4, 5, 2, 3, 4, 5])
         >>> # the following results are same for each pcp rank
         >>> self.num_pcp_pads_cpu
         [1, 3, 0]
@@ -980,13 +980,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
             >= self.input_batch.num_prompt_tokens[:num_reqs]
         )
+        num_decode_tokens = sum(tokens[:num_decode_reqs])
 
         num_padded_scheduled_tokens = np.ceil(
             tokens / (2 * self.pcp_world_size)
         ).astype(np.int32) * (2 * self.pcp_world_size)
-        # we align scheduled tokens of decode reqs to pcp_world_size instead
-        # of 2*pcp_world_size
-        num_padded_scheduled_tokens[:num_decode_reqs] = self.pcp_world_size
+        # we duplicate scheduled tokens of decode reqs to pcp_world_size
+        num_padded_scheduled_tokens[:num_decode_reqs] = (
+            tokens[:num_decode_reqs] * self.pcp_world_size
+        )
         self.num_pcp_pads_cpu[:num_reqs] = num_padded_scheduled_tokens - tokens
         cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(
             num_padded_scheduled_tokens
@@ -997,6 +999,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         pcp_tokens = num_padded_scheduled_tokens // self.pcp_world_size
         pcp_chunk_sizes = (pcp_tokens // 2).clip(min=1)
+        pcp_chunk_sizes[:num_decode_reqs] = pcp_tokens[:num_decode_reqs]
         _, pcp_arange = self._get_cumsum_and_arange(pcp_tokens)
         _, pcp_chunk_arange = self._get_cumsum_and_arange(pcp_chunk_sizes)
         pcp_head_chunk_mask = pcp_arange < np.repeat(pcp_chunk_sizes, pcp_tokens)
@@ -1015,14 +1018,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             # Decode reqs do not have tail chunks.
             positions[~pcp_head_chunk_mask] = (
-                pcp_chunk_arange[num_decode_reqs:]
-                + np.repeat(tail_start_loc, pcp_chunk_sizes)[num_decode_reqs:]
+                pcp_chunk_arange[num_decode_tokens:]
+                + np.repeat(tail_start_loc, pcp_chunk_sizes)[num_decode_tokens:]
             )
             return positions
 
         positions = get_current_rank_positions(0, self.pcp_rank)
-        # Decode tokens are duplicate and their positions always be 0.
-        positions[:num_decode_reqs] = 0
+        # Decode tokens are duplicated only after AG. But their positions are
+        # same without prefill context parallel.
+        if num_decode_reqs > 0:
+            positions[:num_decode_tokens] = self._get_cumsum_and_arange(
+                tokens[:num_decode_reqs]
+            )[1]
 
         padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
         padded_pos_start_loc[0] = 0
