@@ -121,6 +121,7 @@ def fused_moe_kernel_gptq_awq(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    SPLIT_K: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -647,7 +648,6 @@ def invoke_fused_moe_kernel(
                 bit,
             )
             return
-
         fused_moe_kernel_gptq_awq[grid](
             A,
             B,
