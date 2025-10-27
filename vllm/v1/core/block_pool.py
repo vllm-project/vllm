@@ -342,9 +342,12 @@ class BlockPool:
                 # Evict hash later below
                 selected.append(blk)
 
-        # Return deferred cached blocks to the free list tail to keep queue sound
+        # Return deferred cached blocks to the free list tail to keep queue
+        # sound, and re-register them with the policy as cached-free blocks.
         for blk in deferred_cached:
             self.free_block_queue.append(blk)
+            if self._policy is not None and blk.block_hash is not None:
+                self._policy.on_block_release(blk)
 
         # Finalize selection: evict hashes for cached blocks; inc ref_cnt
         if self.enable_caching:
