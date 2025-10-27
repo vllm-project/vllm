@@ -121,7 +121,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
 
         # tracking allocations for assertions
         allocated_bitmap = np.zeros(
-            (buffer_size,), dtype=np.bool
+            (buffer_size,), dtype=np.bool_
         )  # addr -> is_allocated
         allocation_map = dict()  # monotonic_id -> (addr, size)
 
