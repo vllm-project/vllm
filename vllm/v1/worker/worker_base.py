@@ -17,7 +17,6 @@ from vllm.utils import warn_for_unimplemented_methods
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -308,6 +307,9 @@ class WorkerWrapperBase:
             self.worker.init_device()  # type: ignore
 
     def execute_method(self, method: str | bytes, *args, **kwargs):
+        # Avoid needing cloudpickle in doc build
+        from vllm.v1.serial_utils import run_method
+
         try:
             # method resolution order:
             # if a method is defined in this class, it will be called directly.
