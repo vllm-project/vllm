@@ -513,6 +513,7 @@ class EngineArgs:
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
+    external_parameters: Optional[dict] = SchedulerConfig.external_parameters
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     override_pooler_config: dict | PoolerConfig | None = (
@@ -1034,6 +1035,9 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
+        )
+        scheduler_group.add_argument("--external_parameters",
+                                     **scheduler_kwargs["external_parameters"]
         )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
@@ -1582,6 +1586,7 @@ class EngineArgs:
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
+            external_parameters=self.external_parameters,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
