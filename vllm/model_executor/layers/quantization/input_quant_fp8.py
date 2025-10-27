@@ -183,7 +183,14 @@ class QuantFP8(CustomOp):
         if use_aiter_per_tensor_quant:
             return torch.ops.vllm.rocm_aiter_per_tensor_quant(x, scale, _FP8_DTYPE)
         if use_aiter_per_token_quant:
-            return torch.ops.vllm.rocm_aiter_per_token_quant(x, scale, _FP8_DTYPE)
+            out_shape = x.shape
+            out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
+            if scale is None:
+                scale = torch.empty(
+                    (*out_shape[:-1], 1), dtype=torch.float32, device=x.device
+                )
+            torch.ops.vllm.rocm_aiter_per_token_quant(out, x, scale)
+            return out, scale
 
         # Fallback to CUDA implementation
         return self.forward_cuda(x, scale, scale_ub)
