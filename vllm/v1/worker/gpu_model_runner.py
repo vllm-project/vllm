@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -4146,44 +4146,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
-    def _find_compatible_block_sizes(
-        self,
-        kv_manager_block_size: int,
-        backend_cls: type[AttentionBackend],
-        return_all: bool = False,
-    ) -> list[int]:
-        """
-        Find compatible block sizes for a backend.
-
-        Args:
-            kv_manager_block_size: Physical block size of KV cache
-            backend_cls: Attention backend class
-            return_all: Return all compatible sizes if True, max size if False
-
-        Returns:
-            Compatible block size(s) based on return_all parameter
-
-        Raises:
-            ValueError: If no compatible block size found
-        """
-        supported_block_size = backend_cls.get_supported_kernel_block_size()
-        compatible_sizes = []
-
-        for block_size in supported_block_size:
-            if isinstance(block_size, int):
-                if kv_manager_block_size % block_size == 0:
-                    compatible_sizes.append(block_size)
-            elif (
-                isinstance(block_size, MultipleOf)
-                and kv_manager_block_size % block_size.base == 0
-            ):
-                compatible_sizes.append(kv_manager_block_size)
-
-        if not compatible_sizes:
-            raise ValueError(f"No compatible block size for {kv_manager_block_size}")
-
-        return compatible_sizes if return_all else [max(compatible_sizes)]
-
     def _select_common_block_size(
         self, kv_manager_block_size: int, attn_groups: list[AttentionGroup]
     ) -> int:
@@ -4204,8 +4166,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         all_backend_supports = []
 
         for attn_group in attn_groups:
-            compatible_sizes = self._find_compatible_block_sizes(
-                kv_manager_block_size, attn_group.backend, return_all=True
+            kv_cache_spec = attn_group.kv_cache_spec
+            compatible_sizes = kv_cache_spec.find_compatible_kernel_block_sizes(
+                attn_group.backend, return_all=True
             )
             supported_sizes = sorted(list(set(compatible_sizes)), reverse=True)
             all_backend_supports.append(set(supported_sizes))
@@ -4388,8 +4351,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     kv_manager_block_size = kv_cache_spec.block_size
-                    kernel_size_list = self._find_compatible_block_sizes(
-                        kv_manager_block_size, attn_backend, return_all=False
+                    kernel_size_list = kv_cache_spec.find_compatible_kernel_block_sizes(
+                        attn_backend, return_all=False
                     )
                     kernel_size = kernel_size_list[0]
                     num_blocks_per_kv_block = kv_manager_block_size // kernel_size

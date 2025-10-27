@@ -4,6 +4,7 @@
 import copy
 from dataclasses import dataclass, fields
 from math import prod
+from typing import TYPE_CHECKING
 
 import torch
 from typing_extensions import Self
@@ -12,6 +13,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -70,6 +74,46 @@ class AttentionSpec(KVCacheSpec):
             * self.head_size
             * get_dtype_size(self.dtype)
         )
+
+    def find_compatible_kernel_block_sizes(
+        self, backend_cls: type[AttentionBackend], return_all: bool = False
+    ) -> list[int]:
+        """Find compatible kernel block sizes for this spec and backend.
+
+        Args:
+            backend_cls: The attention backend class
+            return_all: If True, return all compatible sizes;
+                        If False, return only the max
+
+        Returns:
+            List of compatible kernel block sizes
+
+        Raises:
+            ValueError: If no compatible block size found
+        """
+        from vllm.attention.backends.abstract import MultipleOf
+
+        kv_manager_block_size = self.block_size
+        supported_sizes = backend_cls.get_supported_kernel_block_size()
+        compatible_sizes = []
+
+        for block_size in supported_sizes:
+            if isinstance(block_size, int) and kv_manager_block_size % block_size == 0:
+                compatible_sizes.append(block_size)
+            elif (
+                isinstance(block_size, MultipleOf)
+                and kv_manager_block_size % block_size.base == 0
+            ):
+                compatible_sizes.append(kv_manager_block_size)
+
+        if not compatible_sizes:
+            raise ValueError(
+                f"No compatible kernel block size found for "
+                f"kv_manager_block_size={kv_manager_block_size}, "
+                f"supported_sizes={supported_sizes}"
+            )
+
+        return compatible_sizes if return_all else [max(compatible_sizes)]
 
 
 @dataclass(frozen=True)

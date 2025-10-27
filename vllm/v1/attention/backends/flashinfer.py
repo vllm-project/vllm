@@ -333,7 +333,31 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
         FlashInferBackend.validate_head_size(self.head_dim)
-        self.page_size = self.kv_cache_spec.block_size
+
+        # IMPORTANT: page_size must match the actual kernel block size,
+        # not the KV manager block size!
+        # When using hybrid blocks (kv_manager_block_size != kernel_block_size),
+        # the KV cache is allocated with kernel_block_size, so we must use that
+        # for page_size when calling FlashInfer.
+        kv_manager_block_size = self.kv_cache_spec.block_size
+        kernel_block_size = self.kv_cache_spec.find_compatible_kernel_block_sizes(
+            FlashInferBackend, return_all=False
+        )[0]
+
+        self.page_size = kernel_block_size
+
+        if kernel_block_size != kv_manager_block_size:
+            logger.info_once(
+                "FlashInfer: Using kernel_block_size=%d (page_size) != "
+                "kv_manager_block_size=%d. Hybrid blocks mode.",
+                kernel_block_size,
+                kv_manager_block_size,
+            )
+        else:
+            logger.info_once(
+                "FlashInfer: Using page_size=%d (matches kv_manager_block_size)",
+                self.page_size,
+            )
 
         self.cache_dtype = self.cache_config.cache_dtype
         if self.cache_dtype.startswith("fp8"):
