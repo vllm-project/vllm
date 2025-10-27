@@ -41,13 +41,10 @@ inline Vectorized<at::BFloat16> convert_from_float_ext<at::BFloat16>(const Vecto
 inline __m512bh cvt_e4m3_bf16_intrinsic_no_nan(__m256i fp8_vec) {
   const __m512i x = _mm512_cvtepu8_epi16(fp8_vec);
 
-  const __m512i mant = _mm512_slli_epi16(_mm512_and_si512(x, _mm512_set1_epi16(0x07)), 4);
-  const __m512i raw_exp = _mm512_srli_epi16(_mm512_and_si512(x, _mm512_set1_epi16(0x78)), 3);
-  const __m512i exp = _mm512_slli_epi16(_mm512_add_epi16(raw_exp, _mm512_set1_epi16(120)), 7);
-  const __m512i nonsign = _mm512_or_si512(exp, mant);
-
-  const __m512i sign = _mm512_slli_epi16(_mm512_and_si512(x, _mm512_set1_epi16(0x80)), 8);
-  const __m512i combined = _mm512_or_si512(nonsign, sign);
+  __m512i combined = _mm512_add_epi16(x, mm780);
+  combined = _mm512_slli_epi16(combined, 4);
+  combined = _mm512_and_si512(combined, mm87f0);
+  combined = _mm512_add_epi16(combined, mm3c00);
 
   const __mmask32 is_nonzero = _mm512_cmpneq_epi16_mask(x, _mm512_setzero_si512());
   return (__m512bh)_mm512_maskz_mov_epi16(is_nonzero, combined);
