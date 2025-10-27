@@ -402,7 +402,7 @@ class TTModelRunner:
         compat_sampling_used = False
         sampling_metadata = None
 
-        if is_prompt:
+        if self.model_config.is_multimodal_model and is_prompt:
             multi_modal_kwargs = self._gather_multi_modal_inputs(
                 scheduler_output)
         else:
@@ -516,11 +516,14 @@ class TTModelRunner:
         compat_sampling_used = False
         sampling_metadata = None
 
-        # Gather multi-modal inputs from all DP ranks
-        multi_modal_kwargs: MultiModalKwargs = {"pixel_values": []}
-        for mi in inputs:
-            multi_modal_kwargs["pixel_values"].append(
-                mi.multi_modal_kwargs["pixel_values"])
+        if self.model_config.is_multimodal_model and not is_decode:
+            # Gather multi-modal inputs from all DP ranks
+            multi_modal_kwargs: MultiModalKwargs = {"pixel_values": []}
+            for mi in inputs:
+                multi_modal_kwargs["pixel_values"].append(
+                    mi.multi_modal_kwargs["pixel_values"])
+        else:
+            multi_modal_kwargs = {}
 
         merged = TTModelInput(
             input_tokens=input_tokens,
