@@ -55,9 +55,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, round_up
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -368,11 +368,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is available for EP"
                     " but not enabled, consider setting"
-                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it."
+                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
+                    scope="local",
                 )
             elif self.moe.moe_parallel_config.dp_size > 1:
                 logger.info_once(
-                    "FlashInfer CUTLASS MoE is currently not available for DP."
+                    "FlashInfer CUTLASS MoE is currently not available for DP.",
+                    scope="local",
                 )
             self.flashinfer_cutlass_moe = None  # type: ignore
 
@@ -411,11 +413,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        if self.moe.is_act_and_mul:
+            w13_up_dim = 2 * intermediate_size_per_partition
+        else:
+            w13_up_dim = intermediate_size_per_partition
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_up_dim,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -425,9 +431,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w13_weight, extra_weight_attrs)
         if self.moe.has_bias:
             w13_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts, 2 * intermediate_size_per_partition, dtype=params_dtype
-                ),
+                torch.zeros(num_experts, w13_up_dim, dtype=params_dtype),
                 requires_grad=False,
             )
             layer.register_parameter("w13_bias", w13_bias)
@@ -978,6 +982,7 @@ def maybe_roundup_hidden_size(
     act_dtype: torch.dtype,
     quant_config: QuantizationConfig | None,
     moe_parallel_config: FusedMoEParallelConfig,
+    is_lora_enabled: bool,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -988,6 +993,9 @@ def maybe_roundup_hidden_size(
         act_dtype: Data type of the layer activations.
         quant_config: Fused MoE quantization configuration.
         moe_parallel_config: Fused MoE parallelization strategy configuration.
+        is_lora_enabled: True if the engine is enabled with LoRA. This
+            is used in the case of mxfp4 quantization in selecting the
+            MxFP4Backend.
 
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
@@ -1011,7 +1019,7 @@ def maybe_roundup_hidden_size(
             get_mxfp4_backend,
         )
 
-        current_mxfp4_backend = get_mxfp4_backend()
+        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
@@ -1073,6 +1081,7 @@ class FusedMoE(CustomOp):
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        is_act_and_mul: bool = True,
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
@@ -1099,6 +1108,7 @@ class FusedMoE(CustomOp):
         self.params_dtype = params_dtype
 
         vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
 
         # FIXME (varun): We should have a better way of inferring the activation
         # datatype. This works for now as the tensor datatype entering the MoE
@@ -1133,7 +1143,11 @@ class FusedMoE(CustomOp):
 
         # Round up hidden size if needed.
         hidden_size = maybe_roundup_hidden_size(
-            hidden_size, moe_in_dtype, quant_config, self.moe_parallel_config
+            hidden_size,
+            moe_in_dtype,
+            quant_config,
+            self.moe_parallel_config,
+            is_lora_enabled=self.vllm_config.lora_config is not None,
         )
 
         # For smuggling this layer into the fused moe custom op
@@ -1263,8 +1277,10 @@ class FusedMoE(CustomOp):
             in_dtype=moe_in_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
+            is_act_and_mul=is_act_and_mul,
+            is_lora_enabled=vllm_config.lora_config is not None,
         )
-        self.moe_config = moe
+        self.moe_config: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
@@ -1282,6 +1298,24 @@ class FusedMoE(CustomOp):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+
+        if not self.moe_config.is_act_and_mul:
+            # Avoid circular import
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptFp8MoEMethod,
+            )
+
+            if not isinstance(
+                quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
+            ):
+                raise NotImplementedError(
+                    "is_act_and_mul=False is supported only for unquantized "
+                    "and ModelOpt FP8 moe for now"
+                )
+            if not current_platform.is_cuda():
+                raise NotImplementedError(
+                    "is_act_and_mul=False is supported only for CUDA for now"
+                )
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
@@ -1319,26 +1353,6 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
-
-        if self.use_dp_chunking:
-            states_shape: tuple[int, ...]
-            logits_shape: tuple[int, ...]
-
-            # Note here we use `num_experts` which is logical expert count
-            if vllm_config.parallel_config.enable_dbo:
-                states_shape = (2, moe.max_num_tokens, self.hidden_size)
-                logits_shape = (2, moe.max_num_tokens, num_experts)
-            else:
-                states_shape = (moe.max_num_tokens, self.hidden_size)
-                logits_shape = (moe.max_num_tokens, num_experts)
-
-            self.batched_hidden_states = torch.zeros(
-                states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
-            )
-
-            self.batched_router_logits = torch.zeros(
-                logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
-            )
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
@@ -1398,8 +1412,6 @@ class FusedMoE(CustomOp):
 
     @property
     def use_dp_chunking(self) -> bool:
-        # Route to the chunked forward path using the FlashInfer Cutlass kernel
-        # only when data parallelism (DP) is enabled.
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
@@ -1531,7 +1543,10 @@ class FusedMoE(CustomOp):
     ):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        shard_size = expert_data.shape[shard_dim] // 2
+        if self.moe_config.is_act_and_mul:
+            shard_size = expert_data.shape[shard_dim] // 2
+        else:
+            shard_size = expert_data.shape[shard_dim]
         if not load_full:
             loaded_weight = loaded_weight.narrow(
                 shard_dim, shard_size * tp_rank, shard_size
@@ -1963,11 +1978,39 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
-    def ensure_moe_quant_config(self):
+    def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
+
+        if self.moe_quant_config is None:
+            self.moe_quant_config = self.quant_method.moe_quant_config
+
+    def ensure_dp_chunking_init(self):
+        if not self.use_dp_chunking or self.batched_hidden_states is not None:
+            return
+
+        states_shape: tuple[int, ...]
+        logits_shape: tuple[int, ...]
+
+        moe = self.moe_config
+
+        # Note here we use `num_experts` which is logical expert count
+        if self.vllm_config.parallel_config.enable_dbo:
+            states_shape = (2, moe.max_num_tokens, self.hidden_size)
+            logits_shape = (2, moe.max_num_tokens, moe.num_experts)
+        else:
+            states_shape = (moe.max_num_tokens, self.hidden_size)
+            logits_shape = (moe.max_num_tokens, moe.num_experts)
+
+        self.batched_hidden_states = torch.zeros(
+            states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+        )
+
+        self.batched_router_logits = torch.zeros(
+            logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+        )
 
     @staticmethod
     def select_experts(
@@ -2199,8 +2242,6 @@ class FusedMoE(CustomOp):
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
         assert self.batched_router_logits.size(-1) == full_router_logits.size(-1)
 
-        self.ensure_moe_quant_config()
-
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
@@ -2358,7 +2399,8 @@ class FusedMoE(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
-        self.ensure_moe_quant_config()
+        self.ensure_moe_quant_config_init()
+        self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
             not isinstance(self.quant_method.fused_experts, FusedMoEModularKernel)

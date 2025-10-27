@@ -73,7 +73,7 @@ from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
-from vllm.ray.lazy_utils import is_ray_initialized
+from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import (
@@ -82,7 +82,7 @@ from vllm.transformers_utils.config import (
     maybe_override_with_speculators,
 )
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser, is_in_ray_actor
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -364,7 +364,13 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int | None = ModelConfig.seed
     max_model_len: int | None = ModelConfig.max_model_len
-    cuda_graph_sizes: list[int] = get_field(SchedulerConfig, "cuda_graph_sizes")
+    cuda_graph_sizes: list[int] | None = CompilationConfig.cudagraph_capture_sizes
+    cudagraph_capture_sizes: list[int] | None = (
+        CompilationConfig.cudagraph_capture_sizes
+    )
+    max_cudagraph_capture_size: int | None = get_field(
+        CompilationConfig, "max_cudagraph_capture_size"
+    )
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -1008,9 +1014,6 @@ class EngineArgs:
             **scheduler_kwargs["max_long_partial_prefills"],
         )
         scheduler_group.add_argument(
-            "--cuda-graph-sizes", **scheduler_kwargs["cuda_graph_sizes"]
-        )
-        scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
@@ -1037,6 +1040,29 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
+        )
+
+        # Compilation arguments
+        compilation_kwargs = get_kwargs(CompilationConfig)
+        compilation_group = parser.add_argument_group(
+            title="CompilationConfig",
+            description=CompilationConfig.__doc__,
+        )
+        compilation_group.add_argument(
+            "--cudagraph-capture-sizes", **compilation_kwargs["cudagraph_capture_sizes"]
+        )
+        compilation_kwargs["cudagraph_capture_sizes"]["help"] = (
+            "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or v1.0.0,"
+            " whichever is soonest. Please use --cudagraph-capture-sizes instead."
+        )
+        compilation_group.add_argument(
+            "--cuda-graph-sizes",
+            **compilation_kwargs["cudagraph_capture_sizes"],
+            deprecated=True,
+        )
+        compilation_group.add_argument(
+            "--max-cudagraph-capture-size",
+            **compilation_kwargs["max_cudagraph_capture_size"],
         )
 
         # vLLM arguments
@@ -1549,7 +1575,6 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
-            cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
@@ -1601,15 +1626,13 @@ class EngineArgs:
         if self.guided_decoding_backend is not None:
             so_config.guided_decoding_backend = self.guided_decoding_backend
         if self.guided_decoding_disable_fallback is not None:
-            so_config.guided_decoding_disable_fallback = (
-                self.guided_decoding_disable_fallback
-            )
+            so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
-            so_config.guided_decoding_disable_any_whitespace = (
+            so_config.disable_any_whitespace = (
                 self.guided_decoding_disable_any_whitespace
             )
         if self.guided_decoding_disable_additional_properties is not None:
-            so_config.guided_decoding_disable_additional_properties = (
+            so_config.disable_additional_properties = (
                 self.guided_decoding_disable_additional_properties
             )
 
@@ -1618,6 +1641,38 @@ class EngineArgs:
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
+
+        # Compilation config overrides
+        if self.cuda_graph_sizes is not None:
+            logger.warning(
+                "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or "
+                "v1.0.0, whichever is soonest. Please use --cudagraph-capture-sizes "
+                "instead."
+            )
+            if self.compilation_config.cudagraph_capture_sizes is not None:
+                raise ValueError(
+                    "cuda_graph_sizes and compilation_config."
+                    "cudagraph_capture_sizes are mutually exclusive"
+                )
+            self.compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
+        if self.cudagraph_capture_sizes is not None:
+            if self.compilation_config.cudagraph_capture_sizes is not None:
+                raise ValueError(
+                    "cudagraph_capture_sizes and compilation_config."
+                    "cudagraph_capture_sizes are mutually exclusive"
+                )
+            self.compilation_config.cudagraph_capture_sizes = (
+                self.cudagraph_capture_sizes
+            )
+        if self.max_cudagraph_capture_size is not None:
+            if self.compilation_config.max_cudagraph_capture_size is not None:
+                raise ValueError(
+                    "max_cudagraph_capture_size and compilation_config."
+                    "max_cudagraph_capture_size are mutually exclusive"
+                )
+            self.compilation_config.max_cudagraph_capture_size = (
+                self.max_cudagraph_capture_size
+            )
 
         config = VllmConfig(
             model_config=model_config,
@@ -1743,16 +1798,6 @@ class EngineArgs:
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
             self.enable_chunked_prefill = True
-
-            # TODO: When prefix caching supports prompt embeds inputs, this
-            # check can be removed.
-            if self.enable_prompt_embeds and self.enable_prefix_caching is not False:
-                logger.warning(
-                    "--enable-prompt-embeds and --enable-prefix-caching "
-                    "are not supported together in V1. Prefix caching has "
-                    "been disabled."
-                )
-                self.enable_prefix_caching = False
 
             if self.enable_prefix_caching is None:
                 # Disable prefix caching default for hybrid models

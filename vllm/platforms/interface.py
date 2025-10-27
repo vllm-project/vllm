@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
     FlexibleArgumentParser = object
 
@@ -607,6 +607,13 @@ class Platform:
         Returns the nixl memory type for the current platform.
         """
         return None
+
+    @classmethod
+    def check_max_model_len(cls, max_model_len: int) -> int:
+        """
+        Check max_model_len for the current platform.
+        """
+        return max_model_len
 
 
 class UnspecifiedPlatform(Platform):
