@@ -70,6 +70,8 @@ def should_ignore_layer(
             layer_name=layer_name, targets=ignore
         )
         if not should_ignore_layer:
+            # Handle configs that list only child params so the containing
+            # module inherits their ignore state.
             prefix = f"{layer_name}."
             should_ignore_layer = any(
                 target.startswith(prefix) and not target.startswith("re:")
