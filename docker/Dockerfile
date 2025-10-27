@@ -355,6 +355,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             --pre pytorch_triton==3.3.0+gitab727c40 ; \
     fi
 
+# Install build dependencies BEFORE compilation steps that need them
+# Required by xformers, FlashInfer JIT, and other build-from-source packages
+COPY requirements/build.txt requirements/build.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r requirements/build.txt \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
 # TODO (huydhn): Remove this once xformers is released for 2.9.0
 # Install xformers BEFORE vLLM wheel to cache this expensive build step
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
@@ -370,15 +377,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && uv pip install --system flashinfer-jit-cache==0.4.1 \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
-
-# Even when we build Flashinfer with AOT mode, there's still
-# some issues w.r.t. JIT compilation. Therefore we need to
-# install build dependencies for JIT compilation.
-# TODO: Remove this once FlashInfer AOT wheel is fixed
-COPY requirements/build.txt requirements/build.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # Install DeepGEMM from source
 ARG DEEPGEMM_GIT_REF
