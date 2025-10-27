@@ -286,7 +286,7 @@ def rocm_sparse_attn_indexer_impl(
             padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(
                 decode_lens.shape[0], -1, *q_fp8.shape[1:]
             )
-        # TODO: move and optimize below logic with triton kernels
+
         batch_size = padded_q_fp8_decode_tokens.shape[0]
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
@@ -342,9 +342,6 @@ def rocm_sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
-    # profile run
-    # NOTE(Chen): create the max possible flattened_kv. So that
-    # profile_run can get correct memory usage.
     _flattened_kv = torch.empty(
         [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
     )
