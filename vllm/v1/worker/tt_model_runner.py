@@ -10,6 +10,7 @@ import ttnn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.platforms.tt import TTPlatform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv
@@ -271,6 +272,47 @@ class TTModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
+    def _validate_mm_input(self, mm_input: MultiModalKwargs) -> None:
+        """Validate multi-modal input supports only single images."""
+        if list(mm_input.modalities) != ["image"]:
+            raise NotImplementedError("Only images are supported for now")
+        assert mm_input.get_item_count("image") == 1, (
+            "Request can contain multiple inputs, \
+            but each input can contain only one image!")
+
+    def _gather_multi_modal_inputs(self, scheduler_output) -> dict:
+        """
+        Gather and batch multi-modal inputs from scheduled requests.
+        #TODO: Currently only supports image inputs in the "pixel_values" field.
+
+        Creates a list of pixel values for each request.
+        Example:
+        [
+          None, # for requests without mm_inputs
+          [pixel_values_1], # with single mm_input
+          [pixel_values_2, pixel_values_3, ...], # with multiple mm_inputs
+        ]
+        """
+
+        multi_modal_kwargs: MultiModalKwargs = {"pixel_values": []}
+
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            req_state = self.requests[req_id]
+
+            if not req_state.mm_inputs:
+                multi_modal_kwargs["pixel_values"].append(None)
+                continue
+
+            pv_array = []
+            for mm_input in req_state.mm_inputs:
+                self._validate_mm_input(mm_input)
+                pv_array.append(mm_input["pixel_values"])
+
+            multi_modal_kwargs["pixel_values"].append(pv_array)
+
+        return multi_modal_kwargs
+
     def _prepare_model_inputs(
             self, scheduler_output: "SchedulerOutput") -> TTModelInput:
 
@@ -360,6 +402,12 @@ class TTModelRunner:
         compat_sampling_used = False
         sampling_metadata = None
 
+        if is_prompt:
+            multi_modal_kwargs = self._gather_multi_modal_inputs(
+                scheduler_output)
+        else:
+            multi_modal_kwargs = {}
+
         return TTModelInput(
             input_tokens=input_tokens,
             input_positions=input_positions,
@@ -371,7 +419,7 @@ class TTModelRunner:
             sampling_params_list=sampling_params_list,
             compat_sampling_used=compat_sampling_used,
             sampling_metadata=sampling_metadata,
-            multi_modal_kwargs={},  # Not yet supported in V1
+            multi_modal_kwargs=multi_modal_kwargs,
             cross_block_tables=None  # Not yet supported in V1
         )
 
@@ -468,6 +516,12 @@ class TTModelRunner:
         compat_sampling_used = False
         sampling_metadata = None
 
+        # Gather multi-modal inputs from all DP ranks
+        multi_modal_kwargs: MultiModalKwargs = {"pixel_values": []}
+        for mi in inputs:
+            multi_modal_kwargs["pixel_values"].append(
+                mi.multi_modal_kwargs["pixel_values"])
+
         merged = TTModelInput(
             input_tokens=input_tokens,
             input_positions=input_positions,
@@ -479,7 +533,7 @@ class TTModelRunner:
             sampling_params_list=sampling_params_list,
             compat_sampling_used=compat_sampling_used,
             sampling_metadata=sampling_metadata,
-            multi_modal_kwargs={},  # Not yet supported in V1
+            multi_modal_kwargs=multi_modal_kwargs,
             cross_block_tables=None  # Not yet supported in V1
         )
         return merged
@@ -547,10 +601,11 @@ class TTModelRunner:
             "tokens": model_input.input_tokens,
             "page_table": model_input.block_tables,
             "kv_cache": self.kv_caches,
-            **(model_input.multi_modal_kwargs or {}),
         }
+
         if not is_decode:
             kwargs["prompt_lens"] = model_input.prompt_lens
+            kwargs.update(model_input.multi_modal_kwargs)
             if len(batch_size_per_dp) > 1:
                 # TODO: the model should only require DP ranks, but passing
                 # "global" user ids instead for backwards compatibility.

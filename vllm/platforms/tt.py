@@ -141,10 +141,6 @@ class TTPlatform(Platform):
                 raise ValueError(
                     "VLLM_USE_V1=1 was set but encoder-decoder models aren't "
                     "yet supported in V1 for TT")
-            elif model_config.is_multimodal_model:
-                raise ValueError(
-                    "VLLM_USE_V1=1 was set but multimodal models aren't "
-                    "yet supported in V1 for TT")
             logger.warning(
                 "Enabling V1 since VLLM_USE_V1=1, however V1 is still "
                 "experimental for TT backend.")

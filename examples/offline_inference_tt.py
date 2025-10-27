@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import regex as re
 import requests
 import uvloop
 from PIL import Image as PIL_Image
@@ -131,55 +132,64 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
     text_prompts = []
     imgs = []
 
-    if not multi_image:
-        # Example data
-        if "Qwen2.5-VL" in model:
-            # [INFO] Qwen-VL currently does not support a mixture of
-            # text-image and text-only inputs
-            img_refs = [
-                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-            ]
-            questions = [
-                "Describe this image.",
-                "Is there a cat?",
-            ]
-        else:
-            questions = [
-                "Describe this image.",
-                "What is the capital of France?",
-            ]
-            img_refs = [
-                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-                None,
-            ]
-        # Build chat-style prompts
-        prompts = [
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": img_ref},
-                        {"type": "text", "text": question},
-                    ],
-                }
-            ]
-            for img_ref, question in zip(img_refs, questions)
-        ]
+    text_prompts_content = [
+        [{"type": "text", "text": "Count to 20."}],
+        [{"type": "text", "text": "What is the capital of France?"}],
+        [{"type": "text", "text": "Describe the band Oasis in 300 words."}],
+        [{"type": "text", "text": "Write a haiku about an orange."}],
+    ]
+
+    single_image_prompts_content = [
+        [
+            {"type": "text", "text": "Describe this image."},
+            {
+                "type": "image",
+                "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+            },
+        ],
+        [
+            {"type": "text", "text": "Is there a cat?"},
+            {
+                "type": "image",
+                "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+            },
+        ],
+        [
+            {"type": "text", "text": "Describe this image."},
+            {
+                "type": "image",
+                "image": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/cats.jpeg",
+            },
+        ],
+    ]
+
+    multi_image_prompts_content = [
+        [
+            {"type": "text", "text": "Compare these images."},
+            {
+                "type": "image",
+                "image": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/cats.jpeg",
+            },
+            {
+                "type": "image",
+                "image": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/cats.png",
+            },
+        ],
+    ]
+
+    content = []
+    if "Qwen2.5-VL" in model:
+        # [INFO] Qwen-VL currently does not support a mixture of
+        # text-image and text-only inputs
+        content += single_image_prompts_content
     else:
-        # Example data
-        question = "Compare these images."
-        img_refs = [
-            "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/cats.jpeg",
-            "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/cats.png",
-        ]
-        prompt = {"role": "user", "content": []}
+        content += text_prompts_content + single_image_prompts_content
+        if multi_image:
+            content += multi_image_prompts_content
 
-        for img_ref in img_refs:
-            prompt["content"].append({"type": "image", "image": img_ref})
-        prompt["content"].append({"type": "text", "text": question})
-
-        prompts = [[prompt]]
+    prompts = []
+    for c in content:
+        prompts.append([{"role": "user", "content": c}])
 
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
 
@@ -226,7 +236,7 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
     inputs = []
     for img, text_prompt in zip(imgs, text_prompts):
         entry = {"prompt": text_prompt}
-        if img is not None:
+        if img and all(item is not None for item in img):
             entry["multi_modal_data"] = {"image": img}
         inputs.append(entry)
 
@@ -553,13 +563,33 @@ async def run_inference_perf_async(
     print(f"Average time taken per inference run: {avg_time:.2f} s")
 
 
+def _format_prompt_for_display(prompt: str) -> str:
+    """Format prompt for display by replacing repetitive image tokens."""
+    # Count and replace consecutive image_soft_token occurrences
+    pattern = r"(<image_soft_token>)+"
+
+    def replace_tokens(match):
+        count = match.group(0).count("<image_soft_token>")
+        return f"<image_tokens:{count}>"
+
+    cleaned_prompt = re.sub(pattern, replace_tokens, prompt)
+    return cleaned_prompt
+
+
 def generate_tokens(
     llm: LLM, prompts, sampling_params, prompt_token_ids=None, print_output=True
 ):
+    # Use tokenized prompts if provided
+    if prompt_token_ids is not None:
+        prompts = []
+        for single_prompt_token_ids in prompt_token_ids:
+            prompts.append(TokensPrompt(prompt_token_ids=single_prompt_token_ids))
+
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params, prompt_token_ids)
+    outputs = llm.generate(prompts, sampling_params)
+
     # Print the outputs.
     for output in outputs:
         request_id = int(output.request_id) + 1
@@ -568,6 +598,7 @@ def generate_tokens(
         num_tokens_prompt = len(output.prompt_token_ids)
         num_tokens_output = len(output.outputs[0].token_ids)
         if print_output:
+            prompt = _format_prompt_for_display(prompt)
             print(
                 f"Prompt #{request_id} "
                 f"({num_tokens_prompt} tokens): {prompt!r}, "
@@ -616,6 +647,7 @@ async def generate_tokens_async(
         num_tokens_prompt = len(res.prompt_token_ids)
         num_tokens_output = len(res.outputs[0].token_ids)
         if print_output and res.finished:
+            prompt = _format_prompt_for_display(prompt)
             print(
                 f"Prompt {request_id} "
                 f"({num_tokens_prompt} tokens): {prompt!r}, "
