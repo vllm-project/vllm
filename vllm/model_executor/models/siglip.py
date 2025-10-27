@@ -174,9 +174,11 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
     @cached_property
     def image_token_id(self) -> int:
         tokenizer = self.info.get_tokenizer()
-        dummy_token_id = 0
-
-        assert dummy_token_id not in tokenizer.all_special_ids
+        dummy_token_id = next(
+            token_id
+            for token_id in range(tokenizer.vocab_size)
+            if token_id not in tokenizer.all_special_ids
+        )
 
         return dummy_token_id
 
