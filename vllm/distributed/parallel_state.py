@@ -313,7 +313,7 @@ class GroupCoordinator:
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
         enable_fault_tolerance: bool = False,
-        gool_comm_timeout: timedelta | None = None,
+        gloo_comm_timeout: timedelta | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -335,7 +335,7 @@ class GroupCoordinator:
                 cpu_group = torch.distributed.new_group(ranks, backend="gloo")
             else:
                 cpu_group = torch.distributed.new_group(
-                    ranks, backend="gloo", timeout=gool_comm_timeout
+                    ranks, backend="gloo", timeout=gloo_comm_timeout
                 )
             if self.rank in ranks:
                 self.ranks = ranks
@@ -1017,7 +1017,7 @@ def init_world_group(
     local_rank: int,
     backend: str,
     enable_fault_tolerance: bool = False,
-    gool_comm_timeout: int | None = None,
+    gloo_comm_timeout: timedelta | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -1026,7 +1026,7 @@ def init_world_group(
         use_device_communicator=False,
         group_name="world",
         enable_fault_tolerance=enable_fault_tolerance,
-        gool_comm_timeout=gool_comm_timeout,
+        gloo_comm_timeout=gloo_comm_timeout,
     )
 
 
@@ -1035,7 +1035,7 @@ def init_model_parallel_group(
     local_rank: int,
     backend: str,
     enable_fault_tolerance: bool = False,
-    gool_comm_timeout: timedelta | None = None,
+    gloo_comm_timeout: timedelta | None = None,
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
 ) -> GroupCoordinator:
@@ -1047,7 +1047,7 @@ def init_model_parallel_group(
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
         enable_fault_tolerance=enable_fault_tolerance,
-        gool_comm_timeout=gool_comm_timeout,
+        gloo_comm_timeout=gloo_comm_timeout,
     )
 
 
@@ -1228,7 +1228,7 @@ def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     enable_fault_tolerance: bool = False,
-    gool_comm_timeout: timedelta | None = None,
+    gloo_comm_timeout: timedelta | None = None,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
 ) -> None:
@@ -1293,7 +1293,7 @@ def initialize_model_parallel(
         get_world_group().local_rank,
         backend,
         enable_fault_tolerance,
-        gool_comm_timeout,
+        gloo_comm_timeout,
         use_message_queue_broadcaster=True,
         group_name="tp",
     )
@@ -1312,7 +1312,7 @@ def initialize_model_parallel(
         get_world_group().local_rank,
         backend,
         enable_fault_tolerance,
-        gool_comm_timeout,
+        gloo_comm_timeout,
         use_message_queue_broadcaster=True,
         group_name="dcp",
     )
@@ -1329,7 +1329,7 @@ def initialize_model_parallel(
         get_world_group().local_rank,
         backend,
         enable_fault_tolerance,
-        gool_comm_timeout,
+        gloo_comm_timeout,
         group_name="pp",
     )
 
@@ -1342,7 +1342,7 @@ def initialize_model_parallel(
         get_world_group().local_rank,
         backend,
         enable_fault_tolerance,
-        gool_comm_timeout,
+        gloo_comm_timeout,
         group_name="dp",
     )
 
@@ -1359,7 +1359,7 @@ def initialize_model_parallel(
         get_world_group().local_rank,
         backend,
         enable_fault_tolerance,
-        gool_comm_timeout,
+        gloo_comm_timeout,
         group_name="ep",
     )
 
@@ -1380,7 +1380,7 @@ def ensure_model_parallel_initialized(
     pipeline_model_parallel_size: int,
     decode_context_model_parallel_size: int | None = 1,
     enable_fault_tolerance: bool = False,
-    gool_comm_timeout: timedelta | None = None,
+    gloo_comm_timeout: timedelta | None = None,
     backend: str | None = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1393,7 +1393,7 @@ def ensure_model_parallel_initialized(
             tensor_model_parallel_size,
             pipeline_model_parallel_size,
             enable_fault_tolerance,
-            gool_comm_timeout,
+            gloo_comm_timeout,
             decode_context_model_parallel_size,
             backend,
         )
