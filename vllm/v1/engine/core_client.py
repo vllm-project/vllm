@@ -350,7 +350,7 @@ class ClientGuard:
         self,
         fault_receiver_addr: str,
         cmd_addr: str,
-        engine_registry: dict[int, bytes],
+        engine_registry: list[bytes],
         engine_exception_q: asyncio.Queue[FaultInfo],
         engine_exception_q_lock: asyncio.Lock,
         fault_pub_addr: str,
