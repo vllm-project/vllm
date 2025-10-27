@@ -559,7 +559,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self, **kwargs: object
     ) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
