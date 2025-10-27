@@ -9,7 +9,7 @@ from vllm import envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
@@ -20,58 +20,61 @@ _FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
-def rocm_aiter_per_tensor_quant_impl(
-    x: torch.Tensor, scale: torch.Tensor, dtype: torch.dtype
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.quant import per_tensor_quant_hip
+if current_platform.is_rocm():
 
-    return per_tensor_quant_hip(x, scale, dtype)
+    def rocm_aiter_per_tensor_quant_impl(
+        x: torch.Tensor, scale: torch.Tensor | None, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from aiter.ops.quant import per_tensor_quant_hip
 
+        return per_tensor_quant_hip(x, scale, dtype)
 
-def rocm_aiter_per_tensor_quant_fake(
-    x: torch.Tensor, scale: torch.Tensor, dtype: torch.dtype
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x, dtype=dtype), torch.empty(
-        1, dtype=torch.float32, device=x.device
+    def rocm_aiter_per_tensor_quant_fake(
+        x: torch.Tensor, scale: torch.Tensor | None, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.empty_like(x, dtype=dtype), torch.empty(
+            1, dtype=torch.float32, device=x.device
+        )
+
+    def rocm_aiter_per_token_quant_impl(
+        out: torch.Tensor,
+        x: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> None:
+        from aiter.ops.quant import dynamic_per_token_scaled_quant
+
+        dynamic_per_token_scaled_quant(
+            out,
+            x,
+            scale,
+            scale_ub=None,
+            shuffle_scale=False,
+            num_rows=None,
+            num_rows_factor=1,
+        )
+
+    def rocm_aiter_per_token_quant_fake(
+        out: torch.Tensor,
+        x: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> None:
+        pass
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_per_tensor_quant",
+        op_func=rocm_aiter_per_tensor_quant_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_per_tensor_quant_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
 
-
-def rocm_aiter_per_token_quant_impl(
-    x: torch.Tensor, scale: torch.Tensor | None, dtype: torch.dtype
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.quant import per_token_quant_hip
-
-    return per_token_quant_hip(x, scale, dtype)
-
-
-def rocm_aiter_per_token_quant_fake(
-    x: torch.Tensor, scale: torch.Tensor | None, dtype: torch.dtype
-) -> tuple[torch.Tensor, torch.Tensor]:
-    scale_shape = (*x.shape[:-1], 1)
-    return torch.empty_like(x, dtype=dtype), torch.empty(
-        scale_shape, dtype=torch.float32, device=x.device
+    direct_register_custom_op(
+        op_name="rocm_aiter_per_token_quant",
+        op_func=rocm_aiter_per_token_quant_impl,
+        fake_impl=rocm_aiter_per_token_quant_fake,
+        mutates_args=["out", "scale"],
+        dispatch_key=current_platform.dispatch_key,
     )
-
-
-direct_register_custom_op(
-    op_name="rocm_aiter_per_tensor_quant",
-    op_func=rocm_aiter_per_tensor_quant_impl,
-    mutates_args=[],
-    fake_impl=rocm_aiter_per_tensor_quant_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-direct_register_custom_op(
-    op_name="rocm_aiter_per_token_quant",
-    op_func=rocm_aiter_per_token_quant_impl,
-    mutates_args=[],
-    fake_impl=rocm_aiter_per_token_quant_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-
-def use_aiter():
-    return envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
 
 
 @CustomOp.register("quant_fp8")
@@ -105,7 +108,15 @@ class QuantFP8(CustomOp):
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
         self.use_ue8m0 = use_ue8m0
-        self.use_aiter = use_aiter()
+
+        from vllm.platforms import on_gfx9
+
+        self.use_aiter = (
+            envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_LINEAR
+            and on_gfx9()
+            and current_platform.is_rocm()
+        )
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
@@ -156,18 +167,17 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        use_aiter_per_tensor_quant = (
-            not self.is_group_quant,
-            self.group_shape == GroupShape.PER_TENSOR
+        use_aiter_quant = (
+            not self.is_group_quant
             and self.use_aiter
-            and scale_ub is not None,
+            and scale_ub is None
+            and x.is_contiguous()
+        )
+        use_aiter_per_tensor_quant = (
+            use_aiter_quant and self.group_shape == GroupShape.PER_TENSOR
         )
         use_aiter_per_token_quant = (
-            not self.is_group_quant,
-            self.group_shape == GroupShape.PER_TOKEN
-            and self.use_aiter
-            and scale_ub is not None
-            and not self.static,
+            use_aiter_quant and self.group_shape == GroupShape.PER_TOKEN
         )
 
         if use_aiter_per_tensor_quant:
