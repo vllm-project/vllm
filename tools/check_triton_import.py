@@ -59,6 +59,13 @@ def get_diff(diff_type: str) -> str:
         )
     elif diff_type == "unstaged":
         return subprocess.check_output(["git", "diff", "--unified=0"], text=True)
+    elif diff_type == "pr_commits":
+        base_commit = subprocess.check_output(
+            ["git", "merge-base", "--fork-point", "origin/main", "HEAD"], text=True
+        ).strip()
+        return subprocess.check_output(
+            ["git", "diff", base_commit, "HEAD", "--unified=0"], text=True
+        )
     else:
         raise ValueError(f"Unknown diff_type: {diff_type}")
 
