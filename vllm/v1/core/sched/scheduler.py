@@ -430,6 +430,11 @@ class Scheduler(SchedulerInterface):
                             self.waiting.pop_request()
                             skipped_waiting_requests.prepend_request(request)
                             continue
+                        # Keep track of number of tokens to load from remote
+                        # for the request st we can compute actual throughput
+                        request.num_external_computed_tokens = (
+                            num_external_computed_tokens
+                        )
 
                         num_external_computed_tokens = ext_tokens
 
@@ -538,7 +543,6 @@ class Scheduler(SchedulerInterface):
                     self._update_connector_prefix_cache_stats(
                         request, num_external_computed_tokens
                     )
-                    request.num_external_computed_tokens += num_external_computed_tokens
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
