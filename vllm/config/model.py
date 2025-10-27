@@ -2116,25 +2116,7 @@ def _get_and_verify_max_len(
     # the model config as a default value.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
-        if current_platform.is_tpu():
-            logger.warning(
-                "--max-model-len is not specified, "
-                "it's currently using model's default length %d, "
-                "which might be too large."
-                "Please input with --max-model-len based on your "
-                "request input length and output length, to avoid "
-                "unnecessary degradation.",
-                max_model_len,
-            )
-        elif current_platform.device_name == "npu" and max_model_len > 65536:
-            logger.warning(
-                "max_model_len is not specified and the default value"
-                "derived from the model config is %d, which is too large"
-                "and will make the engine stuck in initializing distributed"
-                "communication. Set max_model_len to 65536.",
-                max_model_len,
-            )
-            max_model_len = 65536
+        max_model_len = current_platform.check_max_model_len(max_model_len)
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     elif max_model_len > derived_max_model_len:
