@@ -63,10 +63,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen2_audio import (
-    Qwen2AudioFeatureInputs,
-    Qwen2AudioProcessingInfo,
-)
+from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
@@ -86,6 +83,7 @@ from .interfaces import (
     SupportsPP,
 )
 from .qwen2_5_omni_thinker import (
+    Qwen2_5OmniAudioFeatureInputs,
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalProcessor,
@@ -101,6 +99,7 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    flatten_bn,
     maybe_prefix,
 )
 from .vision import (
@@ -1056,41 +1055,16 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
 
 class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMixin):
-    def _validate_and_reshape_mm_tensor(
-        self, mm_input: object, name: str, dim: int = 0
-    ) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. Got type: {type(mm_input)}")
-        if name == "feature_attention_mask":
-            dim = -1
-        if isinstance(mm_input, torch.Tensor):
-            return torch.concat(list(mm_input), dim=dim)
-        else:
-            if isinstance(mm_input[0], list):
-                return torch.concat(
-                    [torch.concat(mm_input[i], dim=dim) for i in range(len(mm_input))],
-                    dim=dim,
-                )
-            else:
-                return torch.concat(mm_input, dim=dim)
-
     def _process_audio_input(
         self,
-        audio_input: Qwen2AudioFeatureInputs,
-        audio_hashes: list[str] = None,
-        cached_audio_features: torch.Tensor = None,
+        audio_input: Qwen2_5OmniAudioFeatureInputs,
+        audio_hashes: list[str] | None = None,
+        cached_audio_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
 
-        if input_features.ndim == 3:
-            assert input_features.shape[0] == 1
-            input_features = input_features.squeeze(0)
-
-        if not isinstance(audio_feature_lengths, torch.Tensor):
-            audio_feature_lengths = torch.cat(audio_feature_lengths)
-        if audio_feature_lengths.ndim == 2:
-            audio_feature_lengths = audio_feature_lengths.reshape(-1)
+        audio_feature_lengths = flatten_bn(audio_feature_lengths, concat=True)
 
         audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
             audio_feature_lengths
@@ -1117,6 +1091,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen3OmniMoeConditionalGenerationMixin,
 ):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
