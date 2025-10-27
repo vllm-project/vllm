@@ -297,6 +297,8 @@ def test_engine_core_concurrent_batches():
         max_num_batched_tokens=10,
         # Reduce startup time.
         enforce_eager=True,
+        # Test concurrent batch behaviour independently of async scheduling.
+        async_scheduling=False,
     )
     vllm_config = engine_args.create_engine_config()
     with set_default_torch_num_threads(1):
