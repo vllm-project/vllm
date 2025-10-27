@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
+    FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.moe_method_base import FusedMoEMethodBase
 
@@ -23,17 +24,23 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def __init__(
         self,
         old_quant_method: FusedMoEMethodBase,
-        fused_experts: FusedMoEModularKernel,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        shared_experts: torch.nn.Module | None,
     ):
         super().__init__(old_quant_method.moe)
         # Find better way to copy attributes?  Should we even copy attributes?
         # self.__dict__.update(old_quant_method.__dict__)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        self.fused_experts = fused_experts
+        experts = old_quant_method.select_gemm_impl(prepare_finalize, self)
+        self.fused_experts = FusedMoEModularKernel(
+            prepare_finalize,
+            experts,
+            shared_experts,
+        )
         self.disable_expert_map = getattr(
             old_quant_method,
             "disable_expert_map",
-            not fused_experts.supports_expert_map(),
+            not self.fused_experts.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)

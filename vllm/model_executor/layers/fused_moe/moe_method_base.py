@@ -12,7 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
@@ -67,29 +66,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             f"{self.__class__.__name__} must select appropriate gemm "
             "implementation based on the prepare_finalize"
         )
-
-    def maybe_init_modular_kernel(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEModularKernel | None:
-        # We must get the quant config here so that the layer is
-        # completely initialized, i.e. all weights loaded and post
-        # processed.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
-        prepare_finalize = self.maybe_make_prepare_finalize()
-
-        if prepare_finalize is not None:
-            logger.debug(
-                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
-            )
-            experts = self.select_gemm_impl(prepare_finalize, layer)
-            return FusedMoEModularKernel(
-                prepare_finalize,
-                experts,
-                layer.shared_experts,
-            )
-        else:
-            return None
 
     @abstractmethod
     def get_fused_moe_quant_config(

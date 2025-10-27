@@ -539,9 +539,6 @@ class FusedMoE(CustomOp):
             is_lora_enabled=vllm_config.lora_config is not None,
         )
 
-        # Note: the moe_quant_config can't be constructed until after
-        # weight loading post processing.
-        self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
         def _get_quant_method() -> FusedMoEMethodBase:
@@ -619,9 +616,15 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
-        mk = self.quant_method.maybe_init_modular_kernel(self)
-        if mk is not None:
-            self.quant_method = FusedMoEModularMethod(self.quant_method, mk)
+        self.ensure_moe_quant_config_init()
+        prepare_finalize = self.quant_method.maybe_make_prepare_finalize()
+        if prepare_finalize is not None:
+            logger.debug(
+                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
+            )
+            self.quant_method = FusedMoEModularMethod(
+                self.quant_method, prepare_finalize, self.shared_experts
+            )
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
@@ -1253,12 +1256,17 @@ class FusedMoE(CustomOp):
 
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
+            # Note: the moe_quant_config can't be constructed until after
+            # weight loading post processing. Attempt to assert that here.
+            assert self.w13_weight is not None
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
 
-        if self.moe_quant_config is None:
-            self.moe_quant_config = self.quant_method.moe_quant_config
+    @property
+    def moe_quant_config(self) -> FusedMoEQuantConfig | None:
+        self.ensure_moe_quant_config_init()
+        return self.quant_method.moe_quant_config
 
     def ensure_dp_chunking_init(self):
         if not self.use_dp_chunking or self.batched_hidden_states is not None:
@@ -1672,7 +1680,6 @@ class FusedMoE(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
-        self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
