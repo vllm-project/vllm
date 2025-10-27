@@ -20,6 +20,9 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonBaseImpl,
     is_rocm_aiter_fp8bmm_enabled,
 )
+from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    triton_convert_req_index_to_global_index,
+)
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -348,11 +351,19 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         # Note: the above triton kernel may triggers some strange unexpected
         # crush on Mi300, although the code looks fine on memory access pattern,
         # this ref torch  impl can help to alleviate this issue.
-        topk_indices_global = ref_convert_to_global(
+        # topk_indices_global = ref_convert_to_global(
+        #     attn_metadata.req_id_per_token,
+        #     attn_metadata.block_table,
+        #     topk_indices,
+        #     attn_metadata.block_size,
+        # )
+
+        topk_indices_global = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
-            attn_metadata.block_size,
+            BLOCK_SIZE=attn_metadata.block_size,
+            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
         q = torch.cat([ql_nope, q_pe], dim=-1)
