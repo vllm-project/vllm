@@ -73,12 +73,12 @@ Currently, there are no pre-built ROCm wheels.
 
 3. Optionally, if you choose to use either Triton split attention or AITER multi-headed attention (See [Attention Backends](../../getting_started/quickstart.md#on-attention-backends)), you can install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention)
 
-    Install ROCm's latest flash attention (v2.8.3) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention#amd-rocm-support); see [Dockerfile.rocm_base](../../../docker/Dockerfile.rocm_base) for the most recent commit:
+    Install ROCm's latest flash attention (v2.8.3) following the instructions from [ROCm/flash-attention](https://github.com/Dao-AILab/flash-attention#amd-rocm-support); see [Dockerfile.rocm_base](../../../docker/Dockerfile.rocm_base) for the most recent commit:
 
     ```bash
     git clone https://github.com/Dao-AILab/flash-attention.git
     cd flash-attention
-    git checkout 0e60e394
+    git checkout 9716b1b8
     git submodule update --init
     GPU_ARCHS="gfx90a" python3 setup.py install
     cd ..
