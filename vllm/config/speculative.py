@@ -318,40 +318,7 @@ class SpeculativeConfig:
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
-            if not has_arctic_inference():
-                raise ImportError(
-                    "Arctic Inference is required for suffix decoding. "
-                    "Install via `pip install arctic-inference==0.1.0`."
-                )
-            if self.num_speculative_tokens is None:
-                # Suffix decoding decides the actual number of speculative tokens
-                # dynamically and treats num_speculative_tokens as a maximum limit.
-                self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
-                logger.warning(
-                    "Defaulted num_speculative_tokens to %s for suffix decoding.",
-                    self.num_speculative_tokens,
-                )
-            # Validate values
-            if self.suffix_decoding_max_tree_depth < 1:
-                raise ValueError(
-                    f"suffix_decoding_max_tree_depth="
-                    f"{self.suffix_decoding_max_tree_depth} must be >= 1"
-                )
-            if self.suffix_decoding_max_cached_requests < 0:
-                raise ValueError(
-                    f"suffix_decoding_max_cached_requests="
-                    f"{self.suffix_decoding_max_cached_requests} must be >= 0"
-                )
-            if self.suffix_decoding_max_spec_factor < 0:
-                raise ValueError(
-                    f"suffix_decoding_max_spec_factor="
-                    f"{self.suffix_decoding_max_spec_factor} must be >= 0"
-                )
-            if not 0 <= self.suffix_decoding_min_token_prob <= 1:
-                raise ValueError(
-                    f"suffix_decoding_min_token_prob="
-                    f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
-                )
+            self._validate_suffix_decoding()
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -505,6 +472,42 @@ class SpeculativeConfig:
                     )
                 )
         return self
+
+    def _validate_suffix_decoding(self):
+        if not has_arctic_inference():
+            raise ImportError(
+                "Arctic Inference is required for suffix decoding. "
+                "Install via `pip install arctic-inference==0.1.0`."
+            )
+        if self.num_speculative_tokens is None:
+            # Suffix decoding decides the actual number of speculative tokens
+            # dynamically and treats num_speculative_tokens as a maximum limit.
+            self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
+            logger.warning(
+                "Defaulted num_speculative_tokens to %s for suffix decoding.",
+                self.num_speculative_tokens,
+            )
+        # Validate values
+        if self.suffix_decoding_max_tree_depth < 1:
+            raise ValueError(
+                f"suffix_decoding_max_tree_depth="
+                f"{self.suffix_decoding_max_tree_depth} must be >= 1"
+            )
+        if self.suffix_decoding_max_cached_requests < 0:
+            raise ValueError(
+                f"suffix_decoding_max_cached_requests="
+                f"{self.suffix_decoding_max_cached_requests} must be >= 0"
+            )
+        if self.suffix_decoding_max_spec_factor < 0:
+            raise ValueError(
+                f"suffix_decoding_max_spec_factor="
+                f"{self.suffix_decoding_max_spec_factor} must be >= 0"
+            )
+        if not 0 <= self.suffix_decoding_min_token_prob <= 1:
+            raise ValueError(
+                f"suffix_decoding_min_token_prob="
+                f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
+            )
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
