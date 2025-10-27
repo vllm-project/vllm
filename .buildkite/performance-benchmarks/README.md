@@ -5,7 +5,6 @@
 This directory contains a benchmarking suite for **developers** to run locally and gain clarity on whether their PR improves/degrades vllm's performance.
 vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](https://perf.vllm.ai/), hosted under PyTorch CI HUD.
 
-
 ## Performance benchmark quick overview
 
 **Benchmarking Coverage**: latency, throughput and fix-qps serving on B200, A100, H100 and Intel® Xeon® Processors, with different models.
@@ -15,7 +14,6 @@ vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](http
 **For benchmarking developers**: please try your best to constraint the duration of benchmarking to about 1 hr so that it won't take forever to run.
 
 ## Trigger the benchmark
-
 
 The benchmark needs to be triggered manually:
 
@@ -133,4 +131,3 @@ Here is an example using the script to compare result_a and result_b with Model,
 A comparison diagram will be generated below the table.
 Here is an example to compare between 96c/results_gnr_96c_091_tp2pp3 and 128c/results_gnr_128c_091_tp2pp3
 <img width="1886" height="828" alt="image" src="https://github.com/user-attachments/assets/c02a43ef-25d0-4fd6-90e5-2169a28682dd" />
-
