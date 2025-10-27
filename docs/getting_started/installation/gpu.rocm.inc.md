@@ -119,11 +119,11 @@ Currently, there are no pre-built ROCm wheels.
             setuptools_scm
         pip install -r requirements/rocm.txt
 
-        # Build vLLM for multiple arch MI210/MI250/MI300.
-        export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-
-        # Build vLLM for single arch MI300. (Speed up installation)
+        # To build for a single architecture (e.g., MI300) for faster installation (recommended):
         export PYTORCH_ROCM_ARCH="gfx942"
+
+        # To build vLLM for multiple arch MI210/MI250/MI300, use this instead
+        # export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
 
         python3 setup.py develop
         ```
