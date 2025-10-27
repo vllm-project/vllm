@@ -16,6 +16,8 @@ from vllm.logger import init_logger
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
     "cprofile_context": "profiling",
+    # Used by lm-eval
+    "get_open_port": "network_utils",
 }
 
 
