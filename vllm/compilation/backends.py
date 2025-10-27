@@ -27,7 +27,6 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .caching import VllmSerializableFunction
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -42,24 +41,52 @@ logger = init_logger(__name__)
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
+    # Check if inductor should be used by looking at the backend field
     if compilation_config.backend == "inductor":
-        # Use standalone compile only if requested, version is new enough,
-        # and the symbol actually exists in this PyTorch build.
-        if (
+        # Use standalone compile if:
+        # 1. Explicitly requested via VLLM_USE_STANDALONE_COMPILE, OR
+        # 2. AOT compile is enabled (which requires serialization), OR
+        # 3. Backend with inductor cache is enabled (requires serialization)
+        # AND the PyTorch version is new enough and has standalone_compile
+        should_use_standalone = (
             envs.VLLM_USE_STANDALONE_COMPILE
+            or envs.VLLM_USE_AOT_COMPILE
+            or envs.VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS
+        )
+        if (
+            should_use_standalone
             and is_torch_equal_or_newer("2.8.0.dev")
             and hasattr(torch._inductor, "standalone_compile")
         ):
+            if (
+                envs.VLLM_USE_AOT_COMPILE
+                or envs.VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS
+            ) and not envs.VLLM_USE_STANDALONE_COMPILE:
+                msg = (
+                    "AOT compile or inductor cache backend is enabled, "
+                    "automatically using InductorStandaloneAdaptor for "
+                    "serialization support"
+                )
+                logger.info(msg)
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
         else:
+            if (
+                envs.VLLM_USE_AOT_COMPILE
+                or envs.VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS
+            ):
+                msg = (
+                    "VLLM_USE_AOT_COMPILE or "
+                    "VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS is "
+                    "set but standalone compile is not available. These "
+                    "features require PyTorch 2.8.0+ with standalone_compile "
+                    "support. Falling back to InductorAdaptor without "
+                    "serialization support."
+                )
+                logger.warning(msg)
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
-        assert compilation_config.backend == "eager", (
-            "Custom backends not supported with CompilationMode.VLLM_COMPILE"
-        )
-
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
 
@@ -202,7 +229,6 @@ class CompilerManager:
                 # there can be multiple graphs due to piecewise compilation.
                 now = time.time()
                 elapsed = now - compilation_start_time
-                compilation_config.compilation_time += elapsed
                 if runtime_shape is None:
                     logger.info(
                         "Directly load the compiled graph(s) for dynamic shape "
@@ -354,6 +380,51 @@ def split_graph(
 compilation_start_time = 0.0
 
 
+def wrap_with_cudagraph_if_needed(
+    piecewise_backend: Any,
+    vllm_config: VllmConfig,
+    compilation_config: CompilationConfig,
+    is_first_graph: bool,
+    is_last_graph: bool,
+) -> Any:
+    """
+    Wrap a piecewise backend with CUDA graph wrapper if needed.
+    This function is shared between VllmBackend and VllmBackendWithCache.
+
+    Args:
+        piecewise_backend: The backend to wrap
+        vllm_config: The vLLM configuration
+        compilation_config: The compilation configuration
+        is_first_graph: Whether this is the first graph in the sequence
+        is_last_graph: Whether this is the last graph in the sequence
+
+    Returns:
+        The wrapped backend if CUDA graphs are enabled, otherwise the original backend
+    """
+    if (
+        compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        and not compilation_config.use_inductor_graph_partition
+    ):
+        from .cuda_graph import CUDAGraphOptions
+
+        static_graph_wrapper_class = resolve_obj_by_qualname(
+            current_platform.get_static_graph_wrapper_cls()
+        )
+
+        return static_graph_wrapper_class(
+            runnable=piecewise_backend,
+            vllm_config=vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=CUDAGraphOptions(
+                debug_log_enable=is_first_graph,
+                gc_disable=not is_first_graph,
+                weak_ref_output=is_last_graph,
+            ),
+        )
+    else:
+        return piecewise_backend
+
+
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
     It runs the given graph with fake inputs, and compile some
@@ -409,17 +480,19 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             ]
             global compilation_start_time
 
-            compiled_graph_for_dynamic_shape = (
-                self.vllm_backend.compiler_manager.compile(
-                    submod,
-                    args,
-                    self.compilation_config.inductor_compile_config,
-                    self.compilation_config,
-                    graph_index=index,
-                    num_graphs=len(self.compile_submod_names),
-                    runtime_shape=None,
+            with torch._functorch.config.patch("bundled_autograd_cache", True):
+                compiled_graph_for_dynamic_shape = (
+                    self.vllm_backend.compiler_manager.compile(
+                        submod,
+                        args,
+                        self.compilation_config.inductor_compile_config,
+                        self.compilation_config,
+                        graph_index=index,
+                        num_graphs=len(self.compile_submod_names),
+                        runtime_shape=None,
+                    )
                 )
-            )
+
             # Lazy import here to avoid circular import
             from .piecewise_backend import PiecewiseBackend
 
@@ -433,36 +506,14 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 self.vllm_backend,
             )
 
-            if (
-                self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
-                and not self.compilation_config.use_inductor_graph_partition
-            ):
-                # We're using Dynamo-based piecewise splitting, so we wrap
-                # the whole subgraph with a static graph wrapper.
-                from .cuda_graph import CUDAGraphOptions
-
-                # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
-                # class) as platform dependent.
-                static_graph_wrapper_class = resolve_obj_by_qualname(
-                    current_platform.get_static_graph_wrapper_cls()
-                )
-
-                # Always assign PIECEWISE runtime mode to the
-                # CUDAGraphWrapper for piecewise_backend, to distinguish
-                # it from the FULL cudagraph runtime mode, no matter it
-                # is wrapped on a full or piecewise fx graph.
-                self.module.__dict__[target] = static_graph_wrapper_class(
-                    runnable=piecewise_backend,
-                    vllm_config=self.vllm_config,
-                    runtime_mode=CUDAGraphMode.PIECEWISE,
-                    cudagraph_options=CUDAGraphOptions(
-                        debug_log_enable=piecewise_backend.is_first_graph,
-                        gc_disable=not piecewise_backend.is_first_graph,
-                        weak_ref_output=piecewise_backend.is_last_graph,
-                    ),
-                )
-            else:
-                self.module.__dict__[target] = piecewise_backend
+            # Use the shared cudagraph wrapper function
+            self.module.__dict__[target] = wrap_with_cudagraph_if_needed(
+                piecewise_backend,
+                self.vllm_config,
+                self.compilation_config,
+                piecewise_backend.is_first_graph,
+                piecewise_backend.is_last_graph,
+            )
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
@@ -489,9 +540,207 @@ def set_model_tag(tag: str):
         model_tag = old_tag
 
 
+def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
+    factors = []
+    # 0. factors come from the env, for example, The values of
+    # VLLM_PP_LAYER_PARTITION will affect the computation graph.
+    env_hash = envs.compute_hash()
+    factors.append(env_hash)
+
+    # 1. factors come from the vllm_config (it mainly summarizes how the
+    #    model is created)
+    config_hash = vllm_config.compute_hash()
+    factors.append(config_hash)
+    return factors
+
+
+class VllmBackendWithCache:
+    """A backend that reconstructs the compiled model from cached inductor
+    artifacts.
+
+    This backend takes the inductor cache directly and constructs a split_gm
+    object from scratch, without relying on VllmBackend's existing logic.
+    This avoids the overhead of saving the dynamo graph module and
+    re-splitting the graph module.
+
+    The workflow is:
+    1. Take the inductor cache with all compiled graph pieces
+    2. Construct a callable that dispatches to the right compiled graphs
+    3. Wrap with cudagraph if needed
+    """
+
+    def __init__(
+        self,
+        inductor_compiled_artifacts: Any,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        submod_names: list[str] | None = None,
+        sym_shape_indices_map: dict[str, list[int]] | None = None,
+        returns_tuple_map: dict[str, bool] | None = None,
+    ):
+        """
+        Initialize the backend with an inductor cache.
+
+        Args:
+            inductor_compiled_artifacts: The inductor cache containing
+                compiled artifacts
+            vllm_config: The vLLM configuration
+            prefix: The prefix for this backend (e.g., model_tag)
+            submod_names: List of submodule names in compilation order
+            sym_shape_indices_map: Mapping from submod_name to sym_shape_indices
+            returns_tuple_map: Mapping from submod_name to returns_tuple
+        """
+        self.inductor_compiled_artifacts = inductor_compiled_artifacts
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
+        self.prefix = prefix
+        self.submod_names = submod_names or []
+        self.sym_shape_indices_map = sym_shape_indices_map or {}
+        self.returns_tuple_map = returns_tuple_map or {}
+
+        # Create a VllmBackend instance for PiecewiseBackend to use
+        # This is needed for compiler_manager access
+        self.vllm_backend = VllmBackend(vllm_config, prefix)
+
+        # Initialize the compiler manager with cache disabled since
+        # we're loading from cache. We don't need to compile anything
+        # new, just need the save_to_file method to work.
+        # Use a dummy cache directory since we won't actually write.
+        dummy_cache_dir = os.path.join(envs.VLLM_CACHE_ROOT, "dummy_cache")
+        os.makedirs(dummy_cache_dir, exist_ok=True)
+        self.vllm_backend.compiler_manager.initialize_cache(
+            cache_dir=dummy_cache_dir,
+            disable_cache=True,
+            prefix=prefix,
+        )
+
+        # Load all artifacts from cache
+        self.inductor_compiled_artifacts.load_all()
+
+        # Build the dispatch callable
+        self.build_dispatch_callable()
+
+    def build_dispatch_callable(self):
+        """Build a callable that dispatches to the right compiled graphs."""
+        # Store compiled callables for each submodule and shape
+        self.compiled_callables: dict[str, dict[str, Callable]] = {}
+
+        for submod_name in self.submod_names:
+            self.compiled_callables[submod_name] = {}
+
+            # For each submodule, we need to load the compiled graph
+            # for each shape. The cache stores entries as
+            # "{submod_name}_{shape}". We need to extract the general
+            # shape (None) and any specific shapes
+            for cache_key in self.inductor_compiled_artifacts.submodule_bytes:
+                if cache_key.startswith(f"{submod_name}_"):
+                    shape_str = cache_key[len(submod_name) + 1 :]
+                    compiled_fn = self.inductor_compiled_artifacts.get_loaded(
+                        submod_name, shape_str
+                    )
+                    self.compiled_callables[submod_name][shape_str] = compiled_fn
+
+    def create_piecewise_backend_from_cache(
+        self,
+        submod_name: str,
+        index: int,
+    ):
+        """Create a piecewise backend from cached artifacts for a
+        specific submodule."""
+        from .piecewise_backend import PiecewiseBackend
+
+        # Get the compiled callable for the general shape
+        general_shape_fn = self.compiled_callables[submod_name].get("None")
+        if general_shape_fn is None:
+            raise ValueError(
+                f"No general shape compiled function found for {submod_name}"
+            )
+
+        # Create a lightweight piecewise backend that uses the cached artifacts
+        # We need to create a minimal graph module as a placeholder
+        # since PiecewiseBackend expects one
+        dummy_graph = fx.GraphModule({}, fx.Graph())
+
+        # Determine which shapes are available for this submodule
+        available_shapes = [
+            shape_str
+            for shape_str in self.compiled_callables[submod_name]
+            if shape_str != "None"
+        ]
+
+        def get_compiled_graph_for_size(shape_str: str):
+            """Get the compiled graph for a specific shape from cache."""
+            return self.compiled_callables[submod_name].get(shape_str)
+
+        # Get sym_shape_indices from the map. Default to [0] (batch dimension)
+        # if not found, which is the typical case in vLLM where the first
+        # argument represents the batch size (a symbolic shape).
+        sym_shape_indices = self.sym_shape_indices_map.get(submod_name, [0])
+
+        # Get returns_tuple from the map
+        returns_tuple = self.returns_tuple_map.get(submod_name)
+
+        piecewise_backend = PiecewiseBackend(
+            graph=dummy_graph,
+            vllm_config=self.vllm_config,
+            piecewise_compile_index=index,
+            total_piecewise_compiles=len(self.submod_names),
+            sym_shape_indices=sym_shape_indices,
+            compiled_graph_for_general_shape=general_shape_fn,
+            vllm_backend=self.vllm_backend,
+            get_compiled_graph_for_size=(
+                get_compiled_graph_for_size if available_shapes else None
+            ),
+            returns_tuple=returns_tuple,
+        )
+
+        return piecewise_backend
+
+    def create_split_gm_from_cache(self, split_gm: fx.GraphModule) -> fx.GraphModule:
+        """Replace the submodules in split_gm with piecewise backends
+        loaded from cache.
+
+        This allows us to reuse the graph structure from split_gm while
+        loading the compiled artifacts from cache.
+
+        Args:
+            split_gm: The split graph module from deserialization. This
+                contains the structure of how submodules are chained, but
+                the submodules themselves need to be replaced with piecewise
+                backends loaded from cache.
+
+        Returns:
+            The modified split_gm with submodules replaced by piecewise
+            backends from cache.
+        """
+        for i, submod_name in enumerate(self.submod_names):
+            # Create piecewise backend from cache
+            piecewise_backend = self.create_piecewise_backend_from_cache(submod_name, i)
+
+            # Wrap with cudagraph if needed
+            is_first = i == 0
+            is_last = i == len(self.submod_names) - 1
+            wrapped_backend = wrap_with_cudagraph_if_needed(
+                piecewise_backend,
+                self.vllm_config,
+                self.compilation_config,
+                is_first,
+                is_last,
+            )
+
+            # Replace the submodule in split_gm
+            setattr(split_gm, submod_name, wrapped_backend)
+            logger.debug(
+                "Replaced submodule %s with piecewise backend from cache",
+                submod_name,
+            )
+
+        return split_gm
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation mode of `CompilationMode.VLLM_COMPILE`,
+    It is used for compilation level of `CompilationLevel.PIECEWISE`,
     where we customize the compilation.
 
     The major work of this backend is to split the graph into
@@ -545,6 +794,120 @@ class VllmBackend:
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
+    def _collect_inductor_compiled_artifacts(
+        self, submod_names: list[str]
+    ) -> tuple[Any, dict[str, list[int]] | None, dict[str, bool] | None]:
+        """Collect inductor cache artifacts from all piecewise backends.
+
+        Returns:
+            tuple: (inductor_compiled_artifacts, sym_shape_indices_map,
+                    returns_tuple_map)
+                - inductor_compiled_artifacts: InductorCompiledArtifacts
+                  with compiled artifacts
+                - sym_shape_indices_map: dict mapping submod_name to
+                  sym_shape_indices
+                - returns_tuple_map: dict mapping submod_name to
+                  returns_tuple
+        """
+
+        if not envs.VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS:
+            return None, None, None
+
+        from torch._inductor.compile_fx import graph_returns_tuple
+
+        from .caching import VllmSerializableFunction
+
+        inductor_compiled_artifacts = (
+            VllmSerializableFunction.InductorCompiledArtifacts()
+        )
+        sym_shape_indices_map = {}
+        returns_tuple_map = {}
+
+        for submod_name in submod_names:
+            # Get the piecewise backend from the split_gm
+            if not hasattr(self.split_gm, submod_name):
+                logger.warning(
+                    "Submodule %s not found in split_gm, skipping cache collection",
+                    submod_name,
+                )
+                continue
+
+            piecewise_backend = getattr(self.split_gm, submod_name)
+
+            # If it's wrapped in a CUDA graph wrapper, unwrap it
+            if hasattr(piecewise_backend, "runnable"):
+                piecewise_backend = piecewise_backend.runnable
+
+            # Collect sym_shape_indices from the piecewise backend
+            if hasattr(piecewise_backend, "sym_shape_indices"):
+                sym_shape_indices_map[submod_name] = piecewise_backend.sym_shape_indices
+                logger.debug(
+                    "Collected sym_shape_indices for %s: %s",
+                    submod_name,
+                    piecewise_backend.sym_shape_indices,
+                )
+
+            # Collect returns_tuple information
+            if hasattr(piecewise_backend, "graph"):
+                returns_tuple = graph_returns_tuple(piecewise_backend.graph)
+                returns_tuple_map[submod_name] = returns_tuple
+                logger.debug(
+                    "Collected returns_tuple for %s: %s",
+                    submod_name,
+                    returns_tuple,
+                )
+
+            has_serialize = hasattr(
+                piecewise_backend.compiled_graph_for_general_shape, "serialize"
+            )
+            logger.debug(
+                "Piecewise backend for %s: has serialize=%s",
+                submod_name,
+                has_serialize,
+            )
+
+            if has_serialize:
+                bytes_dict = piecewise_backend.to_bytes()
+                if bytes_dict:
+                    for shape_str, bytes_data in bytes_dict.items():
+                        inductor_compiled_artifacts.insert(
+                            submod_name, shape_str, bytes_data
+                        )
+                        logger.debug(
+                            "Collected inductor cache for %s with shape %s (%d bytes)",
+                            submod_name,
+                            shape_str,
+                            len(bytes_data),
+                        )
+                else:
+                    logger.warning(
+                        "Piecewise backend for %s returned empty to_bytes() - "
+                        "bundled_autograd_cache may not have been enabled",
+                        submod_name,
+                    )
+            else:
+                logger.debug(
+                    "Compiled graph for %s does not support serialization "
+                    "(missing 'serialize' method). aot "
+                    "was not enabled during compilation. Check that "
+                    "VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS=1",
+                    submod_name,
+                )
+
+        logger.info(
+            "Collected inductor cache: %d entries, %d artifacts, %d bytes total",
+            inductor_compiled_artifacts.num_entries(),
+            inductor_compiled_artifacts.num_artifacts(),
+            inductor_compiled_artifacts.size_bytes(),
+        )
+
+        logger.info(
+            "Inductor cache keys: %s",
+            list(inductor_compiled_artifacts.submodule_bytes.keys()),
+        )
+
+        return inductor_compiled_artifacts, sym_shape_indices_map, returns_tuple_map
+
     def configure_post_pass(self):
         config = self.compilation_config
         self.post_grad_pass_manager.configure(self.vllm_config)
@@ -566,10 +929,12 @@ class VllmBackend:
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
-    def __call__(
-        self, graph: fx.GraphModule, example_inputs
-    ) -> VllmSerializableFunction:
-        from .caching import _compute_code_hash, compilation_config_hash_factors
+    def __call__(self, graph: fx.GraphModule, example_inputs):
+        from .caching import (
+            VllmSerializableFunction,
+            _compute_code_hash,
+            compilation_config_hash_factors,
+        )
 
         vllm_config = self.vllm_config
         if not self.compilation_config.cache_dir:
@@ -582,7 +947,6 @@ class VllmBackend:
             # 2. factors come from the code files that are traced by Dynamo (
             #    it mainly summarizes how the model is used in forward pass)
             code_hash = _compute_code_hash(self.compilation_config.traced_files)
-            self.compilation_config.traced_files.clear()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -643,14 +1007,16 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        if self.compilation_config.use_inductor_graph_partition:
-            # Let Inductor decide partitioning; avoid FX-level pre-splitting.
-            fx_split_ops: list[str] = []
-        else:
-            fx_split_ops = self.compilation_config.splitting_ops or []
+        # Resolve splitting ops from strings to OpOverload objects
+        from vllm.compilation.partition_rules import resolve_defined_ops
 
-        resolved_split_ops = resolve_defined_ops(fx_split_ops)
-        self.split_gm, self.piecewise_graphs = split_graph(graph, resolved_split_ops)
+        resolved_splitting_ops = resolve_defined_ops(
+            self.compilation_config.splitting_ops or []
+        )
+
+        self.split_gm, self.piecewise_graphs = split_graph(
+            graph, resolved_splitting_ops
+        )
 
         from torch._dynamo.utils import lazy_format_graph_code
 
@@ -674,8 +1040,7 @@ class VllmBackend:
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
-            # code adapted from
-            # https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30
+            # code adapted from https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30 # noqa
             # use `print_readable` because it can include submodules
             src = (
                 "from __future__ import annotations\nimport torch\n"
@@ -691,12 +1056,41 @@ class VllmBackend:
 
         self._called = True
 
+        # Extract shape_env from the graph module's fake mode if available
+        from torch._guards import detect_fake_mode
+
+        fake_mode = detect_fake_mode()
+        shape_env = fake_mode.shape_env if fake_mode else None
+
+        # Extract submod_names from piecewise_graphs for serialization
+        submod_names = [
+            item.submod_name
+            for item in self.piecewise_graphs
+            if not item.is_splitting_graph
+        ]
+
+        # Collect inductor cache and sym_shape_indices from all
+        # piecewise backends
+        (
+            inductor_compiled_artifacts,
+            sym_shape_indices_map,
+            returns_tuple_map,
+        ) = self._collect_inductor_compiled_artifacts(submod_names)
+
         if (
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
         ):
             return VllmSerializableFunction(
-                graph, example_inputs, self.prefix, self.split_gm
+                graph,
+                example_inputs,
+                self.prefix,
+                self.split_gm,
+                shape_env,
+                submod_names,
+                inductor_compiled_artifacts,
+                sym_shape_indices_map,
+                returns_tuple_map,
             )
 
         # if we need to copy input buffers for cudagraph
@@ -743,5 +1137,13 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return VllmSerializableFunction(
-            graph, example_inputs, self.prefix, copy_and_call
+            graph,
+            example_inputs,
+            self.prefix,
+            copy_and_call,
+            shape_env,
+            submod_names,
+            inductor_compiled_artifacts,
+            sym_shape_indices_map,
+            returns_tuple_map,
         )
