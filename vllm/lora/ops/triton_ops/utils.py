@@ -219,12 +219,13 @@ def get_lora_op_configs(
         "fused_moe_lora_down_expand",
     ]:
         default = {
-            "block_m": 64,
-            "block_n": 64,
-            "block_k": 32,
-            "num_warps": 4,
-            "num_stages": 3,
-            "group_size_m": 8,
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "NUM_WARPS": 4,
+            "NUM_STAGES": 3,
+            "GROUP_SIZE_M": 8,
+            "SPLIT_K": 1,
         }
     else:
         default = {

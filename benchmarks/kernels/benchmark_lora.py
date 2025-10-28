@@ -70,6 +70,8 @@ DEFAULT_NUM_LORAS = [1, 2, 3, 4]
 DEFAULT_SORT_BY_LORA_IDS = [False, True]
 DEFAULT_SEQ_LENGTHS = [1]
 DEFAULT_EXPAND_FN_ADD_INPUTS = [True, False]
+DEFAULT_TOP_K_NUMS = [1]  # Added for MoE LoRA top_k
+DEFAULT_NUM_EXPERTS = [8]  # Added for MoE LoRA num_experts
 
 
 # Utilities
@@ -315,20 +317,19 @@ class OpType(Enum):
         top_k_num: int,
         num_experts: int,
     ) -> tuple[tuple[int], tuple[int], tuple[int], tuple[int]]:
-        if self.is_fused_moe_lora_gate_up_fn():
-            if self.is_fused_moe_lora_shrink_fn():
-                input_shape = (
-                    (m * top_k_num, n)
-                    if self in [OpType.FUSED_MOE_LORA_GATE_UP_SHRINK]
-                    else (m, n)
-                )
-                output_shape = (num_slices, m, top_k_num, k)
-                weight_shape = (num_loras, num_experts, k, n)
-            else:
-                assert self.is_fused_moe_lora_expand_fn()
-                input_shape = (num_slices, m, top_k_num, k)
-                output_shape = (m, top_k_num, n * num_slices)
-                weight_shape = (num_loras, num_experts, n, k)
+        if self.is_fused_moe_lora_shrink_fn():
+            input_shape = (
+                (m * top_k_num, n)
+                if self in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
+                else (m, n)
+            )
+            output_shape = (num_slices, m, top_k_num, k)
+            weight_shape = (num_loras, num_experts, k, n)
+        else:
+            assert self.is_fused_moe_lora_expand_fn()
+            input_shape = (num_slices, m, top_k_num, k)
+            output_shape = (m, top_k_num, n * num_slices)
+            weight_shape = (num_loras, num_experts, n, k)
         return (input_shape, weight_shape, output_shape)
 
     def matmul_shapes(
@@ -357,7 +358,6 @@ class OpType(Enum):
             return ((num_slices, m, k), b_shape, (m, n * num_slices))
         if self.is_fused_moe_lora_fn():
             return self.matmul_shapes_fused_moe_lora(
-                self,
                 m,
                 k,
                 n,
@@ -470,14 +470,14 @@ class OpType(Enum):
 
                         # Decode: original_token_idx and k_idx from sorted_token_id
                         if is_shrink:
-                            # For shrink: sorted_token_id encodes (token_idx * top_k + k_idx)
+                            # shrink: sorted_token_id (token_idx * top_k + k_idx)
                             original_token_idx = sorted_token_id // top_k_num
                             k_idx = sorted_token_id % top_k_num
                         else:
                             # For expand: sorted_token_id is just the token index
-                            # k_idx comes from the expert routing (encoded in block structure)
+                            # k_idx from the expert routing (encoded in block structure)
                             original_token_idx = sorted_token_id
-                            # Need to infer k_idx - in expand, tokens are organized differently
+                            # Infer k_idx, in expand, tokens are organized differently
                             # Each expert processes tokens with that expert's k_idx
                             k_idx = expert_id % top_k_num  # Simplified
 
@@ -719,7 +719,7 @@ class BenchmarkTensors:
             torch.sum(self.seq_lens) * ctx.top_k_num == num_tokens
             if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
             else torch.sum(self.seq_lens) == num_tokens
-        )
+        ), f"Expected {num_tokens} tokens, but got {torch.sum(self.seq_lens)}"
         num_seqs = self.seq_lens.shape[0]
         # assert self.seq_start_loc.shape[0] == num_seqs
         ## In down shrink case, each prompt corresponds to top_k_num sequences
@@ -846,7 +846,7 @@ class BenchmarkTensors:
 
         (sorted_token_ids_lora, expert_ids_lora, num_tokens_post_padded_lora) = (
             moe_lora_align_block_size(
-                curr_topk_ids=curr_topk_ids,
+                topk_ids=curr_topk_ids,
                 token_lora_mapping=token_lora_mapping,
                 block_size=block_size,
                 num_experts=ctx.num_experts,
@@ -968,7 +968,12 @@ class BenchmarkTensors:
         lora_rank = lw_shape[-2]
         # Expected output shape : [num_slices, num_tokens, top_k_num, lora_rank]
         assert len(o_shape) == 4
-        assert o_shape == (num_slices, num_tokens, ctx.top_k_num, lora_rank)
+        assert (
+            o_shape
+            == (num_slices, num_tokens // ctx.top_k_num, ctx.top_k_num, lora_rank)
+            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
+            else o_shape == (num_slices, num_tokens, ctx.top_k_num, lora_rank)
+        )
         kernel_config = get_lora_op_configs(
             op_type.name.lower(),
             max_loras=lw_shape[0],
@@ -1010,7 +1015,7 @@ class BenchmarkTensors:
             "shrink_group_size_m": kernel_config["GROUP_SIZE_M"],
             "shrink_num_warps": kernel_config["num_warps"],
             "shrink_num_stages": kernel_config["num_stages"],
-            "shrink_splitK": kernel_config.get("SPLIT_K", 1),
+            "shrink_split_k": kernel_config.get("SPLIT_K", 1),
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
@@ -1085,7 +1090,7 @@ class BenchmarkTensors:
             "expand_group_size_m": kernel_config["GROUP_SIZE_M"],
             "expand_num_warps": kernel_config["num_warps"],
             "expand_num_stages": kernel_config["num_stages"],
-            "expand_splitK": kernel_config.get("SPLIT_K", 1),
+            "expand_split_k": kernel_config.get("SPLIT_K", 1),
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
@@ -1170,7 +1175,7 @@ def bench_optype(
     test_correctness: bool = False,
 ) -> TMeasurement:
     assert arg_pool_size >= 1
-    if op_type.is_shrink_fn():
+    if op_type.is_shrink_fn() or op_type.is_fused_moe_lora_fn():
         assert expand_fn_add_inputs is None
     else:
         assert expand_fn_add_inputs is not None
@@ -1350,7 +1355,9 @@ def run(args: argparse.Namespace, bench_ctxs: list[BenchmarkContext]):
 
                     # Benchmark bench_op
                     expand_fn_add_inputs = (
-                        [None] if bench_op.is_shrink_fn() else args.expand_fn_add_inputs
+                        [None]
+                        if bench_op.is_shrink_fn() or bench_op.is_fused_moe_lora_fn()
+                        else args.expand_fn_add_inputs
                     )
                     for add_input_arg in expand_fn_add_inputs:
                         seq_len_timers.append(
@@ -1388,12 +1395,22 @@ def as_benchmark_contexts(
     hidden_sizes: list[int], lora_ranks: list[int], args: argparse.Namespace
 ) -> list[BenchmarkContext]:
     ctxs: list[BenchmarkContext] = []
-    for batch_size, hidden_size, lora_rank, num_loras, sort_by_lora_id in product(  # noqa
+    for (
+        batch_size,
+        hidden_size,
+        lora_rank,
+        num_loras,
+        sort_by_lora_id,
+        top_k_num,
+        num_experts,
+    ) in product(  # noqa
         args.batch_sizes,
         list(hidden_sizes),
         lora_ranks,
         args.num_loras,
         args.sort_by_lora_id,
+        args.top_k_nums,
+        args.num_experts,
     ):
         ctxs.append(
             BenchmarkContext(
@@ -1409,6 +1426,8 @@ def as_benchmark_contexts(
                 sort_by_lora_id=sort_by_lora_id,
                 dtype=args.dtype,
                 # To be filled based on the OpType to benchmark
+                top_k_num=top_k_num,
+                num_experts=num_experts,
                 num_slices=None,
             )
         )
@@ -1567,6 +1586,22 @@ if __name__ == "__main__":
                 "When enabled, the benchmarking functions are tested"
                 "for correctness before the actual benchmarking"
             ),
+        )
+
+        p.add_argument(
+            "--top-k-nums",
+            nargs="+",
+            type=int,
+            default=DEFAULT_TOP_K_NUMS,
+            help="Top-K values for MoE LoRA operations",
+        )
+
+        p.add_argument(
+            "--num-experts",
+            nargs="+",
+            type=int,
+            default=DEFAULT_NUM_EXPERTS,
+            help="Number of experts for MoE LoRA operations",
         )
 
     parser = FlexibleArgumentParser(
