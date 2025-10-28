@@ -306,9 +306,7 @@ class LLMEngine:
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
         # 4) Record stats
-        if self.logger_manager is not None:
-            assert outputs.scheduler_stats is not None
-
+        if self.logger_manager is not None and outputs.scheduler_stats is not None:
             self.logger_manager.record(
                 scheduler_stats=outputs.scheduler_stats,
                 iteration_stats=iteration_stats,
