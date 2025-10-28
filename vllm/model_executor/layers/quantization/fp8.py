@@ -551,8 +551,13 @@ class Fp8LinearMethod(LinearMethodBase):
 
                     # Override the W8A8BlockFp8LinearOp as now we know
                     # the weight is shuffled
+                    # assertion to ensure the weight block size is not None
+                    # so mypy is happy with the GroupShape constructor
+                    assert self.weight_block_size is not None
                     self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-                        weight_group_shape=GroupShape(*self.weight_block_size),
+                        weight_group_shape=GroupShape(
+                            self.weight_block_size[0], self.weight_block_size[1]
+                        ),
                         act_quant_group_shape=self.act_q_group_shape,
                         cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                         use_aiter_and_is_supported=self.use_aiter_and_is_supported,
