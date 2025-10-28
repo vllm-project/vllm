@@ -186,11 +186,6 @@ def _convert_req_index_to_global_index_kernel(
     # Load request id for this token (no mask: grid is exact)
     req = tl.load(req_id_ptr + token_id)
 
-    # Load prefill request id if prefill support is enabled
-    if HAS_PREFILL:
-        prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
-        is_prefill = prefill_req_id >= 0
-
     # Load token indices for this tile
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
     tok = tl.load(ti_ptr)  # int32
@@ -198,8 +193,10 @@ def _convert_req_index_to_global_index_kernel(
     # Only token == -1 should propagate as -1
     is_invalid_tok = tok < 0
 
-    # Prefill path: map to workspace offset
+    # Prefill path: load metadata and compute workspace offset
     if HAS_PREFILL:
+        prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
+        is_prefill = prefill_req_id >= 0
         workspace_start = tl.load(
             workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
         )
