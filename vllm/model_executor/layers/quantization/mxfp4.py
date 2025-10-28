@@ -73,8 +73,24 @@ class Mxfp4Backend(Enum):
     TRITON = 6
 
 
-def get_mxfp4_backend():
+def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
+    """
+    Not all MXFP4 backends support LoRA. Select backends that are known to
+    have LoRA support.
+    """
+    if not current_platform.is_cuda():
+        return Mxfp4Backend.NONE
+
+    logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
+    return Mxfp4Backend.MARLIN
+
+
+def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
     # Backend Selection
+
+    if with_lora_support:
+        return get_mxfp4_backend_with_lora()
+
     if current_platform.is_cuda():
         if (
             current_platform.is_device_capability(90)
@@ -183,13 +199,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.topk_indices_dtype = None
         self.moe = moe
-        self.mxfp4_backend = get_mxfp4_backend()
+        self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
-            "No MXFP4 MoE backend (FlashInfer/Marlin/Triton) available."
+            f"get_mxfp4_backend(with_lora_support={moe.is_lora_enabled}) found"
+            "no compatible MXFP4 MoE backend (FlashInfer/Marlin/Triton)."
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
