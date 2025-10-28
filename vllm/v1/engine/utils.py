@@ -1236,7 +1236,7 @@ class FaultHandler:
         self.client_cmd_registry = client_cmd_registry
         self.engine_exception_q = engine_exception_q
         self.engine_exception_q_lock = engine_exception_q_lock
-        self.engine_statue_dict = engine_status_dict
+        self.engine_status_dict = engine_status_dict
 
     async def handle_fault(self, instruction: str, timeout) -> bool:
         # TODO: Implement a thread-safe dictionary to mark statuses
@@ -1246,7 +1246,7 @@ class FaultHandler:
 
         client_cmd_registry_copy = self.client_cmd_registry.copy()
 
-        if instruction == "retry" and "Dead" in self.engine_statue_dict.values():
+        if instruction == "retry" and "Dead" in self.engine_status_dict.values():
             logger.info(
                 "engine_core dead unexpectedly, retry is impossible,"
                 "shutdown will be performed"

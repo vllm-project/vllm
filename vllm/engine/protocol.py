@@ -170,3 +170,6 @@ class EngineClient(ABC):
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
         raise NotImplementedError
+
+    def shutdown(self) -> None:
+        raise NotImplementedError
