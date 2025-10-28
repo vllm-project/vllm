@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -33,7 +34,11 @@ class CPUModelRunner(GPUModelRunner):
 
     # Note: Remove the override after new attention backend finished
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
-        if len(self.kv_cache_config.kv_cache_groups) > 1:
+        # ipex (used in CPU attn backend for x86) does not support multiple kv groups
+        if (
+            len(self.kv_cache_config.kv_cache_groups) > 1
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+        ):
             raise ValueError(
                 "Multiple KVCacheGroups is not"
                 "currently supported with CPU model runner."

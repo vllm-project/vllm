@@ -1778,7 +1778,12 @@ class EngineArgs:
                 _raise_or_fallback(feature_name=name, recommend_to_remove=False)
                 return False
 
-        if current_platform.is_cpu() and model_config.get_sliding_window() is not None:
+        # SWA not supported by ipex in CPU attention backend
+        if (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and model_config.get_sliding_window() is not None
+        ):
             _raise_or_fallback(
                 feature_name="sliding window (CPU backend)", recommend_to_remove=False
             )

@@ -381,7 +381,9 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         seq_lens_np = seq_lens_cpu.numpy()
 
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        # This tensor is shared between metadata builders for different kv cache groups.
+        # We dont't want to modify it in-place.
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu.clone()
         query_start_loc_np = query_start_loc_cpu.numpy()
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -636,6 +638,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 block_tables_arg,
                 seq_lens_arg,
                 max_seq_len_arg,
+                self.sliding_window,
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -817,6 +820,51 @@ class _PagedAttention:
         )
 
     @staticmethod
+    def truncate_blocks_for_swa(
+        window: int,
+        block_size: int,
+        context_lens: torch.Tensor,
+        block_table: torch.Tensor,
+    ):
+        # Truncate blocks for Sliding Window Attention (SWA):
+        # This helps us enable block-granular sliding window.
+        # We truncate all blocks that are fully outside the window, to:
+        #   1. Avoid doing attention over blocks that have been nullified
+        #       (i.e. contain garbage) by the block manager
+        #   2. Save FLOPs by completely truncating these blocks, not just masking.
+        #### Example Inputs:
+        # window = 20
+        # block_size = 16
+        # context_lens = [30, 95, 45]
+        # block_table_tensor=tensor([[10, 12, 0, 0, 0, 0, 0], [3, 4, 5, 6, 7, 11, 0],
+        #                            [8, 9, 13, 0, 0, 0, 0]], dtype=torch.int32)
+        #### Example Output:
+        # 1. context len = 30 -> Nothing to skip
+        # 2. context len = 95 -> skip first 4 blocks, new context len = 31
+        # 3. context len = 45 -> skip first block only, new context len = 29
+        # context_lens = [30, 95, 45]
+        # block_table_tensor=tensor([[10, 12, 0, 0, 0, 0, 0],[7, 11, 0, 0, 0, 0, 0],
+        #                           [9, 13, 0, 0, 0, 0, 0]], dtype=torch.int32)
+
+        # full blocks to drop from the beginning
+        blocks_to_skip = torch.relu((context_lens - window) // block_size)
+        num_sequences, max_num_blocks_per_seq = block_table.shape
+        # per-row column indices after shifting: j -> j + skip[i]
+        # idx dims: [num_sequences, max_num_blocks_per_seq]
+        idx = torch.arange(max_num_blocks_per_seq).unsqueeze(
+            0
+        ) + blocks_to_skip.unsqueeze(1)
+        # valid positions after shift
+        mask = idx < max_num_blocks_per_seq
+        # keep gather in-bounds
+        idx = idx.clamp_max(max_num_blocks_per_seq - 1)
+        # gather then zero-out overflow with mask
+        new_block_table = block_table.gather(1, idx) * mask.to(block_table.dtype)
+
+        new_context_lens = context_lens - blocks_to_skip * block_size
+        return new_context_lens, new_block_table
+
+    @staticmethod
     def forward_decode(
         output: torch.Tensor,
         query: torch.Tensor,
@@ -825,6 +873,7 @@ class _PagedAttention:
         block_tables: torch.Tensor,
         context_lens: torch.Tensor,
         max_context_len: int,
+        sliding_window: int,
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
@@ -839,6 +888,19 @@ class _PagedAttention:
         blocksparse_block_size: int = 64
         blocksparse_head_sliding_step: int = 0
         block_size = value_cache.shape[3]
+
+        if sliding_window and max_context_len > sliding_window:
+            # This allows for block-granular SWA, which is the best we can do with
+            # current paged_attn API/implementations and the current block manager.
+            # As a result of having a block-granular (instead of a token granular)
+            # window, we might pay attention to a maximum of "block_size - 1"
+            # extra tokens, but this doesn't affect accuracy in my tests.
+            # See https://github.com/vllm-project/vllm/pull/4768
+            # for context and attempt to enable native SWA support in paged_attn.
+            context_lens, block_tables = _PagedAttention.truncate_blocks_for_swa(
+                sliding_window, block_size, context_lens, block_tables
+            )
+            max_context_len = context_lens.max().item()
 
         ops.paged_attention_v1(
             output,
@@ -908,6 +970,7 @@ class _IPEXPagedAttention(_PagedAttention):
         block_tables: torch.Tensor,
         context_lens: torch.Tensor,
         max_context_len: int,
+        sliding_window: int,
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
@@ -916,6 +979,7 @@ class _IPEXPagedAttention(_PagedAttention):
         v_scale: torch.Tensor,
         *args,
     ) -> None:
+        assert not sliding_window, "_IPEXPagedAttention does not support sliding window"
         block_size = value_cache.shape[2]
         head_mapping = (
             torch.arange(
