@@ -316,4 +316,4 @@ We have split the `encode` task into two more specific token wise tasks: `token_
 
 ### Remove softmax from PoolingParams
 
-We are going to remove `softmax` from `PoolingParams`. Instead, you should set `activation`, since we actually allow `classify` and `token_classify` to use any activation function. 
+We are going to remove `softmax` from `PoolingParams`. Instead, you should set `use_activation`, since we actually allow `classify` and `token_classify` to use any activation function. 

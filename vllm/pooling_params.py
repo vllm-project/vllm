@@ -28,7 +28,7 @@ class PoolingParams(
         normalize: Whether to normalize the embeddings outputs.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
-        activation: Whether to apply activation function to
+        use_activation: Whether to apply activation function to
             the classification outputs.
     """
 
@@ -44,7 +44,7 @@ class PoolingParams(
 
     ## for classification, scoring and rerank
     # --8<-- [start:classification-pooling-params]
-    activation: bool | None = None
+    use_activation: bool | None = None
     # --8<-- [end:classification-pooling-params]
 
     ## for step pooling models
@@ -59,16 +59,16 @@ class PoolingParams(
 
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "normalize", "activation"]
+        return ["dimensions", "normalize", "use_activation"]
 
     @property
     def valid_parameters(self):
         return {
             "embed": ["dimensions", "normalize"],
-            "classify": ["activation"],
-            "score": ["activation"],
+            "classify": ["use_activation"],
+            "score": ["use_activation"],
             "token_embed": ["dimensions", "normalize"],
-            "token_classify": ["activation"],
+            "token_classify": ["use_activation"],
         }
 
     def clone(self) -> "PoolingParams":
@@ -168,8 +168,8 @@ class PoolingParams(
                     raise ValueError("Dimensions must be greater than 0")
 
         elif self.task in ["classify", "score", "token_classify"]:
-            if self.activation is None:
-                self.activation = True
+            if self.use_activation is None:
+                self.use_activation = True
         else:
             raise ValueError(f"Unknown pooling task: {self.task}")
 
@@ -197,7 +197,7 @@ class PoolingParams(
             f"task={self.task}, "
             f"normalize={self.normalize}, "
             f"dimensions={self.dimensions}, "
-            f"activation={self.activation}, "
+            f"use_activation={self.use_activation}, "
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
