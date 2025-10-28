@@ -4,7 +4,6 @@
 within a vision language model."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from einops import rearrange, repeat
@@ -82,7 +81,7 @@ class Siglip2VisionEmbeddings(nn.Module):
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        grid_thws: Optional[torch.LongTensor] = None,
+        grid_thws: torch.LongTensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -206,9 +205,10 @@ class Siglip2Attention(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
@@ -249,7 +249,9 @@ class Siglip2Attention(nn.Module):
 
         # Detect attention implementation.
         self.attn_backend = get_vit_attn_backend(
-            head_size=self.head_dim, dtype=torch.get_default_dtype()
+            head_size=self.head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         self.use_upstream_fa = False
 
@@ -257,6 +259,7 @@ class Siglip2Attention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
@@ -275,8 +278,8 @@ class Siglip2Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Input shape: Batch x Time x Channel"""
 
         seq_length, embed_dim = hidden_states.shape
@@ -337,7 +340,7 @@ class Siglip2MLP(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -370,9 +373,10 @@ class Siglip2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -382,6 +386,7 @@ class Siglip2EncoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Siglip2MLP(
@@ -432,9 +437,10 @@ class Siglip2Encoder(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
@@ -445,6 +451,7 @@ class Siglip2Encoder(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{idx}",
                     use_data_parallel=use_data_parallel,
+                    attn_backend_override=attn_backend_override,
                 )
                 for idx in range(config.num_hidden_layers)
             ]
@@ -616,9 +623,10 @@ class Siglip2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
@@ -630,6 +638,7 @@ class Siglip2VisionTransformer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -655,9 +664,10 @@ class Siglip2NavitModel(torch.nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
 
@@ -666,6 +676,7 @@ class Siglip2NavitModel(torch.nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.vision_model",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
 
     def forward(

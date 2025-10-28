@@ -9,9 +9,9 @@
 import copy
 import math
 import unicodedata
-from collections.abc import Collection, Mapping, Sequence, Set
+from collections.abc import Callable, Collection, Mapping, Sequence, Set
 from functools import lru_cache, partial
-from typing import Annotated, Callable, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -58,7 +58,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .qwen import QWenBaseModel, QWenModel
-from .utils import flatten_bn
 
 
 class QwenImagePixelInputs(TensorSchema):
@@ -93,7 +92,7 @@ class QwenImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", 256, "hs")]
 
 
-QwenImageInputs = Union[QwenImagePixelInputs, QwenImageEmbeddingInputs]
+QwenImageInputs: TypeAlias = QwenImagePixelInputs | QwenImageEmbeddingInputs
 
 
 class VisualAttention(nn.Module):
@@ -107,8 +106,8 @@ class VisualAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        kdim: Optional[int] = None,
-        vdim: Optional[int] = None,
+        kdim: int | None = None,
+        vdim: int | None = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -135,7 +134,7 @@ class VisualAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # query/key/value: [sq, b, h]
         sq, b, _ = x.size()
@@ -213,7 +212,7 @@ class QwenVLMLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.c_fc = ColumnParallelLinear(
@@ -241,7 +240,7 @@ class VisualAttentionBlock(nn.Module):
         n_head: int,
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
 
@@ -258,7 +257,7 @@ class VisualAttentionBlock(nn.Module):
     def attention(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_mask = attn_mask.to(x.dtype) if attn_mask is not None else None
         return self.attn(x, attn_mask=attn_mask)
@@ -266,7 +265,7 @@ class VisualAttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = x + self.attention(self.ln_1(x), attn_mask=attn_mask)
         x = x + self.mlp(self.ln_2(x))
@@ -281,7 +280,7 @@ class TransformerBlock(nn.Module):
         heads: int,
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.width = width
@@ -307,7 +306,7 @@ class TransformerBlock(nn.Module):
         return self.resblocks[0].mlp.c_fc.weight.device
 
     def forward(
-        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         for r in self.resblocks:
             x = r(x, attn_mask=attn_mask)
@@ -326,7 +325,7 @@ class VisionTransformer(nn.Module):
         n_queries: int = 256,
         output_dim: int = 512,
         image_start_id: int = 151857,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -434,10 +433,10 @@ def _get_tokenizer_without_image_pad(
         def tokenize(
             self,
             text: str,
-            allowed_special: Union[Set[str], str] = "all",
-            disallowed_special: Union[Collection[str], str] = (),
+            allowed_special: Set[str] | str = "all",
+            disallowed_special: Collection[str] | str = (),
             **kwargs,
-        ) -> list[Union[bytes, str]]:
+        ) -> list[bytes | str]:
             text = unicodedata.normalize("NFC", text)
 
             return [
@@ -451,9 +450,9 @@ def _get_tokenizer_without_image_pad(
 
         def _decode(
             self,
-            token_ids: Union[int, list[int]],
+            token_ids: int | list[int],
             skip_special_tokens: bool = False,
-            errors: Optional[str] = None,
+            errors: str | None = None,
             **kwargs,
         ) -> str:
             if isinstance(token_ids, int):
@@ -523,9 +522,9 @@ class QwenVLProcessor:
 
     def __call__(
         self,
-        text: Optional[Union[TextInput, list[TextInput]]] = None,
-        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        text: TextInput | list[TextInput] | None = None,
+        images: ImageInput | list[ImageInput] | None = None,
+        return_tensors: str | TensorType | None = None,
     ) -> BatchFeature:
         if text is None:
             text = []
@@ -568,7 +567,7 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(self) -> int:
@@ -597,7 +596,7 @@ class QwenVLDummyInputsBuilder(BaseDummyInputsBuilder[QwenVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.visual
@@ -703,6 +702,8 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
 class QwenVLForConditionalGeneration(
     QWenBaseModel, SupportsPP, SupportsLoRA, SupportsMultiModal
 ):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [
@@ -722,7 +723,7 @@ class QwenVLForConditionalGeneration(
         )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return f"Picture {i}: <img></img>"
 
@@ -745,35 +746,24 @@ class QwenVLForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[QwenImageInputs]:
+    ) -> QwenImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
             expected_h = expected_w = self.config.visual["image_size"]
             resolve_bindings = {"h": expected_h, "w": expected_w}
 
             return QwenImagePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values, concat=True),
+                data=pixel_values,
                 resolve_bindings=resolve_bindings,
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-
             return QwenImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         return None
@@ -799,10 +789,10 @@ class QwenVLForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 

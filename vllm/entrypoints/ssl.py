@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from collections.abc import Callable
 from ssl import SSLContext
-from typing import Callable, Optional
 
 from watchfiles import Change, awatch
 
@@ -20,9 +20,9 @@ class SSLCertRefresher:
     def __init__(
         self,
         ssl_context: SSLContext,
-        key_path: Optional[str] = None,
-        cert_path: Optional[str] = None,
-        ca_path: Optional[str] = None,
+        key_path: str | None = None,
+        cert_path: str | None = None,
+        ca_path: str | None = None,
     ) -> None:
         self.ssl = ssl_context
         self.key_path = key_path

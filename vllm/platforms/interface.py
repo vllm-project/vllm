@@ -7,38 +7,31 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from platform import uname
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
 
-from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from torch.distributed import PrefixStore, ProcessGroup
+
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
-    from vllm.lora.request import LoRARequest
+    from vllm.config import VllmConfig
+    from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
-    _Backend = None
-    ModelConfig = None
-    VllmConfig = None
-    LoRARequest = None
-    PoolingParams = None
-    SamplingParams = None
-    FlexibleArgumentParser = None
+    FlexibleArgumentParser = object
 
 logger = init_logger(__name__)
 
 
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
+    return "microsoft" in " ".join(platform.uname()).lower()
 
 
 class PlatformEnum(enum.Enum):
@@ -113,7 +106,7 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
-    _global_graph_pool: Optional[Any] = None
+    _global_graph_pool: Any | None = None
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -181,6 +174,7 @@ class Platform:
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        # Import _Backend here to avoid circular import.
         from vllm.attention.backends.registry import _Backend
 
         return _Backend.TORCH_SDPA
@@ -191,7 +185,7 @@ class Platform:
         selected_backend: "_Backend",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -205,14 +199,14 @@ class Platform:
     def get_device_capability(
         cls,
         device_id: int = 0,
-    ) -> Optional[DeviceCapability]:
+    ) -> DeviceCapability | None:
         """Stateless version of [torch.cuda.get_device_capability][]."""
         return None
 
     @classmethod
     def has_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         """
@@ -236,7 +230,7 @@ class Platform:
     @classmethod
     def is_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         """
@@ -283,7 +277,7 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def seed_everything(cls, seed: Optional[int] = None) -> None:
+    def seed_everything(cls, seed: int | None = None) -> None:
         """
         Set the seed of each random module.
         `torch.manual_seed` will set seed on all devices.
@@ -304,7 +298,7 @@ class Platform:
 
     @classmethod
     def pre_register_and_update(
-        cls, parser: Optional[FlexibleArgumentParser] = None
+        cls, parser: FlexibleArgumentParser | None = None
     ) -> None:
         """
         Do some pre-registration or update action for the current platform.
@@ -319,7 +313,7 @@ class Platform:
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
 
@@ -389,7 +383,7 @@ class Platform:
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         """
         Return the memory usage in bytes.
@@ -500,9 +494,9 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        processed_inputs: ProcessorInputs,
+        prompt: "PromptType",
+        params: "SamplingParams | PoolingParams",
+        processed_inputs: "ProcessorInputs",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
@@ -545,27 +539,18 @@ class Platform:
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,
-        prefix_store: PrefixStore,
+        prefix_store: "PrefixStore",
         group_rank: int,
         group_size: int,
         timeout: timedelta,
-    ) -> ProcessGroup:
+    ) -> "ProcessGroup":
         """
         Init platform-specific torch distributed process group.
         """
-        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+        raise NotImplementedError
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        """
-        Returns if the kv_cache_dtype is supported by the current platform.
-        """
-        return False
-
-    @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
         """
         Check if the dtype is supported by the current platform.
         """
@@ -617,11 +602,18 @@ class Platform:
         return {}
 
     @classmethod
-    def get_nixl_memory_type(cls) -> Optional[str]:
+    def get_nixl_memory_type(cls) -> str | None:
         """
         Returns the nixl memory type for the current platform.
         """
         return None
+
+    @classmethod
+    def check_max_model_len(cls, max_model_len: int) -> int:
+        """
+        Check max_model_len for the current platform.
+        """
+        return max_model_len
 
 
 class UnspecifiedPlatform(Platform):

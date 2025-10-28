@@ -2,18 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    KVConnectorRole,
+    supports_hma,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.config.kv_transfer import KVTransferConfig
 
 logger = init_logger(__name__)
@@ -37,7 +41,7 @@ class KVConnectorFactory:
     @classmethod
     def create_connector(
         cls,
-        config: "VllmConfig",
+        config: VllmConfig,
         role: KVConnectorRole,
     ) -> KVConnectorBase:
         if not envs.VLLM_USE_V1:
@@ -47,7 +51,18 @@ class KVConnectorFactory:
             )
 
         kv_transfer_config = config.kv_transfer_config
+        if kv_transfer_config is None:
+            raise ValueError("kv_transfer_config must be set to create a connector")
         connector_cls = cls.get_connector_class(kv_transfer_config)
+
+        # check if the connector supports HMA
+        hma_enabled = not config.scheduler_config.disable_hybrid_kv_cache_manager
+        if hma_enabled and not supports_hma(connector_cls):
+            raise ValueError(
+                f"Connector {connector_cls.__name__} does not support HMA but "
+                f"HMA is enabled. Please set `--disable-hybrid-kv-cache-manager`."
+            )
+
         logger.info(
             "Creating v1 connector with name: %s and engine_id: %s",
             connector_cls.__name__,
@@ -64,11 +79,31 @@ class KVConnectorFactory:
         return connector_cls(config, role)
 
     @classmethod
+    def get_connector_class_by_name(
+        cls, connector_name: str
+    ) -> type[KVConnectorBaseType]:
+        """Get a registered connector class by name.
+
+        Raises ValueError if the connector is not registered.
+
+        Args:
+            connector_name: Name of the registered connector.
+
+        Returns:
+            The connector class.
+        """
+        if connector_name not in cls._registry:
+            raise ValueError(f"Connector '{connector_name}' is not registered.")
+        return cls._registry[connector_name]()
+
+    @classmethod
     def get_connector_class(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> type[KVConnectorBaseType]:
         """Get the connector class by name."""
         connector_name = kv_transfer_config.kv_connector
+        if connector_name is None:
+            raise ValueError("Connector name is not set in KVTransferConfig")
         if connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
         else:
@@ -76,7 +111,13 @@ class KVConnectorFactory:
             if connector_module_path is None:
                 raise ValueError(f"Unsupported connector type: {connector_name}")
             connector_module = importlib.import_module(connector_module_path)
-            connector_cls = getattr(connector_module, connector_name)
+            try:
+                connector_cls = getattr(connector_module, connector_name)
+            except AttributeError as e:
+                raise AttributeError(
+                    f"Class {connector_name} not found in {connector_module_path}"
+                ) from e
+            connector_cls = cast(type[KVConnectorBaseType], connector_cls)
         return connector_cls
 
 
@@ -118,4 +159,10 @@ KVConnectorFactory.register_connector(
     "OffloadingConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector",
     "OffloadingConnector",
+)
+
+KVConnectorFactory.register_connector(
+    "DecodeBenchConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector",
+    "DecodeBenchConnector",
 )

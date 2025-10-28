@@ -3,7 +3,6 @@
 
 import inspect
 from collections.abc import Sequence
-from typing import Optional
 
 import numpy as np
 import pytest
@@ -11,7 +10,8 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -271,7 +271,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         reqs, req_ids_retained, input_batch.req_id_to_index, device=torch.device(device)
     )
 
-    def same(t1: Optional[torch.Tensor], t2: Optional[torch.Tensor]) -> bool:
+    def same(t1: torch.Tensor | None, t2: torch.Tensor | None) -> bool:
         return (t1 is None and t2 is None) or (
             t1 is not None and t2 is not None and torch.allclose(t1, t2)
         )

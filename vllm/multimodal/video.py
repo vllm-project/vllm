@@ -6,16 +6,19 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
 from vllm import envs
+from vllm.logger import init_logger
 
 from .base import MediaIO
 from .image import ImageMediaIO
+
+logger = init_logger(__name__)
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -103,6 +106,7 @@ class OpenCVVideoBackend(VideoLoader):
         cls,
         data: bytes,
         num_frames: int = -1,
+        fps: int = -1,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
@@ -116,14 +120,20 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
-        # resample video to target num_frames
-        full_read = num_frames == -1 or total_frames_num < num_frames
-        if full_read:
-            num_frames = total_frames_num
-            frame_idx = list(range(0, num_frames))
+        # resample video to target num_frames and fps
+        # - the minimum of the two will be used
+        num_frames_to_sample = total_frames_num
+        if num_frames > 0:
+            num_frames_to_sample = min(num_frames, total_frames_num)
+        if fps > 0:
+            num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
+        num_frames_to_sample = max(1, num_frames_to_sample)  # at least one sample
+
+        if num_frames_to_sample == total_frames_num:
+            frame_idx = list(range(0, num_frames_to_sample))
         else:
             uniform_sampled_frames = np.linspace(
-                0, total_frames_num - 1, num_frames, dtype=int
+                0, total_frames_num - 1, num_frames_to_sample, dtype=int
             )
             frame_idx = uniform_sampled_frames.tolist()
 
@@ -132,7 +142,7 @@ class OpenCVVideoBackend(VideoLoader):
         frames = np.empty((len(frame_idx), height, width, 3), dtype=np.uint8)
 
         i = 0
-        for idx in range(total_frames_num):
+        for idx in range(max(frame_idx) + 1):
             ok = cap.grab()
             if not ok:
                 break
@@ -142,8 +152,8 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        assert i == num_frames, (
-            f"Expected reading {num_frames} frames, "
+        assert i == num_frames_to_sample, (
+            f"Expected reading {num_frames_to_sample} frames, "
             f"but only loaded {i} frames from video."
         )
 
@@ -151,14 +161,14 @@ class OpenCVVideoBackend(VideoLoader):
         # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
         # can cause incorrect timestamp calculation without num_frames=-1.
         metadata = {
-            "total_num_frames": num_frames,
-            "fps": num_frames / duration,
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
             "duration": duration,
             "video_backend": "opencv",
-            "frames_indices": list(range(num_frames)),
+            "frames_indices": list(frame_idx),
             # extra field used to control hf processor's video
             # sampling behavior
-            "do_sample_frames": num_frames == total_frames_num,
+            "do_sample_frames": num_frames_to_sample == total_frames_num,
         }
 
         return frames, metadata
@@ -192,7 +202,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
-        frame_indices: Union[range, list[int]]
+        frame_indices: range | list[int]
         if duration <= max_duration:
             n = int(math.floor(duration * fps))
             frame_indices = sorted(

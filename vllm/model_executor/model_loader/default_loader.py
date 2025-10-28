@@ -5,7 +5,7 @@ import glob
 import os
 import time
 from collections.abc import Generator, Iterable
-from typing import Optional, cast
+from typing import cast
 
 import torch
 from torch import nn
@@ -47,7 +47,7 @@ class DefaultModelLoader(BaseModelLoader):
         model_or_path: str
         """The model ID or path."""
 
-        revision: Optional[str]
+        revision: str | None
         """The optional model revision."""
 
         prefix: str = ""
@@ -56,7 +56,7 @@ class DefaultModelLoader(BaseModelLoader):
         fall_back_to_pt: bool = True
         """Whether .pt weights can be used."""
 
-        allow_patterns_overrides: Optional[list[str]] = None
+        allow_patterns_overrides: list[str] | None = None
         """If defined, weights will load exclusively using these patterns."""
 
     counter_before_loading_weights: float = 0.0
@@ -79,9 +79,9 @@ class DefaultModelLoader(BaseModelLoader):
     def _prepare_weights(
         self,
         model_name_or_path: str,
-        revision: Optional[str],
+        revision: str | None,
         fall_back_to_pt: bool,
-        allow_patterns_overrides: Optional[list[str]],
+        allow_patterns_overrides: list[str] | None,
     ) -> tuple[str, list[str], bool]:
         """Prepare weights for the model.
 
@@ -311,9 +311,10 @@ class DefaultModelLoader(BaseModelLoader):
             loaded_weights = load_weights_and_online_quantize(self, model, model_config)
 
         self.counter_after_loading_weights = time.perf_counter()
-        logger.info(
+        logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
+            scope="local",
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.

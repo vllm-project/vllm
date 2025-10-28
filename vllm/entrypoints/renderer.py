@@ -5,7 +5,7 @@ import asyncio
 import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Annotated, Optional, Union
+from typing import Annotated
 
 import pybase64
 import torch
@@ -17,32 +17,32 @@ from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 
 @dataclass(frozen=True)
 class RenderConfig:
     """Configuration to control how prompts are prepared."""
 
-    max_length: Optional[int] = None
+    max_length: int | None = None
     """Maximum allowable total input token length. If provided,
-    token inputs longer than this raise ``ValueError``."""
+    token inputs longer than this raise `ValueError`."""
 
-    truncate_prompt_tokens: Optional[int] = None
-    """Number of tokens to keep. ``None`` means no truncation.
-    ``0`` yields an empty list (and skips embeds).
-    ``-1`` maps to ``model_config.max_model_len``."""
+    truncate_prompt_tokens: int | None = None
+    """Number of tokens to keep. `None` means no truncation.
+    `0` yields an empty list (and skips embeds).
+    `-1` maps to `model_config.max_model_len`."""
 
-    add_special_tokens: Optional[bool] = True
+    add_special_tokens: bool | None = True
     """Whether to add model-specific special tokens during tokenization."""
 
-    cache_salt: Optional[str] = None
+    cache_salt: str | None = None
     """String to disambiguate prefix cache entries."""
 
-    needs_detokenization: Optional[bool] = False
+    needs_detokenization: bool | None = False
     """If True, detokenize IDs back to text for inclusion in outputs."""
 
-    def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> Optional[int]:
+    def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> int | None:
         """Validate and normalize `truncate_prompt_tokens` parameter."""
         truncate_prompt_tokens = self.truncate_prompt_tokens
         if truncate_prompt_tokens is None:
@@ -85,7 +85,7 @@ class BaseRenderer(ABC):
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: Optional[AnyTokenizer] = None,
+        tokenizer: AnyTokenizer | None = None,
     ):
         super().__init__()
         self.model_config = model_config
@@ -95,7 +95,7 @@ class BaseRenderer(ABC):
     async def render_prompt(
         self,
         *,
-        prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
+        prompt_or_prompts: str | list[str] | list[int] | list[list[int]],
         config: RenderConfig,
     ) -> list[EngineTokensPrompt]:
         """
@@ -107,10 +107,10 @@ class BaseRenderer(ABC):
 
         Args:
             prompt_or_prompts: One of:
-                - ``str``: Single text prompt.
-                - ``list[str]``: Batch of text prompts.
-                - ``list[int]``: Single pre-tokenized sequence.
-                - ``list[list[int]]``: Batch of pre-tokenized sequences.
+                - `str`: Single text prompt.
+                - `list[str]`: Batch of text prompts.
+                - `list[int]`: Single pre-tokenized sequence.
+                - `list[list[int]]`: Batch of pre-tokenized sequences.
             config: Render configuration controlling how prompts are prepared
                 (e.g., tokenization and length handling).
 
@@ -126,19 +126,17 @@ class BaseRenderer(ABC):
     async def render_prompt_and_embeds(
         self,
         *,
-        prompt_or_prompts: Optional[
-            Union[str, list[str], list[int], list[list[int]]]
-        ] = None,
-        prompt_embeds: Optional[Union[bytes, list[bytes]]] = None,
+        prompt_or_prompts: str | list[str] | list[int] | list[list[int]] | None = None,
+        prompt_embeds: bytes | list[bytes] | None = None,
         config: RenderConfig,
-    ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
+    ) -> list[EngineTokensPrompt | EngineEmbedsPrompt]:
         """
         Convert text/token and/or base64-encoded embeddings inputs into
         engine-ready prompt objects using a unified RenderConfig.
 
-        At least one of ``prompt_or_prompts`` or ``prompt_embeds`` must be
+        At least one of `prompt_or_prompts` or `prompt_embeds` must be
         provided and non-empty. If both are omitted or empty (e.g., empty
-        string and empty list), a ``ValueError`` is raised.
+        string and empty list), a `ValueError` is raised.
 
         Args:
             prompt_or_prompts: Text or token inputs to include.
@@ -152,20 +150,23 @@ class BaseRenderer(ABC):
                 Engine-ready prompt objects.
 
         Raises:
-            ValueError: If both ``prompt_or_prompts`` and ``prompt_embeds``
+            ValueError: If both `prompt_or_prompts` and `prompt_embeds`
                 are omitted or empty (decoder prompt cannot be empty), or if
                 length limits are exceeded.
         """
         raise NotImplementedError
 
-    @classmethod
     def load_prompt_embeds(
-        cls,
-        prompt_embeds: Union[bytes, list[bytes]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=0)]] = None,
-        cache_salt: Optional[str] = None,
+        self,
+        prompt_embeds: bytes | list[bytes],
+        truncate_prompt_tokens: Annotated[int, Field(ge=0)] | None = None,
+        cache_salt: str | None = None,
     ) -> list[EngineEmbedsPrompt]:
         """Load and validate base64-encoded embeddings into prompt objects."""
+        if not self.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            )
 
         def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
             tensor = torch.load(
@@ -199,19 +200,18 @@ class CompletionRenderer(BaseRenderer):
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: Optional[AnyTokenizer] = None,
-        async_tokenizer_pool: Optional[
-            dict[AnyTokenizer, AsyncMicrobatchTokenizer]
-        ] = None,
+        tokenizer: AnyTokenizer | None = None,
+        async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer]
+        | None = None,
     ):
         super().__init__(model_config, tokenizer)
         self.async_tokenizer_pool = async_tokenizer_pool
-        self.async_tokenizer: Optional[AsyncMicrobatchTokenizer] = None
+        self.async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
     async def render_prompt(
         self,
         *,
-        prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
+        prompt_or_prompts: str | list[str] | list[int] | list[list[int]],
         config: RenderConfig,
     ) -> list[EngineTokensPrompt]:
         """Implementation of prompt rendering for completion-style requests.
@@ -237,12 +237,10 @@ class CompletionRenderer(BaseRenderer):
     async def render_prompt_and_embeds(
         self,
         *,
-        prompt_or_prompts: Optional[
-            Union[str, list[str], list[int], list[list[int]]]
-        ] = None,
-        prompt_embeds: Optional[Union[bytes, list[bytes]]] = None,
+        prompt_or_prompts: str | list[str] | list[int] | list[list[int]] | None = None,
+        prompt_embeds: bytes | list[bytes] | None = None,
         config: RenderConfig,
-    ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
+    ) -> list[EngineTokensPrompt | EngineEmbedsPrompt]:
         """
         Render text/token prompts and/or precomputed embedding prompts. At
         least one of `prompt_or_prompts` or `prompt_embeds` must be provided.
@@ -251,7 +249,7 @@ class CompletionRenderer(BaseRenderer):
         if truncate_prompt_tokens == 0:
             return []
 
-        rendered: list[Union[EngineTokensPrompt, EngineEmbedsPrompt]] = []
+        rendered: list[EngineTokensPrompt | EngineEmbedsPrompt] = []
 
         if prompt_embeds is not None:
             rendered.extend(
@@ -271,7 +269,7 @@ class CompletionRenderer(BaseRenderer):
         return rendered
 
     def _maybe_apply_truncation(
-        self, token_ids: list[int], truncate_prompt_tokens: Optional[int]
+        self, token_ids: list[int], truncate_prompt_tokens: int | None
     ) -> list[int]:
         """Apply truncation to token sequence."""
         if truncate_prompt_tokens is None:
@@ -283,9 +281,9 @@ class CompletionRenderer(BaseRenderer):
 
     async def _create_prompt(
         self,
-        prompt_input: Union[EngineTextPrompt, EngineTokensPrompt],
+        prompt_input: EngineTextPrompt | EngineTokensPrompt,
         config: RenderConfig,
-        truncate_prompt_tokens: Optional[int],
+        truncate_prompt_tokens: int | None,
     ) -> EngineTokensPrompt:
         prompt, prompt_token_ids, _ = get_prompt_components(prompt_input)
 
@@ -315,10 +313,10 @@ class CompletionRenderer(BaseRenderer):
     async def _create_prompt_from_text(
         self,
         text: str,
-        max_length: Optional[int],
-        truncate_prompt_tokens: Optional[int],
-        add_special_tokens: Optional[bool],
-        cache_salt: Optional[str],
+        max_length: int | None,
+        truncate_prompt_tokens: int | None,
+        add_special_tokens: bool | None,
+        cache_salt: str | None,
     ) -> EngineTokensPrompt:
         """Tokenize text input asynchronously."""
         async_tokenizer = self._get_async_tokenizer()
@@ -348,10 +346,10 @@ class CompletionRenderer(BaseRenderer):
     async def _create_prompt_from_token_ids(
         self,
         token_ids: list[int],
-        max_length: Optional[int],
-        truncate_prompt_tokens: Optional[int],
-        cache_salt: Optional[str],
-        needs_detokenization: Optional[bool] = False,
+        max_length: int | None,
+        truncate_prompt_tokens: int | None,
+        cache_salt: str | None,
+        needs_detokenization: bool | None = False,
     ) -> EngineTokensPrompt:
         """Optionally detokenize token IDs and build a tokens prompt."""
         token_ids = self._maybe_apply_truncation(token_ids, truncate_prompt_tokens)
@@ -391,9 +389,9 @@ class CompletionRenderer(BaseRenderer):
     def _create_tokens_prompt(
         self,
         token_ids: list[int],
-        max_length: Optional[int] = None,
-        cache_salt: Optional[str] = None,
-        prompt: Optional[str] = None,
+        max_length: int | None = None,
+        cache_salt: str | None = None,
+        prompt: str | None = None,
     ) -> EngineTokensPrompt:
         """Create validated EngineTokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:

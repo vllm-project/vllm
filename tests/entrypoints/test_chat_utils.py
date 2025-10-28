@@ -3,7 +3,7 @@
 
 import warnings
 from collections.abc import Mapping
-from typing import Literal, Optional
+from typing import Literal
 
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
@@ -70,6 +70,19 @@ def phi3v_model_config_mm_interleaved():
         limit_mm_per_prompt={
             "image": 2,
         },
+    )
+
+
+@pytest.fixture(scope="function")
+def phi3v_model_config_image_embeds():
+    return ModelConfig(
+        PHI3V_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+        enable_mm_embeds=True,
     )
 
 
@@ -152,9 +165,9 @@ def audio_url():
 
 
 def _assert_mm_data_is_image_input(
-    mm_data: Optional[MultiModalDataDict],
+    mm_data: MultiModalDataDict | None,
     image_count: int,
-    skipped_image_indices: Optional[list] = None,
+    skipped_image_indices: list | None = None,
 ) -> None:
     assert mm_data is not None
     assert set(mm_data.keys()) == {"image"}
@@ -169,9 +182,9 @@ def _assert_mm_data_is_image_input(
 
 
 def _assert_mm_uuids(
-    mm_uuids: Optional[MultiModalUUIDDict],
+    mm_uuids: MultiModalUUIDDict | None,
     media_count: int,
-    expected_uuids: list[Optional[str]],
+    expected_uuids: list[str | None],
     modality: str = "image",
 ) -> None:
     if len(expected_uuids) > 0:
@@ -193,9 +206,9 @@ MultiModalDataCounts = Mapping[ModalityType, int]
 
 
 def _assert_mm_data_inputs(
-    mm_data: Optional[MultiModalDataDict],
+    mm_data: MultiModalDataDict | None,
     data_count: MultiModalDataCounts,
-    skipped_media_indices: Optional[dict[str, list]] = None,  # modality -> list[int]
+    skipped_media_indices: dict[str, list] | None = None,  # modality -> list[int]
 ) -> None:
     assert mm_data is not None
     assert set(data_count.keys()) == (set(mm_data.keys()))
@@ -799,7 +812,7 @@ def test_parse_chat_messages_empty_pil_image_with_uuid(
 
 
 def test_parse_chat_messages_empty_image_embeds_with_uuid(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -813,7 +826,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -832,7 +845,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
 
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
-    phi3v_model_config,
+    phi3v_model_config_image_embeds,
     phi3v_tokenizer,
 ):
     uuid = "abcd"
@@ -846,7 +859,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        phi3v_model_config_image_embeds,
         phi3v_tokenizer,
         content_format="string",
     )
@@ -1729,7 +1742,9 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1810,6 +1825,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         "unsed_kwargs_2": "abc",
         # should not appear
         "chat_template": "{% Hello world! %}",
+        "tokenize": True,
         # used by tokenizer
         "continue_final_message": True,
         "tools": tools,
@@ -1828,7 +1844,9 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1846,12 +1864,56 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         tools=tools,
         model_config=model_config,
     )
+    with pytest.raises(
+        ValueError, match="Found unexpected chat template kwargs from request"
+    ):
+        # should raise error if `chat_template_kwargs` contains
+        # `chat_template` or `tokenize`
+        resolve_chat_template_kwargs(
+            tokenizer,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     resolved_chat_template_kwargs = resolve_chat_template_kwargs(
         tokenizer,
         chat_template=chat_template,
         chat_template_kwargs=chat_template_kwargs,
+        raise_on_unexpected=False,
     )
     assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
+
+    # Additional test: Verify HF base parameters work with **kwargs tokenizers
+    # This validates the fix for tokenizers like Kimi K2 that use **kwargs
+    # to receive standard HuggingFace parameters instead of declaring them explicitly
+    from vllm.entrypoints.chat_utils import _get_hf_base_chat_template_params
+
+    hf_base_params = _get_hf_base_chat_template_params()
+    # Verify common HF parameters are in the base class
+    assert {"add_generation_prompt", "tools", "continue_final_message"}.issubset(
+        hf_base_params
+    ), f"Expected HF base params not found in {hf_base_params}"
+
+    # Test with a mock tokenizer that uses **kwargs (like Kimi K2)
+    class MockTokenizerWithKwargs:
+        def apply_chat_template(self, conversation, **kwargs):
+            return "mocked_output"
+
+    mock_tokenizer = MockTokenizerWithKwargs()
+    mock_kwargs = {
+        "add_generation_prompt": True,
+        "tools": tools,
+        "continue_final_message": False,
+        "unknown_param": "should_be_filtered",
+    }
+    resolved_mock = resolve_chat_template_kwargs(
+        mock_tokenizer, chat_template, mock_kwargs, raise_on_unexpected=False
+    )
+    # HF base params should pass through even with **kwargs tokenizer
+    assert "add_generation_prompt" in resolved_mock
+    assert "tools" in resolved_mock
+    assert "continue_final_message" in resolved_mock
+    # Unknown params should be filtered out
+    assert "unknown_param" not in resolved_mock
 
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
@@ -1878,7 +1940,9 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1936,7 +2000,9 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )

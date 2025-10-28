@@ -22,6 +22,11 @@ sys.modules["vllm._C"] = MagicMock()
 class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
+    def __init__(self, *args, **kwargs):
+        name = kwargs.pop("name", None)
+        super().__init__(*args, **kwargs)
+        self.__spec__ = importlib.machinery.ModuleSpec(name, None)
+
     def __get_pydantic_core_schema__(self, source_type, handler):
         return core_schema.any_schema()
 
@@ -42,7 +47,9 @@ def auto_mock(module, attr, max_mocks=50):
             raise e
         except ModuleNotFoundError as e:
             logger.info("Mocking %s for argparse doc generation", e.name)
-            sys.modules[e.name] = PydanticMagicMock()
+            sys.modules[e.name] = PydanticMagicMock(name=e.name)
+        except Exception as e:
+            logger.warning("Failed to import %s.%s: %s", module, attr, e)
 
     raise ImportError(
         f"Failed to import {module}.{attr} after mocking {max_mocks} imports"
@@ -58,7 +65,9 @@ ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
 cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
-FlexibleArgumentParser = auto_mock("vllm.utils", "FlexibleArgumentParser")
+FlexibleArgumentParser = auto_mock(
+    "vllm.utils.argparse_utils", "FlexibleArgumentParser"
+)
 
 
 class MarkdownFormatter(HelpFormatter):

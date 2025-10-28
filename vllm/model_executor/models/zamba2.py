@@ -10,7 +10,7 @@ model alternates between state space model layers and attention-based layers.
 
 from collections.abc import Iterable
 from itertools import cycle
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
@@ -45,7 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid
+from .interfaces import HasInnerState, IsHybrid, SupportsMambaPrefixCaching
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -60,8 +60,8 @@ class Zamba2LoRA(nn.Module):
         self,
         input_dim: int,
         rank: int,
-        output_dim: Union[int, list[int]],
-        quant_config: Optional[QuantizationConfig] = None,
+        output_dim: int | list[int],
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         """Initialize the attention layer.
@@ -106,8 +106,8 @@ class Zamba2Attention(nn.Module):
         config: Zamba2Config,
         bare_block_idx: int,
         num_hybrid_layers: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the attention layer.
@@ -288,7 +288,7 @@ class Zamba2MLP(nn.Module):
         config: Zamba2Config,
         bare_block_idx: int,
         num_hybrid_layers: dict[int, int],
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the MLP layer.
@@ -386,8 +386,8 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         config: Zamba2Config,
         bare_block_idx: int,
         num_hybrid_layers: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the decoder layer.
@@ -484,9 +484,9 @@ class Zamba2MambaDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Zamba2Config,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the Mamba decoder layer.
@@ -523,9 +523,9 @@ class Zamba2MambaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        transformer_hidden_states: Optional[torch.Tensor] = None,
-        positions: Optional[torch.Tensor] = None,
-        original_hidden_states: Optional[torch.Tensor] = None,
+        transformer_hidden_states: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        original_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through the Mamba decoder layer.
 
@@ -581,9 +581,9 @@ class Zamba2HybridLayer(nn.Module):
         shared_transformer: Zamba2AttentionDecoderLayer,
         config: Zamba2Config,
         block_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the hybrid layer.
@@ -764,8 +764,8 @@ class Zamba2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         """Forward pass through the model.
 
         Args:
@@ -824,7 +824,7 @@ class Zamba2Model(nn.Module):
         return loaded_params
 
 
-class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
+class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixCaching):
     """Zamba2 model with causal language modeling head.
 
     This class wraps the core Zamba2 model and adds:
@@ -947,7 +947,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass through the model.
@@ -973,7 +973,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """Compute logits for next token prediction.
 
         Args:
