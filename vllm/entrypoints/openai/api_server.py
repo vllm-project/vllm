@@ -1002,6 +1002,16 @@ if envs.VLLM_SERVER_DEV_MODE:
         await engine_client(raw_request).reset_prefix_cache(device)
         return Response(status_code=200)
 
+    @router.post("/unpin_all_pinned_prefixes")
+    async def unpin_all_pinned_prefixes(raw_request: Request):
+        """Unpin all pinned KV blocks across the engine instance.
+
+        Returns JSON with count of unpinned blocks.
+        """
+        logger.info("Unpinning all pinned KV blocks ...")
+        count = await engine_client(raw_request).unpin_all_pinned_prefixes()
+        return JSONResponse(content={"unpinned": int(count)})
+
     @router.post("/reset_mm_cache")
     async def reset_mm_cache(raw_request: Request):
         """
