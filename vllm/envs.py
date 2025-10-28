@@ -208,7 +208,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
-    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
+    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -351,6 +351,24 @@ def env_list_with_choices(
         return values
 
     return _get_validated_env_list
+
+
+def env_set_with_choices(
+    env_name: str,
+    default: list[str],
+    choices: list[str] | Callable[[], list[str]],
+    case_sensitive: bool = True,
+) -> Callable[[], set[str]]:
+    """
+    Creates a lambda which that validates environment variable
+    containing comma-separated values against allowed choices which
+    returns choices as a set.
+    """
+
+    def _get_validated_env_set() -> set[str]:
+        return set(env_list_with_choices(env_name, default, choices, case_sensitive)())
+
+    return _get_validated_env_set
 
 
 def get_vllm_port() -> int | None:
@@ -1374,10 +1392,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
     # Valid values are container,code_interpreter,web_search_preview
     # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
-    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_list_with_choices(
+    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_set_with_choices(
         "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-        [],
-        ["container", "code_interpreter", "web_search_preview"],
+        default=[],
+        choices=["container", "code_interpreter", "web_search_preview"],
     ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
