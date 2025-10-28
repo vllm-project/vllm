@@ -1238,7 +1238,7 @@ def apply_top_k_top_p_test(
 # --------------------------------------------------------------------------------------
 
 @triton.jit
-def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.constexpr, VOCAB_SIZE:tl.constexpr, BLOCK_SIZE:tl.constexpr, WIDEN_NUM: tl.constexpr): 
+def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.constexpr, VOCAB_SIZE:tl.constexpr, BLOCK_SIZE:tl.constexpr): 
     NUM_TILES: tl.constexpr = (VOCAB_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -1381,29 +1381,20 @@ def top_p_pivot_filter(LOGITS, L, PROBS, PROBS_2, idx_tensor, P, B, SIGMA:tl.con
                 if num_iters >= 32 or tl.abs(min_range - max_range) < 1e-8:
                     p_pivot = p_pivot_0
 
-            # At least one value should be greater than p_pivot
-            # if p_pivot >= max_logit:
-            #     p_pivot = second_max_logit
-            if True:
-                # Force remove duplicates (p_pivot is made to include all
-                # duplicates if it falls on the duplicates)
-                num_force_remove = tl.cast((p_pivots_sum_0 - p) / min_larger_0,
-                                        tl.uint32)
-                force_remove_logit = tl.log(
-                    min_larger_0 * sum_exp_logits) + max_logit
+            # Force remove duplicates (p_pivot is made to include all
+            # duplicates if it falls on the duplicates)
+            num_force_remove = tl.cast((p_pivots_sum_0 - p) / min_larger_0,
+                                    tl.uint32)
+            force_remove_logit = tl.log(
+                min_larger_0 * sum_exp_logits) + max_logit
 
             # p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
             p_pivot_logit = -float('inf')
 
             # -------- widen cutoff by 10% ----------------
             if p_pivot != -float('inf'):
-                # WIDEN_NUM 
-                widened_prob = p_pivot * (WIDEN_NUM / 100.0)
-                # clamp widened_prob to <= max possible prob
-                widened_prob = tl.minimum(widened_prob, max_range)
                 p_pivot_logit = tl.log(widened_prob * sum_exp_logits) + max_logit
-
-            current_num_force_remove = tl.zeros((), dtype=tl.uint32)
+            # current_num_force_remove = tl.zeros((), dtype=tl.uint32)
             kept_write_pos = 0
 
             for i in range(0, NUM_TILES):
@@ -1465,15 +1456,15 @@ def apply_top_p_filtered (
     l = torch.zeros((batch_size,), device=logits.device, dtype=torch.int32)
     idx_tensor = torch.full_like(logits, 0, dtype=torch.int32)
     
-
     BLOCK_SIZE = 2048
     SIGMA = 2.15   
     NUM_WARPS = 16
     NUM_STAGES = 3
-    WIDEN_NUM = 0 # ----------------------------> ????????
 
     if not torch.any(p < 1.0):  
         return logits
+
+    p_widened = torch.clamp(p * 1.2, max=0.999)
 
     grid = lambda meta: ((batch_size + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'], )
     top_p_pivot_filter[grid](
@@ -1482,12 +1473,11 @@ def apply_top_p_filtered (
         probs,
         probs_2,
         idx_tensor,
-        p*1.1,
+        p_widened,
         batch_size,
         SIGMA=SIGMA,
         VOCAB_SIZE=vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
-        WIDEN_NUM=WIDEN_NUM
     )
     # print(f"logits: {logits}", flush=True)
     # print(f"l: {l}", flush=True)
