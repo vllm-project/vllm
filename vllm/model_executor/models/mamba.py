@@ -29,6 +29,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
+    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from vllm.sequence import IntermediateTensors
@@ -193,7 +194,9 @@ class MambaModel(nn.Module):
         return loaded_params
 
 
-class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
+class MambaForCausalLM(
+    nn.Module, HasInnerState, IsAttentionFree, SupportsPP, SupportsMambaPrefixCaching
+):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         lora_config = vllm_config.lora_config
