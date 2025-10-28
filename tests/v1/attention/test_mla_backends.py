@@ -23,6 +23,7 @@ from vllm.attention.backends.registry import _Backend
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.config.vllm import set_current_vllm_config
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.mla.common import QueryLenSupport
@@ -255,11 +256,19 @@ class MockAttentionLayer:
         self._v_scale = torch.tensor(1.0, device=device)
 
 
-class MockMLAAttentionLayer:
+class MockMLAAttentionLayer(AttentionLayerBase):
     """A mock MLA attention layer for populating static_forward_context."""
 
     def __init__(self, impl):
         self.impl = impl
+
+    def get_attn_backend(self):
+        """Not used in tests, but required by AttentionLayerBase."""
+        raise NotImplementedError
+
+    def get_kv_cache_spec(self, vllm_config):
+        """Not used in tests, but required by AttentionLayerBase."""
+        raise NotImplementedError
 
 
 def run_attention_backend(
