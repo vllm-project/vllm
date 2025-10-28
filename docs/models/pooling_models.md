@@ -93,7 +93,7 @@ It is primarily designed for embedding models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-small")
+llm = LLM(model="intfloat/e5-small", runner="pooling")
 (output,) = llm.embed("Hello, my name is")
 
 embeds = output.outputs.embedding
@@ -110,7 +110,7 @@ It is primarily designed for classification models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach")
+llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling")
 (output,) = llm.classify("Hello, my name is")
 
 probs = output.outputs.probs
@@ -131,7 +131,7 @@ It is designed for embedding models and cross-encoder models. Embedding models u
 ```python
 from vllm import LLM
 
-llm = LLM(model="BAAI/bge-reranker-v2-m3")
+llm = LLM(model="BAAI/bge-reranker-v2-m3", runner="pooling")
 (output,) = llm.score(
     "What is the capital of France?",
     "The capital of Brazil is Brasilia.",
@@ -150,7 +150,7 @@ The [reward][vllm.LLM.reward] method is available to all reward models in vLLM.
 ```python
 from vllm import LLM
 
-llm = LLM(model="internlm/internlm2-1_8b-reward", trust_remote_code=True)
+llm = LLM(model="internlm/internlm2-1_8b-reward", trust_remote_code=True, runner="pooling")
 (output,) = llm.reward("Hello, my name is")
 
 data = output.outputs.data
@@ -178,7 +178,7 @@ The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 from vllm import LLM
 
 llm = LLM(model="intfloat/e5-small")
-(output,) = llm.encode("Hello, my name is", pooling_task="embed")
+(output,) = llm.encode("Hello, my name is", pooling_task="embed", runner="pooling")
 
 data = output.outputs.data
 print(f"Data: {data!r}")
