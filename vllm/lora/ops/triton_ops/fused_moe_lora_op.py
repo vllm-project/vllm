@@ -177,7 +177,8 @@ def _fused_moe_lora_kernel(
 
 @torch.inference_mode()
 def _fused_moe_lora_shrink(
-    a_intermediate_cache1: torch.Tensor,  # (num_slices, num_tokens, top_k_num, max_lora_rank)
+    a_intermediate_cache1: torch.Tensor,
+    # (num_slices, num_tokens, top_k_num, max_lora_rank)
     qcurr_hidden_states: torch.Tensor,  # (num_tokens, K,)
     lora_a_stacked: list[
         torch.Tensor
