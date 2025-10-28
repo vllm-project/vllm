@@ -90,7 +90,7 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(10, 0)
+        return DeviceCapability(9, 0)
 
     @classmethod
     def get_max_compute_capability(cls) -> DeviceCapability | None:

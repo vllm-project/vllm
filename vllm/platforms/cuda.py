@@ -60,6 +60,7 @@ def _get_backend_priorities(
             _Backend.FLASHMLA: 2,
             _Backend.FLASH_ATTN_MLA: 3,
             _Backend.TRITON_MLA: 4,
+            _Backend.FLASHMLA_SPARSE: 5,
         }
     else:
         return {
