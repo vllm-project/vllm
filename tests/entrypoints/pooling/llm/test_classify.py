@@ -39,7 +39,9 @@ def llm():
 def test_pooling_params(llm: LLM):
     def get_outputs(use_activation):
         outputs = llm.classify(
-            prompts, pooling_params=PoolingParams(use_activation=use_activation), use_tqdm=False
+            prompts,
+            pooling_params=PoolingParams(use_activation=use_activation),
+            use_tqdm=False,
         )
         return torch.tensor([x.outputs.probs for x in outputs])
 
