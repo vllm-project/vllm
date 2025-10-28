@@ -14,6 +14,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -354,22 +355,47 @@ class Worker(WorkerBase):
         # warm up sizes that are not in cudagraph capture sizes,
         # but users still want to compile for better performance,
         # e.g. for the max-num-batched token size in chunked prefill.
-        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
-        if not self.model_config.enforce_eager:
-            warmup_sizes = [
-                x
-                for x in warmup_sizes
-                if x not in self.vllm_config.compilation_config.cudagraph_capture_sizes
-            ]
-        # We skip EPLB here since we don't want to record dummy metrics
-        for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+
+        aot_compile_loaded_from_cache = False
+        if envs.VLLM_USE_AOT_COMPILE:
+            from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+
+            if self.model_config.is_multimodal_model:
+                compiled_model = self.get_model().get_language_model().model
+            else:
+                compiled_model = self.get_model().model
+            if isinstance(
+                compiled_model, TorchCompileWrapperWithCustomDispatcher
+            ) and hasattr(compiled_model, "aot_compile_loaded_from_cache"):
+                aot_compile_loaded_from_cache = (
+                    compiled_model.aot_compile_loaded_from_cache
+                )
+
+        if not aot_compile_loaded_from_cache:
+            warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+            if (
+                not self.model_config.enforce_eager
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
+                warmup_sizes = [
+                    x
+                    for x in warmup_sizes
+                    if x
+                    not in self.vllm_config.compilation_config.cudagraph_capture_sizes
+                ]
+            # We skip EPLB here since we don't want to record dummy metrics
+            for size in sorted(warmup_sizes, reverse=True):
+                logger.info("Compile and warming up model for size %d", size)
+                self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+
+        # Save compiler cache after warmup is complete
+        self.model_runner.save_compiler_cache()
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

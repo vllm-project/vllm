@@ -30,6 +30,53 @@ logger = init_logger(__name__)
 
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 
+
+def save_compile_cache(compiled_module: torch.nn.Module) -> None:
+    """
+    Save the compilation cache to disk after compilation.
+
+    This mimics what the GPU model runner does after warmup.
+    It saves both:
+    1. The AOT compiled function artifacts (via save_aot_compiled_function)
+    2. The compiler manager cache (vllm_compile_cache.py)
+
+    Args:
+        compiled_module: A compiled module with AOT compilation artifacts
+    """
+    # Save the AOT compiled function artifacts
+    if hasattr(compiled_module, "save_aot_compiled_function"):
+        compiled_module.save_aot_compiled_function()
+
+    # Save the compiler manager cache (vllm_compile_cache.py)
+    if not hasattr(compiled_module, "aot_compiled_fn"):
+        return
+
+    artifacts = compiled_module.aot_compiled_fn._artifacts
+    compiled_fn = artifacts.compiled_fn
+
+    # Access the split_gm's optimized_call if available
+    if hasattr(compiled_fn, "optimized_call"):
+        split_gm = compiled_fn.optimized_call
+
+        # Find any piecewise backend with compiler_manager
+        for name in dir(split_gm):
+            if name.startswith("submod_"):
+                submod = getattr(split_gm, name, None)
+                if submod is None:
+                    continue
+
+                # Unwrap cudagraph wrapper if needed
+                if hasattr(submod, "runnable"):
+                    submod = submod.runnable
+
+                # Check if it has vllm_backend with compiler_manager
+                if hasattr(submod, "vllm_backend") and hasattr(
+                    submod.vllm_backend, "compiler_manager"
+                ):
+                    submod.vllm_backend.compiler_manager.save_to_file()
+                    return
+
+
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
@@ -246,6 +293,8 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
+        self.aot_compile_loaded_from_cache = False
+
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_mode=vllm_config.compilation_config.mode
@@ -304,6 +353,7 @@ def _support_torch_compile(
                 _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
                 loaded_fn.disable_guard_check()
                 self.aot_compiled_fn = loaded_fn
+                self.aot_compile_loaded_from_cache = True
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
                     logger.warning(
@@ -401,10 +451,9 @@ def _support_torch_compile(
                 if envs.VLLM_USE_AOT_COMPILE:
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                     output = self.aot_compiled_fn(self, *args, **kwargs)
-                    assert aot_compilation_path is not None
-                    assert cache_dir is not None
-                    os.makedirs(cache_dir, exist_ok=True)
-                    self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
+                    # Store the path for later saving after warmup
+                    self._aot_compilation_path = aot_compilation_path
+                    self._aot_cache_dir = cache_dir
                 else:
                     output = self.compiled_callable(*args, **kwargs)
             return output
@@ -416,7 +465,33 @@ def _support_torch_compile(
             model_output = self.forward(*args, **kwargs)
             return model_output
 
+    def save_aot_compiled_function(self):
+        """Save the AOT compiled function after warmup is complete."""
+        if not envs.VLLM_USE_AOT_COMPILE:
+            return
+
+        if getattr(self, "aot_compiled_fn", None) is None:
+            logger.debug("No AOT compiled function to save")
+            return
+
+        if getattr(self, "aot_compile_loaded_from_cache", False):
+            logger.debug("AOT compiled function was loaded from cache, skipping save")
+            return
+
+        aot_compilation_path = getattr(self, "_aot_compilation_path", None)
+        cache_dir = getattr(self, "_aot_cache_dir", None)
+
+        if aot_compilation_path is None or cache_dir is None:
+            logger.debug("No AOT compilation path found, skipping save")
+            return
+
+        logger.info("Saving AOT compiled function to %s", aot_compilation_path)
+        os.makedirs(cache_dir, exist_ok=True)
+        self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
+        logger.info("AOT compiled function saved successfully")
+
     cls.__call__ = __call__
+    cls.save_aot_compiled_function = save_aot_compiled_function
     return cls
 
 

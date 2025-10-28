@@ -2989,6 +2989,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return None
 
+    def save_compiler_cache(self) -> None:
+        """Save the compiler cache after warmup is complete."""
+        from vllm.compilation.wrapper import (
+            TorchCompileWrapperWithCustomDispatcher,
+        )
+
+        # The compiled model is typically at get_model().model for most models
+        # or get_model().get_language_model().model for multimodal models
+        wrapper = None
+        model = self.get_model()
+
+        # Try to find the TorchCompileWrapperWithCustomDispatcher instance
+        if hasattr(model, "model") and isinstance(
+            model.model, TorchCompileWrapperWithCustomDispatcher
+        ):
+            wrapper = model.model
+        elif hasattr(model, "get_language_model"):
+            language_model = model.get_language_model()
+            if hasattr(language_model, "model") and isinstance(
+                language_model.model, TorchCompileWrapperWithCustomDispatcher
+            ):
+                wrapper = language_model.model
+
+        if wrapper is None:
+            logger.debug("Model not compiled (wrapper is None), skipping cache save")
+            return
+
+        # Save both AOT compiled function and compiler manager cache
+        from vllm.compilation.decorators import save_compile_cache
+
+        save_compile_cache(wrapper)
+
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, (
             "Cannot reload weights before model is loaded."
