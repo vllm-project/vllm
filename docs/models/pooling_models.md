@@ -307,9 +307,11 @@ An OpenAI client example can be found here: [examples/online_serving/pooling/ope
 ## Deprecated Features
 
 ### Encode task
-Split the encode task into two more specific token wise tasks: token_embed and token_classify:
-- token_embed is the same as embed, using normalize as activation.
-- token_classify is the same as classify, default using softmax as activation.
+
+We have split the `encode` task into two more specific token wise tasks: `token_embed` and `token_classify`:
+- `token_embed` is the same as embed, using normalize as activation.
+- `token_classify` is the same as classify, default using softmax as activation.
 
 ### Remove softmax from PoolingParams
-Remove softmax from PoolingParams, prefer using activation, since we actually allow classify and token_classify to use any activation function. 
+
+We are going to remove `softmax` from `PoolingParams`. Instead, you should set `activation`, since we actually allow `classify` and `token_classify` to use any activation function. 
