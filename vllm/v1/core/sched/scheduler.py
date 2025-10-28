@@ -603,6 +603,13 @@ class Scheduler(SchedulerInterface):
                 )
             )
 
+        # Collect num_output_placeholders for each scheduled request.
+        # For sync scheduling: all requests have 0 placeholders (empty dict).
+        # For async scheduling: AsyncScheduler will override this method to
+        # populate the dict with actual placeholder counts.
+        num_output_placeholders = self._get_num_output_placeholders(
+            num_scheduled_tokens)
+        
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(
@@ -636,6 +643,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            num_output_placeholders=num_output_placeholders,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -665,6 +673,26 @@ class Scheduler(SchedulerInterface):
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def _get_num_output_placeholders(
+        self,
+        num_scheduled_tokens: dict[str, int],
+    ) -> dict[str, int]:
+        """
+        Get the number of output placeholders for each scheduled request.
+        
+        For sync scheduling: returns empty dict (no placeholders).
+        For async scheduling: AsyncScheduler overrides this to return actual
+        placeholder counts.
+        
+        Args:
+            num_scheduled_tokens: dict mapping request_id to num_scheduled_tokens
+            
+        Returns:
+            dict mapping request_id to num_output_placeholders
+        """
+        # Sync scheduling: no placeholders
+        return {}
 
     def _update_after_schedule(
         self,

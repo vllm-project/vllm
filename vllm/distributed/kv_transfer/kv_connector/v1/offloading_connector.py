@@ -266,7 +266,20 @@ class OffloadingConnectorScheduler:
 
             req = self._requests[req_id]
             new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            total_tokens = req.num_computed_tokens + new_tokens
+            
+            # For async scheduling: num_computed_tokens includes placeholders
+            # (tokens scheduled but not yet generated). We should only store
+            # actually computed tokens. Calculate the real computed count:
+            #   real_computed = num_computed_tokens - num_output_placeholders
+            num_placeholders = 0
+            if scheduler_output.num_output_placeholders:
+                num_placeholders = scheduler_output.num_output_placeholders.get(
+                    req_id, 0
+                )
+            logger.debug(f"Request {req_id} num_placeholders: {num_placeholders}")
+            
+            # Total tokens to store = real computed tokens + new tokens
+            total_tokens = req.num_computed_tokens - num_placeholders + new_tokens
             num_blocks = total_tokens // self.offloaded_block_size
             start_block_idx = self._next_stored_block_idx.get(req_id, 0)
             num_new_blocks = num_blocks - start_block_idx
