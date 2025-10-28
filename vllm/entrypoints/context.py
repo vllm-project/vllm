@@ -362,7 +362,7 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1]
-        if envs.TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY:
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)
             except json.JSONDecodeError as e:
@@ -449,7 +449,7 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        if envs.TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY:
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)
             except json.JSONDecodeError as e:

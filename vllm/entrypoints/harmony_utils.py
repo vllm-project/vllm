@@ -340,7 +340,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
         content = message.content[0]
-        # We do not need to check the TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY
+        # We do not need to check the VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY
         # env variable since if it is not set, we are certain the json is valid
         # The use of Actions for web search will be removed entirely in
         # the future, so this is only necessary temporarily

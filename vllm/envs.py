@@ -218,6 +218,7 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
 
 
 def get_default_cache_root():
@@ -1411,8 +1412,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable automatic retry when tool call JSON parsing fails
     # If enabled, returns an error message to the model to retry
     # If disabled (default), raises an exception and fails the request
-    "TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY": lambda: bool(
-        int(os.getenv("TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY", "0"))
+    "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
+        int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
     ),
 }
 
