@@ -12,9 +12,17 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
+    ROCmScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     ScaledMMLinearKernel,
     ScaledMMLinearLayerConfig,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.torch import (
+    ChannelWiseTorchScaledMMLinearKernel,
+    PerTensorTorchScaledMMLinearKernel,
+    RowWiseTorchScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonScaledMMLinearKernel,
@@ -25,16 +33,28 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
 from vllm.platforms import PlatformEnum, current_platform
 
 # in priority/performance order (when available)
-_POSSIBLE_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
+_POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CPUScaledMMLinearKernel],
     PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
     PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
 
+_POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
+    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
+    PlatformEnum.ROCM: [
+        ROCmScaledMMLinearKernel,
+        PerTensorTorchScaledMMLinearKernel,
+        RowWiseTorchScaledMMLinearKernel,
+        ChannelWiseTorchScaledMMLinearKernel,
+    ],
+}
+
 
 def choose_scaled_mm_linear_kernel(
-    config: ScaledMMLinearLayerConfig, compute_capability: int | None = None
+    config: ScaledMMLinearLayerConfig,
+    possible_kernels: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]],
+    compute_capability: int | None = None,
 ) -> type[ScaledMMLinearKernel]:
     """
     Choose an ScaledMMLinearKernel that can implement the given config for the
@@ -61,7 +81,7 @@ def choose_scaled_mm_linear_kernel(
             compute_capability = _cc[0] * 10 + _cc[1]
 
     failure_reasons = []
-    for kernel in _POSSIBLE_KERNELS[current_platform._enum]:
+    for kernel in possible_kernels[current_platform._enum]:
         if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
             failure_reasons.append(
                 f" {kernel.__name__} disabled by environment variable"

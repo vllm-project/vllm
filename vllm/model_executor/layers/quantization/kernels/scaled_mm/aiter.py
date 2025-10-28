@@ -9,8 +9,8 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .cutlass import CutlassScaledMMLinearKernel
-from .ScaledMMLinearKernel import ScaledMMLinearLayerConfig
+from .cutlass import process_weights_after_loading
+from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
 
 
 def rocm_aiter_gemm_w8a8_impl(
@@ -52,7 +52,7 @@ if current_platform.is_rocm():
     )
 
 
-class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
+class AiterScaledMMLinearKernel(ScaledMMLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
         return 90
@@ -92,7 +92,9 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
+        _, param_names = self.layer_mapping_function(layer)
+
+        process_weights_after_loading(self.config, layer, *param_names)
 
     def apply_weights(
         self,
@@ -110,7 +112,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         w8a8 scaled gemm. `AiterScaledMMLinearKernel` also does not support
         ATIER block scaled GEMM and mix-precision GEMM.
         """
-        w_q, w_s, i_s, i_zp, azp_adj = self._get_weight_params(layer)
+        (w_q, w_s, i_s, i_zp, azp_adj), _ = self.layer_mapping_function(layer)
 
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
