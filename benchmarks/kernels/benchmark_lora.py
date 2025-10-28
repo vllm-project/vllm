@@ -386,6 +386,137 @@ class OpType(Enum):
 
         raise ValueError(f"Unrecognized optype {self}")
 
+    def _run_fused_moe_lora_ref(
+        self,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        lora_weights: list[torch.Tensor],
+        is_shrink: bool,
+        **kwargs,
+    ) -> None:
+        """
+        Unified reference implementation for fused MoE LoRA operations.
+
+        Processes tokens exactly as the kernel does:
+        - For each LoRA and block: get expert_id from expert_ids tensor
+        - For each token in block: get token_id from sorted_token_ids
+        - Perform the gemm with the corresponding expert's weights
+        """
+        top_k_num = kwargs.get("top_k_num", 1)
+        seq_lens_cpu = kwargs.get("seq_lens_cpu")
+        prompt_lora_mapping_cpu = kwargs.get("prompt_lora_mapping_cpu")
+        scaling = kwargs.get("scaling", 1.0)
+        topk_weights = kwargs.get("topk_weights")
+        sorted_token_ids = kwargs.get("sorted_token_ids")  # (num_loras, padded_size)
+        expert_ids = kwargs.get("expert_ids")  # (num_loras, num_blocks)
+        mul_routed_weight = kwargs.get("mul_routed_weight", False)
+        w_dtype = lora_weights[0].dtype
+        num_slices = len(lora_weights)
+
+        # Get block size from kernel config (needed to map tokens to blocks)
+        block_size_m = kwargs.get(
+            "shrink_block_size_m" if is_shrink else "expand_block_size_m", 64
+        )
+
+        # Move to CPU for easier processing
+        sorted_token_ids_cpu = sorted_token_ids.cpu()
+        expert_ids_cpu = expert_ids.cpu()
+        num_loras = lora_weights[0].shape[0]
+
+        # Process each LoRA
+        for lora_idx in range(num_loras):
+            # Find which batch uses this LoRA
+            batch_mask = prompt_lora_mapping_cpu == lora_idx
+            if not batch_mask.any():
+                continue  # No sequences use this LoRA
+
+            # Process each slice
+            for slice_idx in range(num_slices):
+                weights_slice = lora_weights[
+                    slice_idx
+                ]  # (num_loras, num_experts, out_dim, in_dim)
+
+                # Process each block for this LoRA
+                num_blocks = expert_ids_cpu.shape[1]
+                for block_idx in range(num_blocks):
+                    # Get the expert_id for this block
+                    expert_id = expert_ids_cpu[lora_idx, block_idx].item()
+                    if expert_id == -1:
+                        continue  # Empty block
+
+                    # Get weight for this expert and LoRA
+                    weight = weights_slice[lora_idx, expert_id, :, :]
+
+                    # Process tokens in this block
+                    block_start = block_idx * block_size_m
+                    block_end = min(
+                        block_start + block_size_m, sorted_token_ids_cpu.shape[1]
+                    )
+
+                    for token_pos in range(block_start, block_end):
+                        sorted_token_id = sorted_token_ids_cpu[
+                            lora_idx, token_pos
+                        ].item()
+
+                        # Check if this is a valid token (not padding)
+                        num_tokens = seq_lens_cpu.sum().item()
+                        if self == OpType.FUSED_MOE_LORA_DOWN_SHRINK and is_shrink:
+                            max_valid = num_tokens * top_k_num
+                        else:
+                            max_valid = num_tokens
+
+                        if sorted_token_id >= max_valid:
+                            continue  # Padding token
+
+                        # Decode: original_token_idx and k_idx from sorted_token_id
+                        if is_shrink:
+                            # For shrink: sorted_token_id encodes (token_idx * top_k + k_idx)
+                            original_token_idx = sorted_token_id // top_k_num
+                            k_idx = sorted_token_id % top_k_num
+                        else:
+                            # For expand: sorted_token_id is just the token index
+                            # k_idx comes from the expert routing (encoded in block structure)
+                            original_token_idx = sorted_token_id
+                            # Need to infer k_idx - in expand, tokens are organized differently
+                            # Each expert processes tokens with that expert's k_idx
+                            k_idx = expert_id % top_k_num  # Simplified
+
+                        if is_shrink:
+                            # Input index
+                            if self == OpType.FUSED_MOE_LORA_DOWN_SHRINK:
+                                input_idx = sorted_token_id
+                            else:
+                                input_idx = original_token_idx
+
+                            x = input[input_idx : input_idx + 1, :]
+                            result = torch.nn.functional.linear(x, weight)
+                            result = result * scaling
+                            output[slice_idx, original_token_idx, k_idx, :] = (
+                                result.squeeze(0)
+                            )
+
+                        else:
+                            # Expand
+                            hidden_size = weights_slice.shape[2]
+                            x = (
+                                input[slice_idx, original_token_idx, k_idx, :]
+                                .unsqueeze(0)
+                                .to(dtype=w_dtype)
+                            )
+                            result = torch.nn.functional.linear(x, weight)
+                            result = result * scaling
+
+                            if mul_routed_weight and topk_weights is not None:
+                                route_weight = topk_weights[original_token_idx, k_idx]
+                                result = result * route_weight
+
+                            slice_offset = slice_idx * hidden_size
+                            output[
+                                original_token_idx,
+                                k_idx,
+                                slice_offset : slice_offset + hidden_size,
+                            ] += result.squeeze(0)
+
     def run_ref_group_gemm(
         self,
         output: torch.Tensor,
@@ -418,6 +549,24 @@ class OpType(Enum):
                     lora_weights=lora_weights[slice_idx],
                     **kwargs,
                 )
+        elif self.is_fused_moe_lora_shrink_fn():
+            # For fused MoE LoRA shrink: input @ lora_a.T -> intermediate
+            # Input shape: (num_tokens, hidden_size) for gate_up or
+            #              (num_tokens*top_k, hidden_size) for down
+            # Weight shape: (num_loras, num_experts, lora_rank, hidden_size)
+            # Output shape: (num_slices, num_tokens, top_k, lora_rank)
+            self._run_fused_moe_lora_ref(
+                output, input, lora_weights, is_shrink=True, **kwargs
+            )
+
+        elif self.is_fused_moe_lora_expand_fn():
+            # For fused MoE LoRA expand: intermediate @ lora_b.T -> output
+            # Input shape: (num_slices, num_tokens, top_k, lora_rank)
+            # Weight shape: (num_loras, num_experts, hidden_size, lora_rank)
+            # Output shape: (num_tokens, top_k, hidden_size * num_slices)
+            self._run_fused_moe_lora_ref(
+                output, input, lora_weights, is_shrink=False, **kwargs
+            )
         else:
             raise ValueError(f"Unrecognized optype {self}")
 
@@ -959,7 +1108,7 @@ class BenchmarkTensors:
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(
-        self, op_type: OpType, expand_fn_add_inputs: bool | None
+        self, ctx: BenchmarkContext, op_type: OpType, expand_fn_add_inputs: bool | None
     ) -> bool:
         """
         Test correctness of op_type implementation against a grouped gemm
@@ -970,16 +1119,37 @@ class BenchmarkTensors:
         ref_output = self.output.clone()
 
         self.output.zero_()
-        op_type.bench_fn()(**self.bench_fn_kwargs(op_type, expand_fn_add_inputs))
+        kernel_kwargs = self.bench_fn_kwargs(ctx, op_type, expand_fn_add_inputs)
+        op_type.bench_fn()(**kernel_kwargs)
+
+        # Build reference kwargs
+        ref_kwargs = {
+            "seq_lens_cpu": seq_lens_cpu,
+            "prompt_lora_mapping_cpu": prompt_lora_mapping_cpu,
+            "scaling": 1.0,
+            "add_inputs": expand_fn_add_inputs,
+        }
+
+        # Add fused_moe_lora specific kwargs if needed
+        if op_type.is_fused_moe_lora_fn():
+            ref_kwargs.update(
+                {
+                    "topk_weights": kernel_kwargs.get("topk_weights"),
+                    "sorted_token_ids": kernel_kwargs.get("sorted_token_ids"),
+                    "expert_ids": kernel_kwargs.get("expert_ids"),
+                    "top_k_num": ctx.top_k_num,
+                    "num_experts": ctx.num_experts,
+                    "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
+                    "shrink_block_size_m": kernel_kwargs.get("shrink_block_size_m"),
+                    "expand_block_size_m": kernel_kwargs.get("expand_block_size_m"),
+                }
+            )
 
         op_type.run_ref_group_gemm(
             ref_output,
             self.input,
             self.lora_weights_lst,
-            seq_lens_cpu=seq_lens_cpu,
-            prompt_lora_mapping_cpu=prompt_lora_mapping_cpu,
-            scaling=1.0,
-            add_inputs=expand_fn_add_inputs,
+            **ref_kwargs,
         )
 
         rtol, atol = {
@@ -1015,12 +1185,15 @@ def bench_optype(
     # Test correctness of our implementation.
     if test_correctness:
         assert all(
-            [bt.test_correctness(op_type, expand_fn_add_inputs) for bt in bench_tensors]
+            [
+                bt.test_correctness(ctx, op_type, expand_fn_add_inputs)
+                for bt in bench_tensors
+            ]
         )
 
     # BenchmarkTensors -> dict (kwargs)
     kwargs_list = [
-        bt.bench_fn_kwargs(op_type, add_inputs=expand_fn_add_inputs)
+        bt.bench_fn_kwargs(ctx, op_type, add_inputs=expand_fn_add_inputs)
         for bt in bench_tensors
     ]
 
