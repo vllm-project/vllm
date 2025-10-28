@@ -126,8 +126,7 @@ def rocm_unquantized_gemm_impl(
 ) -> torch.Tensor:
     from vllm.platforms.rocm import on_gfx9
 
-    x_view = x.view(-1, x.size(-1))
-    n = x_view.shape[0]
+    n = x.numel() / x.size(-1)
     m = weight.shape[0]
     k = weight.shape[1]
 
@@ -146,6 +145,7 @@ def rocm_unquantized_gemm_impl(
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
 
+    x_view = x.view(-1, x.size(-1))
     if m > 8 and 0 < n <= 4:
         cu_count = current_platform.get_cu_count()
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
