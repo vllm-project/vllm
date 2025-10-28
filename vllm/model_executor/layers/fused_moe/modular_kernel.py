@@ -957,7 +957,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.expert_map = expert_map.clone()
             
             start_idx = int(torch.distributed.get_rank()) * local_num_experts
-            expert_load_view[start_idx:start_idx+local_num_experts] += (
+            expert_load_view[start_idx : start_idx+local_num_experts] += (
                 expert_tokens_meta.expert_num_tokens
             )
 
