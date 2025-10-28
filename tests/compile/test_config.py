@@ -76,7 +76,9 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-@pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.NONE])
+@pytest.mark.parametrize(
+    "cudagraph_mode", [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.NONE]
+)
 def test_use_cudagraphs(vllm_runner, monkeypatch, cudagraph_mode):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -88,7 +90,9 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, cudagraph_mode):
     with (
         compilation_counter.expect(
             num_graphs_seen=1,
-            num_gpu_runner_capture_triggers=1 if cudagraph_mode != CUDAGraphMode.NONE else 0,
+            num_gpu_runner_capture_triggers=1
+            if cudagraph_mode != CUDAGraphMode.NONE
+            else 0,
             num_cudagraph_captured=13 if cudagraph_mode != CUDAGraphMode.NONE else 0,
         ),
         # loading the model causes compilation (if enabled) to happen
@@ -248,7 +252,15 @@ def test_resolve_operator_overload():
     [
         (None, None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         ([1, 2, 4], 4, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
-        ([1, 2, 4], 8, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
+        (
+            [1, 2, 4],
+            8,
+            1,
+            False,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            ValidationError,
+        ),
         ([1, 256], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         ([], None, 1, False, 2048, CUDAGraphMode.NONE, 0),
         (None, 0, 1, False, 2048, CUDAGraphMode.NONE, 0),
@@ -300,5 +312,6 @@ def test_cudagraph_sizes_post_init(
         vllm_config = engine_args.create_engine_config()
 
         assert (
-            vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
+            vllm_config.compilation_config.max_cudagraph_capture_size
+            == expected_max_size
         )
