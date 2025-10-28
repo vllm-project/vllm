@@ -704,6 +704,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         kv_cache_per_block_size[block_size] = kv_cache
 
     # 4. Run vLLM backends and compare
+    failures = []
     for backend_idx, backend_name in enumerate(BACKENDS_TO_TEST):
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
@@ -747,32 +748,40 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         expected_output = sdpa_outputs[backend_name]
 
         # Check shape and dtype consistency
-        assert backend_output.shape == expected_output.shape, (
-            f"[{backend_name}] shape {backend_output.shape} != "
-            f"SDPA shape {expected_output.shape}"
-        )
-        assert backend_output.dtype == expected_output.dtype, (
-            f"[{backend_name}] dtype {backend_output.dtype} != "
-            f"SDPA dtype {expected_output.dtype}"
-        )
+        try:
+            assert backend_output.shape == expected_output.shape, (
+                f"[{backend_name}] shape {backend_output.shape} != "
+                f"SDPA shape {expected_output.shape}"
+            )
+            assert backend_output.dtype == expected_output.dtype, (
+                f"[{backend_name}] dtype {backend_output.dtype} != "
+                f"SDPA dtype {expected_output.dtype}"
+            )
 
-        assert torch.isfinite(backend_output).all(), (
-            f"[{backend_name}] produced non-finite values"
-        )
+            assert torch.isfinite(backend_output).all(), (
+                f"[{backend_name}] produced non-finite values"
+            )
 
-        # Check numerical similarity
-        rtol = 1e-2
-        atol = 5e-1
+            # Check numerical similarity
+            rtol = 1e-2
+            atol = 5e-1
 
-        max_diff = torch.max(torch.abs(backend_output - expected_output)).item()
-        max_rel_diff = torch.max(
-            torch.abs(backend_output - expected_output) / torch.abs(expected_output)
-        ).item()
-        all_close = torch.allclose(
-            backend_output, expected_output, rtol=rtol, atol=atol
-        )
+            max_diff = torch.max(torch.abs(backend_output - expected_output)).item()
+            max_rel_diff = torch.max(
+                torch.abs(backend_output - expected_output) / torch.abs(expected_output)
+            ).item()
+            all_close = torch.allclose(
+                backend_output, expected_output, rtol=rtol, atol=atol
+            )
 
-        assert all_close, (
-            f"[{backend_name}] output differs from SDPA baseline. "
-            f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})"
-        )
+            assert all_close, (
+                f"[{backend_name}] output differs from SDPA baseline. "
+                f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})"
+            )
+        except AssertionError as e:
+            failures.append(str(e))
+
+    # Report all failures at once
+    if failures:
+        failure_msg = "\n".join(failures)
+        pytest.fail(f"Backend correctness test failed:\n{failure_msg}")
