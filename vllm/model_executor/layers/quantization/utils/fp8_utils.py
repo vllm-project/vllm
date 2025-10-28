@@ -28,13 +28,13 @@ from vllm.model_executor.parameter import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -910,11 +910,11 @@ def requant_weight_ue8m0_inplace(
     UE8M0 (power-of-two) format expected by the new DeepGEMM kernels inplace.
 
     Args:
-        weight: Block-quantised weight tensor stored in ``torch.float8_e4m3fn``.
-            Expected shape ``(..., M, K)``.
-        weight_scale: Corresponding per-block scale tensor (``torch.float32``)
-            with shape ``(..., M // block_size[0], K // block_size[1])``.
-        block_size: 2-element iterable ``[block_m, block_k]`` describing the
+        weight: Block-quantised weight tensor stored in `torch.float8_e4m3fn`.
+            Expected shape `(..., M, K)`.
+        weight_scale: Corresponding per-block scale tensor (`torch.float32`)
+            with shape `(..., M // block_size[0], K // block_size[1])`.
+        block_size: 2-element iterable `[block_m, block_k]` describing the
             block quantisation granularity.
     """
     if weight.numel() == 0:

@@ -594,9 +594,8 @@ class KeyeVL1_5ForConditionalGeneration(
             new_video_embeds.append(video_embeds[start:end])
         return tuple(new_video_embeds)
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,

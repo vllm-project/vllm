@@ -13,14 +13,11 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import (
-    enable_trace_function_call_for_thread,
-    resolve_obj_by_qualname,
-    run_method,
-    update_environment_variables,
-    warn_for_unimplemented_methods,
-)
+from vllm.utils import warn_for_unimplemented_methods
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -128,28 +125,6 @@ class WorkerBase:
     def execute_model(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         raise NotImplementedError
 
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        raise NotImplementedError("Dead V0 code")
-
-    def determine_num_available_blocks(self) -> tuple[int, int]:
-        """Determine the number of available blocks for the GPU KV cache and
-        swappable CPU KV cache.
-
-        The implementation may run profiling or other heuristics to determine
-        the size of caches.
-
-        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
-        appended to.
-        """
-        raise NotImplementedError
-
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
@@ -204,19 +179,20 @@ class WorkerWrapperBase:
         """
         self.rpc_rank = rpc_rank
         self.worker: WorkerBase | None = None
-        self.vllm_config: VllmConfig | None = None
-        # do not store this `vllm_config`, `init_worker` will set the final
-        # one. TODO: investigate if we can remove this field in
-        # `WorkerWrapperBase`, `init_cached_hf_modules` should be
-        # unnecessary now.
-        if vllm_config.model_config is not None:
-            # it can be None in tests
-            trust_remote_code = vllm_config.model_config.trust_remote_code
-            if trust_remote_code:
-                # note: lazy import to avoid importing torch before initializing
-                from vllm.utils import init_cached_hf_modules
 
-                init_cached_hf_modules()
+        # do not store this `vllm_config`, `init_worker` will set the final
+        # one.
+        # TODO: investigate if we can remove this field in `WorkerWrapperBase`,
+        # `init_cached_hf_modules` should be unnecessary now.
+        self.vllm_config: VllmConfig | None = None
+
+        # `model_config` can be None in tests
+        model_config = vllm_config.model_config
+        if model_config and model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils.import_utils import init_cached_hf_modules
+
+            init_cached_hf_modules()
 
     def shutdown(self) -> None:
         if self.worker is not None:
@@ -253,7 +229,7 @@ class WorkerWrapperBase:
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker"
         )
-        enable_trace_function_call_for_thread(self.vllm_config)
+        self.vllm_config.enable_trace_function_call_for_thread()
 
         from vllm.plugins import load_general_plugins
 
