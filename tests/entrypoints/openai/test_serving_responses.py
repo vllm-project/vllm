@@ -125,6 +125,28 @@ class TestInitializeToolSessions:
         # Verify that init_tool_sessions was called
         assert mock_context.init_tool_sessions_called
 
+    def test_validate_create_responses_input(
+        self, serving_responses_instance, mock_context, mock_exit_stack
+    ):
+        request = ResponsesRequest(
+            input="test input",
+            previous_input_messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What is my horoscope? I am an Aquarius.",
+                        }
+                    ],
+                }
+            ],
+            previous_response_id="lol",
+        )
+        error = serving_responses_instance._validate_create_responses_input(request)
+        assert error is not None
+        assert error.error.type == "invalid_request_error"
+
 
 class TestValidateGeneratorInput:
     """Test class for _validate_generator_input method"""
