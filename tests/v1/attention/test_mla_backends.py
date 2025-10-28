@@ -36,9 +36,10 @@ BACKENDS_TO_TEST = [
     _Backend.TRITON_MLA,
 ]
 
-# Remove CUTLASS_MLA from the list if not using sm100
+# Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(_Backend.CUTLASS_MLA)
+    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER_MLA)
 
 # Remove FLASHMLA from the list if not supported
 if not is_flashmla_dense_supported()[0]:
