@@ -1300,9 +1300,8 @@ class Scheduler(SchedulerInterface):
             finished_status: The finished status to set.
 
         Returns:
-            List of valid requests that were finished. These
-            are freed from the scheduler PoV, but can be used
-            to create outputs.
+            List of freed requests. These are freed from the
+            scheduler PoV, but can be used to create outputs.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -1312,7 +1311,7 @@ class Scheduler(SchedulerInterface):
 
         running_requests_to_remove = set()
         waiting_requests_to_remove = []
-        valid_requests = []
+        freed_requests = []
 
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
@@ -1321,7 +1320,7 @@ class Scheduler(SchedulerInterface):
                 # Invalid request ID.
                 continue
 
-            valid_requests.append(request)
+            freed_requests.append(request)
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
             else:
@@ -1334,11 +1333,11 @@ class Scheduler(SchedulerInterface):
             self.waiting.remove_requests(waiting_requests_to_remove)
 
         # Set status and free all valid requests
-        for request in valid_requests:
+        for request in freed_requests:
             request.status = finished_status
             self._free_request(request)
 
-        return valid_requests
+        return freed_requests
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
@@ -1540,6 +1539,8 @@ class Scheduler(SchedulerInterface):
 
         This method scans the given requests, detects those with invalid blocks
         and adjusts their `num_computed_tokens` to the longest valid prefix.
+        For observability, it also accumulates the total number of tokens that
+        will need to be recomputed across all affected requests.
 
         Args:
             requests: The set of requests to scan for invalid blocks.
@@ -1566,7 +1567,6 @@ class Scheduler(SchedulerInterface):
         for request in requests:
             is_affected = False
             marked_invalid_block = False
-            first_affected_idx = None
             req_id = request.request_id
             # TODO (davidb): add support for hybrid memory allocator
             (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
@@ -1610,12 +1610,14 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 marked_invalid_block = True
-                first_affected_idx = idx
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
                 total_affected_tokens += (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
+                # collect invalid block and all downstream dependent blocks
+                if evict_blocks:
+                    blocks_to_evict.update(req_block_ids[idx:])
 
             if is_affected:
                 if not marked_invalid_block:
@@ -1628,11 +1630,6 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - request.num_cached_tokens
                     )
                     request.num_computed_tokens = request.num_cached_tokens
-                else:
-                    # collect invalid block and all downstream dependent blocks
-                    # only if this request marked blocks for recomputation
-                    if evict_blocks and first_affected_idx is not None:
-                        blocks_to_evict.update(req_block_ids[first_affected_idx:])
 
                 affected_req_ids.add(request.request_id)
 
@@ -1645,10 +1642,7 @@ class Scheduler(SchedulerInterface):
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
         """
-        should_fail = (
-            self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.kv_load_failure_policy == "fail"
-        )
+        should_fail = not self.recompute_kv_load_failures
 
         # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (
@@ -1679,12 +1673,10 @@ class Scheduler(SchedulerInterface):
             return set()
 
         # evict invalid blocks and downstream dependent blocks from cache
-        if sync_blocks_to_evict:
-            cached_blocks_to_evict = self.kv_cache_manager.get_cached_block_ids(
-                sync_blocks_to_evict
-            )
-            if cached_blocks_to_evict:
-                self.kv_cache_manager.evict_blocks(cached_blocks_to_evict)
+        # only when not using recompute policy (where blocks will be recomputed
+        # and reused by other requests sharing them)
+        if sync_blocks_to_evict and not self.recompute_kv_load_failures:
+            self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
 
         if should_fail:
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
