@@ -45,12 +45,12 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs:
 
-| Task       | APIs                                 |
-|------------|--------------------------------------|
-| `encode`   | `LLM.reward(...)`                    |
-| `embed`    | `LLM.embed(...)`, `LLM.score(...)`\* |
-| `classify` | `LLM.classify(...)`                  |
-| `score`    | `LLM.score(...)`                     |
+| Task             | APIs                                 |
+|------------------|--------------------------------------|
+| `token_classify` | `LLM.reward(...)`                    |
+| `embed`          | `LLM.embed(...)`, `LLM.score(...)`\* |
+| `classify`       | `LLM.classify(...)`                  |
+| `score`          | `LLM.score(...)`                     |
 
 \* The `LLM.score(...)` API falls back to `embed` task if the model does not support `score` task.
 
@@ -91,7 +91,7 @@ It is primarily designed for embedding models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-small", runner="pooling")
+llm = LLM(model="intfloat/e5-small")
 (output,) = llm.embed("Hello, my name is")
 
 embeds = output.outputs.embedding
@@ -108,7 +108,7 @@ It is primarily designed for classification models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling")
+llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach")
 (output,) = llm.classify("Hello, my name is")
 
 probs = output.outputs.probs
@@ -129,7 +129,7 @@ It is designed for embedding models and cross-encoder models. Embedding models u
 ```python
 from vllm import LLM
 
-llm = LLM(model="BAAI/bge-reranker-v2-m3", runner="pooling")
+llm = LLM(model="BAAI/bge-reranker-v2-m3")
 (output,) = llm.score(
     "What is the capital of France?",
     "The capital of Brazil is Brasilia.",
@@ -144,12 +144,11 @@ A code example can be found here: [examples/offline_inference/basic/score.py](..
 ### `LLM.reward`
 
 The [reward][vllm.LLM.reward] method is available to all reward models in vLLM.
-It returns the extracted hidden states directly.
 
 ```python
 from vllm import LLM
 
-llm = LLM(model="internlm/internlm2-1_8b-reward", runner="pooling", trust_remote_code=True)
+llm = LLM(model="internlm/internlm2-1_8b-reward", trust_remote_code=True)
 (output,) = llm.reward("Hello, my name is")
 
 data = output.outputs.data
@@ -161,20 +160,22 @@ A code example can be found here: [examples/offline_inference/basic/reward.py](.
 ### `LLM.encode`
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
-It returns the extracted hidden states directly.
 
 !!! note
     Please use one of the more specific methods or set the task directly when using `LLM.encode`:
 
     - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
     - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
-    - For rewards, use `LLM.reward(...)` or `pooling_task="reward"`.
     - For similarity scores, use `LLM.score(...)`.  
+    - For rewards, use `LLM.reward(...)` or `pooling_task="token_classify"`.
+    - For token classification, use `pooling_task="token_classify"`.
+    - For multi-vector retrieval, use `pooling_task="token_embed"`
+    - For IO Processor Plugins , use `pooling_task="plugin"`
 
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-small", runner="pooling")
+llm = LLM(model="intfloat/e5-small")
 (output,) = llm.encode("Hello, my name is", pooling_task="embed")
 
 data = output.outputs.data
@@ -185,10 +186,47 @@ print(f"Data: {data!r}")
 
 Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
-- [Pooling API](../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API](../serving/openai_compatible_server.md#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for embedding models.
 - [Classification API](../serving/openai_compatible_server.md#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
 - [Score API](../serving/openai_compatible_server.md#score-api) is similar to `LLM.score` for cross-encoder models.
+- [Pooling API](../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
+
+!!! note
+    Please use one of the more specific methods or set the task directly when using  [Pooling API](../serving/openai_compatible_server.md#pooling-api) api.:
+
+    - For embeddings, use [Embeddings API](../serving/openai_compatible_server.md#embeddings-api) or `"task":"embed"`.
+    - For classification logits, use [Classification API](../serving/openai_compatible_server.md#classification-api) or `task":"classify"`.
+    - For similarity scores, use [Score API](../serving/openai_compatible_server.md#score-api).  
+    - For rewards, `task":"token_classify"`.
+    - For token classification, use `task":"token_classify"`.
+    - For multi-vector retrieval, use `task":"token_embed"`
+    - For IO Processor Plugins , use `task":"plugin"`
+
+```python
+# start a supported embeddings model server with `vllm serve`, e.g.
+# vllm serve intfloat/e5-small
+import requests
+
+host = "localhost"
+port = "8000"
+model_name = "intfloat/e5-small"
+
+api_url = f"http://{host}:{port}/pooling"
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+prompt = {"model": model_name, "input": prompts, "task": "embed"}
+
+response = requests.post(api_url, json=prompt)
+
+for output in response.json()["data"]:
+    data = output["data"]
+    print(f"Data: {data!r} (size={len(data)})")
+```
 
 ## Matryoshka Embeddings
 
