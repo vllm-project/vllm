@@ -54,7 +54,6 @@ class ARCOffloadingManager(OffloadingManager):
 
     def __init__(self, backend: Backend, enable_events: bool = False):
         self.backend: Backend = backend
-        self.cache_capacity: int = 0  # will be set based on backend capacity
         self.target_t1_size: int = 0
         self.t1: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
         self.t2: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
@@ -63,13 +62,11 @@ class ARCOffloadingManager(OffloadingManager):
         self.b2: OrderedDict[BlockHash, None] = OrderedDict()
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
 
-    def _update_cache_capacity(self):
-        if self.cache_capacity == 0:
-            if hasattr(self.backend, "num_blocks"):
-                self.cache_capacity = self.backend.num_blocks
-            else:
-                # fallback: use current free blocks as a proxy
-                self.cache_capacity = self.backend.get_num_free_blocks()
+        if hasattr(self.backend, "num_blocks"):
+            self.cache_capacity: int = self.backend.num_blocks
+        else:
+            # fallback: use current free blocks as a proxy
+            self.cache_capacity: int = self.backend.get_num_free_blocks()
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         hit_count = 0
@@ -122,9 +119,6 @@ class ARCOffloadingManager(OffloadingManager):
     def prepare_store(
         self, block_hashes: Iterable[BlockHash]
     ) -> PrepareStoreOutput | None:
-        if self.cache_capacity == 0:
-            self._update_cache_capacity()
-
         block_hashes_to_store = []
         for block_hash in block_hashes:
             if block_hash not in self.t1 and block_hash not in self.t2:
