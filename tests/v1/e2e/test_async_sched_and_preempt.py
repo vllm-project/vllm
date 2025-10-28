@@ -6,6 +6,7 @@ import pytest
 import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
+from vllm.logprobs import Logprob
 
 from ...conftest import VllmRunner
 from ...models.utils import check_outputs_equal
@@ -32,6 +33,8 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
         # dict(min_tokens=20),
         dict(presence_penalty=-1.0),
         dict(bad_words=["the", " the"]),
+        dict(logprobs=2),
+        dict(logprobs=2, presence_penalty=-1.0),
     ]
 
     default_params = dict(
@@ -77,21 +80,25 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
                                     sampling_params=SamplingParams(
                                         **default_params, **override_params
                                     ),
+                                    return_logprobs=True,
                                 )
                             )
 
                         if not outputs:
                             # First check that the different parameter configs
                             # actually result in different output.
-                            for other_test, params in zip(
+                            for (other_test_outs, other_test_logprobs), params in zip(
                                 results[1:], sampling_param_tests[1:]
                             ):
                                 with pytest.raises(AssertionError):
                                     check_outputs_equal(
-                                        outputs_0_lst=results[0],
-                                        outputs_1_lst=other_test,
+                                        outputs_0_lst=results[0][0],
+                                        outputs_1_lst=other_test_outs,
                                         name_0=f"baseline params={params}",
                                         name_1=f"other params={params}",
+                                    )
+                                    assert _all_logprobs_match(
+                                        results[0][1], other_test_logprobs
                                     )
 
                         outputs.append((test_config, results))
@@ -99,7 +106,7 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
     baseline_config, baseline_tests = outputs[0]
 
     for test_config, test_outputs in outputs[1:]:
-        for base_outs, test_outs, params in zip(
+        for (base_outs, base_logprobs), (test_outs, test_logprobs), params in zip(
             baseline_tests, test_outputs, sampling_param_tests
         ):
             check_outputs_equal(
@@ -108,5 +115,27 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
                 name_0=f"baseline=[{baseline_config}], params={params}",
                 name_1=f"config=[{test_config}], params={params}",
             )
+            assert _all_logprobs_match(base_logprobs, test_logprobs)
 
             print(f"PASSED: config=[{test_config}], params={params}")
+
+
+def _all_logprobs_match(req_a, req_b) -> bool:
+    return (
+        req_a == req_b
+        or len(req_a) == len(req_b)
+        and all(
+            len(seq_a) == len(seq_b)
+            and all(_logprobs_match(a, b) for a, b in zip(seq_a, seq_b))
+            for seq_a, seq_b in zip(req_a, req_b)
+        )
+    )
+
+
+def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> bool:
+    return len(lps_a) == len(lps_b) and all(
+        a.decoded_token == b.decoded_token
+        and a.rank == b.rank
+        and a.logprob == pytest.approx(b.logprob, rel=1e-3, abs=1e-6)
+        for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
+    )

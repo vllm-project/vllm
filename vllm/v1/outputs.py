@@ -59,6 +59,15 @@ class LogprobsTensors(NamedTuple):
             cu_num_generated_tokens,
         )
 
+    def to_cpu_nonblocking(self) -> "LogprobsTensors":
+        if self.logprob_token_ids.device.type == "cpu":
+            return self
+        return LogprobsTensors(
+            self.logprob_token_ids.to("cpu", non_blocking=True),
+            self.logprobs.to("cpu", non_blocking=True),
+            self.selected_token_ranks.to("cpu", non_blocking=True),
+        )
+
     @staticmethod
     def empty_cpu(
         num_positions: int, num_tokens_per_position: int
