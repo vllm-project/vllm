@@ -14,7 +14,6 @@ import torch
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
-    create_standard_kv_cache_spec,
     create_vllm_config,
     try_get_attention_backend,
 )
@@ -446,8 +445,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
     device = torch.device("cuda:0")
 
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
-
     # 1. Setup
     batch_size = batch_spec.batch_size
     seq_lens = batch_spec.seq_lens
@@ -717,9 +714,20 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         common_attn_metadata = metadata_per_block_size[block_size]
         kv_cache = kv_cache_per_block_size[block_size]
 
+        # Create kv_cache_spec with the correct block_size for this backend
+        backend_kv_cache_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+                vllm_config.parallel_config
+            ),
+            head_size=vllm_config.model_config.get_head_size(),
+            dtype=vllm_config.model_config.dtype,
+            sliding_window=vllm_config.model_config.get_sliding_window(),
+        )
+
         backend_output = run_attention_backend(
             backend_name,
-            kv_cache_spec,
+            backend_kv_cache_spec,
             ["placeholder"],
             vllm_config,
             device,
