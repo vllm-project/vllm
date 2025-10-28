@@ -31,6 +31,7 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.protocol import Device
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -75,8 +76,8 @@ from vllm.transformers_utils.tokenizer import (
     get_cached_tokenizer,
 )
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device
 from vllm.utils.collection_utils import as_iter, is_list_of
+from vllm.utils.counter import Counter
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -1490,8 +1491,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> bool:
-        return self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self, device: Device | None = None) -> None:
+        self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """
