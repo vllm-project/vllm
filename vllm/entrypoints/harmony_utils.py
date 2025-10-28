@@ -340,7 +340,19 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
         content = message.content[0]
-        browser_call = json.loads(content.text)
+        try:
+            browser_call = json.loads(content.text)
+        except json.JSONDecodeError:
+            # If the content is not valid JSON, then it was
+            # caught and retried by vLLM, which means
+            json_retry_output_message = (
+                f"Invalid JSON args, caught and retried: {content.text}"
+            )
+            browser_call = {
+                "query": json_retry_output_message,
+                "url": json_retry_output_message,
+                "pattern": json_retry_output_message,
+            }
         # TODO: translate to url properly!
         if recipient == "browser.search":
             action = ActionSearch(
