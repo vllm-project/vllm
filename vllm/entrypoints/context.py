@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Union
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
+from vllm import envs
 from vllm.entrypoints.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -361,10 +362,13 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1]
-        try:
+        if envs.TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.content[0].text)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
             args = json.loads(last_msg.content[0].text)
-        except json.JSONDecodeError as e:
-            return _create_json_parse_error_messages(last_msg, e)
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)
@@ -445,10 +449,13 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        try:
+        if envs.TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.content[0].text)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
             args = json.loads(last_msg.content[0].text)
-        except json.JSONDecodeError as e:
-            return _create_json_parse_error_messages(last_msg, e)
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)

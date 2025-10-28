@@ -1408,6 +1408,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
     ),
+    # Enable automatic retry when tool call JSON parsing fails
+    # If enabled (default), returns an error message to the model to retry
+    # If disabled, raises an exception and fails the request
+    "TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY": lambda: bool(
+        int(os.getenv("TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY", "1"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

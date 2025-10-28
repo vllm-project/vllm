@@ -340,6 +340,9 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
         content = message.content[0]
+        # We do not need to check the TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY
+        # env variable since if it is not set, we are certain the json is valid
+        # The use of Actions will also be removed in the future entirely
         try:
             browser_call = json.loads(content.text)
         except json.JSONDecodeError:
