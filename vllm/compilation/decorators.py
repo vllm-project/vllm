@@ -46,8 +46,6 @@ class CompiledCodeCacheEntry:
     Stores compiled code that can be reused across instances of the same class.
     """
 
-    # The hash key that identifies this compiled code
-    cache_key: str
     # Whether compilation has been completed
     compiled: bool = False
     # Compiled codes (bytecode)
@@ -216,7 +214,7 @@ def _model_hash_key(fn) -> str:
 
 
 def _compute_compilation_cache_key(
-    forward_fn: Callable, vllm_config: VllmConfig
+    module: nn.Module, forward_fn: Callable, vllm_config: VllmConfig
 ) -> str:
     """
     Compute a unique cache key for compilation that identifies whether
@@ -226,6 +224,7 @@ def _compute_compilation_cache_key(
     - Code location and version (_model_hash_key)
     - Compilation configuration (from caching.compilation_config_hash_factors)
     - Device/parallel configuration factors
+    - Module structure (parameter/buffer shapes and dtypes)
     """
     from vllm.compilation.caching import compilation_config_hash_factors
 
@@ -248,9 +247,21 @@ def _compute_compilation_cache_key(
     # 4. Compilation mode
     sha256_hash.update(str(vllm_config.compilation_config.mode).encode())
 
+    # 5. Module structure (parameters and buffers)
+    # This ensures different shapes/dtypes get different cache keys
+    structure_info = []
+    for name, param in sorted(module.named_parameters()):
+        structure_info.append(f"{name}:{param.dtype}:{tuple(param.shape)}")
+    for name, buffer in sorted(module.named_buffers()):
+        structure_info.append(f"{name}:{buffer.dtype}:{tuple(buffer.shape)}")
+    if structure_info:
+        sha256_hash.update("|".join(structure_info).encode())
+
     cache_key = sha256_hash.hexdigest()
     logger.debug(
-        "Computed compilation cache key for %s: %s", forward_fn.__qualname__, cache_key
+        "Computed compilation cache key for %s: %s",
+        forward_fn.__qualname__,
+        cache_key[:16],
     )
     return cache_key
 
@@ -309,9 +320,24 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
+        # Check if compilation cache is disabled
+        # If disabled, each instance compiles independently (original behavior)
+        if envs.VLLM_DISABLE_COMPILE_CACHE:
+            logger.debug(
+                "Compilation cache disabled for %s (VLLM_DISABLE_COMPILE_CACHE=1)",
+                self.__class__.__name__,
+            )
+            compilation_counter.num_models_seen += 1
+            self._using_cached_compilation = False
+            self._cache_entry = None
+            TorchCompileWrapperWithCustomDispatcher.__init__(
+                self, compilation_mode=vllm_config.compilation_config.mode
+            )
+            return
+
         # Compute cache key for this instance's compiled code
         self._compilation_cache_key = _compute_compilation_cache_key(
-            self.__class__.forward, vllm_config
+            self, self.__class__.forward, vllm_config
         )
 
         # Check if we can reuse cached compiled code
@@ -327,16 +353,15 @@ def _support_torch_compile(
                 self._using_cached_compilation = True
                 self._cache_entry = cache_entry
             else:
-                # First time seeing this code, increment counter and create cache entry
+                # First time seeing this code, increment counter
+                # and create cache entry
                 compilation_counter.num_models_seen += 1
                 logger.debug(
                     "First compilation for %s (key: %s)",
                     self.__class__.__name__,
                     self._compilation_cache_key[:8],
                 )
-                cache_entry = CompiledCodeCacheEntry(
-                    cache_key=self._compilation_cache_key
-                )
+                cache_entry = CompiledCodeCacheEntry()
                 _compiled_code_cache[self._compilation_cache_key] = cache_entry
                 self._using_cached_compilation = False
                 self._cache_entry = cache_entry
@@ -530,7 +555,12 @@ def _support_torch_compile(
                     os.makedirs(cache_dir, exist_ok=True)
                     self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
                     # Save AOT compiled function to cache for reuse
-                    if not getattr(self, "_using_cached_compilation", False):
+                    # (only if cache is enabled and this is first compilation)
+                    if (
+                        not envs.VLLM_DISABLE_COMPILE_CACHE
+                        and not getattr(self, "_using_cached_compilation", False)
+                        and self._cache_entry is not None
+                    ):
                         with _cache_lock:
                             self._cache_entry.aot_compiled_fn = self.aot_compiled_fn
                             self._cache_entry.compiled = True
@@ -541,8 +571,11 @@ def _support_torch_compile(
                 else:
                     output = self.compiled_callable(*args, **kwargs)
                     # Save compiled codes to cache for reuse
+                    # (only if cache is enabled and this is first compilation)
                     if (
-                        not getattr(self, "_using_cached_compilation", False)
+                        not envs.VLLM_DISABLE_COMPILE_CACHE
+                        and not getattr(self, "_using_cached_compilation", False)
+                        and self._cache_entry is not None
                         and len(self.compiled_codes) > 0
                     ):
                         with _cache_lock:
