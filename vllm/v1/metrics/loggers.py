@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Union
@@ -17,6 +18,9 @@ from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
+
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
+                              "0") in ("1", "true", "True")
 
 logger = init_logger(__name__)
 
@@ -64,7 +68,9 @@ class LoggingStatLogger(StatLoggerBase):
         kv_tranfer_config = self.vllm_config.kv_transfer_config
         self.kv_transfer_logging = KVConnectorLogging(kv_tranfer_config)
         self.last_prompt_throughput: float = 0.0
-        self.last_generation_throughput: float = 0.0
+        if TIMECOUNT_ENABLED:
+            # [count_num, total_seconds]
+            self.encoder_consume_seconds: list[float] = [0.0, 0.0]
 
     def _reset(self, now):
         self.last_log_time = now
@@ -72,11 +78,18 @@ class LoggingStatLogger(StatLoggerBase):
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: int = 0
         self.num_generation_tokens: int = 0
+        if TIMECOUNT_ENABLED:
+            self.encoder_consume_seconds: list[float] = [0.0, 0.0]
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
         self.num_prompt_tokens += iteration_stats.num_prompt_tokens
         self.num_generation_tokens += iteration_stats.num_generation_tokens
+        if TIMECOUNT_ENABLED:
+            for finished_request in iteration_stats.finished_requests:
+                self.encoder_consume_seconds[0] += 1
+                self.encoder_consume_seconds[1] += \
+                    finished_request.encoder_consume_time
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -124,13 +137,13 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput = prompt_throughput
 
         # Format and print output.
-        log_fn(
-            "Engine %03d: "
-            "Avg prompt throughput: %.1f tokens/s, "
-            "Avg generation throughput: %.1f tokens/s, "
-            "Running: %d reqs, Waiting: %d reqs, "
-            "GPU KV cache usage: %.1f%%, "
-            "Prefix cache hit rate: %.1f%%",
+        log_msg = ("Engine %03d: "
+                   "Avg prompt throughput: %.1f tokens/s, "
+                   "Avg generation throughput: %.1f tokens/s, "
+                   "Running: %d reqs, Waiting: %d reqs, "
+                   "GPU KV cache usage: %.1f%%, "
+                   "Prefix cache hit rate: %.1f%%")
+        log_args = [
             self.engine_index,
             prompt_throughput,
             generation_throughput,
@@ -138,7 +151,12 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.num_waiting_reqs,
             scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
-        )
+        ]
+        if TIMECOUNT_ENABLED and self.encoder_consume_seconds[0] > 0:
+            log_msg += ", Encoder consume seconds: %.3f ms/request"
+            log_args.append(self.encoder_consume_seconds[1] /
+                            self.encoder_consume_seconds[0] * 1000)
+        log_fn(log_msg, *log_args)
         self.spec_decoding_logging.log(log_fn=log_fn)
         self.kv_transfer_logging.log(log_fn=log_fn)
 

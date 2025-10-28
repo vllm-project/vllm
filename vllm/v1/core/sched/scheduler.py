@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -36,6 +37,9 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
+                              "0") in ("1", "true", "True")
 
 logger = init_logger(__name__)
 
@@ -175,6 +179,7 @@ class Scheduler(SchedulerInterface):
             dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        self._epd_encoder_reqs: set[str] = set()
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -318,6 +323,12 @@ class Scheduler(SchedulerInterface):
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
+                if self.log_stats and TIMECOUNT_ENABLED and request.request_id\
+                    not in self._epd_encoder_reqs:
+                    # Record EPD encoder request
+                    self._epd_encoder_reqs.add(request.request_id)
+                    request.record_event(
+                        EngineCoreEventType.ENCODER_CONSUME_START)
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -535,6 +546,12 @@ class Scheduler(SchedulerInterface):
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
+                    if self.log_stats and TIMECOUNT_ENABLED \
+                        and request.request_id not in self._epd_encoder_reqs:
+                        # Record EPD encoder request
+                        self._epd_encoder_reqs.add(request.request_id)
+                        request.record_event(
+                            EngineCoreEventType.ENCODER_CONSUME_START)
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
@@ -889,7 +906,9 @@ class Scheduler(SchedulerInterface):
                 # request is aborted while the model is executing it (e.g.,
                 # in pipeline parallelism).
                 continue
-
+            if self.log_stats and TIMECOUNT_ENABLED and (
+                    req_id in self._epd_encoder_reqs):
+                request.record_event(EngineCoreEventType.ENCODER_CONSUME_END)
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
@@ -984,7 +1003,8 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
-
+        if self.log_stats and TIMECOUNT_ENABLED:
+            self._epd_encoder_reqs.clear()
         # KV Connector: update state for finished KV Transfers.
         if model_runner_output.kv_connector_output:
             self._update_from_kv_xfer_finished(
