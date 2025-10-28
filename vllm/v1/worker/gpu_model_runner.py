@@ -2329,7 +2329,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cu_num_accepted_tokens[-1] + sampled_id_cnt
                 )
 
-            if sampled_id_cnt == 0:
+            if not sampled_ids:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
