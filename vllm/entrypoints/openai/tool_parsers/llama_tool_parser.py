@@ -62,7 +62,7 @@ class Llama3JsonToolParser(ToolParser):
         # Updated regex to match multiple JSONs separated by semicolons
         # This pattern is more robust and can handle nested JSON objects recursively
         self.tool_call_regex = re.compile(
-            r'^(?<BLOCK>\{(?:[^{}"\\]+|"(?:\\.|[^"\\])*"|(?&BLOCK))*\})(?:\s*;\s*(?&BLOCK))*$'
+            r'(?<BLOCK>\{(?:"(?:\\.|[^"\\])*"|(?&BLOCK)|[^{}"\\]+)*\})(?:\s*;\s*(?&BLOCK))*'
         )
 
     def extract_tool_calls(
