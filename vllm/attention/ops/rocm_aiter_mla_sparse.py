@@ -192,6 +192,7 @@ def rocm_sparse_attn_indexer_impl(
     topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
+    fp8_dtype = current_platform.fp8_dtype()
     attn_metadata = get_forward_context().attn_metadata
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -232,7 +233,7 @@ def rocm_sparse_attn_indexer_impl(
             k_fp8 = torch.empty(
                 [chunk.total_seq_lens, head_dim],
                 device=k.device,
-                dtype=torch.float8_e4m3fn,
+                dtype=fp8_dtype,
             )
             k_scale = torch.empty(
                 [chunk.total_seq_lens, 4],
