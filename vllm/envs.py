@@ -1392,6 +1392,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
     # Valid values are container,code_interpreter,web_search_preview
     # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
+    # If the server_label of your mcp tool is not in this list it will
+    # be completely ignored.
     "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_set_with_choices(
         "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
         default=[],

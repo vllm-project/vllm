@@ -599,6 +599,8 @@ class OpenAIServingResponses(OpenAIServing):
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
                 output_messages = context.messages[context.num_init_messages :]
+                print(input_messages)
+                print(output_messages)
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
