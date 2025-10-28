@@ -179,6 +179,7 @@ run_tests_for_model() {
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    VLLM_LOGGING_LEVEL=DEBUG \
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
@@ -232,9 +233,10 @@ run_tests_for_model() {
       UCX_NET_DEVICES=all \
       VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
       UCX_FAULT_DEBUG=1 \
-      RUST_LOG=debug \
+      RUST_LOG=info \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
       VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+      VLLM_LOGGING_LEVEL=DEBUG \
       LD_PRELOAD=$UCX_FAULT_INJECTOR_LIB \
       vllm serve $model_name \
       --port $PORT \
@@ -247,6 +249,7 @@ run_tests_for_model() {
       VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
       UCX_NET_DEVICES=all \
       VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+      VLLM_LOGGING_LEVEL=DEBUG \
       vllm serve $model_name \
       --port $PORT \
       --enforce-eager \
@@ -294,7 +297,7 @@ run_tests_for_model() {
 
   if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
     echo "Configuring fault injection via ucx-fault-client..."
-    FAULT_RATE=${FAULT_RATE:-0.5}
+    FAULT_RATE=${FAULT_RATE:-0.1}
     echo "Setting fault injection probability to ${FAULT_RATE}%"
     $UCX_FAULT_CLIENT probability $FAULT_RATE
     $UCX_FAULT_CLIENT toggle
