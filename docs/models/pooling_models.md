@@ -304,7 +304,7 @@ Expected output:
 
 An OpenAI client example can be found here: [examples/online_serving/pooling/openai_embedding_matryoshka_fy.py](../../examples/online_serving/pooling/openai_embedding_matryoshka_fy.py)
 
-## Deprecated Feature
+## Deprecated Features
 
 ### Encode task
 Split the encode task into two more specific token wise tasks: token_embed and token_classify:
