@@ -37,11 +37,11 @@ def assert_tool_calls(
         assert actual_tool_call.type == "function"
         assert actual_tool_call.function == expected_tool_call.function
 
-        # assert tool call id format
-        assert actual_tool_call.id.startswith("functions.")
+        # assert tool call id format: should contain function name and numeric index
+        # Format can be either "functions.func_name:0" or "func_name:0"
         assert actual_tool_call.id.split(":")[-1].isdigit()
         assert (
-            actual_tool_call.id.split(".")[1].split(":")[0]
+            actual_tool_call.id.split(":")[0].split(".")[-1]
             == expected_tool_call.function.name
         )
 
