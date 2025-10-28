@@ -943,7 +943,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         
         # In EPLB, update expert load from expert_num_tokens.
         if (
-            expert_tokens_meta is not None 
+            expert_tokens_meta is not None
             and expert_load_view is not None
             and expert_tokens_meta.expert_num_tokens is not None
             and expert_map is not None
@@ -952,12 +952,14 @@ class FusedMoEModularKernel(torch.nn.Module):
             # to global physical experts, after which it will not change.
             # expert_load_view: (num_physical_experts,)
             # expert_num_tokens: (local_num_physical_experts,)
-            local_num_experts= expert_tokens_meta.expert_num_tokens.shape[0]
+            local_num_experts = expert_tokens_meta.expert_num_tokens.shape[0]
             if self.expert_map is None or not torch.equal(self.expert_map, expert_map):
                 self.expert_map = expert_map.clone()
             
             start_idx = int(torch.distributed.get_rank()) * local_num_experts
-            expert_load_view[start_idx:start_idx+local_num_experts] += expert_tokens_meta.expert_num_tokens
+            expert_load_view[start_idx:start_idx+local_num_experts] += (
+                expert_tokens_meta.expert_num_tokens
+            )
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
