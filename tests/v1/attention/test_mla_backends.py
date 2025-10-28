@@ -24,6 +24,7 @@ from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.config.vllm import set_current_vllm_config
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.mla.common import QueryLenSupport
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -31,6 +32,7 @@ BACKENDS_TO_TEST = [
     _Backend.CUTLASS_MLA,
     _Backend.FLASHMLA,
     _Backend.FLASH_ATTN_MLA,
+    _Backend.FLASHINFER_MLA,
     _Backend.TRITON_MLA,
 ]
 
@@ -41,6 +43,15 @@ if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 
 # Remove FLASHMLA from the list if not supported
 if not is_flashmla_dense_supported()[0]:
     BACKENDS_TO_TEST.remove(_Backend.FLASHMLA)
+
+SPEC_DECODE_BACKENDS = []
+for backend in BACKENDS_TO_TEST:
+    builder_cls, _ = try_get_attention_backend(backend)
+    query_len_support = getattr(
+        builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
+    )
+    if query_len_support != QueryLenSupport.SINGLE_ONLY:
+        SPEC_DECODE_BACKENDS.append(backend)
 
 torch.manual_seed(42)
 
@@ -353,11 +364,9 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
-    from vllm.v1.attention.backends.mla.common import QueryLenSupport
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
-    spec_decode_backends = {_Backend.FLASH_ATTN_MLA, _Backend.FLASHMLA}
 
     block_size = 16
     required_blocks = sum(
@@ -619,7 +628,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     # 4. Run vLLM backends and compare
     for backend_idx, backend_name in enumerate(BACKENDS_TO_TEST):
         # Skip backends that don't support spec decode for spec decode tests
-        if is_spec_decode_test and backend_name not in spec_decode_backends:
+        if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue
 
         backend_output = run_attention_backend(
