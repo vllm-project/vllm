@@ -311,6 +311,7 @@ An OpenAI client example can be found here: [examples/online_serving/pooling/ope
 ### Encode task
 
 We have split the `encode` task into two more specific token wise tasks: `token_embed` and `token_classify`:
+
 - `token_embed` is the same as embed, using normalize as activation.
 - `token_classify` is the same as classify, default using softmax as activation.
 
