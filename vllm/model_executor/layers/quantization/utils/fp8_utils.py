@@ -329,6 +329,7 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert input_scale is None
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
@@ -392,6 +393,7 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert input_scale is None
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
@@ -962,8 +964,7 @@ def requant_weight_ue8m0_inplace(
 
 
 def check_aiter_fp8_linear_support() -> bool:
-    """AITER is only supported on ROCm and only for FP8_FNUZ
-    and at the moment are MI300 series"""
+    """AITER is only supported on ROCm for MI3XX"""
     return (
         current_platform.is_rocm()
         and envs.VLLM_ROCM_USE_AITER
