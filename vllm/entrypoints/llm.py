@@ -1582,6 +1582,8 @@ class LLM:
                     prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
                 )
 
+            if i % 100 == 99:
+                self.llm_engine.start_profile()
             self._add_request(
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
@@ -1590,6 +1592,8 @@ class LLM:
                 else lora_request,
                 priority=priority[i] if priority else 0,
             )
+            if i % 100 == 99:
+                self.llm_engine.stop_profile()
 
     def _validate_mm_data_and_uuids(
         self,
