@@ -203,7 +203,7 @@ def _lora_shrink(
     NUM_WARPS = kernel_config["num_warps"]
     NUM_STAGES = kernel_config["num_stages"]
     NUM_CTAS = kernel_config["num_ctas"]
-    GROUP_SIZE_M = kernel_config['group_size_m']
+    GROUP_SIZE_M = kernel_config["group_size_m"]
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
     # TODO (varun): This grid formulation maximizes parallelization at the
