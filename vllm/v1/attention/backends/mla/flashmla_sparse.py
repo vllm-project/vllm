@@ -187,7 +187,6 @@ def _convert_req_index_to_global_index_kernel(
     req = tl.load(req_id_ptr + token_id)
 
     # Load prefill request id if prefill support is enabled
-    is_prefill = tl.full((BLOCK_N,), 0, dtype=tl.int1)
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
@@ -199,6 +198,13 @@ def _convert_req_index_to_global_index_kernel(
     # Only token == -1 should propagate as -1
     is_invalid_tok = tok < 0
 
+    # Prefill path: map to workspace offset
+    if HAS_PREFILL:
+        workspace_start = tl.load(
+            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
+        )
+        prefill_out = workspace_start + tok
+
     # Compute block id and in-block offset
     block_id = tok // BLOCK_SIZE
     inblock_off = tok % BLOCK_SIZE
@@ -206,18 +212,15 @@ def _convert_req_index_to_global_index_kernel(
     # Guard block_table access
     valid_block = block_id < max_num_blocks_per_req
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+    base = tl.load(bt_ptr, mask=valid_block, other=0)
 
+    # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
     if HAS_PREFILL:
-        workspace_start = tl.load(
-            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
-        )
-        prefill_out = workspace_start + tok
         decode_out = tl.where(valid_block, base * BLOCK_SIZE + inblock_off, -1)
-        out_val = tl.where(is_prefill, prefill_out, decode_out)
-        out_val = tl.where(is_invalid_tok, -1, out_val)
+        out_val = tl.where(
+            is_invalid_tok, -1, tl.where(is_prefill, prefill_out, decode_out)
+        )
     else:
-        # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
         out_val = tl.where(
             is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
         )
@@ -791,24 +794,29 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 q, kv_cache, topk_indices_global, attn_metadata
             )
         else:
-            # Process decode tokens
-            if num_decode_tokens > 0:
+            # Pure decode case: direct call without allocation
+            if num_prefill_tokens == 0:
                 attn_out = self._forward_fp8_kv(
-                    q[:num_decode_tokens],
-                    kv_cache,
-                    topk_indices_global[:num_decode_tokens],
-                    attn_metadata,
+                    q, kv_cache, topk_indices_global, attn_metadata
                 )
-
-            if num_prefill_tokens > 0:
-                decode_attn_out = attn_out
+            else:
+                # Mixed or pure prefill: allocate output tensor
                 attn_out = q.new_empty(
                     (num_actual_toks, self.num_heads, self.kv_lora_rank),
                     dtype=q.dtype,
                     device=q.device,
                 )
-                attn_out[:num_prefill_tokens] = decode_attn_out[:num_prefill_tokens]
 
+                # Fill decode portion if present
+                if num_decode_tokens > 0:
+                    attn_out[:num_decode_tokens] = self._forward_fp8_kv(
+                        q[:num_decode_tokens],
+                        kv_cache,
+                        topk_indices_global[:num_decode_tokens],
+                        attn_metadata,
+                    )
+
+                # Process prefill chunks
                 assert attn_metadata.prefill_chunks is not None
                 prefill_bf16_workspace = current_workspace_manager().get(
                     self.prefill_workspace_spec
