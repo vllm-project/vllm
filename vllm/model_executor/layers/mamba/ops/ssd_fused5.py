@@ -108,7 +108,6 @@ def _fused5_ssd_kernel(
     cu_chunk_seqlens_ptr,
     cb_ptr,
     out_ptr,
-    out_x_ptr,
     C_ptr,
     D_ptr,
     A_ptr,
@@ -905,9 +904,6 @@ def _fused5_ssd(
     assert CB.shape == (nchunks, ngroups, chunk_size, chunk_size)
     if D is not None:
         assert D.shape == (nheads, hdim) or D.shape == (nheads,)
-    # Allocates output.
-    # out = torch.empty(seqlen, nheads, hdim, device=x.device, dtype=x.dtype)
-    out_x = None
 
     if initial_states is not None:
         num_varlen_seqs = initial_states.shape[0]
@@ -989,7 +985,6 @@ def _fused5_ssd(
             cu_chunk_seqlens,
             CB,
             out,
-            out_x,
             C,
             D,
             A,
@@ -1048,4 +1043,4 @@ def _fused5_ssd(
             CB_COMP_FP32=cb_comp_fp32,
         )
 
-    return out_x, states_G, dA_cumsum, dt_out
+    return states_G

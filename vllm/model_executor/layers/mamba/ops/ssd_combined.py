@@ -81,7 +81,7 @@ def _mamba_chunk_scan_combined_fwd(
         assert initial_states.shape == (len(cu_seqlens) - 1, nheads, headdim, dstate)
 
     if use_fused_kernel:  # all 5 kernels fused
-        _, states, dA_cumsum, dt = _fused5_ssd(
+        states = _fused5_ssd(
             x,
             dt,
             A,
