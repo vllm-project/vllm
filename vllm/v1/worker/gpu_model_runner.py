@@ -2630,7 +2630,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # NOTE(qcs): For PCP, we pad num_scheduled_tokens_np but
                 # do not update total_num_scheduled_tokens in scheduler_output
                 num_input_tokens = self._get_num_input_tokens(
-                    sum(num_scheduled_tokens_np)
+                    num_scheduled_tokens_np.sum()
                 )
             else:
                 num_input_tokens = self._get_num_input_tokens(
@@ -2706,7 +2706,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = get_pcp_group().all_gather(
-                    hidden_states[:num_scheduled_tokens],
+                    hidden_states[:num_scheduled_tokens_np.sum()],
                     0,
                 )
                 hidden_states = torch.index_select(
