@@ -18,7 +18,12 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CompilationMode,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -75,6 +80,21 @@ def support_torch_compile(
 
 
 @overload
+def support_torch_compile(
+    *,
+    mark_unbacked_dims: dict[str, int | list[int]] | None,
+) -> Callable[[_T], _T]: ...
+
+
+@overload
+def support_torch_compile(
+    *,
+    dynamic_arg_dims: dict[str, int | list[int]] | None,
+    mark_unbacked_dims: dict[str, int | list[int]] | None,
+) -> Callable[[_T], _T]: ...
+
+
+@overload
 def support_torch_compile(cls: _T) -> _T: ...
 
 
@@ -82,6 +102,7 @@ def support_torch_compile(
     cls: _T | None = None,
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None = None,
+    mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> Callable[[_T], _T] | _T:
     """
@@ -135,6 +156,11 @@ def support_torch_compile(
     returns a boolean value indicating whether to compile the model or not.
     This is useful if you want to compile the model only when certain
     conditions are met.
+
+    `mark_unbacked_dims` is a dictionary that maps argument names with a dynamic
+    dim to be decorated with `mark_unbacked`.  This is useful if we would like to
+    enforce that dynamo do not specialize on 0/1 values in the case of dummy input
+    such as for vision model compilation
     """
 
     def cls_decorator_helper(cls: _T) -> _T:
@@ -172,7 +198,9 @@ def support_torch_compile(
                 raise ValueError(
                     f"Argument {k} not found in the forward method of {cls}"
                 )
-        return _support_torch_compile(cls, inferred_dynamic_arg_dims, enable_if)
+        return _support_torch_compile(
+            cls, inferred_dynamic_arg_dims, mark_unbacked_dims, enable_if
+        )
 
     if cls is not None:
         # use `support_torch_compile` as a decorator without arguments
@@ -212,6 +240,7 @@ def _verify_source_unchanged(source_info, vllm_config) -> None:
 def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, int | list[int]],
+    mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> _T:
     """
@@ -230,8 +259,22 @@ def _support_torch_compile(
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs):
-        old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
+    def __init__(
+        self, *, vllm_config: VllmConfig | None = None, prefix: str = "", **kwargs
+    ):
+        if vllm_config is None:
+            vllm_config = get_current_vllm_config()
+
+        # NOTE: to support multimodal models (such as encoder),
+        # we may not have vllm_config so we may need to patch
+        # it
+        sig = inspect.signature(old_init)
+        if "vllm_config" in sig.parameters:
+            kwargs["vllm_config"] = vllm_config
+        if "prefix" in sig.parameters:
+            kwargs["prefix"] = prefix
+        old_init(self, **kwargs)
+
         self.vllm_config = vllm_config
         enable_compile = enable_if is None or enable_if(vllm_config)
         # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
@@ -344,6 +387,15 @@ def _support_torch_compile(
                             "Unsupported dynamic dimensions"
                             f" {dims} for argument {k} with type {type(arg)}."
                         )
+            if mark_unbacked_dims:
+                for k, dims in mark_unbacked_dims.items():
+                    arg = bound_args.arguments.get(k)
+                    if arg is not None:
+                        dims = [dims] if isinstance(dims, int) else dims
+                        if isinstance(arg, torch.Tensor):
+                            # In case dims is specified with negative indexing
+                            dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
+                            torch._dynamo.decorators.mark_unbacked(arg, dims)
             # here, it is the starting point of the `torch.compile` process
             start_monitoring_torch_compile(self.vllm_config)
             logger.debug("Start compiling function %s", self.original_code_object)
