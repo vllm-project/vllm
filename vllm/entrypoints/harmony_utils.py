@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import datetime
 import json
 from collections.abc import Iterable, Sequence
-from typing import Literal, Union
+from typing import Literal
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -40,11 +38,14 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
+from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionToolsParam,
     ResponseInputOutputItem,
+    ResponsesRequest,
 )
 from vllm.utils import random_uuid
 
@@ -122,7 +123,7 @@ def get_system_message(
     return sys_msg
 
 
-def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
+def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     if isinstance(tool, ChatCompletionToolsParam):
         return ToolDescription.new(
             name=tool.function.name,
@@ -138,13 +139,13 @@ def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
 
 def get_developer_message(
     instructions: str | None = None,
-    tools: list[Union[Tool, ChatCompletionToolsParam]] | None = None,
+    tools: list[Tool | ChatCompletionToolsParam] | None = None,
 ) -> Message:
     dev_msg_content = DeveloperContent.new()
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools: list[Union[Tool, ChatCompletionToolsParam]] = []
+        function_tools: list[Tool | ChatCompletionToolsParam] = []
         for tool in tools:
             if tool.type in (
                 "web_search_preview",
@@ -178,7 +179,7 @@ def get_user_message(content: str) -> Message:
 
 def parse_response_input(
     response_msg: ResponseInputOutputItem,
-    prev_responses: list[Union[ResponseOutputItem, ResponseReasoningItem]],
+    prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
 ) -> Message:
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
@@ -230,7 +231,7 @@ def parse_response_input(
     return msg
 
 
-def parse_chat_input(chat_msg) -> list[Message]:
+def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     if not isinstance(chat_msg, dict):
         # Handle Pydantic models
         chat_msg = chat_msg.model_dump(exclude_none=True)
@@ -256,6 +257,15 @@ def parse_chat_input(chat_msg) -> list[Message]:
     if role == "tool":
         name = chat_msg.get("name", "")
         content = chat_msg.get("content", "") or ""
+        if isinstance(content, list):
+            # Handle array format for tool message content
+            # by concatenating all text parts.
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{name}"), content
         ).with_channel("commentary")
@@ -270,6 +280,40 @@ def parse_chat_input(chat_msg) -> list[Message]:
         contents = [TextContent(text=c.get("text", "")) for c in content]
     msg = Message.from_role_and_contents(role, contents)
     return [msg]
+
+
+def construct_harmony_previous_input_messages(
+    request: ResponsesRequest,
+) -> list[OpenAIHarmonyMessage]:
+    messages: list[OpenAIHarmonyMessage] = []
+    if request.previous_input_messages:
+        for message in request.previous_input_messages:
+            # Handle both OpenAIHarmonyMessage objects and dictionary inputs
+            if isinstance(message, OpenAIHarmonyMessage):
+                message_role = message.author.role
+                # To match OpenAI, instructions, reasoning and tools are
+                # always taken from the most recent Responses API request
+                # not carried over from previous requests
+                if (
+                    message_role == OpenAIHarmonyRole.SYSTEM
+                    or message_role == OpenAIHarmonyRole.DEVELOPER
+                ):
+                    continue
+                messages.append(message)
+            else:
+                harmony_messages = parse_input_to_harmony_message(message)
+                for harmony_msg in harmony_messages:
+                    message_role = harmony_msg.author.role
+                    # To match OpenAI, instructions, reasoning and tools are
+                    # always taken from the most recent Responses API request
+                    # not carried over from previous requests
+                    if (
+                        message_role == OpenAIHarmonyRole.SYSTEM
+                        or message_role == OpenAIHarmonyRole.DEVELOPER
+                    ):
+                        continue
+                    messages.append(harmony_msg)
+    return messages
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:

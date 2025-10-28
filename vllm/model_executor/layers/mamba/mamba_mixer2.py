@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -46,7 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
 # Added by the IBM Team, 2024
@@ -138,7 +138,7 @@ class Mixer2RMSNormGated(CustomOp):
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         input_dtype = x.dtype
         if not self.use_rms_norm:
             # Keep gate in float32 for numerical stability during silu
@@ -244,9 +244,9 @@ class MambaMixer2(MambaBase, CustomOp):
         rms_norm_eps: float = 1e-5,
         activation: str = "silu",
         use_rms_norm: bool = True,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -474,7 +474,7 @@ class MambaMixer2(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        mup_vector: Optional[torch.Tensor] = None,
+        mup_vector: torch.Tensor | None = None,
     ):
         pass
 
@@ -482,7 +482,7 @@ class MambaMixer2(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        mup_vector: Optional[torch.Tensor] = None,
+        mup_vector: torch.Tensor | None = None,
     ):
         torch.ops.vllm.mamba_mixer2(
             hidden_states,
@@ -495,7 +495,7 @@ class MambaMixer2(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        mup_vector: Optional[torch.Tensor] = None,
+        mup_vector: torch.Tensor | None = None,
     ):
         forward_context = get_forward_context()
         # attn_metadata contains metadata necessary for the mamba2 triton
@@ -822,7 +822,7 @@ def mamba_mixer2(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    mup_vector: Optional[torch.Tensor] = None,
+    mup_vector: torch.Tensor | None = None,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
@@ -833,7 +833,7 @@ def mamba_mixer2_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    mup_vector: Optional[torch.Tensor] = None,
+    mup_vector: torch.Tensor | None = None,
 ) -> None:
     return
 

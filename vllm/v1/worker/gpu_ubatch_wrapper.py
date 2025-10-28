@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 
@@ -21,7 +22,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -32,8 +33,8 @@ class UbatchMetadata:
     context: UBatchContext
     input_ids: torch.Tensor
     positions: torch.Tensor
-    inputs_embeds: Optional[torch.Tensor]
-    intermediate_tensors: Optional[IntermediateTensors]
+    inputs_embeds: torch.Tensor | None
+    intermediate_tensors: IntermediateTensors | None
     num_tokens: int
 
 
@@ -41,7 +42,7 @@ class UbatchMetadata:
 class CUDAGraphMetaData:
     cudagraph: torch.cuda.CUDAGraph
     ubatch_metadata: UbatchMetadata
-    outputs: Optional[Any] = None
+    outputs: Any | None = None
 
 
 class SMControlContextManager:

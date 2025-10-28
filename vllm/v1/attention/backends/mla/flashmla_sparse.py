@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional
 
@@ -23,7 +22,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -51,18 +50,12 @@ structured as:
 """
 
 
-def _lse2_to_lse(lse_base2: torch.Tensor) -> torch.Tensor:
-    # Convert base-2 LSE to natural-log LSE
-    # Keep FP32 for numerical stability during the merge.
-    return lse_base2.to(torch.float32) * math.log(2.0)
-
-
 class FlashMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHMLA_SPARSE_VLLM_V1"
+        return "FLASHMLA_SPARSE"
 
     @staticmethod
     def get_metadata_cls() -> type[AttentionMetadata]:
@@ -101,36 +94,6 @@ class FlashMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class MLASparsePrefillMetadata:
-    # NOTE(Chen): not call it "FlashMLASparsePrefillMetadata" because
-    # the kernel is not from flashmla
-    block_table: torch.Tensor
-    has_context: bool = False
-    context_lens: Optional[torch.Tensor] = None
-
-
-@dataclass
-class FlashMLASparseDecodeAndContextMetadata:
-    scheduler_metadata: torch.Tensor = None
-    num_splits: torch.Tensor = None
-    cache_lens: torch.Tensor = None
-    prefill_context_lengths: Optional[torch.Tensor] = None
-    prefill_new_k_start_locs: Optional[torch.Tensor] = None
-    dummy_block_table: torch.Tensor = None
-
-    def filter_prefill_indices(
-        self, indices: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.prefill_context_lengths is not None
-        prefill_context_lengths = self.prefill_context_lengths.unsqueeze(-1)
-        context_indices = torch.where(indices < prefill_context_lengths, indices, -1)
-        new_token_indices = torch.where(
-            indices >= prefill_context_lengths, indices - prefill_context_lengths, -1
-        )
-        return context_indices, new_token_indices
-
-
-@dataclass
 class FlashMLASparseMetadata:
     num_reqs: int
     max_query_len: int
@@ -147,12 +110,12 @@ class FlashMLASparseMetadata:
 
     @dataclass
     class FP8KernelMetadata:
-        scheduler_metadata: Optional[torch.Tensor]
+        scheduler_metadata: torch.Tensor | None
         num_splits: torch.Tensor
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
-    fp8_extra_metadata: Optional[FP8KernelMetadata] = None
+    fp8_extra_metadata: FP8KernelMetadata | None = None
 
 
 @triton.jit
@@ -410,14 +373,14 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: Optional[torch.Tensor] = None,
+        topk_indice_buffer: torch.Tensor | None = None,
         indexer: Optional["Indexer"] = None,
         **mla_args,
     ) -> None:
@@ -503,9 +466,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode

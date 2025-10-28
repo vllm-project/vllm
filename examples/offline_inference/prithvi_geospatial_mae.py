@@ -3,7 +3,6 @@
 import argparse
 import datetime
 import os
-from typing import Union
 
 import albumentations
 import numpy as np
@@ -50,6 +49,7 @@ class PrithviMAE:
             dtype="float16",
             enforce_eager=True,
             model_impl="terratorch",
+            enable_mm_embeds=True,
         )
 
     def run(self, input_data, location_coords):
@@ -64,7 +64,7 @@ class PrithviMAE:
         }
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
-        outputs = self.model.encode(prompt, use_tqdm=False)
+        outputs = self.model.encode(prompt, pooling_task="plugin", use_tqdm=False)
 
         return outputs[0].outputs.data
 
@@ -160,7 +160,7 @@ def load_example(
     file_paths: list[str],
     mean: list[float] = None,
     std: list[float] = None,
-    indices: Union[list[int], None] = None,
+    indices: list[int] | None = None,
 ):
     """Build an input example by loading images in *file_paths*.
 

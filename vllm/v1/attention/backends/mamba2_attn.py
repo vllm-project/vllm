@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
@@ -108,18 +107,18 @@ class Mamba2AttentionMetadata:
 
     # The following tensors only contain prefill requests and will be None if
     # the batch has no prefill request.
-    has_initial_states_p: Optional[torch.Tensor]
-    seq_idx_p: Optional[torch.Tensor]
+    has_initial_states_p: torch.Tensor | None
+    seq_idx_p: torch.Tensor | None
 
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
     # each chunk, its offests into the varlen sequence dimension. It is defined
     # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
     # cu_chunk_seqlen_p[i+1].
-    cu_chunk_seqlen_p: Optional[torch.Tensor]
+    cu_chunk_seqlen_p: torch.Tensor | None
 
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
-    last_chunk_indices_p: Optional[torch.Tensor]
+    last_chunk_indices_p: torch.Tensor | None
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
     block_idx_last_scheduled_token: torch.Tensor  # shape: [batch,]
@@ -128,9 +127,9 @@ class Mamba2AttentionMetadata:
     num_computed_tokens_p: torch.Tensor  # shape: [batch,]
 
     # The following attributes are for triton implementation of causal_conv1d
-    nums_dict: Optional[dict] = None
-    batch_ptr: Optional[torch.Tensor] = None
-    token_chunk_offset_ptr: Optional[torch.Tensor] = None
+    nums_dict: dict | None = None
+    batch_ptr: torch.Tensor | None = None
+    token_chunk_offset_ptr: torch.Tensor | None = None
 
 
 class Mamba2AttentionMetadataBuilder(

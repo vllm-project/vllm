@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -70,11 +70,14 @@ class TestInitializeToolSessions:
         """Create a real OpenAIServingResponses instance for testing"""
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
-        engine_client.get_model_config = AsyncMock()
 
         model_config = MagicMock()
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.processor = MagicMock()
+        engine_client.io_processor = MagicMock()
 
         models = MagicMock()
 
@@ -83,7 +86,6 @@ class TestInitializeToolSessions:
         # Create the actual instance
         instance = OpenAIServingResponses(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=None,
             chat_template=None,
@@ -123,6 +125,28 @@ class TestInitializeToolSessions:
         # Verify that init_tool_sessions was called
         assert mock_context.init_tool_sessions_called
 
+    def test_validate_create_responses_input(
+        self, serving_responses_instance, mock_context, mock_exit_stack
+    ):
+        request = ResponsesRequest(
+            input="test input",
+            previous_input_messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What is my horoscope? I am an Aquarius.",
+                        }
+                    ],
+                }
+            ],
+            previous_response_id="lol",
+        )
+        error = serving_responses_instance._validate_create_responses_input(request)
+        assert error is not None
+        assert error.error.type == "invalid_request_error"
+
 
 class TestValidateGeneratorInput:
     """Test class for _validate_generator_input method"""
@@ -132,18 +156,20 @@ class TestValidateGeneratorInput:
         """Create a real OpenAIServingResponses instance for testing"""
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
-        engine_client.get_model_config = AsyncMock()
 
         model_config = MagicMock()
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.processor = MagicMock()
+        engine_client.io_processor = MagicMock()
 
         models = MagicMock()
 
         # Create the actual instance
         instance = OpenAIServingResponses(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=None,
             chat_template=None,

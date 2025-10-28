@@ -6,8 +6,7 @@ import copy
 import itertools
 import pickle as pkl
 import time
-from collections.abc import Iterable
-from typing import Callable, Optional
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -19,7 +18,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_triton_block_scaled_mm,
 )
-from vllm.utils import FlexibleArgumentParser, cdiv
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.math_utils import cdiv
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
@@ -53,7 +53,7 @@ def bench_int8(
     n: int,
     label: str,
     sub_label: str,
-    bench_kernels: Optional[list[str]] = None,
+    bench_kernels: list[str] | None = None,
 ) -> Iterable[TMeasurement]:
     """Benchmark INT8-based kernels."""
     assert dtype == torch.int8
@@ -108,7 +108,7 @@ def bench_fp8(
     n: int,
     label: str,
     sub_label: str,
-    bench_kernels: Optional[list[str]] = None,
+    bench_kernels: list[str] | None = None,
 ) -> Iterable[TMeasurement]:
     """Benchmark FP8-based kernels."""
     assert dtype == torch.float8_e4m3fn
@@ -183,7 +183,7 @@ def bench(
     n: int,
     label: str,
     sub_label: str,
-    bench_kernels: Optional[list[str]] = None,
+    bench_kernels: list[str] | None = None,
 ) -> Iterable[TMeasurement]:
     if dtype == torch.int8:
         return bench_int8(dtype, m, k, n, label, sub_label, bench_kernels)
@@ -201,7 +201,7 @@ def print_timers(timers: Iterable[TMeasurement]):
 def run(
     dtype: torch.dtype,
     MKNs: Iterable[tuple[int, int, int]],
-    bench_kernels: Optional[list[str]] = None,
+    bench_kernels: list[str] | None = None,
 ) -> Iterable[TMeasurement]:
     results = []
     for m, k, n in MKNs:

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
-from typing import Optional
 
 import torch
 
@@ -29,10 +28,10 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.num_cpu_blocks: int = num_cpu_blocks
 
         # scheduler-side
-        self._manager: Optional[OffloadingManager] = None
+        self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._handler: Optional[OffloadingHandler] = None
+        self._handler: OffloadingHandler | None = None
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
