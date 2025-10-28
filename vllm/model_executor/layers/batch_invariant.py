@@ -753,13 +753,13 @@ def override_envs_for_invariance():
     curr_attn_backend = envs.VLLM_ATTENTION_BACKEND
     supported_backends = [
         "FLASH_ATTN",  # best supported backend
-        "FLEX_ATTENTION",
         "FLASHINFER",
         "FLASH_ATTN_MLA",
         "FLASHINFER_MLA",
         "TRITON_MLA",
         # Not yet supported MLA backends
         # "FLASHMLA",
+        # "FLEX_ATTENTION", # IMA issue even if we disable batch invariance
     ]
     if curr_attn_backend not in supported_backends:
         warning = (
