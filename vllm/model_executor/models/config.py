@@ -291,8 +291,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        # this may get override by prefix caching logic later
-        cache_config.mamba_block_size = model_config.max_model_len
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
         if cache_config.enable_prefix_caching:
             if model_config.supports_mamba_prefix_caching:
@@ -332,6 +332,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if not envs.VLLM_USE_V1:
             return
 
+        # Save the user input before it gets modified by MambaModelConfig
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -403,7 +405,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             def lcm(a, b):
                 return a * b // gcd(a, b)
 
-            base_chunk_size = model_config.get_mamba_chunk_size()
+            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
+
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
