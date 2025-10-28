@@ -58,8 +58,10 @@ def auto_mock(module, attr, max_mocks=50):
 
 bench_latency = auto_mock("vllm.benchmarks", "latency")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
-bench_sweep_serve = auto_mock("vllm.benchmarks.sweep", "serve")
-bench_sweep_serve_sla = auto_mock("vllm.benchmarks.sweep", "serve_sla")
+bench_sweep_serve = auto_mock("vllm.benchmarks.sweep.serve", "SweepServeArgs")
+bench_sweep_serve_sla = auto_mock(
+    "vllm.benchmarks.sweep.serve_sla", "SweepServeSLAArgs"
+)
 bench_throughput = auto_mock("vllm.benchmarks", "throughput")
 AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
