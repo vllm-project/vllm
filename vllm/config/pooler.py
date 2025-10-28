@@ -48,7 +48,7 @@ class PoolerConfig:
     """
 
     ## for classification models
-    activation: bool | None = None
+    use_activation: bool | None = None
     """
     Whether to apply activation function to the classification outputs.
     Defaults to True.
