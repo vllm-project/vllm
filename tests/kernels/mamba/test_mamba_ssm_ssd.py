@@ -579,3 +579,90 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(
             rtol=rtol,
             msg=lambda x, i=i: f"seq{i} state " + x,
         )
+
+
+@pytest.mark.parametrize("itype", [torch.float16])
+@pytest.mark.parametrize("n_heads", [4])
+@pytest.mark.parametrize("d_head", [32])
+@pytest.mark.parametrize("has_z", [True, False])
+@pytest.mark.parametrize("has_d", [True, False])
+@pytest.mark.parametrize("mamba2_fast_kernel", [False, True])
+@pytest.mark.parametrize(
+    "seq_len_chunk_size_cases",
+    [
+        # small-ish chunk_size (8)
+        (64, 8, 2, [(64, 32), (64, 32)]),
+        (768, 128, 2, [(138, 225), (138, 225)]),
+    ],
+)
+def test_mamba_chunk_scan_cont_batch_z_d(
+    d_head, n_heads, seq_len_chunk_size_cases, itype, has_z, has_d, mamba2_fast_kernel
+):
+    # this test with multiple examples in a continuous batch
+    # (i.e. chunked prefill)
+
+    seqlen, chunk_size, num_examples, cases = seq_len_chunk_size_cases
+
+    atol, rtol = 1e-2, 1e-2
+
+    # hold state during the cutting process so we know if an
+    # example has been exhausted and needs to cycle
+    last_taken: dict = {}  # map: eg -> pointer to last taken sample
+    exhausted: dict = {}  # map: eg -> boolean indicating example is exhausted
+
+    states = None
+    for Y_min, cu_seqlens, _token_seq_idx, (
+        A,
+        dt,
+        X,
+        B,
+        C,
+    ) in generate_continuous_batched_examples(
+        cases, num_examples, seqlen, last_taken, exhausted, n_heads, d_head, itype
+    ):
+        cu_chunk_seqlens, last_chunk_indices, seq_idx_chunks = (
+            compute_varlen_chunk_metadata(cu_seqlens, chunk_size)
+        )
+
+        Z = torch.randn_like(X) if has_z else None
+        D = torch.randn((n_heads,), dtype=itype, device=X.device) if has_d else None
+
+        Y = torch.empty_like(X)
+
+        new_states = mamba_chunk_scan_combined_varlen(
+            X,
+            dt,
+            A,
+            B,
+            C,
+            chunk_size,
+            cu_seqlens=cu_seqlens.to(torch.int32),
+            cu_chunk_seqlens=cu_chunk_seqlens,
+            last_chunk_indices=last_chunk_indices,
+            seq_idx=seq_idx_chunks,
+            out=Y,
+            D=D,
+            z=Z,
+            initial_states=states,
+            use_fused_kernel=mamba2_fast_kernel,
+        )
+
+        # just test the last in sequence
+        for i in range(num_examples):
+            # test all n_heads and d_heads
+            Y_eg = Y[cu_seqlens[i] : cu_seqlens[i + 1]]
+            Y_min_eg = Y_min[i]
+            Y_min_eg = Y_min_eg.clone()
+            if has_d:
+                Y_min_eg += X[cu_seqlens[i] : cu_seqlens[i + 1]] * D[None, :, None]
+            if has_z:
+                Z_eg = Z[cu_seqlens[i] : cu_seqlens[i + 1]]
+                Y_min_eg *= Z_eg * torch.sigmoid(Z_eg)
+            torch.testing.assert_close(Y_eg, Y_min_eg, atol=atol, rtol=rtol)
+
+        # update states
+        states = new_states
+        for i, clear in exhausted.items():
+            if clear:
+                states[i].fill_(0.0)
+                exhausted[i] = False
