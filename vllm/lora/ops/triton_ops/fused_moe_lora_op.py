@@ -309,7 +309,7 @@ def _fused_moe_lora_expand(
 
     b_intermediate_cache1 = torch.zeros(
         (num_slices, M, top_k_num, w1_output_dim_size),
-        dtype=torch.bfloat16,
+        dtype=output.dtype,
         device=device,
     )
 
@@ -426,7 +426,7 @@ def _fused_moe_lora(
 
     a_intermediate_cache1 = torch.zeros(
         (num_slices, M, top_k_num, max_lora_rank),
-        dtype=torch.bfloat16,
+        dtype=output.dtype,
         device=device,
     )
 
