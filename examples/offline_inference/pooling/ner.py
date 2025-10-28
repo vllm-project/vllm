@@ -33,7 +33,7 @@ def main(args: Namespace):
     label_map = llm.llm_engine.vllm_config.model_config.hf_config.id2label
 
     # Run inference
-    outputs = llm.encode(prompts)
+    outputs = llm.encode(prompts, pooling_task="token_classify")
 
     for prompt, output in zip(prompts, outputs):
         logits = output.outputs.data
