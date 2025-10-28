@@ -564,9 +564,7 @@ def _support_torch_compile(
                             and self._cache_entry is not None
                         ):
                             with _cache_lock:
-                                self._cache_entry.aot_compiled_fn = (
-                                    self.aot_compiled_fn
-                                )
+                                self._cache_entry.aot_compiled_fn = self.aot_compiled_fn
                                 self._cache_entry.compiled = True
                                 logger.debug(
                                     "Saved AOT compilation to cache for %s",
@@ -591,9 +589,7 @@ def _support_torch_compile(
                     ):
                         with _cache_lock:
                             # Save the compiled_callable (with guards)
-                            self._cache_entry.compiled_callable = (
-                                self.compiled_callable
-                            )
+                            self._cache_entry.compiled_callable = self.compiled_callable
                             self._cache_entry.compiled = True
                             logger.debug(
                                 "Saved compiled_callable to cache for %s",
