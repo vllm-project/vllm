@@ -1619,6 +1619,29 @@ class ModelConfig:
         return is_encoder_decoder(self.hf_config)
 
     @property
+    def uses_alibi(self) -> bool:
+        cfg = self.hf_text_config
+
+        return (
+            getattr(cfg, "alibi", False)  # Falcon
+            or "BloomForCausalLM" in self.architectures  # Bloom
+            or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
+            or (
+                hasattr(cfg, "attn_config")  # MPT
+                and (
+                    (
+                        isinstance(cfg.attn_config, dict)
+                        and cfg.attn_config.get("alibi", False)
+                    )
+                    or (
+                        not isinstance(cfg.attn_config, dict)
+                        and getattr(cfg.attn_config, "alibi", False)
+                    )
+                )
+            )
+        )
+
+    @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
 
@@ -1655,6 +1678,10 @@ class ModelConfig:
     @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
+
+    @property
+    def supports_mamba_prefix_caching(self) -> bool:
+        return self._model_info.supports_mamba_prefix_caching
 
     @property
     def use_mla(self) -> bool:
@@ -2112,20 +2139,13 @@ def _get_and_verify_max_len(
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
-    # If the user specified a max length, make sure it is smaller than the
-    # derived length from the HF model config.
+    # If the user didn't specify `max_model_len`, then use that derived from
+    # the model config as a default value.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
-        if current_platform.is_tpu():
-            logger.warning(
-                "--max-model-len is not specified, "
-                "it's currently using model's default length %s, "
-                "which might be too large."
-                "Please input with --max-model-len based on your "
-                "request input length and output length, to avoid "
-                "unnecessary degradation.",
-                max_model_len,
-            )
+        max_model_len = current_platform.check_max_model_len(max_model_len)
+    # If the user specified a max length, make sure it is smaller than the
+    # derived length from the HF model config.
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input

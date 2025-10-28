@@ -453,6 +453,18 @@ steps:
   - pytest -v -s compile/test_full_graph.py
   - pytest -v -s compile/test_fusions_e2e.py
 
+- label: Cudagraph test
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental]
+  source_file_dependencies:
+  - tests/v1/cudagraph
+  - vllm/v1/cudagraph_dispatcher.py
+  - vllm/config/compilation.py
+  - vllm/compilation
+  commands:
+    - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
+    - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
+
 - label: Kernels Core Operation Test # 48min
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
@@ -705,8 +717,10 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
