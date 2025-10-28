@@ -313,7 +313,12 @@ def test_compilation_cache_reuse():
     @support_torch_compile
     class TestBlock(nn.Module):
         def __init__(
-            self, hidden_size, *, vllm_config: VllmConfig, prefix: str = "", **kwargs
+            self,
+            *,
+            hidden_size: int,
+            vllm_config: VllmConfig,
+            prefix: str = "",
+            **kwargs,
         ):
             super().__init__()
             self.linear = nn.Linear(hidden_size, hidden_size)
@@ -325,7 +330,9 @@ def test_compilation_cache_reuse():
         # Create 5 instances with same structure (128x128)
         blocks_128 = []
         for i in range(5):
-            block = TestBlock(128, vllm_config=vllm_config, prefix=f"block_{i}")
+            block = TestBlock(
+                hidden_size=128, vllm_config=vllm_config, prefix=f"block_{i}"
+            )
             blocks_128.append(block)
 
     # All 5 instances should share the same compiled code
@@ -340,7 +347,9 @@ def test_compilation_cache_reuse():
         # Create 3 instances with different structure (256x256)
         blocks_256 = []
         for i in range(3):
-            block = TestBlock(256, vllm_config=vllm_config, prefix=f"block_256_{i}")
+            block = TestBlock(
+                hidden_size=256, vllm_config=vllm_config, prefix=f"block_256_{i}"
+            )
             blocks_256.append(block)
 
     # Different structure should trigger new compilation
