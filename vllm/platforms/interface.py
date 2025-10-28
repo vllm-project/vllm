@@ -13,7 +13,6 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.models.registry import MAMBA_BACKEND_MAP
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
@@ -234,6 +233,8 @@ class Platform:
         mamba_type: str = "",
     ) -> str:
         """Get mamba attention backend class of a device."""
+        from vllm.model_executor.models.registry import MAMBA_BACKEND_MAP
+
         if mamba_type not in MAMBA_BACKEND_MAP:
             raise ValueError(
                 f"Invalid mamba type ({mamba_type}) for {cls.device_name}."
