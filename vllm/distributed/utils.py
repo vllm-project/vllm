@@ -463,8 +463,8 @@ def stateless_init_torch_distributed_process_group(
     rank: int,
     world_size: int,
     backend: str,
+    gloo_comm_timeout: int,
     enable_fault_tolerance: bool = False,
-    gloo_comm_timeout: int | None = None,
 ) -> ProcessGroup:
     """
     A replacement for `torch.distributed.init_process_group` that does not
