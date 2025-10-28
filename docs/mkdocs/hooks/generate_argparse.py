@@ -58,7 +58,8 @@ def auto_mock(module, attr, max_mocks=50):
 
 bench_latency = auto_mock("vllm.benchmarks", "latency")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
-bench_sweep = auto_mock("vllm.benchmarks.sweep", "cli")
+bench_sweep_serve = auto_mock("vllm.benchmarks.sweep", "serve")
+bench_sweep_serve_sla = auto_mock("vllm.benchmarks.sweep", "serve_sla")
 bench_throughput = auto_mock("vllm.benchmarks", "throughput")
 AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
@@ -161,7 +162,8 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "bench_latency": create_parser(bench_latency.add_cli_args),
         "bench_throughput": create_parser(bench_throughput.add_cli_args),
         "bench_serve": create_parser(bench_serve.add_cli_args),
-        "bench_sweep": create_parser(bench_sweep.add_cli_args),
+        "bench_sweep_serve": create_parser(bench_sweep_serve.add_cli_args),
+        "bench_sweep_serve_sla": create_parser(bench_sweep_serve_sla.add_cli_args),
         "run-batch": create_parser(openai_run_batch.make_arg_parser),
     }
 

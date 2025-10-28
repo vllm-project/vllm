@@ -1,4 +1,4 @@
-# vllm bench sweep
+# vllm bench sweep serve
 
 ## JSON CLI Arguments
 
@@ -6,4 +6,4 @@
 
 ## Options
 
---8<-- "docs/argparse/bench_sweep.md"
+--8<-- "docs/argparse/bench_sweep_serve.md"
