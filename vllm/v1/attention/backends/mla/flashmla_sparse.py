@@ -192,16 +192,10 @@ def _convert_req_index_to_global_index_kernel(
 
     # Only token == -1 should propagate as -1
     is_invalid_tok = tok < 0
-
-    # Prefill path: load metadata and compute workspace offset
+    is_prefill = False
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
-        workspace_start = tl.load(
-            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
-        )
-        prefill_out = workspace_start + tok
-
     # Compute block id and in-block offset
     block_id = tok // BLOCK_SIZE
     inblock_off = tok % BLOCK_SIZE
@@ -209,18 +203,18 @@ def _convert_req_index_to_global_index_kernel(
     # Guard block_table access
     valid_block = block_id < max_num_blocks_per_req
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    base = tl.load(bt_ptr, mask=valid_block, other=0)
+    is_invalid_tok |= ~valid_block
+    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+    out_val = base * BLOCK_SIZE + inblock_off
 
-    # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
+    # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
-        decode_out = tl.where(valid_block, base * BLOCK_SIZE + inblock_off, -1)
-        out_val = tl.where(
-            is_invalid_tok, -1, tl.where(is_prefill, prefill_out, decode_out)
+        workspace_start = tl.load(
+            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
         )
-    else:
-        out_val = tl.where(
-            is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
-        )
+        prefill_out = workspace_start + tok
+        out_val = tl.where(is_prefill, prefill_out, out_val)
+    out_val = tl.where(is_invalid_tok, -1, out_val)
 
     # Store results
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
