@@ -340,8 +340,7 @@ class Worker(WorkerBase):
         connector_vllm_config = copy.copy(self.vllm_config)
         connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
         ensure_kv_transfer_initialized(connector_vllm_config)
-        # Init ec connector here
-        ensure_ec_transfer_initialized(connector_vllm_config)
+
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -794,3 +793,7 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
+
+    # Init ec connector here before KV caches caches init
+    # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
+    ensure_ec_transfer_initialized(vllm_config)

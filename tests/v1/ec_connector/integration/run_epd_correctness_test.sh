@@ -23,6 +23,10 @@ MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 
 # Set 1 to use multimodal prompts; else to use text-only
 USE_MM_PROMPTS="${USE_MM_PROMPTS:-1}"
+MM_FLAG=""
+if [ $USE_MM_PROMPTS = "1" ]; then
+    MM_FLAG="--use_mm_prompts"
+fi
 
 # GPU configuration
 GPU_E="${GPU_E:-0}"
@@ -99,11 +103,7 @@ run_baseline() {
     echo ""
     
     # Run test in baseline mode
-    echo "Running baseline correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
+    echo "Running baseline..."
 
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PORT" \
@@ -201,10 +201,6 @@ run_epd_1e_1pd() {
     
     # Run test in disagg mode
     echo "Running EPD (1E+1PD) correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
     
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PROXY_PORT" \
@@ -248,6 +244,7 @@ run_baseline_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
+        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -265,6 +262,7 @@ run_baseline_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
+        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -299,11 +297,7 @@ run_baseline_1p_1d() {
     echo "All PD (1P+1D) services are up!"
     
     # Run test in baseline mode
-    echo "Running EPD (1E+1P+1D) correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
+    echo "Running PD disagg baseline..."
     
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PROXY_PORT" \
@@ -366,6 +360,7 @@ run_epd_1e_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
+        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
@@ -390,6 +385,7 @@ run_epd_1e_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
+        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -429,10 +425,6 @@ run_epd_1e_1p_1d() {
     
     # Run test in disagg mode
     echo "Running EPD (1E+1P+1D) correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
     
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PROXY_PORT" \

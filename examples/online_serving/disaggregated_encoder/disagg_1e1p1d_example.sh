@@ -90,12 +90,13 @@ mkdir -p $EC_SHARED_STORAGE_PATH
 # Encoder worker
 ###############################################################################
 CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.0 \
+    --gpu-memory-utilization 0.01 \
     --port "$ENCODE_PORT" \
+    --enforce-eager \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
-    --max-num-seqs 128 \
     --max-num-batched-tokens 4096 \
+    --max-num-seqs 128 \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
         "ec_role": "ec_producer",
@@ -116,7 +117,9 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization 0.7 \
     --port "$PREFILL_PORT" \
+    --enforce-eager \
     --enable-request-id-headers \
+    --disable-hybrid-kv-cache-manager \
     --max-num-seqs 128 \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
@@ -142,7 +145,9 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization 0.7 \
     --port "$DECODE_PORT" \
+    --enforce-eager \
     --enable-request-id-headers \
+    --disable-hybrid-kv-cache-manager \
     --max-num-seqs 128 \
     --kv-transfer-config '{
         "kv_connector": "NixlConnector",
