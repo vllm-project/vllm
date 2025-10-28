@@ -5,7 +5,6 @@ import tempfile
 
 import mteb
 import numpy as np
-import pytest
 import requests
 import torch
 from mteb.models import ModelMeta
