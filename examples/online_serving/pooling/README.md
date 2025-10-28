@@ -62,7 +62,7 @@ python examples/online_serving/pooling/openai_classification_client.py
 python examples/online_serving/pooling/openai_cross_encoder_score.py
 ```
 
-## Openai cross_encoder score for multimodal usage
+## OpenAI cross_encoder score for multimodal usage
 
 ```bash
 # vllm serve jinaai/jina-reranker-m0
