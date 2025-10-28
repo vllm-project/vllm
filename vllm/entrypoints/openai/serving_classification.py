@@ -52,11 +52,11 @@ class ClassificationMixin(OpenAIServing):
         try:
             ctx.tokenizer = await self.engine_client.get_tokenizer()
 
-            messages = getattr(ctx.request, "messages", None)
-            if messages is not None:
-                chat_request: ClassificationChatRequest = cast(
-                    ClassificationChatRequest, ctx.request
-                )
+            request_obj = ctx.request
+
+            if isinstance(request_obj, ClassificationChatRequest):
+                chat_request = request_obj
+                messages = chat_request.messages
                 trust_request_chat_template = getattr(
                     self,
                     "trust_request_chat_template",
@@ -91,10 +91,9 @@ class ClassificationMixin(OpenAIServing):
                     add_special_tokens=chat_request.add_special_tokens,
                 )
                 ctx.engine_prompts = engine_prompts
-            else:
-                completion_request: ClassificationCompletionRequest = cast(
-                    ClassificationCompletionRequest, ctx.request
-                )
+
+            elif isinstance(request_obj, ClassificationCompletionRequest):
+                completion_request = request_obj
                 input_data = completion_request.input
                 if input_data in (None, ""):
                     return self.create_error_response(
@@ -110,6 +109,11 @@ class ClassificationMixin(OpenAIServing):
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=prompt_input,
                     config=self._build_render_config(completion_request),
+                )
+            else:
+                return self.create_error_response(
+                    "Invalid classification request type",
+                    status_code=HTTPStatus.BAD_REQUEST,
                 )
 
             return None
