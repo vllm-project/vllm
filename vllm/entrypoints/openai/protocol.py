@@ -1673,7 +1673,7 @@ EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
 
 class PoolingCompletionRequest(EmbeddingCompletionRequest):
     task: PoolingTask | None = None
-    activation: bool | None = Field(
+    use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
         "If it is a classify or token_classify task, the default is True; "
@@ -1685,13 +1685,13 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
             normalize=self.normalize,
-            activation=self.activation,
+            use_activation=self.use_activation,
         )
 
 
 class PoolingChatRequest(EmbeddingChatRequest):
     task: PoolingTask | None = None
-    activation: bool | None = Field(
+    use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
         "If it is a classify or token_classify task, the default is True; "
@@ -1703,7 +1703,7 @@ class PoolingChatRequest(EmbeddingChatRequest):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
             normalize=self.normalize,
-            activation=self.activation,
+            use_activation=self.use_activation,
         )
 
 
@@ -1785,7 +1785,7 @@ class ScoreRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = Field(
+    use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
         "Default is True.",
@@ -1795,7 +1795,7 @@ class ScoreRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=self.use_activation,
         )
 
 
@@ -1822,7 +1822,7 @@ class RerankRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = Field(
+    use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
         "Default is True.",
@@ -1832,7 +1832,7 @@ class RerankRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=self.use_activation,
         )
 
 
@@ -2000,7 +2000,7 @@ class ClassificationRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = Field(
+    use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
         "Default is True.",
@@ -2010,7 +2010,7 @@ class ClassificationRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=self.use_activation,
         )
 
 

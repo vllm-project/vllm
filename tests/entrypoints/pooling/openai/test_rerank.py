@@ -125,8 +125,8 @@ def test_invocations(server: RemoteOpenAIServer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_activation(server: RemoteOpenAIServer, model_name: str):
-    async def get_outputs(activation):
+async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
+    async def get_outputs(use_activation):
         query = "What is the capital of France?"
         documents = [
             "The capital of Brazil is Brasilia.",
@@ -139,16 +139,16 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
                 "model": model_name,
                 "query": query,
                 "documents": documents,
-                "activation": activation,
+                "use_activation": use_activation,
             },
         )
         outputs = response.json()
 
         return torch.tensor([x["relevance_score"] for x in outputs["results"]])
 
-    default = await get_outputs(activation=None)
-    w_activation = await get_outputs(activation=True)
-    wo_activation = await get_outputs(activation=False)
+    default = await get_outputs(use_activation=None)
+    w_activation = await get_outputs(use_activation=True)
+    wo_activation = await get_outputs(use_activation=False)
 
     assert torch.allclose(default, w_activation, atol=1e-2), (
         "Default should use activation."

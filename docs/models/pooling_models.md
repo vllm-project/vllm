@@ -150,7 +150,7 @@ The [reward][vllm.LLM.reward] method is available to all reward models in vLLM.
 ```python
 from vllm import LLM
 
-llm = LLM(model="internlm/internlm2-1_8b-reward", trust_remote_code=True, runner="pooling")
+llm = LLM(model="internlm/internlm2-1_8b-reward", runner="pooling", trust_remote_code=True)
 (output,) = llm.reward("Hello, my name is")
 
 data = output.outputs.data
@@ -177,8 +177,8 @@ The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-small")
-(output,) = llm.encode("Hello, my name is", pooling_task="embed", runner="pooling")
+llm = LLM(model="intfloat/e5-small", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="embed")
 
 data = output.outputs.data
 print(f"Data: {data!r}")
