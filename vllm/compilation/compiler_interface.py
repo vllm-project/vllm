@@ -236,7 +236,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
         path = handle[1]
-        print("[DEBUG] Loading compiled artifact from %s", path)
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
             path=path, format=envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
         )
