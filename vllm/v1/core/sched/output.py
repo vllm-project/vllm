@@ -172,5 +172,12 @@ class SchedulerOutput:
     # the bitmask for the whole batch
     grammar_bitmask: "npt.NDArray[np.int32] | None"
 
+    # req_id -> num_output_placeholders
+    # For async scheduling: tracks tokens that have been scheduled but not yet
+    # generated. KV connectors (e.g., LMCache) use this to determine the actual
+    # computed token boundary for caching.
+    # For sync scheduling: this dict is empty (all placeholders are 0).
+    num_output_placeholders: dict[str, int] | None = None
+
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
