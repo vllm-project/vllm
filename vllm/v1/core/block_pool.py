@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, Optional
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -192,6 +192,49 @@ class BlockPool:
                 return None
             cached_blocks.append(block)
         return cached_blocks
+
+    def cache_full_block(
+        self,
+        request: Request,
+        block: KVCacheBlock,
+        cached_block_index: int,
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> None:
+        """Cache a full block for prefix caching.
+        """
+
+        assert cached_block_index >= 0
+        assert len(request.block_hashes) > cached_block_index
+        new_block_hash: BlockHash = request.block_hashes[cached_block_index]
+        new_hashes: Optional[list[ExternalBlockHash]] = (
+            [] if self.enable_kv_cache_events else None)
+        assert block.block_hash is None
+
+        # Update and added the full block to the cache.
+        block_hash_with_group_id: BlockHashWithGroupId = make_block_hash_with_group_id(
+            new_block_hash, kv_cache_group_id)
+        block.block_hash = block_hash_with_group_id
+        self.cached_block_hash_to_block[block_hash_with_group_id][
+            block.block_id] = block
+        if new_hashes is not None:
+            new_hashes.append(maybe_convert_block_hash(new_block_hash))
+
+        if self.enable_kv_cache_events:
+            parent_block_hash: Optional[ExternalBlockHash] = None
+
+            self.kv_event_queue.append(
+                BlockStored(
+                    block_hashes=new_hashes,
+                    parent_block_hash=parent_block_hash,
+                    token_ids=request.
+                    all_token_ids[cached_block_index * block_size:
+                                  (cached_block_index+1) * block_size],
+                    block_size=block_size,
+                    lora_id=request.lora_request.id
+                    if request.lora_request else None,
+                    medium=MEDIUM_GPU,
+                ))
 
     def cache_full_blocks(
         self,

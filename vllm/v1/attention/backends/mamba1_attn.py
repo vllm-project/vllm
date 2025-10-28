@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
@@ -75,7 +76,9 @@ class Mamba1AttentionMetadataBuilder(
 
         # TODO(@Josephasafg) Mamba1 and Mamba2 have a lot of code in common here.
         # We should consolidate this code
-        if self.vllm_config.cache_config.enable_prefix_caching:
+        if (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            and self.vllm_config.cache_config.enable_prefix_caching
+        ):
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
             mamba_block_size = self.kv_cache_spec.block_size
@@ -92,6 +95,8 @@ class Mamba1AttentionMetadataBuilder(
         else:
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+            if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+                state_indices_tensor = state_indices_tensor.contiguous()
             block_idx_last_scheduled_token = None
             block_idx_last_computed_token = None
 
@@ -110,7 +115,9 @@ class Mamba1AttentionMetadataBuilder(
                 common_attn_metadata.query_start_loc.device
             )
 
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            if (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                and self.vllm_config.cache_config.enable_prefix_caching
+            ):
                 assert num_computed_tokens is not None
                 num_computed_tokens_p = num_computed_tokens[
                     num_reqs - num_prefills : num_reqs
@@ -132,7 +139,9 @@ class Mamba1AttentionMetadataBuilder(
             state_indices_tensor = self.state_indices_tensor[:padded_decodes]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            if (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                and self.vllm_config.cache_config.enable_prefix_caching
+            ):
                 self.block_idx_last_scheduled_token[:num_decodes].copy_(
                     block_idx_last_scheduled_token, non_blocking=True
                 )

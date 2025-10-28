@@ -219,7 +219,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-
+    VLLM_USE_LIGHTER_MAMBA_CACHE: bool = False
 
 def get_default_cache_root():
     return os.getenv(
@@ -1452,6 +1452,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
+    "VLLM_USE_LIGHTER_MAMBA_CACHE": lambda: os.getenv(
+        "VLLM_USE_LIGHTER_MAMBA_CACHE", False
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1577,6 +1580,7 @@ def compute_hash() -> str:
         "VLLM_USE_FBGEMM",
         "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE",
         "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL",
+        "VLLM_USE_LIGHTER_MAMBA_CACHE"
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
