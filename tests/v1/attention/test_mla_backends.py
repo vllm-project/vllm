@@ -254,6 +254,13 @@ class MockAttentionLayer:
         self._q_scale = torch.tensor(1.0, device=device)
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
+        self._prob_scale = torch.tensor(1.0, device=device)
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+
+    def forward(self, *_args, **_kwargs):
+        raise NotImplementedError
 
 
 class MockMLAAttentionLayer(AttentionLayerBase):
@@ -263,11 +270,9 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         self.impl = impl
 
     def get_attn_backend(self):
-        """Not used in tests, but required by AttentionLayerBase."""
         raise NotImplementedError
 
     def get_kv_cache_spec(self, vllm_config):
-        """Not used in tests, but required by AttentionLayerBase."""
         raise NotImplementedError
 
 
