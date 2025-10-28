@@ -252,6 +252,9 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_is_batch_invariant,
+    )
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
@@ -260,7 +263,10 @@ def use_aot_compile() -> bool:
         else "0"
     )
 
-    return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    return (
+        not vllm_is_batch_invariant()
+        and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    )
 
 
 def env_with_choices(
