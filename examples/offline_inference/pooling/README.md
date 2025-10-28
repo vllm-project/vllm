@@ -38,7 +38,7 @@ python examples/offline_inference/pooling/multi_vector_retrieval.py
 python examples/offline_inference/pooling/ner.py
 ```
 
-## prithvi geospatial mae usage
+## Prithvi Geospatial MAE usage
 
 ```bash
 python examples/offline_inference/pooling/prithvi_geospatial_mae.py
