@@ -17,6 +17,39 @@ class ARCOffloadingManager(OffloadingManager):
     """
     An OffloadingManager implementing the ARC (Adaptive Replacement Cache)
     eviction policy with a pluggable backend.
+
+    Data Structures:
+        T1: Recent cache containing blocks accessed once.
+        T2: Frequent cache containing blocks accessed multiple times.
+        B1/B2: Ghost lists tracking recently evicted blocks from T1/T2.
+        target_t1_size: Adaptive target size for the T1 partition.
+
+    Algorithm Flow:
+        1. Cache lookup (lookup):
+           Searches T1 and T2 for block hashes and counts consecutive hits
+           until a miss or non-ready block is encountered.
+
+        2. Cache touch (touch) - Adaptive Learning:
+           For each block_hash (in reverse order):
+           - If in T1: Move to T2 (promotion from recent to frequent).
+           - If in T2: Move to MRU position (end of queue).
+           - If in B1 ghost list: Increase target_t1_size.
+           - If in B2 ghost list: Decrease target_t1_size.
+
+        3. Block eviction (prepare_store) - Adaptive Replacement:
+           Determines eviction source based on adaptive target:
+           - If T1 size > target_t1_size: Evict from T1, add to B1.
+           - Otherwise: Evict from T2, add to B2.
+           Finally, bound each ghost list size.
+
+        4. Block insertion (prepare_store):
+           New blocks are always inserted into T1 and removed from B1/B2 if
+           present. Blocks may later be promoted to T2 during touch operations.
+
+    Adaptive Behavior:
+        The algorithm self-tunes the recency vs. frequency trade-off:
+        - B1 hit: Recent access patterns matter more → increase T1.
+        - B2 hit: Frequent access patterns matter more → decrease T1.
     """
 
     def __init__(self, backend: Backend, enable_events: bool = False):
