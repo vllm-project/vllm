@@ -436,23 +436,21 @@ class Worker(WorkerBase):
 
         # Use inference_mode context manager conditionally instead of decorator
         # This allows gradient computation for training requests
-        ctx = torch.inference_mode() if not has_training_requests else torch.enable_grad()
-        with ctx:
-            intermediate_tensors = None
-            forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-            num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-            num_input_tokens = self.model_runner._get_num_input_tokens(
-                num_scheduled_tokens)
-            all_gather_tensors = {
-                "residual":
-                not is_residual_scattered_for_sp(self.vllm_config,
-                                                num_input_tokens)
-            }
-            if forward_pass and not get_pp_group().is_first_rank:
-                intermediate_tensors = IntermediateTensors(
-                    get_pp_group().recv_tensor_dict(
-                        all_gather_group=get_tp_group(),
-                        all_gather_tensors=all_gather_tensors))
+        intermediate_tensors = None
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_input_tokens = self.model_runner._get_num_input_tokens(
+            num_scheduled_tokens)
+        all_gather_tensors = {
+            "residual":
+            not is_residual_scattered_for_sp(self.vllm_config,
+                                            num_input_tokens)
+        }
+        if forward_pass and not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=get_tp_group(),
+                    all_gather_tensors=all_gather_tensors))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)

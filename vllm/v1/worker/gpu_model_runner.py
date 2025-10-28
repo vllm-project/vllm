@@ -2574,6 +2574,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.training_manager.should_log():
                 self.training_manager.log()
                 self.training_manager.reset_loss()
+                self.training_manager.model_zero_grad()
 
         return ModelRunnerOutput(
             req_ids=req_ids_output,

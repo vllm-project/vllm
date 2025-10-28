@@ -10,6 +10,10 @@ from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+
+DYNAMIC_DISPATCH_CUSTOM_OPS = ["rms_norm"]
+
+
 logger = init_logger(__name__)
 
 
@@ -39,10 +43,18 @@ class CustomOp(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self._forward_method = self.dispatch_forward()
+        if self.__class__.name in DYNAMIC_DISPATCH_CUSTOM_OPS:
+            # Dynamically dispatch.
+            self._forward_method = None
+        else:
+            self._forward_method = self.dispatch_forward()
 
     def forward(self, *args, **kwargs):
-        return self._forward_method(*args, **kwargs)
+        if self._forward_method is not None:
+            return self._forward_method(*args, **kwargs)
+        # Dynamic dispatch.
+        is_training = torch.is_grad_enabled()
+        return self.dispatch_forward(force_native=is_training)(*args, **kwargs)
 
     def forward_native(self, *args, **kwargs):
         """PyTorch-native implementation of the forward method.
@@ -79,13 +91,11 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
-    def dispatch_forward(self):
+    def dispatch_forward(self, force_native: bool = False):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
 
-        # TODO(girfan): This is likely not accurate and "True" even in dummy run etc.
-        # We should use a more accurate way to determine if the model is in training mode.
-        if torch.is_grad_enabled():
+        if force_native:
             return self.forward_native
 
         compilation_config = get_cached_compilation_config()

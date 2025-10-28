@@ -227,6 +227,9 @@ class TrainingManager:
     def reset_loss(self):
         self.training_state.reset_loss()
 
+    def model_zero_grad(self):
+        self.model.zero_grad()
+
     def should_log(self) -> bool:
         return self.training_state.total_steps % self.log_interval == 0
 
