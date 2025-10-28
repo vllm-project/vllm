@@ -140,8 +140,9 @@ class TpuPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if compilation_config.backend == "":
-            compilation_config.backend = "openxla"
+        # Note: the default backend is set to inductor now
+        # we want to overwrite to openxla to execute the ops properly on TPU.
+        compilation_config.backend = "openxla"
 
         assert vllm_config.speculative_config is None, (
             "TPU does not support speculative decoding"

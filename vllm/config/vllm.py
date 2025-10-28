@@ -355,6 +355,7 @@ class VllmConfig:
             if (
                 self.compilation_config.backend == "inductor"
                 and self.compilation_config.mode > CompilationMode.NONE
+                and not current_platform.is_tpu()
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
