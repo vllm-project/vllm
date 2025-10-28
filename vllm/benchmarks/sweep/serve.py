@@ -9,11 +9,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
-import pandas as pd
+from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .server import ServerProcess
 from .utils import sanitize_filename
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 
 @contextlib.contextmanager

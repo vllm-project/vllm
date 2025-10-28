@@ -9,14 +9,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
 
-import pandas as pd
 from typing_extensions import assert_never
+
+from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .serve import SweepServeArgs, run_benchmark, run_server
 from .server import ServerProcess
 from .sla_sweep import SLASweep, SLASweepItem
 from .utils import sanitize_filename
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 
 def _get_sla_base_path(

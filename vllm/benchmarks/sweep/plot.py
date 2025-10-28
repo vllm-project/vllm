@@ -10,14 +10,21 @@ from pathlib import Path
 from types import TracebackType
 from typing import ClassVar
 
-import matplotlib.pyplot as plt
-import pandas as pd
-import seaborn as sns
 from typing_extensions import Self, override
 
 from vllm.utils.collection_utils import full_groupby
+from vllm.utils.import_utils import PlaceholderModule
 
 from .utils import sanitize_filename
+
+try:
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import seaborn as sns
+except ImportError:
+    plt = PlaceholderModule("matplotlib").placeholder_attr("pyplot")
+    pd = PlaceholderModule("pandas")
+    seaborn = PlaceholderModule("seaborn")
 
 
 @dataclass
