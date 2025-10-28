@@ -55,7 +55,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             ),
             dtype=self.base_layer.weight.dtype,
             device=self.base_layer.weight.device,
-            requires_grad=lora_config.enable_lora_training,
+            # requires_grad=lora_config.enable_lora_training,
         )
         self.lora_a_stacked = torch.zeros(
             (
@@ -66,7 +66,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             ),
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
-            requires_grad=lora_config.enable_lora_training,
+            # requires_grad=lora_config.enable_lora_training,
         )
         self.lora_b_stacked = torch.zeros(
             (
@@ -77,7 +77,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             ),
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
-            requires_grad=lora_config.enable_lora_training,
+            # requires_grad=lora_config.enable_lora_training,
         )
         self.lora_a_stacked_2d = self.lora_a_stacked.view(
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],
@@ -101,11 +101,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     ):
         if not is_trainable:
             self.reset_lora(index)
-        self.lora_a_stacked[index, :lora_a.shape[0], :lora_a.shape[1]].detach().copy_(
-            lora_a, non_blocking=True).requires_grad_(True)
+        self.lora_a_stacked[index, :lora_a.shape[0], :lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True)
         self.lora_b_stacked[index,
-                            0, :lora_b.shape[1], :lora_b.shape[0]].detach().copy_(
-                                lora_b.T, non_blocking=True).requires_grad_(True)
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
         # Only copy embeddings if there's space for them (lora_extra_vocab_size > 0)
         lora_extra_vocab_size = self.embeddings_tensors.shape[1]
         if embeddings_tensor is not None and lora_extra_vocab_size > 0:
@@ -113,7 +113,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 index,
                 :embeddings_tensor.shape[0],
                 :embeddings_tensor.shape[1],
-            ].detach().copy_(embeddings_tensor, non_blocking=True).requires_grad_(True)
+            ].copy_(embeddings_tensor, non_blocking=True)
             if self.embeddings_slice is not None:
                 # TODO(yard1): Optimize this copy, we don't need to copy
                 # everything, just the modified part

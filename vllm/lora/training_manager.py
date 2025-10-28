@@ -147,6 +147,10 @@ class TrainingManager:
         self.training_step: int = 0
         self.max_grad_norm: float = 1.0
 
+        # Logging
+        self.log_interval: int = 75
+        self._last_logged_step: int = 0
+
         # TODO(girfan): Take the params from elsewhere.
         self.training_state = TrainingState(grad_accumulation_steps=1)
 
@@ -217,10 +221,26 @@ class TrainingManager:
     def step(self):
         self.training_state.step()
 
-    def reset(self):
-        self.training_state.reset()
+    def reset_steps(self):
+        self.training_state.reset_steps()
+
+    def reset_loss(self):
+        self.training_state.reset_loss()
+
+    def should_log(self) -> bool:
+        return self.training_state.total_steps % self.log_interval == 0
+
+    def log(self):
+        steps_since_last_log: int = self.training_state.total_steps - self._last_logged_step
+        loss_value: float = self.training_state.loss // steps_since_last_log
+        learning_rate: float = self.get_learning_rate()
+        self._last_logged_step = self.training_state.total_steps
+        logger.info(f"training loss = {loss_value:.6f}")
+        logger.info(f"learning rate = {learning_rate:.6f}")
 
     def should_run_optimizer_step(self) -> bool:
+        # TODO(girfan): Maybe this check should be in the GPUModelRunner so we can access steps_in_epoch?
+        # do_sync_step = (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
         return self.training_state.steps % self.training_state.grad_accumulation_steps == 0 and self.training_state.steps > 0
 
     # TODO(girfan): Cache this result?
@@ -447,6 +467,17 @@ class TrainingManager:
         # TODO(girfan): Zero grad of the model?
         # self.model.zero_grad()
         self.optimizer.zero_grad()
+
+    def get_learning_rate(self) -> float:
+        if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            last_lr = self.optimizer.param_groups[0]["lr"]
+        else:
+            last_lr = self.scheduler.get_last_lr()[0]
+
+        if torch.is_tensor(last_lr):
+            last_lr = last_lr.item()
+
+        return last_lr
 
     def save_lora_checkpoint(
         self,

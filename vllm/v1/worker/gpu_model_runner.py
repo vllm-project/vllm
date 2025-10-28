@@ -2383,8 +2383,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode = False  # Training always uses non-uniform decode
             batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                                uniform_decode=uniform_decode)
-            cudagraph_runtime_mode, batch_descriptor = \
-                self.cudagraph_dispatcher.dispatch(batch_descriptor)
+
+            # TODO(girfan): No CUDA graphs being used for now.
+            # Will look for PyTorch's training-compatible CUDA graphs later.
+            # cudagraph_runtime_mode, batch_descriptor = \
+            #     self.cudagraph_dispatcher.dispatch(batch_descriptor)
+
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         # TODO(girfan): Use a field from input_batch to check?
         # Check if this is a LoRA training request
@@ -2400,6 +2405,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             all_eval = all(req.training_params and req.training_params.is_eval for req in scheduler_output.scheduled_new_reqs if req.is_training)
             if not all_eval:
                 raise ValueError("Mixed training and evaluation requests are not supported.")
+
+        # num_examples = 800
+        # batch_size = 4
+        # len_dataloader = num_examples / batch_size = 200
+        # gradient_accumulation_steps = 2
+        # num_updates_per_epoch = len_dataloader / gradient_accumulation_steps = 100
+        # max_steps = num_updates_per_epoch * num_epochs = 100 * 3 = 300
+        # num_training_examples = num_examples * num_epochs = 800 * 3 = 2400
+        # ==
+        # steps_in_epoch = len_dataloader = 200
+        # num_batches = gradient_accumulation_steps = 2
+        # ==
+        # step every batch, do_sync_step every gradient_accumulation_steps
+        # tr_loss is always accumulated and reset after eval
 
         # Run the model WITHOUT torch.inference_mode() to enable gradients
         with (set_forward_context(
@@ -2417,7 +2436,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 model_kwargs["is_lora_training"] = True
 
-                # Start the gradient flow through the input_ids.
+                # Execute the model forward pass
+                start_time = time.time()
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2425,6 +2445,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                end_time = time.time()
+                logger.info(f"model forward time = {(end_time - start_time) * 1000:.6f} ms")
 
                 # For training, model_output should be hidden states
                 hidden_states = model_output
@@ -2441,7 +2463,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 # Compute logits for loss calculation
                 # For training, we need logits for all tokens (achieved via logits_indices)
+                start_time = time.time()
                 logits = self.model.compute_logits(hidden_states, None)
+                end_time = time.time()
+                logger.info(f"logits computation time = {(end_time - start_time) * 1000:.6f} ms")
 
                 per_req_logits = {}
                 all_logits = []
@@ -2450,6 +2475,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_id_to_index = {}
                 req_ids_output = []
 
+                start_time = time.time()
                 offset = 0
                 for i, req_id in enumerate(self.input_batch.req_ids):
                     if req_id is None:
@@ -2507,29 +2533,47 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # TODO(girfan): Check if this is correct.
                 # https://github.com/huggingface/transformers/issues/41842
                 num_items_in_batch = labels.ne(-100).sum()
-                logger.info(f"num_items_in_batch: {num_items_in_batch}")
+                end_time = time.time()
+                logger.info(f"batch ({len(self.input_batch.req_ids)} requests) computation time = {(end_time - start_time) * 1000:.6f} ms")
 
                 # Compute loss for this batch
+                start_time = time.time()
                 loss = ForCausalLMLoss(
                     logits,
                     labels,
                     self.model.config.vocab_size,
                     num_items_in_batch=num_items_in_batch
                 )
+                end_time = time.time()
+                logger.info(f"loss computation time = {(end_time - start_time) * 1000:.6f} ms")
 
                 # Backward pass
+                start_time = time.time()
                 loss.backward()
+                end_time = time.time()
+                logger.info(f"backward pass time = {(end_time - start_time) * 1000:.6f} ms")
 
                 # Add loss to training manager
-                self.training_manager.add_loss(loss)
+                self.training_manager.add_loss(loss.detach())
 
                 # Step the training manager
+                start_time = time.time()
                 self.training_manager.step()
+                end_time = time.time()
+                logger.info(f"training manager step time = {(end_time - start_time) * 1000:.6f} ms")
 
             # Run the optimizer step if it is time to do so
+            start_time = time.time()
             if self.training_manager.should_run_optimizer_step():
                 self.training_manager.optimizer_step()
-                self.training_manager.reset()
+                self.training_manager.reset_steps()
+            end_time = time.time()
+            logger.info(f"optimizer step time = {(end_time - start_time) * 1000:.6f} ms")
+
+            # Log the training state if it is time to do so
+            if self.training_manager.should_log():
+                self.training_manager.log()
+                self.training_manager.reset_loss()
 
         return ModelRunnerOutput(
             req_ids=req_ids_output,

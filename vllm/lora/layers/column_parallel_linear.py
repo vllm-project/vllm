@@ -219,7 +219,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                requires_grad=lora_config.enable_lora_training,
+                # requires_grad=lora_config.enable_lora_training,
             ) for _ in range(self.n_slices))
         self.lora_b_stacked = tuple(
             torch.zeros(
@@ -229,7 +229,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                requires_grad=lora_config.enable_lora_training,
+                # requires_grad=lora_config.enable_lora_training,
             ) for output_size in self.output_slices)
         if lora_config.bias_enabled:
             self.lora_bias_stacked = tuple(
@@ -239,7 +239,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     output_size,
                     dtype=lora_config.lora_dtype,
                     device=self.device,
-                    requires_grad=lora_config.enable_lora_training,
+                    # requires_grad=lora_config.enable_lora_training,
                 ) for output_size in self.output_slices)
 
     def slice_lora_a(
@@ -291,12 +291,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
                 self.lora_a_stacked[i][
-                    index, 0, :lora_a_i.shape[1], :lora_a_i.shape[0]].detach().copy_(
-                        lora_a_i.T, non_blocking=True).requires_grad_(True)
+                    index, 0, :lora_a_i.shape[1], :lora_a_i.shape[0]].copy_(
+                        lora_a_i.T, non_blocking=True)
             if (lora_b_i := lora_b[i]) is not None:
                 self.lora_b_stacked[i][
-                    index, 0, :lora_b_i.shape[1], :lora_b_i.shape[0]].detach().copy_(
-                        lora_b_i.T, non_blocking=True).requires_grad_(True)
+                    index, 0, :lora_b_i.shape[1], :lora_b_i.shape[0]].copy_(
+                        lora_b_i.T, non_blocking=True)
 
         if lora_bias is not None:
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
@@ -304,9 +304,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             for i in range(self.n_slices):
                 if (lora_bias_i := lora_bias[i]) is not None:
                     self.lora_bias_stacked[i][index,
-                                              0, :lora_bias_i.shape[0]].detach().copy_(
+                                              0, :lora_bias_i.shape[0]].copy_(
                                                   lora_bias_i.T,
-                                                  non_blocking=True).requires_grad_(True)
+                                                  non_blocking=True)
 
         if is_trainable:
             assert trainable_slices is not None, "trainable_slices is required for MergedColumnParallelLinearWithLoRA"

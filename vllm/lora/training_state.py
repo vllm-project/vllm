@@ -5,26 +5,31 @@ class TrainingState:
     def __init__(self, grad_accumulation_steps: int = 1):
         self.grad_accumulation_steps: int = grad_accumulation_steps
 
-        self._loss: Optional[torch.Tensor] = None
+        self._loss: torch.Tensor = torch.tensor(0.0)
+        self._total_steps: int = 0
         self._steps: int = 0
 
     @property
-    def loss(self) -> Optional[torch.Tensor]:
-        return self._loss
+    def loss(self) -> float:
+        return self._loss.item()
 
     @property
     def steps(self) -> int:
         return self._steps
 
+    @property
+    def total_steps(self) -> int:
+        return self._total_steps
+
     def add_loss(self, loss: torch.Tensor):
-        if self._loss is None:
-            self._loss = loss
-        else:
-            self._loss += loss
+        self._loss += loss.to(self._loss.device)
 
     def step(self):
         self._steps += 1
+        self._total_steps += 1
 
-    def reset(self):
-        self._loss = None
+    def reset_steps(self):
         self._steps = 0
+
+    def reset_loss(self):
+        self._loss.zero_()

@@ -392,9 +392,6 @@ class LlamaModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
-                if is_lora_training and not hidden_states.requires_grad:
-                    # hidden_states = hidden_states.detach().clone().to(dtype=hidden_states.dtype)
-                    hidden_states.requires_grad_(True)
             residual = None
         else:
             assert intermediate_tensors is not None

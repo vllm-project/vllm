@@ -70,7 +70,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                requires_grad=True,
+                # requires_grad=True,
             ) for _ in range(self.n_slices))
         self.lora_b_stacked = tuple(
             torch.zeros(
@@ -80,7 +80,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                requires_grad=True,
+                # requires_grad=True,
             ) for _ in range(self.n_slices))
         if lora_config.bias_enabled:
             lora_bias_out_size = lora_b_out_size
@@ -91,7 +91,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                     lora_bias_out_size,
                     dtype=lora_config.lora_dtype,
                     device=self.device,
-                    requires_grad=True,
+                    # requires_grad=True,
                 ) for _ in range(self.n_slices))
         self.output_slices = (self.lora_b_stacked[0].shape[2], )
 
