@@ -114,6 +114,10 @@ class KVCacheBlock:
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None
+    # Time when the block was last cached (monotonic timestamp).
+    cache_insert_ts: float | None = None
+    # Request that last cached the block.
+    cache_owner_request_id: str | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -147,6 +151,8 @@ class KVCacheBlock:
             f"KVCacheBlock(block_id={self.block_id}, "
             f"ref_cnt={self.ref_cnt}, "
             f"_block_hash={self._block_hash!r}, "
+            f"cache_insert_ts={self.cache_insert_ts}, "
+            f"cache_owner_request_id={self.cache_owner_request_id!r}, "
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )

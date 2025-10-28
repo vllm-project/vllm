@@ -126,6 +126,18 @@ class PrefixCacheStats(BaseCacheStats):
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
 
+    block_residency_time: float = 0.0
+    """Sum of lifetimes (seconds) for cached blocks evicted in this update."""
+
+    evicted_blocks: int = 0
+    """The number of cached blocks evicted in this update."""
+
+    request_residency_time: float = 0.0
+    """Sum of lifetimes (seconds) for request prefixes evicted in this update."""
+
+    evicted_requests: int = 0
+    """The number of requests whose cached prefixes fully evicted."""
+
 
 @dataclass
 class MultiModalCacheStats(BaseCacheStats):

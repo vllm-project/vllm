@@ -4,6 +4,7 @@
 
 import copy
 from collections.abc import Callable
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -1227,6 +1228,45 @@ def test_prefix_cache_stats_disabled():
 
     # Ensure prefix_cache_stats remains None
     assert manager.prefix_cache_stats is None
+
+
+def test_prefix_cache_residency_stats():
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 4),
+        max_model_len=8192,
+        enable_caching=True,
+        log_stats=True,
+    )
+    req0 = make_request("0", list(range(block_size)), block_size, sha256)
+
+    with patch("vllm.v1.core.block_pool.time.monotonic") as mock_monotonic:
+        mock_monotonic.side_effect = [0.0, 5.0, 10.0, 12.0]
+        computed_blocks0, computed_tokens0 = manager.get_computed_blocks(req0)
+        manager.allocate_slots(
+            req0,
+            req0.num_tokens,
+            computed_tokens0,
+            computed_blocks0,
+        )
+        manager.free(req0)
+
+        req1 = make_request(
+            "1", list(range(block_size, block_size * 2)), block_size, sha256
+        )
+        computed_blocks1, computed_tokens1 = manager.get_computed_blocks(req1)
+        manager.allocate_slots(
+            req1,
+            req1.num_tokens,
+            computed_tokens1,
+            computed_blocks1,
+        )
+
+    stats = manager.make_prefix_cache_stats()
+    assert stats.evicted_blocks == 1
+    assert stats.block_residency_time == pytest.approx(10.0)
+    assert stats.evicted_requests == 1
+    assert stats.request_residency_time == pytest.approx(5.0)
 
 
 def test_maybe_evict_cached_block():

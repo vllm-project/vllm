@@ -170,6 +170,13 @@ class KVCacheManager:
         if not self.log_stats:
             return None
         stats = self.prefix_cache_stats
+        if self.enable_caching:
+            (
+                stats.block_residency_time,
+                stats.evicted_blocks,
+                stats.request_residency_time,
+                stats.evicted_requests,
+            ) = self.block_pool.take_residency_stats()
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
@@ -346,6 +353,8 @@ class KVCacheManager:
             request: The request to free the blocks.
         """
         self.coordinator.free(request.request_id)
+        if self.enable_caching:
+            self.block_pool.mark_request_finished(request.request_id)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

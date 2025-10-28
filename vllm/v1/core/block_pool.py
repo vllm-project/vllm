@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -166,6 +167,14 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        # Residency tracking across cached blocks and owning requests.
+        self._block_residency_time: float = 0.0
+        self._block_residency_count: int = 0
+        self._request_residency_time: float = 0.0
+        self._request_residency_count: int = 0
+        self._request_block_counts: dict[str, int] = {}
+        self._request_free_ts: dict[str, float] = {}
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -228,6 +237,7 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        now = time.monotonic()
         for i, blk in enumerate(new_full_blocks):
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
@@ -237,6 +247,11 @@ class BlockPool:
                 block_hash, kv_cache_group_id
             )
             blk.block_hash = block_hash_with_group_id
+            blk.cache_insert_ts = now
+            blk.cache_owner_request_id = request.request_id
+            self._request_block_counts[request.request_id] = (
+                self._request_block_counts.get(request.request_id, 0) + 1
+            )
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
@@ -292,6 +307,37 @@ class BlockPool:
                 block.ref_cnt += 1
         return ret
 
+    def _record_block_eviction(
+        self, block: KVCacheBlock, now: float | None = None
+    ) -> None:
+        """Update residency stats for the block being evicted."""
+        if block.cache_insert_ts is None:
+            block.cache_owner_request_id = None
+            return
+
+        end_time = time.monotonic() if now is None else now
+        lifetime = max(0.0, end_time - block.cache_insert_ts)
+        self._block_residency_time += lifetime
+        self._block_residency_count += 1
+
+        owner = block.cache_owner_request_id
+        if owner is not None:
+            outstanding = self._request_block_counts.get(owner)
+            if outstanding is not None:
+                outstanding -= 1
+                if outstanding <= 0:
+                    self._request_block_counts.pop(owner, None)
+                    free_ts = self._request_free_ts.pop(owner, None)
+                    if free_ts is not None:
+                        request_lifetime = max(0.0, end_time - free_ts)
+                        self._request_residency_time += request_lifetime
+                        self._request_residency_count += 1
+                else:
+                    self._request_block_counts[owner] = outstanding
+
+        block.cache_insert_ts = None
+        block.cache_owner_request_id = None
+
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
@@ -313,6 +359,7 @@ class BlockPool:
             # eviction is not needed
             return False
 
+        self._record_block_eviction(block)
         block.reset_hash()
 
         if self.enable_kv_cache_events:
@@ -343,6 +390,18 @@ class BlockPool:
                 if block.ref_cnt == 0 and not block.is_null:
                     self.free_block_queue.remove(block)
                 block.ref_cnt += 1
+
+    def mark_request_finished(self, request_id: str) -> None:
+        """Record when a request releases its blocks."""
+        if not self.enable_caching:
+            return
+        outstanding = self._request_block_counts.get(request_id, 0)
+        if outstanding <= 0:
+            self._request_block_counts.pop(request_id, None)
+            self._request_free_ts.pop(request_id, None)
+            return
+        if request_id not in self._request_free_ts:
+            self._request_free_ts[request_id] = time.monotonic()
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
@@ -378,12 +437,18 @@ class BlockPool:
             )
             return False
 
+        now = time.monotonic()
+        for block in self.blocks:
+            if block.is_null:
+                continue
+            if block.block_hash is not None:
+                self._record_block_eviction(block, now=now)
+                block.reset_hash()
+
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
-
-        # Remove all hashes from all blocks.
-        for block in self.blocks:
-            block.reset_hash()
+        self._request_block_counts.clear()
+        self._request_free_ts.clear()
 
         logger.info("Successfully reset prefix cache")
 
@@ -412,6 +477,20 @@ class BlockPool:
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
+
+    def take_residency_stats(self) -> tuple[float, int, float, int]:
+        """Return and reset residency accumulators."""
+        stats = (
+            self._block_residency_time,
+            self._block_residency_count,
+            self._request_residency_time,
+            self._request_residency_count,
+        )
+        self._block_residency_time = 0.0
+        self._block_residency_count = 0
+        self._request_residency_time = 0.0
+        self._request_residency_count = 0
+        return stats
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.

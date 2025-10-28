@@ -98,10 +98,14 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decoding_logging = SpecDecodingLogging()
         kv_tranfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_tranfer_config)
-        self.last_prompt_throughput: float = 0.0
-        self.last_generation_throughput: float = 0.0
-        self.engine_is_idle = False
-        self.aggregated = False
+       self.last_prompt_throughput: float = 0.0
+       self.last_generation_throughput: float = 0.0
+       self.engine_is_idle = False
+       self.aggregated = False
+        self.block_residency_time_accum: float = 0.0
+        self.block_residency_count_accum: int = 0
+        self.request_residency_time_accum: float = 0.0
+        self.request_residency_count_accum: int = 0
 
     def _reset(self, now):
         self.last_log_time = now
@@ -139,6 +143,13 @@ class LoggingStatLogger(StatLoggerBase):
 
         if scheduler_stats is not None:
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
+            pcs = scheduler_stats.prefix_cache_stats
+            if pcs.evicted_blocks:
+                self.block_residency_time_accum += pcs.block_residency_time
+                self.block_residency_count_accum += pcs.evicted_blocks
+            if pcs.evicted_requests:
+                self.request_residency_time_accum += pcs.request_residency_time
+                self.request_residency_count_accum += pcs.evicted_requests
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_logging.observe(scheduler_stats.spec_decoding_stats)
@@ -192,6 +203,18 @@ class LoggingStatLogger(StatLoggerBase):
             self.last_scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         ]
+        if self.block_residency_count_accum:
+            avg_block = (
+                self.block_residency_time_accum / self.block_residency_count_accum
+            )
+            log_parts.append("Avg block residency: %.1fs")
+            log_args.append(avg_block)
+        if self.request_residency_count_accum:
+            avg_request = (
+                self.request_residency_time_accum / self.request_residency_count_accum
+            )
+            log_parts.append("Avg request residency: %.1fs")
+            log_args.append(avg_request)
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
@@ -455,6 +478,46 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_prefix_cache_hits = make_per_engine(
             counter_prefix_cache_hits, engine_indexes, model_name
+        )
+
+        counter_prefix_cache_block_evictions = self._counter_cls(
+            name="vllm:prefix_cache_block_evictions",
+            documentation="Number of cached blocks evicted from the prefix cache.",
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_block_evictions = make_per_engine(
+            counter_prefix_cache_block_evictions, engine_indexes, model_name
+        )
+
+        counter_prefix_cache_block_residency_seconds = self._counter_cls(
+            name="vllm:prefix_cache_block_residency_seconds",
+            documentation=(
+                "Total time cached blocks stayed in the prefix cache before eviction."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_block_residency_seconds = make_per_engine(
+            counter_prefix_cache_block_residency_seconds, engine_indexes, model_name
+        )
+
+        counter_prefix_cache_request_evictions = self._counter_cls(
+            name="vllm:prefix_cache_request_evictions",
+            documentation="Number of requests whose cached prefixes were evicted.",
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_request_evictions = make_per_engine(
+            counter_prefix_cache_request_evictions, engine_indexes, model_name
+        )
+
+        counter_prefix_cache_request_residency_seconds = self._counter_cls(
+            name="vllm:prefix_cache_request_residency_seconds",
+            documentation=(
+                "Total time completed requests kept any prefix cached blocks."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_request_residency_seconds = make_per_engine(
+            counter_prefix_cache_request_residency_seconds, engine_indexes, model_name
         )
 
         #
@@ -855,6 +918,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     ):
         """Log to prometheus."""
         if scheduler_stats is not None:
+            pcs = scheduler_stats.prefix_cache_stats
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
@@ -870,18 +934,29 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if self.show_hidden_metrics:
                 self.counter_gpu_prefix_cache_queries[engine_idx].inc(
-                    scheduler_stats.prefix_cache_stats.queries
+                    pcs.queries
                 )
                 self.counter_gpu_prefix_cache_hits[engine_idx].inc(
-                    scheduler_stats.prefix_cache_stats.hits
+                    pcs.hits
                 )
 
-            self.counter_prefix_cache_queries[engine_idx].inc(
-                scheduler_stats.prefix_cache_stats.queries
-            )
-            self.counter_prefix_cache_hits[engine_idx].inc(
-                scheduler_stats.prefix_cache_stats.hits
-            )
+            self.counter_prefix_cache_queries[engine_idx].inc(pcs.queries)
+            self.counter_prefix_cache_hits[engine_idx].inc(pcs.hits)
+
+            if pcs.evicted_blocks:
+                self.counter_prefix_cache_block_evictions[engine_idx].inc(
+                    pcs.evicted_blocks
+                )
+                self.counter_prefix_cache_block_residency_seconds[engine_idx].inc(
+                    pcs.block_residency_time
+                )
+            if pcs.evicted_requests:
+                self.counter_prefix_cache_request_evictions[engine_idx].inc(
+                    pcs.evicted_requests
+                )
+                self.counter_prefix_cache_request_residency_seconds[engine_idx].inc(
+                    pcs.request_residency_time
+                )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
