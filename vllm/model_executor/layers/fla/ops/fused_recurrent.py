@@ -57,6 +57,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    IS_KDA: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -86,7 +87,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:
         p_beta = beta + bos * HV + i_hv
-    p_g = g + bos * HV + i_hv
+
+    if not IS_KDA:
+        p_g = g + bos * HV + i_hv
+    else:
+        p_gk = g + (bos * HV + i_hv) * K + o_k
+
     p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
     mask_k = o_k < K
@@ -116,14 +122,18 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-        b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
         # [BK, BV]
-        b_h *= exp(b_g)
+        if not IS_KDA:
+            b_g = tl.load(p_g).to(tl.float32)
+            b_h *= exp(b_g)
+        else:
+            b_gk = tl.load(p_gk).to(tl.float32)
+            b_h *= exp(b_gk[:, None])
         # [BV]
         b_v -= tl.sum(b_h * b_k[:, None], 0)
         if IS_BETA_HEADWISE:
@@ -155,7 +165,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_k += H * K
         p_o += HV * V
         p_v += HV * V
-        p_g += HV
+        if not IS_KDA:
+            p_g += HV
+        else:
+            p_gk += HV * K
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
 
@@ -228,6 +241,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
+        IS_KDA=False,
         num_warps=num_warps,
         num_stages=num_stages,
     )
