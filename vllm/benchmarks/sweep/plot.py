@@ -48,7 +48,7 @@ class PlotFilterBase(ABC):
             )
 
     @abstractmethod
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         """Applies this filter to a DataFrame."""
         raise NotImplementedError
 
@@ -56,7 +56,7 @@ class PlotFilterBase(ABC):
 @dataclass
 class PlotEqualTo(PlotFilterBase):
     @override
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         try:
             target = float(self.target)
         except ValueError:
@@ -68,28 +68,28 @@ class PlotEqualTo(PlotFilterBase):
 @dataclass
 class PlotLessThan(PlotFilterBase):
     @override
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         return df[df[self.var] < float(self.target)]
 
 
 @dataclass
 class PlotLessThanOrEqualTo(PlotFilterBase):
     @override
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         return df[df[self.var] <= float(self.target)]
 
 
 @dataclass
 class PlotGreaterThan(PlotFilterBase):
     @override
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         return df[df[self.var] > float(self.target)]
 
 
 @dataclass
 class PlotGreaterThanOrEqualTo(PlotFilterBase):
     @override
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         return df[df[self.var] >= float(self.target)]
 
 
@@ -111,7 +111,7 @@ class PlotFilters(list[PlotFilterBase]):
 
         return cls(PlotFilterBase.parse_str(e) for e in s.split(","))
 
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         for item in self:
             df = item.apply(df)
 
@@ -135,7 +135,7 @@ class PlotBinner:
                 f"Valid operators are: {sorted(PLOT_BINNERS)}",
             )
 
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         """Applies this binner to a DataFrame."""
         df = df.copy()
         df[self.var] = df[self.var] // self.bin_size * self.bin_size
@@ -155,7 +155,7 @@ class PlotBinners(list[PlotBinner]):
 
         return cls(PlotBinner.parse_str(e) for e in s.split(","))
 
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         for item in self:
             df = item.apply(df)
 
