@@ -25,13 +25,13 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, partial
 from io import BytesIO
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 from PIL import Image
-from transformers import PreTrainedTokenizerBase
 from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
@@ -188,7 +188,7 @@ class BenchmarkDataset(ABC):
     @abstractmethod
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -200,7 +200,7 @@ class BenchmarkDataset(ABC):
         for generating a list of SampleRequest objects.
 
         Args:
-            tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
+            tokenizer (AnyTokenizer): The tokenizer to be used
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
             request_id_prefix (str): The prefix of request_id.
@@ -379,7 +379,7 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
 
 def gen_prompt_decode_to_target_len(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: AnyTokenizer,
     token_sequence: list[int],
     target_token_len: int,
     max_retry: int = 10,
@@ -467,7 +467,7 @@ class RandomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -476,6 +476,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
+        probability_density_function: Path | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # validate total input tokens (prefix + sampled) is at least 1.
@@ -495,7 +496,12 @@ class RandomDataset(BenchmarkDataset):
             )
 
         input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+            num_requests,
+            range_ratio,
+            input_len,
+            output_len,
+            tokenizer,
+            probability_density_function,
         )
 
         # Generate prefix once
@@ -552,9 +558,7 @@ class RandomDataset(BenchmarkDataset):
 
         return requests
 
-    def get_prefix(
-        self, tokenizer: PreTrainedTokenizerBase, prefix_len: int
-    ) -> list[int]:
+    def get_prefix(self, tokenizer: AnyTokenizer, prefix_len: int) -> list[int]:
         """
         Get the prefix for the dataset.
         """
@@ -564,13 +568,72 @@ class RandomDataset(BenchmarkDataset):
             else []
         )
 
+    def build_pdf_sampler(
+        self,
+        probability_density_function: Path,
+    ) -> tuple[Callable, Callable]:
+        """
+        Opens a .json file containing the probability density function
+        for the input and output lengths.
+        Returns a tuple of callables that can be used to sample from the
+        probability density function (assuming uniform distribution within
+        each bucket).
+
+        File should contain two probability density functions (histograms):
+        {
+          "input_pdf": [[1, 0.01], [100, 0.02], ..., [1000, 0.0]],
+          "output_pdf": [[1, 0.04], [100, 0.02], ..., [1000, 0.0]]
+        }
+        For example, probability of sampling input size in [0, 100) is 0.01.
+        The last bucket MUST be 0.
+        """
+        with open(probability_density_function) as f:
+            pdf = json.load(f)
+
+        input_buckets, input_pdf = np.array(pdf["input_pdf"]).T
+        input_buckets = input_buckets.astype(int)
+        input_pdf[-1] = 0.0
+        # at least some probability somewhere
+        assert np.any(input_pdf > 0.0)
+        # buckets must be strictly increasing
+        assert np.all(input_buckets[1:] - input_buckets[:-1] > 0)
+
+        output_buckets, output_pdf = np.array(pdf["output_pdf"]).T
+        output_buckets = output_buckets.astype(int)
+        output_pdf[-1] = 0.0
+        assert np.any(output_pdf > 0.0)
+        assert np.all(output_buckets[1:] - output_buckets[:-1] > 0)
+
+        def sampler(low, high, size, buckets, cdf):
+            del low, high  # only here to adapt from _rng.integers interface
+            indices = np.searchsorted(cdf, self._rng.random(size))
+            intra_bucket = self._rng.random(size)
+            return (
+                buckets[indices]
+                + intra_bucket * (buckets[indices + 1] - buckets[indices])
+            ).astype(int)
+
+        return (
+            partial(
+                sampler,
+                buckets=input_buckets,
+                cdf=np.cumsum(input_pdf) / np.sum(input_pdf),
+            ),
+            partial(
+                sampler,
+                buckets=output_buckets,
+                cdf=np.cumsum(output_pdf) / np.sum(output_pdf),
+            ),
+        )
+
     def get_sampling_params(
         self,
         num_requests: int,
         range_ratio: float,
         input_len: int,
         output_len: int,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
+        probability_density_function: Path | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Get the sampling parameters for the dataset.
@@ -578,7 +641,7 @@ class RandomDataset(BenchmarkDataset):
         # Enforce range_ratio < 1
         if not (0.0 <= range_ratio < 1.0):
             raise ValueError("range_ratio must be in [0, 1).")
-        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+        num_special_tokens = len(tokenizer.all_special_tokens_extended)
         real_input_len = max(0, int(input_len) - num_special_tokens)
         # Bounds use floor for low and ceil for high
         input_low = math.floor(real_input_len * (1 - range_ratio))
@@ -608,15 +671,25 @@ class RandomDataset(BenchmarkDataset):
             output_high,
         )
 
-        input_lens = self._rng.integers(input_low, input_high + 1, size=num_requests)
-        output_lens = self._rng.integers(output_low, output_high + 1, size=num_requests)
+        if probability_density_function is not None:
+            input_lens_sampler, output_lens_sampler = self.build_pdf_sampler(
+                probability_density_function
+            )
+        else:
+            input_lens_sampler = self._rng.integers
+            output_lens_sampler = self._rng.integers
+
+        input_lens = input_lens_sampler(input_low, input_high + 1, size=num_requests)
+        output_lens = output_lens_sampler(
+            output_low, output_high + 1, size=num_requests
+        )
         offsets = self._rng.integers(0, tokenizer.vocab_size, size=num_requests)
         return input_lens, output_lens, offsets
 
     def generate_token_sequence(
         self,
         *,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         prefix_token_ids: list[int],
         prefix_len: int,
         vocab_size: int,
@@ -672,7 +745,7 @@ class RandomDatasetForReranking(RandomDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         request_id_prefix: str = "",
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
@@ -1027,7 +1100,7 @@ class RandomMultiModalDataset(RandomDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -1042,6 +1115,7 @@ class RandomMultiModalDataset(RandomDataset):
             tuple[int, int, int], float
         ] = DEFAULT_MM_ITEM_BUCKET_CONFIG,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        probability_density_function: Path | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # NOTE: Video sampling is WIP. Raise error if video is in bucket config
@@ -1056,7 +1130,12 @@ class RandomMultiModalDataset(RandomDataset):
 
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+            num_requests,
+            range_ratio,
+            input_len,
+            output_len,
+            tokenizer,
+            probability_density_function,
         )
 
         (
@@ -1175,7 +1254,7 @@ class ShareGPTDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         lora_path: str | None = None,
         max_loras: int | None = None,
@@ -1396,6 +1475,17 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "used only for random sampling. Must be in the range [0, 1) to define "
         "a symmetric sampling range"
         "[length * (1 - range_ratio), length * (1 + range_ratio)].",
+    )
+    random_group.add_argument(
+        "--random-probability-density-function",
+        type=Path,
+        default=None,
+        help=(
+            "Path to json file specifying a PDF for input/output lenghts. "
+            "Overrides random-input-len, random-output-len, and "
+            "random-range-ratio args. See RandomDataset.build_pdf_sampler "
+            "documentation for more details."
+        ),
     )
     random_group.add_argument(
         "--random-prefix-len",
@@ -1791,6 +1881,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
+                probability_density_function=args.random_probability_density_function,
             ),
             "random-mm": lambda: RandomMultiModalDataset(
                 random_seed=args.seed,
@@ -1809,6 +1900,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 bucket_config=args.random_mm_bucket_config,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
+                probability_density_function=args.random_probability_density_function,
             ),
             "random-rerank": lambda: RandomDatasetForReranking(
                 random_seed=args.seed,
@@ -1909,7 +2001,7 @@ class CustomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         lora_path: str | None = None,
         max_loras: int | None = None,
@@ -2140,7 +2232,7 @@ class BurstGPTDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         max_loras: int | None = None,
         lora_path: str | None = None,
@@ -2226,7 +2318,7 @@ class ConversationDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
@@ -2295,7 +2387,7 @@ class VisionArenaDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
@@ -2349,7 +2441,7 @@ class MMVUDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
@@ -2410,7 +2502,7 @@ class InstructCoderDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
@@ -2474,7 +2566,7 @@ class MTBenchDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
@@ -2540,7 +2632,7 @@ class BlazeditDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         skip_chat_template: bool = False,
@@ -2621,7 +2713,7 @@ class AIMODataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         request_id_prefix: str = "",
@@ -2731,7 +2823,7 @@ class NextEditPredictionDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2803,7 +2895,7 @@ class ASRDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         request_id_prefix: str = "",
@@ -2881,7 +2973,7 @@ class MLPerfDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         request_id_prefix: str = "",
@@ -2960,7 +3052,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         prefix_len: int = DEFAULT_PREFIX_LEN,
         suffix_len: int = DEFAULT_SUFFIX_LEN,
@@ -3046,7 +3138,7 @@ class MMStarDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
