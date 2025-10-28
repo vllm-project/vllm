@@ -13,6 +13,8 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
     ClassificationData,
     ClassificationRequest,
     ClassificationResponse,
@@ -52,16 +54,17 @@ class ClassificationMixin(OpenAIServing):
 
             messages = getattr(ctx.request, "messages", None)
             if messages is not None:
+                chat_request: ClassificationChatRequest = cast(
+                    ClassificationChatRequest, ctx.request
+                )
                 trust_request_chat_template = getattr(
                     self,
                     "trust_request_chat_template",
                     False,
                 )
                 ret = self._validate_chat_template(
-                    request_chat_template=getattr(ctx.request, "chat_template", None),
-                    chat_template_kwargs=getattr(
-                        ctx.request, "chat_template_kwargs", None
-                    ),
+                    request_chat_template=chat_request.chat_template,
+                    chat_template_kwargs=chat_request.chat_template_kwargs,
                     trust_request_chat_template=trust_request_chat_template,
                 )
                 if ret:
@@ -72,11 +75,11 @@ class ClassificationMixin(OpenAIServing):
                     _,
                     engine_prompts,
                 ) = await self._preprocess_chat(
-                    cast(ChatCompletionRequest, ctx.request),
+                    cast(ChatCompletionRequest, chat_request),
                     ctx.tokenizer,
                     messages,
                     chat_template=(
-                        getattr(ctx.request, "chat_template", None)
+                        chat_request.chat_template
                         or getattr(self, "chat_template", None)
                     ),
                     chat_template_content_format=cast(
@@ -85,26 +88,28 @@ class ClassificationMixin(OpenAIServing):
                     ),
                     add_generation_prompt=False,
                     continue_final_message=False,
-                    add_special_tokens=getattr(
-                        ctx.request, "add_special_tokens", False
-                    ),
+                    add_special_tokens=chat_request.add_special_tokens,
                 )
                 ctx.engine_prompts = engine_prompts
             else:
-                input_data = ctx.request.input
+                completion_request: ClassificationCompletionRequest = cast(
+                    ClassificationCompletionRequest, ctx.request
+                )
+                input_data = completion_request.input
                 if input_data in (None, ""):
                     return self.create_error_response(
                         "Input or messages must be provided",
                         status_code=HTTPStatus.BAD_REQUEST,
                     )
                 if isinstance(input_data, list) and not input_data:
+                    ctx.engine_prompts = []
                     return None
 
                 renderer = self._get_renderer(ctx.tokenizer)
                 prompt_input = cast(str | list[str], input_data)
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=prompt_input,
-                    config=self._build_render_config(ctx.request),
+                    config=self._build_render_config(completion_request),
                 )
 
             return None
@@ -164,6 +169,7 @@ class ClassificationMixin(OpenAIServing):
         return RenderConfig(
             max_length=self.max_model_len,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=getattr(request, "add_special_tokens", None),
         )
 
 

@@ -38,6 +38,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
     ClassificationRequest,
     ClassificationResponse,
     CompletionRequest,
@@ -107,13 +109,16 @@ CompletionLikeRequest: TypeAlias = (
     | DetokenizeRequest
     | EmbeddingCompletionRequest
     | RerankRequest
-    | ClassificationRequest
+    | ClassificationCompletionRequest
     | ScoreRequest
     | TokenizeCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | EmbeddingChatRequest | TokenizeChatRequest
+    ChatCompletionRequest
+    | EmbeddingChatRequest
+    | TokenizeChatRequest
+    | ClassificationChatRequest
 )
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
 AnyRequest: TypeAlias = (
@@ -912,7 +917,8 @@ class OpenAIServing:
                 EmbeddingCompletionRequest,
                 ScoreRequest,
                 RerankRequest,
-                ClassificationRequest,
+                ClassificationCompletionRequest,
+                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -920,7 +926,8 @@ class OpenAIServing:
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise ValueError(
