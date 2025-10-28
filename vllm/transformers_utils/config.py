@@ -622,9 +622,14 @@ def get_config(
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:
         if config.model_type not in MODEL_MAPPING_NAMES:
-            raise ValueError(f"Cannot find architecture name for {config.model_type}")
-        model_type = MODEL_MAPPING_NAMES[config.model_type]
-        config.update({"architectures": [model_type]})
+            logger.warning(
+                "Model config does not have a top-level 'architectures' field: "
+                "expecting `hf_overrides={'architectures': ['...']}` to be passed "
+                "in engine args."
+            )
+        else:
+            model_type = MODEL_MAPPING_NAMES[config.model_type]
+            config.update({"architectures": [model_type]})
 
     # ModelOpt 0.31.0 and after saves the quantization config in the model
     # config file.
