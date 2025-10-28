@@ -920,14 +920,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.gauge_gpu_cache_usage[engine_idx].set(
                     scheduler_stats.kv_cache_usage
                 )
+            self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+
+            if self.show_hidden_metrics:
                 self.counter_gpu_prefix_cache_queries[engine_idx].inc(
                     scheduler_stats.prefix_cache_stats.queries
                 )
                 self.counter_gpu_prefix_cache_hits[engine_idx].inc(
                     scheduler_stats.prefix_cache_stats.hits
                 )
-
-            self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
             if self.show_hidden_metrics:
                 self.counter_gpu_prefix_cache_queries[engine_idx].inc(
