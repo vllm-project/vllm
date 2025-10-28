@@ -77,6 +77,11 @@ else:
             raise AttributeError(f"module {__package__} has no attribute {name}")
 
 
+# see https://github.com/vllm-project/vllm/issues/14680
+if _mpol_spec := os.getenv("MPOL_INTERLEAVE", ""):
+    from vllm import mpolset
+    mpolset.configure_memory_policy(f"interleave:{_mpol_spec}", override=False)
+
 __all__ = [
     "__version__",
     "bc_linter_skip",
