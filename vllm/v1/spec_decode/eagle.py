@@ -1120,7 +1120,7 @@ class EagleProposer:
         Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
         hidden states and directly uses the last layer output just like eagle1.
         They might indicate this by setting "use_aux_hidden_state" to False
-        inside the "eagle_config" dict of their hf_config. Retrive this flag
+        inside the "eagle_config" dict of their hf_config. Retrieve this flag
         and return None if not found.
         """
         if self.method != "eagle3":

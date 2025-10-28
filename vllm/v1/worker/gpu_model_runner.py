@@ -365,7 +365,7 @@ class GPUModelRunner(
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
                     use_aux_hidden_state_from_config = (
-                        self.drafter._get_eagle3_use_aux_hidden_state_from_config()
+                        self.drafter._get_eagle3_use_aux_hidden_state_from_config()  # type: ignore
                     )
                     # Override from config if exists
                     if use_aux_hidden_state_from_config is not None:
