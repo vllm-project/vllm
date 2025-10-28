@@ -14,7 +14,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import Device, EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -29,7 +29,6 @@ from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.utils.func_utils import deprecate_kwargs
