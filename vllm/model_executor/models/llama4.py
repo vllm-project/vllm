@@ -25,6 +25,7 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
+import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
@@ -40,6 +41,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.meta_shuffling_moe import MetaShufflingMoE
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
@@ -89,7 +91,6 @@ class Llama4MoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.router",
         )
-
         self.shared_expert = LlamaMLP(
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size_moe,
@@ -100,21 +101,34 @@ class Llama4MoE(nn.Module):
             reduce_results=False,
             disable_tp=self.is_sequence_parallel,
         )
-
-        self.experts = SharedFusedMoE(
-            shared_experts=self.shared_expert,
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            custom_routing_function=Llama4MoE.custom_routing_function,
-            intermediate_size=intermediate_size_moe,
-            apply_router_weight_on_input=True,
-            reduce_results=False,
-            renormalize=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            is_sequence_parallel=self.is_sequence_parallel,
-        )
+        if envs.VLLM_USE_META_SHUFFLING_MOE:
+            self.experts = MetaShufflingMoE(
+                shared_experts=self.shared_expert,
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size_moe,
+                apply_router_weight_on_input=True,
+                scoring_func="sigmoid",
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                is_sequence_parallel=self.is_sequence_parallel,
+            )
+        else:
+            self.experts = SharedFusedMoE(
+                shared_experts=self.shared_expert,
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                custom_routing_function=Llama4MoE.custom_routing_function,
+                intermediate_size=intermediate_size_moe,
+                apply_router_weight_on_input=True,
+                reduce_results=False,
+                renormalize=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                is_sequence_parallel=self.is_sequence_parallel,
+            )
 
     def forward(self, hidden_states):
         num_tokens = hidden_states.shape[0]
@@ -123,11 +137,19 @@ class Llama4MoE(nn.Module):
 
         router_logits, _ = self.router(hidden_states)
 
-        shared_out, routed_out = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
-        experts_out = routed_out + shared_out
+        if envs.VLLM_USE_META_SHUFFLING_MOE:
+            out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            assert isinstance(out, tuple)
+            _, experts_out = out
+        else:
+            shared_out, routed_out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            experts_out = routed_out + shared_out
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
