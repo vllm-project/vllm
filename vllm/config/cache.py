@@ -126,6 +126,17 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    kv_offloading_size: float | None = None
+    """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
+    the total buffer size summed across all TP ranks. By default, this is set
+    to None, which means no KV offloading is enabled. When set with
+    kv_offloading_backend, vLLM will enable KV cache offloading to CPU"""
+
+    kv_offloading_backend: str | None = None
+    """The backend to use for KV cache offloading. Supported backends include
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    together with kv_offloading_size."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

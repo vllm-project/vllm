@@ -56,6 +56,7 @@ from vllm.config import (
 )
 from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
 from vllm.config.device import Device
+from vllm.config.kv_offloading import apply_kv_offloading_config
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -553,6 +554,9 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
+    kv_offloading_size: float | None = CacheConfig.kv_offloading_size
+    kv_offloading_backend: str | None = CacheConfig.kv_offloading_backend
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -892,6 +896,12 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
+        )
+        cache_group.add_argument(
+            "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
+        )
+        cache_group.add_argument(
+            "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
         )
 
         # Multimodal related configs
@@ -1390,6 +1400,8 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            kv_offloading_size=self.kv_offloading_size,
+            kv_offloading_backend=self.kv_offloading_backend,
         )
 
         ray_runtime_env = None
@@ -1673,6 +1685,20 @@ class EngineArgs:
                 self.max_cudagraph_capture_size
             )
 
+        # Handle KV offloading configuration
+        kv_transfer_config = self.kv_transfer_config
+        if cache_config.kv_offloading_size is not None:
+            # Create KVTransferConfig if it doesn't exist
+            if kv_transfer_config is None:
+                kv_transfer_config = KVTransferConfig()
+
+            # Apply the offloading configuration
+            apply_kv_offloading_config(
+                cache_config=cache_config,
+                kv_transfer_config=kv_transfer_config,
+                parallel_config=parallel_config,
+            )
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1685,7 +1711,7 @@ class EngineArgs:
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=self.compilation_config,
-            kv_transfer_config=self.kv_transfer_config,
+            kv_transfer_config=kv_transfer_config,
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
         )
