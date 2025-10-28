@@ -1342,6 +1342,10 @@ class FusedMoE(CustomOp):
     @property
     def dp_size(self):
         return self.moe_parallel_config.dp_size
+    
+    @property
+    def pcp_size(self):
+        return self.moe_parallel_config.pcp_size
 
     @property
     def ep_size(self):
@@ -1354,6 +1358,10 @@ class FusedMoE(CustomOp):
     @property
     def dp_rank(self):
         return self.moe_parallel_config.dp_rank
+    
+    @property
+    def pcp_rank(self):
+        return self.moe_parallel_config.pcp_rank
 
     @property
     def ep_rank(self):
@@ -2340,6 +2348,16 @@ class FusedMoE(CustomOp):
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
 
+            if self.pcp_size > 1:
+                hidden_states = get_pcp_group().all_gather(
+                    hidden_states,
+                    dim=0,
+                )
+                router_logits = get_pcp_group().all_gather(
+                    router_logits,
+                    dim=0,
+                )
+
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -2382,6 +2400,12 @@ class FusedMoE(CustomOp):
             ) -> torch.Tensor:
                 if do_naive_dispatch_combine and do_combine:
                     states = get_ep_group().combine(states, self.is_sequence_parallel)
+
+                if self.pcp_size > 1:
+                    states = get_pcp_group().reduce_scatter(
+                        states,
+                        dim=0,
+                    )
 
                 if (
                     not self.is_sequence_parallel

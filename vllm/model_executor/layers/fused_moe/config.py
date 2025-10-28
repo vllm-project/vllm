@@ -746,12 +746,12 @@ class FusedMoEParallelConfig:
                 between the 4 devices.
         """
 
-        def flatten_tp_across_dp(dp_rank: int):
+        def flatten_tp_across_dp_and_pcp(dp_rank: int, pcp_rank: int):
             tp_rank = 0 if tp_size_ == 1 else get_tensor_model_parallel_rank()
-            # There are actually dp_size_ * tp_size_ devices. Update tp_size
-            # and tp_rank so we shard across all devices.
-            tp_size = dp_size_ * tp_size_
-            tp_rank = dp_rank * tp_size_ + tp_rank
+            # There are actually dp_size_ * pcp_size_ * tp_size_ devices.
+            # Update tp_size and tp_rank so we shard across all devices.
+            tp_size = dp_size_ * pcp_size_ * tp_size_
+            tp_rank = dp_rank * pcp_size_ * tp_size_ + pcp_rank * tp_size_ + tp_rank
             return tp_size, tp_rank
 
         use_ep = (
@@ -761,9 +761,9 @@ class FusedMoEParallelConfig:
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
         pcp_size = pcp_size_
         pcp_rank = get_pcp_group().rank_in_group if pcp_size_ > 1 else 0
+        tp_size, tp_rank = flatten_tp_across_dp_and_pcp(dp_rank, pcp_rank)
 
         if not use_ep:
             return FusedMoEParallelConfig(
@@ -782,13 +782,13 @@ class FusedMoEParallelConfig:
         assert use_ep
         # In EP, each device owns a set of experts fully. There is no tensor
         # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
-        ep_size = tp_size * pcp_size
-        ep_rank = tp_rank + tp_size * pcp_rank
+        ep_size = tp_size
+        ep_rank = tp_rank
         return FusedMoEParallelConfig(
             tp_size=1,
             tp_rank=0,
-            pcp_size=1,
-            pcp_rank=0,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
             dp_size=dp_size,
             dp_rank=dp_rank,
             ep_size=ep_size,
