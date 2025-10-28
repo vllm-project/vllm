@@ -34,6 +34,8 @@ class RequestFuncInput:
     ignore_eos: bool = False
     language: str | None = None
     request_id: str | None = None
+    api_key: str | None = None
+    debug: bool | None = False
 
 
 @dataclass
@@ -135,66 +137,231 @@ async def async_request_trt_llm(
     pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
-    assert api_url.endswith("generate_stream")
+    assert api_url.endswith(("chat/completions", "completions", "profile")), (
+        "TensorRT-LLM server must expose OpenAI-style endpoints: 'chat/completions' or 'completions'."
+    )
 
     async with aiohttp.ClientSession(
         trust_env=True, timeout=AIOHTTP_TIMEOUT
     ) as session:
-        payload = {
-            "accumulate_tokens": True,
-            "text_input": request_func_input.prompt,
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "max_tokens": request_func_input.output_len,
-            "stream": True,
-        }
-        if request_func_input.ignore_eos:
-            payload["min_length"] = request_func_input.output_len
-        headers = None
+        is_chat = api_url.endswith("chat/completions")
+
+        # Build payload according to server's OpenAPI spec
+        if is_chat:
+            payload = {
+                "model": request_func_input.model,
+                "messages": [
+                    {"role": "user", "content": request_func_input.prompt},
+                ],
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": request_func_input.output_len,
+                "stream": True,
+            }
+            if request_func_input.ignore_eos:
+                payload["ignore_eos"] = True
+        else:
+            # /v1/completions
+            payload = {
+                "model": request_func_input.model,
+                "prompt": request_func_input.prompt,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": request_func_input.output_len,
+                "stream": True,
+            }
+            if request_func_input.ignore_eos:
+                payload["ignore_eos"] = True
+
+        # Merge extra body (e.g., response_format)
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
+
+        headers = {"Content-Type": "application/json"}
+        if request_func_input.api_key:
+            headers["Authorization"] = f"Bearer {request_func_input.api_key}"
         if request_func_input.request_id:
-            headers = {"x-request-id": request_func_input.request_id}
+            headers["x-request-id"] = request_func_input.request_id
+
+        if request_func_input.debug:
+            print("[TRT-LLM] POST", api_url)
+            print("[TRT-LLM] Headers:", {k: ("<hidden>" if k.lower()=="authorization" else v) for k, v in headers.items()})
+            # Avoid dumping entire schema if huge
+            debug_payload = dict(payload)
+            if "response_format" in debug_payload:
+                rf = debug_payload["response_format"]
+                if isinstance(rf, dict) and "schema" in rf:
+                    # Summarize schema
+                    schema_type = rf.get("type")
+                    debug_payload["response_format"] = {"type": schema_type, "schema_keys": list(rf["schema"].keys()) if isinstance(rf["schema"], dict) else type(rf["schema"]).__name__}
+            print("[TRT-LLM] Payload:", debug_payload)
+
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
-        ttft = 0.0
+        generated_text = ""
         st = time.perf_counter()
         most_recent_timestamp = st
+        ttft_recorded = False
         try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
+            async with session.post(url=api_url, json=payload, headers=headers) as response:
                 if response.status == 200:
+                    if request_func_input.debug:
+                        print("[TRT-LLM] Response status:", response.status)
+                        print("[TRT-LLM] Response content-type:", response.headers.get("content-type"))
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-
-                        chunk = chunk_bytes.decode("utf-8").removeprefix("data:")
-
-                        data = json.loads(chunk)
-                        output.generated_text += data["text_output"]
-                        timestamp = time.perf_counter()
-                        # First token
-                        if ttft == 0.0:
-                            ttft = timestamp - st
-                            output.ttft = ttft
-
-                        # Decoding phase
+                        chunk_str = chunk_bytes.decode("utf-8", errors="ignore")
+                        if request_func_input.debug:
+                            print("[TRT-LLM] Chunk:", (chunk_str[:200] + ("..." if len(chunk_str) > 200 else "")))
+                        # Skip SSE comments
+                        if chunk_str.startswith(":"):
+                            continue
+                        # Remove optional 'data:' prefix (with or without space)
+                        if chunk_str.startswith("data:"):
+                            chunk = chunk_str[5:].lstrip()
                         else:
-                            output.itl.append(timestamp - most_recent_timestamp)
+                            chunk = chunk_str
+                        if chunk == "[DONE]":
+                            break
 
-                        most_recent_timestamp = timestamp
+                        # Attempt JSON parse; skip invalid fragments
+                        try:
+                            data = json.loads(chunk)
+                        except Exception:
+                            if request_func_input.debug:
+                                print("[TRT-LLM] Non-JSON chunk, skipping")
+                            continue
+                        timestamp = time.perf_counter()
 
+                        if is_chat:
+                            if choices := data.get("choices"):
+                                content_piece = ""
+                                # OpenAI-style streaming delta
+                                if isinstance(choices[0], dict):
+                                    if (delta := choices[0].get("delta")) and isinstance(delta, dict):
+                                        content_piece = delta.get("content") or ""
+                                    # Some servers send full message objects when not streaming
+                                    elif (msg := choices[0].get("message")) and isinstance(msg, dict):
+                                        content_piece = msg.get("content") or ""
+                                    elif "text" in choices[0]:
+                                        content_piece = choices[0].get("text") or ""
+                                if content_piece:
+                                    if not ttft_recorded:
+                                        ttft_recorded = True
+                                        output.ttft = timestamp - st
+                                    else:
+                                        output.itl.append(timestamp - most_recent_timestamp)
+                                    generated_text += content_piece
+                                    most_recent_timestamp = timestamp
+                            if usage := data.get("usage"):
+                                output.output_tokens = usage.get("completion_tokens")
+                                if request_func_input.debug:
+                                    print("[TRT-LLM] Usage chunk:", usage)
+                        else:
+                            if choices := data.get("choices"):
+                                text_piece = ""
+                                if isinstance(choices[0], dict):
+                                    text_piece = choices[0].get("text") or ""
+                                    # Some servers might embed message.content for completions too
+                                    if not text_piece and (msg := choices[0].get("message")):
+                                        if isinstance(msg, dict):
+                                            text_piece = msg.get("content") or ""
+                                if text_piece:
+                                    if not ttft_recorded:
+                                        ttft_recorded = True
+                                        output.ttft = timestamp - st
+                                    else:
+                                        output.itl.append(timestamp - most_recent_timestamp)
+                                    generated_text += text_piece
+                                    most_recent_timestamp = timestamp
+                            if usage := data.get("usage"):
+                                output.output_tokens = usage.get("completion_tokens")
+                                if request_func_input.debug:
+                                    print("[TRT-LLM] Usage chunk:", usage)
+
+                    output.generated_text = generated_text
+                    output.success = True if ttft_recorded or bool(generated_text) else False
+                    if not output.success:
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT. "
+                            "This response will be marked as failed!"
+                        )
                     output.latency = most_recent_timestamp - st
-                    output.success = True
-
+                    if request_func_input.debug:
+                        preview = (generated_text[:500] + ("..." if len(generated_text) > 500 else ""))
+                        print(f"[TRT-LLM] Final generated_text (len={len(generated_text)}):", preview)
                 else:
-                    output.error = response.reason or ""
+                    try:
+                        err_text = await response.text()
+                    except Exception:
+                        err_text = response.reason or ""
+                    output.error = err_text or (response.reason or "")
                     output.success = False
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
+
+        # Fallback: if streaming returned no content but response_format is present,
+        # retry once with non-streaming to fetch the final message.
+        if (
+            not output.success
+            and isinstance(payload, dict)
+            and payload.get("stream") is True
+            and isinstance(payload.get("response_format"), dict)
+        ):
+            try:
+                payload_no_stream = dict(payload)
+                payload_no_stream["stream"] = False
+                if request_func_input.debug:
+                    print("[TRT-LLM] Fallback non-streaming POST", api_url)
+                st_ns = time.perf_counter()
+                async with session.post(url=api_url, json=payload_no_stream, headers=headers) as resp2:
+                    if request_func_input.debug:
+                        print("[TRT-LLM] Fallback status:", resp2.status)
+                    if resp2.status == 200:
+                        data2 = await resp2.json(content_type=None)
+                        if request_func_input.debug:
+                            # Print a truncated snapshot of raw JSON
+                            raw_preview = json.dumps(data2)[:800]
+                            print("[TRT-LLM] Fallback response preview:", raw_preview + ("..." if len(raw_preview) == 800 else ""))
+                        if is_chat:
+                            # Expect choices[0].message.content
+                            choices = data2.get("choices") or []
+                            if choices and isinstance(choices[0], dict):
+                                message = choices[0].get("message") or {}
+                                content = message.get("content") or ""
+                                if content:
+                                    output.generated_text = content
+                                    output.success = True
+                        else:
+                            # Expect choices[0].text
+                            choices = data2.get("choices") or []
+                            if choices and isinstance(choices[0], dict):
+                                text = choices[0].get("text") or ""
+                                if text:
+                                    output.generated_text = text
+                                    output.success = True
+                        if usage := data2.get("usage"):
+                            output.output_tokens = usage.get("completion_tokens")
+                        output.latency = time.perf_counter() - st_ns
+                        if request_func_input.debug:
+                            preview = (output.generated_text[:500] + ("..." if len(output.generated_text) > 500 else ""))
+                            print(f"[TRT-LLM] Fallback generated_text (len={len(output.generated_text)}):", preview)
+                    else:
+                        # Keep previous error; optionally append
+                        try:
+                            err2 = await resp2.text()
+                        except Exception:
+                            err2 = resp2.reason or ""
+                        if request_func_input.debug:
+                            print("[TRT-LLM] Fallback error:", err2)
+            except Exception as e:
+                if request_func_input.debug:
+                    print("[TRT-LLM] Fallback exception:", repr(e))
 
         if pbar:
             pbar.update(1)
