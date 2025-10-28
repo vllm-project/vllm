@@ -21,6 +21,7 @@ from tests.v1.attention.utils import (
 from vllm import _custom_ops as ops
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.config.vllm import set_current_vllm_config
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -40,6 +41,10 @@ BACKENDS_TO_TEST = [
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(_Backend.CUTLASS_MLA)
     BACKENDS_TO_TEST.remove(_Backend.FLASHINFER_MLA)
+
+# Remove FLASH_ATTN_MLA from the list if not supported
+if not flash_attn_supports_mla():
+    BACKENDS_TO_TEST.remove(_Backend.FLASH_ATTN_MLA)
 
 # Remove FLASHMLA from the list if not supported
 if not is_flashmla_dense_supported()[0]:
