@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import importlib
+import inspect
+import json
+import os
 from dataclasses import field
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, Optional
 
 from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
@@ -129,6 +133,15 @@ class SchedulerConfig:
     default scheduler. Can be a class directly or the path to a class of form
     "mod.custom_class"."""
 
+    external_parameters: Optional[dict] = None
+    """ A dictionary of external parameters for custom scheduler implementations.
+    If a user-defined scheduler requires additional configuration values, they
+    can be provided here directly as a dict. Alternatively, a JSON file can be
+    placed in the directory of the class specified by ``scheduler_cls``; in that
+    case, the file will be automatically loaded and its contents stored in this
+    field.
+    """
+
     disable_hybrid_kv_cache_manager: bool = False
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers
@@ -227,8 +240,28 @@ class SchedulerConfig:
             self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
 
         if self.async_scheduling:
-            self.scheduler_cls = (
-                "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
+            if self.scheduler_cls == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler":
+                self.scheduler_cls = (
+                    "vllm.v1.core.sched.ewsjf_scheduler.async_scheduler.AsyncEWSJFScheduler")
+            else:
+                self.scheduler_cls = (
+                    "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
+
+        if isinstance(self.scheduler_cls, str):
+            self.load_external_parameters()
+
+    def load_external_parameters(self):
+        module_name, class_name = self.scheduler_cls.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        cls = getattr(module, class_name)
+
+        module_file = inspect.getfile(cls)
+        module_dir = os.path.dirname(module_file)
+
+        config_path = os.path.join(module_dir, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                self.external_parameters = json.load(f)
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:

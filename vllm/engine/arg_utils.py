@@ -444,6 +444,7 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
+    external_parameters: Optional[dict] = SchedulerConfig.external_parameters
 
     pooler_config: Optional[PoolerConfig] = ModelConfig.pooler_config
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
@@ -909,6 +910,8 @@ class EngineArgs:
             **scheduler_kwargs["disable_chunked_mm_input"])
         scheduler_group.add_argument("--scheduler-cls",
                                      **scheduler_kwargs["scheduler_cls"])
+        scheduler_group.add_argument("--external_parameters",
+                                     **scheduler_kwargs["external_parameters"])
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
@@ -1371,6 +1374,7 @@ class EngineArgs:
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
+            external_parameters=self.external_parameters,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
