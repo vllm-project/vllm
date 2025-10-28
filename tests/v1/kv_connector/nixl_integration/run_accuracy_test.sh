@@ -292,21 +292,12 @@ run_tests_for_model() {
     wait_for_server $PORT
   done
 
-  # Configure fault injection AFTER decode instances have started
   if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
-    echo "Configuring fault injection pattern via ucx-fault-client..."
-    sleep 2  # give the file watcher time to fully initialize
-
-    # Set fault pattern (fault every 16th operation)
-    $UCX_FAULT_CLIENT pattern OOOOOOOOOOOOOOOX
-    sleep 1
-
-    # Enable fault injection
+    echo "Configuring fault injection via ucx-fault-client..."
+    FAULT_RATE=${FAULT_RATE:-0.5}
+    echo "Setting fault injection probability to ${FAULT_RATE}%"
+    $UCX_FAULT_CLIENT probability $FAULT_RATE
     $UCX_FAULT_CLIENT toggle
-    sleep 1
-
-    # Verify configuration
-    echo "Fault injection status:"
     $UCX_FAULT_CLIENT status
   fi
 
