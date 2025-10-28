@@ -663,7 +663,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
             batch_spec, block_size, device
         )
 
-        # Pad block table to meet CUTLASS MLA requirement:
+        # Pad block table to meet requirement:
         # block_num % (128 / block_size) == 0
         required_divisor = int(128 / block_size)
         current_block_num = common_attn_metadata.block_table_tensor.shape[1]
