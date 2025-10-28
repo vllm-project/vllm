@@ -19,11 +19,12 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.mla.common import QueryLenSupport
@@ -59,6 +60,20 @@ for backend in BACKENDS_TO_TEST:
     )
     if query_len_support != QueryLenSupport.SINGLE_ONLY:
         SPEC_DECODE_BACKENDS.append(backend)
+
+BACKEND_BLOCK_SIZES = {}
+for backend in BACKENDS_TO_TEST:
+    backend_class_str = backend_to_class_str(backend)
+    backend_class = resolve_obj_by_qualname(backend_class_str)
+    supported_sizes = backend_class.get_supported_kernel_block_size()
+    if supported_sizes:
+        default_size = supported_sizes[0]
+        block_size = (
+            default_size if isinstance(default_size, int) else default_size.base
+        )
+    else:
+        block_size = 16
+    BACKEND_BLOCK_SIZES[backend.name] = block_size
 
 torch.manual_seed(42)
 
@@ -400,10 +415,11 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
-
-    block_size = 64
+    unique_block_sizes = sorted(set(BACKEND_BLOCK_SIZES.values()))
+    default_block_size = unique_block_sizes[0]
     required_blocks = sum(
-        (seq_len + block_size - 1) // block_size for seq_len in batch_spec.seq_lens
+        (seq_len + default_block_size - 1) // default_block_size
+        for seq_len in batch_spec.seq_lens
     )
     # Add 1 for null block at index 0, and some buffer
     num_gpu_blocks = required_blocks + 1 + 100
@@ -412,7 +428,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         model_name=model,
         max_model_len=max(batch_spec.seq_lens),
         num_gpu_blocks=num_gpu_blocks,
-        block_size=block_size,
+        block_size=default_block_size,
     )
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
@@ -639,46 +655,67 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     )
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T, requires_grad=False)
 
-    # Create metadata using original batch spec
-    common_attn_metadata = create_common_attn_metadata(batch_spec, block_size, device)
+    # 3. Create metadata and KV caches for each block size
+    # Group backends by block size and test each group
+    metadata_per_block_size = {}
+    kv_cache_per_block_size = {}
 
-    # Pad block table to meet CUTLASS MLA requirement:
-    # block_num % (128 / block_size) == 0
-    required_divisor = int(128 / block_size)
-    current_block_num = common_attn_metadata.block_table_tensor.shape[1]
-    if current_block_num % required_divisor != 0:
-        # Pad to next multiple of required_divisor
-        padded_block_num = (
-            (current_block_num + required_divisor - 1) // required_divisor
-        ) * required_divisor
-        padding_cols = padded_block_num - current_block_num
-        padding = torch.zeros(
-            (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
-            dtype=torch.int32,
+    for block_size in unique_block_sizes:
+        # Create metadata for this block size
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec, block_size, device
+        )
+
+        # Pad block table to meet CUTLASS MLA requirement:
+        # block_num % (128 / block_size) == 0
+        required_divisor = int(128 / block_size)
+        current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+        if current_block_num % required_divisor != 0:
+            # Pad to next multiple of required_divisor
+            padded_block_num = (
+                (current_block_num + required_divisor - 1) // required_divisor
+            ) * required_divisor
+            padding_cols = padded_block_num - current_block_num
+            padding = torch.zeros(
+                (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
+                dtype=torch.int32,
+                device=device,
+            )
+            common_attn_metadata.block_table_tensor = torch.cat(
+                [common_attn_metadata.block_table_tensor, padding], dim=1
+            )
+
+        metadata_per_block_size[block_size] = common_attn_metadata
+
+        # Create KV cache for this block size
+        required_blocks_for_size = sum(
+            (seq_len + block_size - 1) // block_size for seq_len in batch_spec.seq_lens
+        )
+        num_blocks_for_size = required_blocks_for_size + 1 + 100
+
+        kv_cache = create_and_prepopulate_kv_cache(
+            kv_c_contexts=kv_c_contexts,
+            k_pe_contexts=k_pe_contexts,
+            block_size=block_size,
+            head_size=head_size,
+            dtype=dtype,
             device=device,
+            num_blocks=num_blocks_for_size,
+            common_attn_metadata=common_attn_metadata,
+            randomize_blocks=True,
         )
-        common_attn_metadata.block_table_tensor = torch.cat(
-            [common_attn_metadata.block_table_tensor, padding], dim=1
-        )
-
-    # 3. Simulate Paged KV Cache and a realistic slot_mapping
-    kv_cache = create_and_prepopulate_kv_cache(
-        kv_c_contexts=kv_c_contexts,
-        k_pe_contexts=k_pe_contexts,
-        block_size=block_size,
-        head_size=head_size,
-        dtype=dtype,
-        device=device,
-        num_blocks=vllm_config.cache_config.num_gpu_blocks,
-        common_attn_metadata=common_attn_metadata,
-        randomize_blocks=True,
-    )
+        kv_cache_per_block_size[block_size] = kv_cache
 
     # 4. Run vLLM backends and compare
     for backend_idx, backend_name in enumerate(BACKENDS_TO_TEST):
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue
+
+        # Get the appropriate block_size, metadata, and cache for this backend
+        block_size = BACKEND_BLOCK_SIZES[backend_name]
+        common_attn_metadata = metadata_per_block_size[block_size]
+        kv_cache = kv_cache_per_block_size[block_size]
 
         backend_output = run_attention_backend(
             backend_name,
