@@ -453,6 +453,13 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     def prepare_extra_body(request) -> dict:
+        """Build backend-specific structured output config for a request.
+
+        For `tensorrt-llm` backend, map the internal structure type to the
+        OpenAI-compatible `response_format` field (e.g., JSON schema, regex, or
+        EBNF grammar). For other backends, fall back to the vLLM-native
+        `structured_outputs` shape to preserve existing behavior.
+        """
         # For tensorrt-llm backend, the server follows OpenAI-style APIs and
         # expects structured decoding settings in `response_format`.
         if backend == "tensorrt-llm":
