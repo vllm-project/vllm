@@ -205,8 +205,8 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
-- label: Distributed Tests (8 GPUs) # ?min
-  timeout_in_minutes: 50
+- label: Distributed Tests (8 GPUs) # 4min
+  timeout_in_minutes: 10
   gpu: h100
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
