@@ -376,6 +376,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # For passing scheduler_output between successive
         # execute_model() and sample_tokens() calls.
         self.scheduler_output: SchedulerOutput | None = None
+        self.mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -1098,7 +1099,16 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
 
+        mm_embed_inputs = None
+        if self.supports_mm_inputs:
+            # Run the multimodal encoder if any.
+            self._execute_mm_encoder(scheduler_output)
+            mm_embed_inputs = self._gather_mm_embeddings(scheduler_output)
+
+        torch_xla.sync(wait=False)
+
         self.scheduler_output = scheduler_output
+        self.mm_embed_inputs = mm_embed_inputs
         return None
 
     @torch.no_grad()
@@ -1111,16 +1121,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "after execute_model() returns None"
             )
         scheduler_output = self.scheduler_output
+        mm_embed_inputs = self.mm_embed_inputs
         self.scheduler_output = None
+        self.mm_embed_inputs = None
 
-        if self.supports_mm_inputs:
-            # Run the multimodal encoder if any.
-            self._execute_mm_encoder(scheduler_output)
-            mm_embed_inputs = self._gather_mm_embeddings(scheduler_output)
-        else:
-            mm_embed_inputs = None
-
-        torch_xla.sync(wait=False)
         # Prepare inputs, the requests might be split into multiple
         # executions, combine the result of each execution.
         start_index = 0
