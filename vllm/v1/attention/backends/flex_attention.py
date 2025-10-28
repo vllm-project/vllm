@@ -28,7 +28,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
@@ -658,7 +658,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
             num_blocks_per_seq=num_blocks_per_seq,
-            direct_build=self.direct_build,
+            # FIXME(Isotr0py): direct build has issue to build bidirectional
+            # attention block mask for encoder-only models, disable it temporarily.
+            # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
+            direct_build=(self.direct_build and common_attn_metadata.causal),
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
         )

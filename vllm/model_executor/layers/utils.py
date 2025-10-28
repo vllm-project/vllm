@@ -8,8 +8,11 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.platforms import current_platform
+from vllm.logger import init_logger
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -178,16 +181,28 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-    elif ops._supports_onednn:
-        origin_weight = layer.weight
-        if remove_weight:
-            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        handler = ops.create_onednn_mm(origin_weight.t(), 32)
-        layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
-    else:
-        layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
-            x, weight, bias
-        )
+        return
+    elif (
+        ops._supports_onednn
+        and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
+    ):
+        try:
+            origin_weight = layer.weight
+            handler = ops.create_onednn_mm(origin_weight.t(), 32)
+            layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
+            if remove_weight:
+                layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            return
+        except RuntimeError as e:
+            logger.warning_once(
+                "Failed to create oneDNN linear, fallback to torch linear."
+                f" Exception: {e}"
+            )
+
+    # fallback case
+    layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
+        x, weight, bias
+    )
 
 
 def cpu_unquantized_gemm(

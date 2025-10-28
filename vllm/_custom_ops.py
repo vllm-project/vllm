@@ -451,10 +451,18 @@ def gptq_gemm(
     b_gptq_scales: torch.Tensor,
     b_g_idx: torch.Tensor,
     use_exllama: bool,
+    use_v2_format: bool,
     bit: int,
 ) -> torch.Tensor:
     return torch.ops._C.gptq_gemm(
-        a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, use_exllama, bit
+        a,
+        b_q_weight,
+        b_gptq_qzeros,
+        b_gptq_scales,
+        b_g_idx,
+        use_exllama,
+        use_v2_format,
+        bit,
     )
 
 
@@ -468,6 +476,7 @@ if hasattr(torch.ops._C, "gptq_gemm"):
         b_gptq_scales: torch.Tensor,
         b_g_idx: torch.Tensor,
         use_exllama: bool,
+        use_v2_format: bool,
         bit: int,
     ) -> torch.Tensor:
         return torch.empty(
@@ -1809,6 +1818,8 @@ def moe_lora_align_block_size(
     num_experts: int,
     block_size: int,
     max_loras: int,
+    max_num_tokens_padded: int,
+    max_num_m_blocks: int,
     sorted_token_ids: torch.Tensor,
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
@@ -1819,6 +1830,8 @@ def moe_lora_align_block_size(
         num_experts,
         block_size,
         max_loras,
+        max_num_tokens_padded,
+        max_num_m_blocks,
         sorted_token_ids,
         experts_ids,
         num_tokens_post_pad,

@@ -37,7 +37,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.compilation_config = vllm_config.compilation_config
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs,
-            self.compilation_config.max_capture_size,
+            self.compilation_config.max_cudagraph_capture_size,
         )
 
         if self.vllm_config.cache_config.enable_prefix_caching:
