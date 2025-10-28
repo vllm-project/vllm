@@ -111,6 +111,7 @@ def _fused5_ssd_kernel(
     C_ptr,
     D_ptr,
     A_ptr,
+    z_ptr,
     dt_bias_ptr,
     dt_orig_ptr,
     # Tensor strides
@@ -146,6 +147,9 @@ def _fused5_ssd_kernel(
     stride_C_head,
     stride_C_dstate,
     stride_D_head,
+    stride_z_seqlen,
+    stride_z_head,
+    stride_z_hdim,
     stride_dt_orig_seqlen,
     stride_dt_orig_head,
     stride_A_head,
@@ -156,6 +160,7 @@ def _fused5_ssd_kernel(
     # Meta-parameters
     IS_CAUSAL: tl.constexpr,
     HAS_D: tl.constexpr,
+    HAS_Z: tl.constexpr,
     D_HAS_HDIM: tl.constexpr,
     DT_SOFTPLUS: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
@@ -799,6 +804,19 @@ def _fused5_ssd_kernel(
                 )
             acc += x_residual * D
 
+        if HAS_Z:
+            z = tl.load(
+                z_ptr
+                + (
+                    (offs_cs[:, None] + chunk_seqlen_start) * stride_z_seqlen
+                    + offs_hd[None, :] * stride_z_hdim
+                    + pid_h * stride_z_head
+                ),
+                mask=(offs_cs[:, None] < chunk_size_limit) & (offs_hd[None, :] < hdim),
+                other=0.0,
+            ).to(tl.float32)
+            acc *= z * tl.sigmoid(z)
+
         out_ptrs = out_ptr + (
             stride_out_seqlen * offs_cs[:, None] + offs_hd[None, :] * stride_out_hdim
         )
@@ -863,7 +881,8 @@ def _fused5_ssd(
     cb_comp_fp32 = True
 
     seqlen, nheads, hdim = x.shape
-    assert z is None
+    if z is not None:
+        assert z.shape == (seqlen, nheads, hdim)
     # setup from chunk cumsum
     assert A.shape == (nheads,)
     if dt_bias is not None:
@@ -910,6 +929,7 @@ def _fused5_ssd(
         assert initial_states.shape == (num_varlen_seqs, nheads, hdim, dstate)
         assert initial_states.dtype == states_G.dtype
 
+    z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
     initial_states_strides = (
         (
             initial_states.stride(0),
@@ -988,6 +1008,7 @@ def _fused5_ssd(
             C,
             D,
             A,
+            z,
             dt_bias,
             dt,
             # Tensor strides
@@ -1022,6 +1043,9 @@ def _fused5_ssd(
             C.stride(1),
             C.stride(2),
             D.stride(0) if D is not None else 0,
+            z_strides[0],
+            z_strides[1],
+            z_strides[2],
             dt.stride(0),
             dt.stride(1),
             A.stride(0),
@@ -1032,6 +1056,7 @@ def _fused5_ssd(
             # Meta-parameters
             IS_CAUSAL=True,
             HAS_D=D is not None,
+            HAS_Z=z is not None,
             D_HAS_HDIM=D.dim() == 2 if D is not None else True,
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
