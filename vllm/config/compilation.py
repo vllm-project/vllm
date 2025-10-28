@@ -54,6 +54,12 @@ class CUDAGraphMode(enum.Enum):
     FULL = 2
     FULL_DECODE_ONLY = (FULL, NONE)
     FULL_AND_PIECEWISE = (FULL, PIECEWISE)
+    # WARMUP is used for the dummy runs prior to CUDA graph capture.
+    # This is to differentiate from NONE because in some use cases, static
+    # and dynamic shapes are two different code paths. We need to ensure
+    # static shapes code path is called during CUDA graph capture, and dynamic
+    # shapes are used during eager mode calls.
+    WARMUP = 3
 
     def decode_mode(self) -> "CUDAGraphMode":
         return CUDAGraphMode(self.value[0]) if self.separate_routine() else self
@@ -82,8 +88,22 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
+    def valid_compilation_modes(self) -> bool:
+        return self in [
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ]
+
     def valid_runtime_modes(self) -> bool:
-        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+        return self in [
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.WARMUP,
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -309,23 +329,23 @@ class CompilationConfig:
     FULL mode: Capture full cudagraph for all batches. Can be good for small
     models or workloads with small prompts; not supported by many backends.
     Generally for performance FULL_AND_PIECEWISE is better.
-    
+
     FULL_DECODE_ONLY mode: Capture full cudagraph for decode batches only.
     Mixed prefill-decode batches are run without cudagraphs. Can be good for
     decode instances in a P/D setup where prefill is not as important so we
     can save some memory.
-    
+
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
     This is the most performant mode for most models and is the default.
 
     Currently, the cudagraph mode is only used for the v1 engine.
-    Note that the cudagraph logic is generally orthogonal to the 
-    compilation logic. While piecewise cudagraphs require piecewise 
+    Note that the cudagraph logic is generally orthogonal to the
+    compilation logic. While piecewise cudagraphs require piecewise
     compilation (mode=VLLM_COMPILE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
-    
-    Warning: This flag is new and subject to change in addition 
+
+    Warning: This flag is new and subject to change in addition
     more modes may be added.
     """
     use_cudagraph: bool = True
@@ -354,7 +374,7 @@ class CompilationConfig:
     cudagraph. If the caller can guarantee that the same input buffers
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False. 
+    internally managed buffer. Default is False.
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
     full_cuda_graph: bool | None = False
@@ -383,7 +403,7 @@ class CompilationConfig:
     outside the partition functions. For a graph with N cudagraph-unsafe ops
     (e.g., Attention), there would be N+1 partitions. To mark an op as
     cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
-    register the custom op. 
+    register the custom op.
 
     This config supports both full cudagraph and piecewise cudagraph without
     compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
@@ -400,8 +420,8 @@ class CompilationConfig:
 
     max_cudagraph_capture_size: int | None = field(default=None)
     """The maximum cudagraph capture size.
-    
-    If cudagraph_capture_sizes is specified, this will be set to the largest 
+
+    If cudagraph_capture_sizes is specified, this will be set to the largest
     size in that list (or checked for consistency if specified). If
     cudagraph_capture_sizes is not specified, the list of sizes is generated
     automatically following the pattern:
@@ -410,7 +430,7 @@ class CompilationConfig:
         range(256, max_cudagraph_capture_size + 1, 16))
 
     If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small 
+    512) by default. This voids OOM in tight memory scenarios with small
     max_num_seqs, and prevents capture of many large graphs (>512) that would
     greatly increase startup time with limited performance benefit.
     """
@@ -607,6 +627,9 @@ class CompilationConfig:
                     "since full_cuda_graph is deprecated."
                 )
             self.cudagraph_mode = CUDAGraphMode.FULL
+
+        if self.cudagraph_mode is not None:
+            assert self.cudagraph_mode.valid_compilation_modes()
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"

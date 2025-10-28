@@ -3432,7 +3432,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for cudagraph capture
                 assert (
-                    cudagraph_runtime_mode == CUDAGraphMode.NONE
+                    cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.WARMUP)
                     or cudagraph_runtime_mode == _cg_mode
                 ), (
                     f"Cudagraph runtime mode mismatch at dummy_run. "
@@ -3895,7 +3895,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 self._dummy_run(
                     num_tokens,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    cudagraph_runtime_mode=CUDAGraphMode.WARMUP,
                     force_attention=force_attention,
                     uniform_decode=uniform_decode,
                     allow_microbatching=allow_microbatching,

@@ -4,6 +4,7 @@ import copy
 from contextlib import nullcontext
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
@@ -306,3 +307,21 @@ def test_cudagraph_sizes_post_init(
     assert (
         vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
     )
+
+
+def test_cudagraph_compilation_modes():
+    with pytest.raises(ValidationError):
+        _ = CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.WARMUP,
+        )
+
+    for mode in [
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ]:
+        _ = CompilationConfig(
+            cudagraph_mode=mode,
+        )
