@@ -596,16 +596,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         inputs_embeds: Optional[torch.Tensor] = None,
         is_lora_training: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        do_log = is_lora_training
-        if do_log:
-            import time
-            print("LlamaForCausalLM: forward (training)")
-            start_time = time.time()
         model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds, is_lora_training=False)
-        if do_log:
-            end_time = time.time()
-            print(f"LlamaForCausalLM: forward (training) time = {(end_time - start_time) * 1000:.6f} ms")
         return model_output
 
     def compute_logits(
