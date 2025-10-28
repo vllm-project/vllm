@@ -96,15 +96,16 @@ class EngineCore:
                 VLLM_VERSION,
                 vllm_config,
             )
-
-        self._profile_current_step = 0
-        self.profiler_start_iters, self.profiler_stop_iters = (
-            self._get_profiler_iteration_index_env_var("VLLM_PROFILE_START_STOP")
-        )
-        self.print_profile_step_iteration_info = os.environ.get("VLLM_PROFILE_ITERATION_INFO", "").lower() == "true"
-        # The dict initially records each request's context token size. After processing, the size will decrease.
-        # When this size <= 0, then it means this request is in generation phase. This helps to collect iteration
-        # info.
+        self.profile_enabled = os.environ.get("VLLM_PROFILE_START_STOP", "") != ""
+        if self.profile_enabled:
+            self._profile_current_step = 0
+            self.profiler_start_iters, self.profiler_stop_iters = (
+                self._get_profiler_iteration_index_env_var("VLLM_PROFILE_START_STOP")
+            )
+            self.print_profile_step_iteration_info = os.environ.get("VLLM_PROFILE_ITERATION_INFO", "").lower() == "true"
+            # The dict initially records each request's context token size. After processing, the size will decrease.
+            # When this size <= 0, then it means this request is in generation phase. This helps to collect iteration
+            # info.
         self.schedule_requests: dict[str, int] = {}
 
         self.log_stats = log_stats
@@ -325,13 +326,14 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         ### nsys profiling
-        self._profile_current_step = self._profile_current_step + 1
-        if self._profile_current_step in self.profiler_start_iters:
-            torch.cuda.cudart().cudaProfilerStart()
+        if self.profile_enabled:
+            self._profile_current_step = self._profile_current_step + 1
+            if self._profile_current_step in self.profiler_start_iters:
+                torch.cuda.cudart().cudaProfilerStart()
 
-        if self._profile_current_step in self.profiler_stop_iters:
-            torch.cuda.cudart().cudaProfilerStop()
-        self._profile_step_iteration_info(scheduler_output)
+            if self._profile_current_step in self.profiler_stop_iters:
+                torch.cuda.cudart().cudaProfilerStop()
+            self._profile_step_iteration_info(scheduler_output)
 
         with self.log_error_detail(scheduler_output):
             model_output = self.model_executor.execute_model(scheduler_output)
@@ -398,12 +400,13 @@ class EngineCore:
         # Block until the next result is available.
         future, scheduler_output = batch_queue.pop()
         ### nys profiling usage
-        self._profile_current_step = self._profile_current_step + 1
-        if self._profile_current_step in self.profiler_start_iters:
-            torch.cuda.cudart().cudaProfilerStart()
-        if self._profile_current_step in self.profiler_stop_iters:
-            torch.cuda.cudart().cudaProfilerStop()
-        self._profile_step_iteration_info(scheduler_output)
+        if self.profile_enabled:
+            self._profile_current_step = self._profile_current_step + 1
+            if self._profile_current_step in self.profiler_start_iters:
+                torch.cuda.cudart().cudaProfilerStart()
+            if self._profile_current_step in self.profiler_stop_iters:
+                torch.cuda.cudart().cudaProfilerStop()
+            self._profile_step_iteration_info(scheduler_output)
 
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
