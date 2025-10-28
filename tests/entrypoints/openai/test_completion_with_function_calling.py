@@ -378,6 +378,7 @@ async def test_named_tool_use(
         messages=messages,
         max_completion_tokens=1000,
         tools=tools,
+        temperature=0.0,
         tool_choice=tool_choice,
     )
     message = chat_completion.choices[0].message
@@ -399,6 +400,7 @@ async def test_named_tool_use(
         max_completion_tokens=1000,
         tools=tools,
         tool_choice=tool_choice,
+        temperature=0.0,
         stream=True,
     )
 

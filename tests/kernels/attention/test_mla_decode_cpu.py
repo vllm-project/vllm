@@ -7,7 +7,7 @@ from torch import Tensor
 
 import vllm._custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 
 def ref_mla(

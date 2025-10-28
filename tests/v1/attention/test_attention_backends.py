@@ -18,7 +18,7 @@ from tests.v1.attention.utils import (
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,

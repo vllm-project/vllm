@@ -991,14 +991,11 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
-        self.device_id = self.tp_rank
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                if not self.use_host_buffer and current_platform.is_cuda_alike():
-                    self.device_id = cache.device.index
                 if base_addr in seen_base_addresses:
                     continue
 
@@ -1026,7 +1023,7 @@ class NixlConnectorWorker:
                         "All kv cache tensors must have the same size"
                     )
                 caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, self.device_id, "")
+                    (base_addr, curr_tensor_size_bytes, self.tp_rank, "")
                 )
 
         logger.debug(
@@ -1073,7 +1070,7 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len_per_layer[i]
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, self.device_id))
+                blocks_data.append((addr, kv_block_len, self.tp_rank))
 
             if self._use_flashinfer:
                 # Separate and interleave K/V regions to maintain the same
@@ -1084,13 +1081,12 @@ class NixlConnectorWorker:
                     addr = base_addr + block_offset
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
-                    blocks_data.append((v_addr, kv_block_len, self.device_id))
+                    blocks_data.append((v_addr, kv_block_len, self.tp_rank))
         logger.debug(
-            "Created %s blocks for src engine %s and rank %s on device id %s",
+            "Created %s blocks for src engine %s and rank %s",
             len(blocks_data),
             self.engine_id,
             self.tp_rank,
-            self.device_id,
         )
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -1452,11 +1448,17 @@ class NixlConnectorWorker:
                 len(done_recving),
             )
 
-        # clean up metadata for completed requests
+        block_ids_to_permute = []
         for req_id in done_recving:
+            # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
-            if self.use_host_buffer and meta:
+            assert meta is not None, f"{req_id} not found in recving_metadata list"
+            if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+            if self.enable_permute_local_kv:
+                block_ids_to_permute += meta.local_block_ids
+        if len(block_ids_to_permute) > 0:
+            self.permute_device_kv(block_ids_to_permute)
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
@@ -1476,15 +1478,6 @@ class NixlConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
-
-        if self.enable_permute_local_kv and len(done_recving) > 0:
-            block_ids = []
-            for req_id in done_recving:
-                meta = self._recving_metadata.pop(req_id)
-                assert meta, f"{req_id} not found in recving_metadata list"
-                block_ids += meta.local_block_ids
-
-            self.permute_device_kv(block_ids)
 
         return done_sending, done_recving
 

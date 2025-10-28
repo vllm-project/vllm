@@ -52,7 +52,7 @@ These are documented under [Inferencing and Serving -> Production Metrics](../us
 
 ### Grafana Dashboard
 
-vLLM also provides [a reference example](../examples/online_serving/prometheus_grafana.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
+vLLM also provides [a reference example](../../examples/online_serving/prometheus_grafana/README.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
 
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 

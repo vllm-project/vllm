@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import copy
 import itertools
 import time
 from collections import defaultdict
@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
@@ -86,15 +87,14 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         if self.vllm_config.kv_transfer_config is not None:
-            assert len(self.kv_cache_config.kv_cache_groups) == 1, (
-                "Multiple KV cache groups are not currently supported "
-                "with KV connectors"
-            )
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported with KV connectors"
             )
+
+            connector_vllm_config = copy.copy(self.vllm_config)
+            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
             self.connector = KVConnectorFactory.create_connector(
-                config=self.vllm_config, role=KVConnectorRole.SCHEDULER
+                config=connector_vllm_config, role=KVConnectorRole.SCHEDULER
             )
             if self.log_stats:
                 self.connector_prefix_cache_stats = PrefixCacheStats()
@@ -113,14 +113,12 @@ class Scheduler(SchedulerInterface):
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
-        if self.scheduler_config.policy == "priority":
-            self.policy = SchedulingPolicy.PRIORITY
-        elif self.scheduler_config.policy == "fcfs":
-            self.policy = SchedulingPolicy.FCFS
-        else:
+        try:
+            self.policy = SchedulingPolicy(self.scheduler_config.policy)
+        except ValueError as e:
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
-            )
+            ) from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
@@ -1324,8 +1322,17 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
-        return self.connector.request_finished(request, block_ids)
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+
+        if not supports_hma(self.connector):
+            # NOTE(Kuntai): We should deprecate this code path after we enforce
+            # all connectors to support HMA.
+            # Hybrid memory allocator should be already turned off for this
+            # code path, but let's double-check here.
+            assert len(self.kv_cache_config.kv_cache_groups) == 1
+            return self.connector.request_finished(request, block_ids[0])
+        else:
+            return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """

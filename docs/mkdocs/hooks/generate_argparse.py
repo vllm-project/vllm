@@ -65,7 +65,9 @@ ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
 cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
-FlexibleArgumentParser = auto_mock("vllm.utils", "FlexibleArgumentParser")
+FlexibleArgumentParser = auto_mock(
+    "vllm.utils.argparse_utils", "FlexibleArgumentParser"
+)
 
 
 class MarkdownFormatter(HelpFormatter):
