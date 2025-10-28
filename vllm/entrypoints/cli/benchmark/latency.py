@@ -7,7 +7,7 @@ from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 
 
 class BenchmarkLatencySubcommand(BenchmarkSubcommandBase):
-    """The `latency` subcommand for vllm bench."""
+    """The `latency` subcommand for `vllm bench`."""
 
     name = "latency"
     help = "Benchmark the latency of a single batch of requests."

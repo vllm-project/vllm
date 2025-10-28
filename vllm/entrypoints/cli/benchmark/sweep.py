@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 
-from vllm.benchmarks.throughput import add_cli_args, main
+from vllm.benchmarks.sweep.cli import add_cli_args, main
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 
 
-class BenchmarkThroughputSubcommand(BenchmarkSubcommandBase):
-    """The `throughput` subcommand for `vllm bench`."""
+class BenchmarkSweepSubcommand(BenchmarkSubcommandBase):
+    """The `sweep` subcommand for `vllm bench`."""
 
-    name = "throughput"
-    help = "Benchmark offline inference throughput."
+    name = "sweep"
+    help = "Benchmark for a parameter sweep."
 
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
