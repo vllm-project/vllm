@@ -801,18 +801,20 @@ def reorder_batch_to_split_decodes_and_prefills(
     #   extend: non-decode request with existing context
     #   prefill: non-decode request with no existing context
     # NOTE for now we loosely use "decode" to mean requests where attention is
-    #  likely memory-bound and "prefill" to mean requests where attention is 
-    #  likely compute-bound, 
+    #  likely memory-bound and "prefill" to mean requests where attention is
+    #  likely compute-bound,
     num_reqs = len(input_batch.req_ids)
-    num_scheduled_tokens_np = np.array(
-        [scheduler_output.num_scheduled_tokens[req_id] for req_id in input_batch.req_ids])
+    num_scheduled_tokens = [
+        scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
+    ]
+    num_scheduled_tokens_np = np.array(num_scheduled_tokens)
     num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
     is_decode = num_scheduled_tokens_np <= decode_threshold
     is_extend = (~is_decode) & (num_computed_tokens_np > num_scheduled_tokens_np)
     is_prefill = (~is_decode) & (num_computed_tokens_np == num_scheduled_tokens_np)
 
-    # Desired order: decode → extend → prefill    
+    # Desired order: decode → extend → prefill
     order_key = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
     order_key[is_extend] = 1
     order_key[is_prefill] = 2
@@ -832,7 +834,6 @@ def reorder_batch_to_split_decodes_and_prefills(
             dest[i], dest[j] = dest[j], dest[i]
             modified_batch = True
     return modified_batch
-
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
