@@ -100,7 +100,7 @@ class SymmMemCommunicator:
             logger.warning(
                 "SymmMemCommunicator: symmetric memory initialization failed. "
                 "Communicator is not available.",
-                e,
+                exc_info=e,
             )
             return
         if handle.multicast_ptr == 0:
