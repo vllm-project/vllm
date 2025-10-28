@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import enum
 import inspect
 import uuid
 import warnings
@@ -65,11 +64,6 @@ STR_INVALID_VAL: str = "INVALID"
 
 
 T = TypeVar("T")
-
-
-class LayerBlockType(enum.Enum):
-    attention = "attention"
-    mamba = "mamba"
 
 
 def random_uuid() -> str:
