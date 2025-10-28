@@ -44,7 +44,7 @@ python examples/offline_inference/pooling/ner.py
 python examples/offline_inference/pooling/prithvi_geospatial_mae.py
 ```
 
-## IO Processor Plugins for prithvi geospatial mae usage
+## IO Processor Plugins for Prithvi Geospatial MAE
 
 ```bash
 python examples/offline_inference/pooling/prithvi_geospatial_mae_io_processor.py
