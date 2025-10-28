@@ -19,13 +19,24 @@ from torch.utils.benchmark import Measurement as TMeasurement
 from utils import ArgPool, Bench, CudaGraphBenchParams
 from weight_shapes import WEIGHT_SHAPES
 
-from vllm.triton_utils import HAS_TRITON
+from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
+from vllm.triton_utils import HAS_TRITON, triton
 
 if HAS_TRITON:
-    from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_expand, lora_shrink
+    from vllm.lora.ops.triton_ops import (  ## added fused_moe_lora
+        LoRAKernelMeta,
+        fused_moe_lora_expand,
+        fused_moe_lora_shrink,
+        lora_expand,
+        lora_shrink,
+    )
+    from vllm.lora.ops.triton_ops.fused_moe_lora_op import (
+        _LORA_PTR_DICT,  ## added _LORA_PTR_DICT for fused_moe_lora
+    )
     from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
-
+from vllm import _custom_ops as ops
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.math_utils import round_up
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_TP_SIZES = [1]
@@ -191,6 +202,11 @@ class OpType(Enum):
 
     LORA_SHRINK = auto()
     LORA_EXPAND = auto()
+    ## Adding support for fused moe lora
+    FUSED_MOE_LORA_GATE_UP_SHRINK = auto()  ## Gate/Up projection variant with shrink
+    FUSED_MOE_LORA_GATE_UP_EXPAND = auto()  ## Gate/Up projection variant with expand
+    FUSED_MOE_LORA_DOWN_SHRINK = auto()  ## Down projection variant with shrink
+    FUSED_MOE_LORA_DOWN_EXPAND = auto()  ## Down projection variant with expand
 
     @staticmethod
     def from_str(s: str) -> "OpType":
@@ -198,6 +214,15 @@ class OpType(Enum):
             return OpType.LORA_SHRINK
         if s.lower() == "lora_expand":
             return OpType.LORA_EXPAND
+        # Adding support for fused moe lora, both in gate_up and down
+        if s.lower() == "fused_moe_lora_gate_up_shrink":  ## Gate/Up variant with shrink
+            return OpType.FUSED_MOE_LORA_GATE_UP_SHRINK
+        if s.lower() == "fused_moe_lora_gate_up_expand":  ## Gate/Up variant with expand
+            return OpType.FUSED_MOE_LORA_GATE_UP_EXPAND
+        if s.lower() == "fused_moe_lora_down_shrink":  ## Down variant with shrink
+            return OpType.FUSED_MOE_LORA_DOWN_SHRINK
+        if s.lower() == "fused_moe_lora_down_expand":  ## Down variant with expand
+            return OpType.FUSED_MOE_LORA_DOWN_EXPAND
         raise ValueError(f"Unrecognized str {s} to convert to OpType")
 
     def is_shrink_fn(self) -> bool:
@@ -206,7 +231,45 @@ class OpType(Enum):
     def is_expand_fn(self) -> bool:
         return self in [OpType.LORA_EXPAND]
 
+    def is_fused_moe_lora_fn(self) -> bool:  ## adding for fused MoE LoRA
+        return self in [
+            OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+            OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+            OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+            OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+        ]
+
+    def is_fused_moe_lora_gate_up_fn(
+        self,
+    ) -> bool:  ## adding for fused MoE LoRA Gate/Up
+        return self in [
+            OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+            OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+        ]
+
+    def is_fused_moe_lora_down_fn(self) -> bool:  ## adding for fused MoE LoRA Down
+        return self in [
+            OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+            OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+        ]
+
+    def is_fused_moe_lora_shrink_fn(self) -> bool:
+        return self in [
+            OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+            OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+        ]
+
+    def is_fused_moe_lora_expand_fn(self) -> bool:
+        return self in [
+            OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+            OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+        ]
+
     def num_slices(self) -> list[int]:
+        if self.is_fused_moe_lora_gate_up_fn():
+            return [2]
+        elif self.is_fused_moe_lora_down_fn():
+            return [1]
         return [1, 2, 3]
 
     def mkn(
@@ -217,11 +280,15 @@ class OpType(Enum):
             m = num_tokens
             k = hidden_size
             n = lora_rank
-        else:
-            assert self.is_expand_fn()
+        elif self.is_expand_fn():
             m = num_tokens
             k = lora_rank
             n = hidden_size
+        else:
+            assert self.is_fused_moe_lora_fn()
+            m = num_tokens
+            n = hidden_size
+            k = lora_rank
         return m, k, n
 
     def matmul_dtypes(
@@ -232,9 +299,37 @@ class OpType(Enum):
         """
         if self.is_shrink_fn():
             return op_dtype, op_dtype, torch.float32
-        else:
-            assert self.is_expand_fn()
+        elif self.is_expand_fn():
             return torch.float32, op_dtype, op_dtype
+        else:
+            assert self.is_fused_moe_lora_fn()
+            return op_dtype, op_dtype, op_dtype
+
+    def matmul_shapes_fused_moe_lora(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        num_loras: int,
+        num_slices: int,
+        top_k_num: int,
+        num_experts: int,
+    ) -> tuple[tuple[int], tuple[int], tuple[int], tuple[int]]:
+        if self.is_fused_moe_lora_gate_up_fn():
+            if self.is_fused_moe_lora_shrink_fn():
+                input_shape = (
+                    (m * top_k_num, n)
+                    if self in [OpType.FUSED_MOE_LORA_GATE_UP_SHRINK]
+                    else (m, n)
+                )
+                output_shape = (num_slices, m, top_k_num, k)
+                weight_shape = (num_loras, num_experts, k, n)
+            else:
+                assert self.is_fused_moe_lora_expand_fn()
+                input_shape = (num_slices, m, top_k_num, k)
+                output_shape = (m, top_k_num, n * num_slices)
+                weight_shape = (num_loras, num_experts, n, k)
+        return (input_shape, weight_shape, output_shape)
 
     def matmul_shapes(
         self,
@@ -244,6 +339,8 @@ class OpType(Enum):
         lora_rank: int,
         num_loras: int,
         num_slices: int,
+        top_k_num: int | None = None,
+        num_experts: int | None = None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Given num_slices, return the shapes of the A, B, and C matrices
@@ -258,6 +355,17 @@ class OpType(Enum):
         if self in [OpType.LORA_EXPAND]:
             # LoRA expand kernels support num_slices inherently in the kernel
             return ((num_slices, m, k), b_shape, (m, n * num_slices))
+        if self.is_fused_moe_lora_fn():
+            return self.matmul_shapes_fused_moe_lora(
+                self,
+                m,
+                k,
+                n,
+                num_loras,
+                num_slices,
+                top_k_num,
+                num_experts,
+            )
         raise ValueError(f"Unrecognized op_type {self}")
 
     def bench_fn(self) -> Callable:
@@ -265,6 +373,16 @@ class OpType(Enum):
             return lora_shrink
         if self == OpType.LORA_EXPAND:
             return lora_expand
+        if (
+            self == OpType.FUSED_MOE_LORA_GATE_UP_SHRINK
+            or self == OpType.FUSED_MOE_LORA_DOWN_SHRINK
+        ):
+            return fused_moe_lora_shrink
+        if (
+            self == OpType.FUSED_MOE_LORA_GATE_UP_EXPAND
+            or self == OpType.FUSED_MOE_LORA_DOWN_EXPAND
+        ):
+            return fused_moe_lora_expand
 
         raise ValueError(f"Unrecognized optype {self}")
 
@@ -318,6 +436,8 @@ class BenchmarkContext:
     sort_by_lora_id: bool
     dtype: torch.dtype
     seq_length: int | None = None
+    num_experts: int | None = None  # num_experts for MoE based ops
+    top_k_num: int | None = None  # top_k for MoE based ops
     num_slices: int | None = None  # num_slices for slice based ops
 
     def with_seq_length(self, seq_length: int) -> "BenchmarkContext":
@@ -385,6 +505,8 @@ class BenchmarkTensors:
             ctx.lora_rank,
             ctx.num_loras,
             ctx.num_slices,
+            ctx.top_k_num,
+            ctx.num_experts,
         )
         a_type, b_type, c_type = op_type.matmul_dtypes(ctx.dtype)
         input_tensor, lora_weights, output_tensor = make_rand_tensors(
@@ -432,17 +554,33 @@ class BenchmarkTensors:
             prompt_lora_indices_tensor,
         )
 
-    def sanity_check(self) -> None:
+    def sanity_check(self, ctx: BenchmarkContext, op_type: OpType) -> None:
         """
         Fails asserts when non-conformality is detected.
         """
-        num_tokens = self.input.shape[-2]
+        ##TODO test if this works
+        num_tokens = (
+            self.input.shape[1]
+            if op_type.is_fused_moe_lora_expand_fn()
+            else self.input.shape[-2]
+        )
         # check metadata tensors
-        assert torch.sum(self.seq_lens) == num_tokens
+        ## In down shrink case, each token is repeated top_k_num times
+        assert (
+            torch.sum(self.seq_lens) * ctx.top_k_num == num_tokens
+            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
+            else torch.sum(self.seq_lens) == num_tokens
+        )
         num_seqs = self.seq_lens.shape[0]
         # assert self.seq_start_loc.shape[0] == num_seqs
+        ## In down shrink case, each prompt corresponds to top_k_num sequences
         assert self.prompt_lora_mapping.shape[0] == num_seqs
-        assert self.lora_kernel_meta.token_lora_mapping.shape[0] == num_tokens
+        assert (
+            self.lora_kernel_meta.token_lora_mapping.shape[0] * ctx.top_k_num
+            == num_tokens
+            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
+            else self.lora_kernel_meta.token_lora_mapping.shape[0] == num_tokens
+        )
 
     def to_device(self, device: str):
         """
@@ -471,21 +609,114 @@ class BenchmarkTensors:
                 to_device(field) if field_name != "no_lora_flag_cpu" else field,
             )
 
-    def metadata(self) -> tuple[int, int, int]:
+    def metadata(self, ctx: BenchmarkContext, op_type: OpType) -> tuple[int, int, int]:
         """
         Return num_seqs, num_tokens and max_seq_len
         """
         num_seqs = self.seq_lens.shape[0]
-        num_tokens = self.lora_kernel_meta.token_lora_mapping.shape[0]
+        ## TODO: test if this works
+        num_tokens = (
+            self.lora_kernel_meta.token_lora_mapping.shape[0] * ctx.top_k_num
+            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
+            else self.lora_kernel_meta.token_lora_mapping.shape[0]
+        )
         max_seq_len = torch.max(self.seq_lens).item()
         num_slices = len(self.lora_weights_lst)
         return num_seqs, num_tokens, max_seq_len, num_slices
 
-    def as_lora_shrink_kwargs(self) -> dict[str, Any]:
-        self.sanity_check()
+    def fused_moe_lora_data_prepare(
+        self,
+        block_size: int,
+        token_lora_mapping: torch.Tensor,
+        ctx: BenchmarkContext,
+    ):
+        def moe_lora_align_block_size(
+            topk_ids: torch.Tensor,
+            token_lora_mapping: torch.Tensor,
+            block_size: int,
+            num_experts: int,
+            max_loras: int,
+            expert_map: torch.Tensor | None = None,
+            pad_sorted_ids: bool = False,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            """
+            Aligns tokens and experts into block-sized chunks for LoRA-based
+            mixture-of-experts (MoE) execution.
+            """
+            max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+            if pad_sorted_ids:
+                max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+            sorted_ids = torch.empty(
+                (max_loras * max_num_tokens_padded,),
+                dtype=torch.int32,
+                device=topk_ids.device,
+            )
+            max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+            # Expert ids must be set default to -1 to prevent a blank block
+            expert_ids = torch.empty(
+                (max_loras * max_num_m_blocks,),
+                dtype=torch.int32,
+                device=topk_ids.device,
+            )
+            num_tokens_post_pad = torch.empty(
+                (max_loras), dtype=torch.int32, device=topk_ids.device
+            )
+
+            ops.moe_lora_align_block_size(
+                topk_ids,
+                token_lora_mapping,
+                num_experts,
+                block_size,
+                max_loras,
+                max_num_tokens_padded,
+                max_num_m_blocks,
+                sorted_ids,
+                expert_ids,
+                num_tokens_post_pad,
+            )
+            if expert_map is not None:
+                expert_ids = expert_map[expert_ids]
+
+            return sorted_ids, expert_ids, num_tokens_post_pad
+
+        num_tokens = ctx.batch_size
+        curr_topk_ids = torch.randint(
+            0,
+            ctx.num_experts,
+            (num_tokens, ctx.top_k_num),
+            device="cuda",
+            dtype=torch.int32,
+        )
+        topk_weights = torch.randint(
+            0,
+            ctx.num_experts,
+            (num_tokens, ctx.top_k_num),
+            device="cuda",
+            dtype=torch.int32,
+        )
+
+        (sorted_token_ids_lora, expert_ids_lora, num_tokens_post_padded_lora) = (
+            moe_lora_align_block_size(
+                curr_topk_ids=curr_topk_ids,
+                token_lora_mapping=token_lora_mapping,
+                block_size=block_size,
+                num_experts=ctx.num_experts,
+                max_loras=ctx.num_loras,
+            )
+        )
+
+        sorted_token_ids = sorted_token_ids_lora.view(ctx.num_loras, -1)
+        expert_ids = expert_ids_lora.view(ctx.num_loras, -1)
+        num_tokens_post_padded = num_tokens_post_padded_lora
+        return (topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded)
+
+    def as_lora_shrink_kwargs(
+        self, ctx: BenchmarkContext, op_type: OpType
+    ) -> dict[str, Any]:
+        self.sanity_check(ctx, op_type)
         self.to_device(self.input.device)
 
-        _, num_tokens, _, num_slices = self.metadata()
+        _, num_tokens, _, num_slices = self.metadata(ctx, op_type)
 
         # Sanity check matrix shapes.
         i_shape, lw_shape, o_shape = (
@@ -520,11 +751,13 @@ class BenchmarkTensors:
             "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
-    def as_lora_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
-        self.sanity_check()
+    def as_lora_expand_kwargs(
+        self, ctx: BenchmarkContext, op_type: OpType, add_inputs: bool
+    ) -> dict[str, Any]:
+        self.sanity_check(ctx, op_type)
         self.to_device(self.input.device)
 
-        _, num_tokens, _, num_slices = self.metadata()
+        _, num_tokens, _, num_slices = self.metadata(ctx, op_type)
 
         # Sanity check matrix shapes.
         i_shape, lw_shape, o_shape = (
@@ -561,8 +794,154 @@ class BenchmarkTensors:
             "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
+    def as_fused_moe_lora_shrink_kwargs(
+        self, ctx: BenchmarkContext, op_type: OpType
+    ) -> dict[str, Any]:
+        self.sanity_check(ctx, op_type)
+        self.to_device(self.input.device)
+
+        _, num_tokens, _, num_slices = self.metadata(ctx, op_type)
+
+        # Sanity check matrix shapes.
+        i_shape, lw_shape, o_shape = (
+            self.input.shape,
+            self.lora_weights_lst[0].shape,
+            self.output.shape,
+        )
+        # Expected input shape : [num_tokens, hidden_size] for gate_up
+        # Expected input shape : [top_k_num * num_tokens, hidden_size] for down
+        assert len(i_shape) == 2
+        assert i_shape[0] == num_tokens
+        hidden_size = i_shape[1]
+        # Expected lora weight shape [max_lora, num_experts, lora_rank, hidden_size]
+        assert len(lw_shape) == 4
+        assert lw_shape[-1] == hidden_size
+        lora_rank = lw_shape[-2]
+        # Expected output shape : [num_slices, num_tokens, top_k_num, lora_rank]
+        assert len(o_shape) == 4
+        assert o_shape == (num_slices, num_tokens, ctx.top_k_num, lora_rank)
+        kernel_config = get_lora_op_configs(
+            op_type.name.lower(),
+            max_loras=lw_shape[0],
+            batch=num_tokens,
+            hidden_size=hidden_size,
+            rank=lora_rank,
+            num_slices=num_slices,
+            add_inputs=False,
+        )
+
+        (topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded) = (
+            self.fused_moe_lora_data_prepare(
+                block_size=kernel_config["BLOCK_SIZE_M"],
+                token_lora_mapping=self.lora_kernel_meta.token_lora_mapping,
+                ctx=ctx,
+            )
+        )
+
+        return {
+            "qcurr_hidden_states": self.input,
+            "lora_a_stacked": self.lora_weights_lst,
+            "a_intermediate_cache1": self.output,
+            "topk_weights": topk_weights,
+            "sorted_token_ids": sorted_token_ids,
+            "expert_ids": expert_ids,
+            "num_tokens_post_padded": num_tokens_post_padded,
+            "top_k_num": ctx.top_k_num,
+            "device": self.input.device,
+            "N": lora_rank,
+            "M": topk_weights.shape[0],
+            "EM": sorted_token_ids.shape[1],
+            "K": self.input.shape[1],
+            "num_tokens": num_tokens,
+            "num_experts": ctx.num_experts,
+            "num_slices": num_slices,
+            "shrink_block_size_m": kernel_config["BLOCK_SIZE_M"],
+            "shrink_block_size_n": kernel_config["BLOCK_SIZE_N"],
+            "shrink_block_size_k": kernel_config["BLOCK_SIZE_K"],
+            "shrink_group_size_m": kernel_config["GROUP_SIZE_M"],
+            "shrink_num_warps": kernel_config["num_warps"],
+            "shrink_num_stages": kernel_config["num_stages"],
+            "shrink_splitK": kernel_config.get("SPLIT_K", 1),
+            "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
+        }
+
+    def as_fused_moe_lora_expand_kwargs(
+        self, ctx: BenchmarkContext, op_type: OpType
+    ) -> dict[str, Any]:
+        self.sanity_check(ctx, op_type)
+        self.to_device(self.input.device)
+
+        _, num_tokens, _, num_slices = self.metadata(ctx, op_type)
+
+        # Sanity check matrix shapes.
+        i_shape, lw_shape, o_shape = (
+            self.input.shape,
+            self.lora_weights_lst[0].shape,
+            self.output.shape,
+        )
+
+        # Expected input shape : [num_slices, num_tokens, top_k_num, lora_rank]
+        assert len(i_shape) == 4
+        assert i_shape[0] == num_slices
+        assert i_shape[1] == num_tokens
+        lora_rank = i_shape[-1]
+        # Expected lora weight shape : [num_loras, num_experts, hidden_size, lora_rank]
+        assert len(lw_shape) == 4
+        assert lw_shape[-1] == lora_rank
+        hidden_size = lw_shape[-2]
+        # Expected output shape : [num_tokens, top_k_num, hidden_size * num_slices]
+        assert len(o_shape) == 3
+        assert o_shape == (num_tokens, ctx.top_k_num, hidden_size * num_slices)
+
+        kernel_config = get_lora_op_configs(
+            op_type.name.lower(),
+            max_loras=lw_shape[0],
+            batch=num_tokens,
+            hidden_size=hidden_size,
+            rank=lora_rank,
+            num_slices=num_slices,
+            add_inputs=False,
+        )
+
+        (topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded) = (
+            self.fused_moe_lora_data_prepare(
+                block_size=kernel_config["BLOCK_SIZE_M"],
+                token_lora_mapping=self.lora_kernel_meta.token_lora_mapping,
+                ctx=ctx,
+            )
+        )
+
+        return {
+            "a_intermediate_cache1": self.input,
+            "lora_b_stacked": self.lora_weights_lst,
+            "output": self.output,
+            "topk_weights": topk_weights,
+            "sorted_token_ids": sorted_token_ids,
+            "expert_ids": expert_ids,
+            "num_tokens_post_padded": num_tokens_post_padded,
+            "top_k_num": ctx.top_k_num,
+            "device": self.input.device,
+            "N": lora_rank,
+            "M": topk_weights.shape[0],
+            "EM": sorted_token_ids.shape[1],
+            "K": self.input.shape[1],
+            "num_tokens": num_tokens,
+            "num_experts": ctx.num_experts,
+            "num_slices": num_slices,
+            "max_lora_rank": lora_rank,
+            "w1_output_dim_size": lw_shape[2],
+            "expand_block_size_m": kernel_config["BLOCK_SIZE_M"],
+            "expand_block_size_n": kernel_config["BLOCK_SIZE_N"],
+            "expand_block_size_k": kernel_config["BLOCK_SIZE_K"],
+            "expand_group_size_m": kernel_config["GROUP_SIZE_M"],
+            "expand_num_warps": kernel_config["num_warps"],
+            "expand_num_stages": kernel_config["num_stages"],
+            "expand_splitK": kernel_config.get("SPLIT_K", 1),
+            "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
+        }
+
     def bench_fn_kwargs(
-        self, op_type: OpType, add_inputs: bool | None = None
+        self, ctx: BenchmarkContext, op_type: OpType, add_inputs: bool | None = None
     ) -> dict[str, Any]:
         if op_type.is_shrink_fn():
             assert add_inputs is None
@@ -570,9 +949,13 @@ class BenchmarkTensors:
             assert add_inputs is not None
 
         if op_type == OpType.LORA_SHRINK:
-            return self.as_lora_shrink_kwargs()
+            return self.as_lora_shrink_kwargs(ctx, op_type)
         if op_type == OpType.LORA_EXPAND:
-            return self.as_lora_expand_kwargs(add_inputs)
+            return self.as_lora_expand_kwargs(ctx, op_type, add_inputs)
+        if op_type.is_fused_moe_lora_shrink_fn():
+            return self.as_fused_moe_lora_shrink_kwargs(ctx, op_type)
+        if op_type.is_fused_moe_lora_expand_fn():
+            return self.as_fused_moe_lora_expand_kwargs(ctx, op_type)
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(
@@ -627,7 +1010,7 @@ def bench_optype(
         BenchmarkTensors.make(ctx, op_type) for _ in range(arg_pool_size)
     ]
     for bt in bench_tensors:
-        bt.sanity_check()
+        bt.sanity_check(ctx, op_type)
 
     # Test correctness of our implementation.
     if test_correctness:
@@ -644,6 +1027,7 @@ def bench_optype(
     # Clear LoRA optimization hash-maps.
     _LORA_A_PTR_DICT.clear()
     _LORA_B_PTR_DICT.clear()
+    _LORA_PTR_DICT.clear()
     # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are set up
     for kwargs in kwargs_list:
         op_type.bench_fn()(**kwargs)
