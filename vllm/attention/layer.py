@@ -123,12 +123,20 @@ def maybe_get_vit_flash_attn_backend(
         ):
             attn_backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
+    elif current_platform.is_xpu():
+        assert attn_backend == _Backend.FLASH_ATTN, (
+            "XPU platform only supports FLASH_ATTN as vision attention backend."
+        )
     else:
         return _Backend.TORCH_SDPA, None
 
     if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
         if attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
+        elif current_platform.is_xpu():
+            from vllm._ipex_ops import ipex_ops as ops
+
+            flash_attn_varlen_func = ops.flash_attn_varlen_func
         else:
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
@@ -521,21 +529,18 @@ class MultiHeadAttention(nn.Module):
         # If vllm native fa is selected, we use it directly.
         use_upstream_fa = False
 
-        if current_platform.is_xpu():
-            self.attn_backend = _Backend.IPEX
-        else:
-            self.attn_backend = (
-                backend
-                if backend
-                in {
-                    _Backend.TORCH_SDPA,
-                    _Backend.XFORMERS,
-                    _Backend.PALLAS,
-                    _Backend.ROCM_AITER_FA,
-                    _Backend.FLASH_ATTN,
-                }
-                else _Backend.TORCH_SDPA
-            )
+        self.attn_backend = (
+            backend
+            if backend
+            in {
+                _Backend.TORCH_SDPA,
+                _Backend.XFORMERS,
+                _Backend.PALLAS,
+                _Backend.ROCM_AITER_FA,
+                _Backend.FLASH_ATTN,
+            }
+            else _Backend.TORCH_SDPA
+        )
 
         self.attn_backend, self._flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
@@ -610,10 +615,7 @@ class MultiHeadAttention(nn.Module):
             out = xops.memory_efficient_attention_forward(
                 query, key, value, scale=self.scale
             )
-        elif (
-            self.attn_backend == _Backend.TORCH_SDPA
-            or self.attn_backend == _Backend.IPEX
-        ):
+        elif self.attn_backend == _Backend.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
             out = out.transpose(1, 2)

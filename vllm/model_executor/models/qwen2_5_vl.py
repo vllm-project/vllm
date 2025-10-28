@@ -718,7 +718,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             _Backend.TORCH_SDPA,
             _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
-            _Backend.IPEX,
         }:
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
@@ -857,11 +856,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
         seqlens = torch.zeros(1, device=cu_seqlens.device)
-        if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
-            or self.attn_backend == _Backend.IPEX
-        ):
+        if self.attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = cu_seqlens[1:] - cu_seqlens[:-1]

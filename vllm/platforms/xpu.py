@@ -119,7 +119,7 @@ class XPUPlatform(Platform):
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
         from vllm.attention.backends.registry import _Backend
 
-        return _Backend.IPEX
+        return _Backend.FLASH_ATTN
 
     @classmethod
     def inference_mode(cls):
