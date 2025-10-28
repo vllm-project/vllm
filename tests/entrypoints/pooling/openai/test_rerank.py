@@ -163,7 +163,25 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling(server: RemoteOpenAIServer, model_name: str):
+async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
+    input_text = "This product was excellent and exceeded my expectations"
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": input_text,
+            "encoding_format": "float",
+            "task": "classify",
+        },
+    )
+    poolings = PoolingResponse.model_validate(response.json())
+    assert len(poolings.data) == 1
+    assert len(poolings.data[0].data) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
     input_text = ["The chef prepared a delicious meal."]
 
     response = requests.post(
@@ -176,3 +194,24 @@ async def test_pooling(server: RemoteOpenAIServer, model_name: str):
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == 11
     assert len(poolings.data[0].data[0]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+async def test_pooling_not_supported(
+    server: RemoteOpenAIServer, model_name: str, task: str
+):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float",
+            "task": task,
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["error"]["message"].startswith(
+        f"Task {task} is not supported"
+    )

@@ -49,6 +49,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
 
+from vllm.tasks import PoolingTask
 from vllm.utils.serial_utils import (
     EmbedDType,
     EncodingFormat,
@@ -1669,8 +1670,42 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
 
-PoolingCompletionRequest = EmbeddingCompletionRequest
-PoolingChatRequest = EmbeddingChatRequest
+
+class PoolingCompletionRequest(EmbeddingCompletionRequest):
+    task: PoolingTask | None = None
+    activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "If it is a classify or token_classify task, the default is True; "
+        "for other tasks, this value should be None.",
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize,
+            activation=self.activation,
+        )
+
+
+class PoolingChatRequest(EmbeddingChatRequest):
+    task: PoolingTask | None = None
+    activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "If it is a classify or token_classify task, the default is True; "
+        "for other tasks, this value should be None.",
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize,
+            activation=self.activation,
+        )
+
 
 T = TypeVar("T")
 
@@ -1686,6 +1721,7 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     """
     data: T
 
+    task: PoolingTask = "plugin"
     encoding_format: EncodingFormat = "float"
     embed_dtype: EmbedDType = Field(
         default="float32",
@@ -1749,8 +1785,11 @@ class ScoreRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = None
-
+    activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
@@ -1783,8 +1822,11 @@ class RerankRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = None
-
+    activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
@@ -1958,8 +2000,11 @@ class ClassificationRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = None
-
+    activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
