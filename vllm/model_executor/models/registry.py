@@ -501,11 +501,11 @@ class _MambaBackend(Enum):
 
 
 MAMBA_BACKEND_MAP = {
-    "mamba1": _MambaBackend.MAMBA1,  # noqa
-    "mamba2": _MambaBackend.MAMBA2,  # noqa
-    "linear_attention": _MambaBackend.LINEAR,  # noqa
-    "gdn_attention": _MambaBackend.GDN,  # noqa
-    "short_conv": _MambaBackend.SHORT_CONV,  # noqa
+    "mamba1": _MambaBackend.MAMBA1.value,  # noqa
+    "mamba2": _MambaBackend.MAMBA2.value,  # noqa
+    "linear_attention": _MambaBackend.LINEAR.value,  # noqa
+    "gdn_attention": _MambaBackend.GDN.value,  # noqa
+    "short_conv": _MambaBackend.SHORT_CONV.value,  # noqa
 }
 
 
