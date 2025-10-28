@@ -401,7 +401,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
 
-    block_size = 32
+    block_size = 64
     required_blocks = sum(
         (seq_len + block_size - 1) // block_size for seq_len in batch_spec.seq_lens
     )
@@ -441,7 +441,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     )
     head_size = vllm_config.model_config.get_head_size()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
-    block_size = vllm_config.cache_config.block_size
     kv_lora_rank = 512
     qk_rope_head_dim = 64
     qk_nope_head_dim = 128
@@ -641,9 +640,26 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T, requires_grad=False)
 
     # Create metadata using original batch spec
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec, vllm_config.cache_config.block_size, device
-    )
+    common_attn_metadata = create_common_attn_metadata(batch_spec, block_size, device)
+
+    # Pad block table to meet CUTLASS MLA requirement:
+    # block_num % (128 / block_size) == 0
+    required_divisor = int(128 / block_size)
+    current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+    if current_block_num % required_divisor != 0:
+        # Pad to next multiple of required_divisor
+        padded_block_num = (
+            (current_block_num + required_divisor - 1) // required_divisor
+        ) * required_divisor
+        padding_cols = padded_block_num - current_block_num
+        padding = torch.zeros(
+            (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
+            dtype=torch.int32,
+            device=device,
+        )
+        common_attn_metadata.block_table_tensor = torch.cat(
+            [common_attn_metadata.block_table_tensor, padding], dim=1
+        )
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
     kv_cache = create_and_prepopulate_kv_cache(
