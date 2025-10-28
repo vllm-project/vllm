@@ -43,13 +43,17 @@ _cache_lock = threading.Lock()
 @dataclasses.dataclass
 class CompiledCodeCacheEntry:
     """
-    Stores compiled code that can be reused across instances of the same class.
+    Stores compiled callable that can be reused across instances.
+
+    The cached compiled_callable retains Dynamo's guard logic, so when
+    reused by instances with different weights, guards will fail and
+    trigger recompilation with the correct weight bindings.
     """
 
     # Whether compilation has been completed
     compiled: bool = False
-    # Compiled codes (bytecode)
-    compiled_codes: list | None = None
+    # The compiled callable (includes guard logic)
+    compiled_callable: object | None = None
     # AOT compiled function (if using AOT mode)
     aot_compiled_fn: object | None = None
 
@@ -437,32 +441,26 @@ def _support_torch_compile(
                 )
                 return self.aot_compiled_fn(self, *args, **kwargs)
 
-        # Check if we can reuse cached compiled code from another instance
+        # Check if we can reuse cached compiled callable from another instance
         if (
             getattr(self, "_using_cached_compilation", False)
             and self._cache_entry.compiled
         ):
-            # Reuse cached compiled code directly
+            # Reuse cached compiled callable (with guards)
+            # Dynamo guards will check if weights match; if not, recompile
             if self._cache_entry.aot_compiled_fn is not None:
                 logger.debug(
                     "Reusing cached AOT compilation for %s", self.__class__.__name__
                 )
                 return self._cache_entry.aot_compiled_fn(self, *args, **kwargs)
-            elif (
-                self._cache_entry.compiled_codes
-                and len(self._cache_entry.compiled_codes) > 0
-            ):
-                # Copy cached compiled codes to this instance
-                if len(self.compiled_codes) == 0:
-                    self.compiled_codes = self._cache_entry.compiled_codes.copy()
-                    logger.debug(
-                        "Reused %d cached compiled codes for %s",
-                        len(self.compiled_codes),
-                        self.__class__.__name__,
-                    )
-                # Dispatch directly to the compiled code
-                with self.dispatch_to_code(0):
-                    return self.forward(*args, **kwargs)
+            elif self._cache_entry.compiled_callable is not None:
+                # Call cached compiled_callable with guards
+                # Guards will ensure correct weight binding
+                logger.debug(
+                    "Reusing cached compiled_callable (with guards) for %s",
+                    self.__class__.__name__,
+                )
+                return self._cache_entry.compiled_callable(*args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
@@ -498,12 +496,12 @@ def _support_torch_compile(
         # with the overhead of guard evaluation and recompilation.
         if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
             # Only remove from cache if this is the first instance
-            # (not using cached compilation). For cached instances,
-            # we want to reuse the Dynamo cache.
+            # (not using cached compilation).
+            # For cached instances, we preserve Dynamo's cache and let
+            # guards handle weight differences.
             if not getattr(self, "_using_cached_compilation", False):
-                # it seems Dynamo reuse the compilation across instances,
-                # while we need to make sure the compiled code is not reused.
-                # we need to control all the compilation of the model.
+                # For the first instance of each unique code object,
+                # we control the compilation by clearing Dynamo's cache
                 torch._dynamo.eval_frame.remove_from_cache(self.original_code_object)
 
             # collect all relevant files traced by Dynamo,
@@ -570,22 +568,23 @@ def _support_torch_compile(
                             )
                 else:
                     output = self.compiled_callable(*args, **kwargs)
-                    # Save compiled codes to cache for reuse
+                    # Save compiled_callable to cache for reuse
                     # (only if cache is enabled and this is first compilation)
+                    # The compiled_callable includes Dynamo guards, so it's safe
+                    # to reuse across instances with different weights
                     if (
                         not envs.VLLM_DISABLE_COMPILE_CACHE
                         and not getattr(self, "_using_cached_compilation", False)
                         and self._cache_entry is not None
-                        and len(self.compiled_codes) > 0
                     ):
                         with _cache_lock:
-                            self._cache_entry.compiled_codes = (
-                                self.compiled_codes.copy()
+                            # Save the compiled_callable (with guards)
+                            self._cache_entry.compiled_callable = (
+                                self.compiled_callable
                             )
                             self._cache_entry.compiled = True
                             logger.debug(
-                                "Saved %d compiled codes to cache for %s",
-                                len(self.compiled_codes),
+                                "Saved compiled_callable to cache for %s",
                                 self.__class__.__name__,
                             )
             return output
@@ -593,6 +592,8 @@ def _support_torch_compile(
         # usually, capturing the model once is enough, and then we can
         # dispatch to the compiled code directly, without going through
         # the Dynamo guard mechanism.
+        # NOTE: Only the first instance (that triggered compilation) reaches here.
+        # Cached instances return earlier with guard checks.
         with self.dispatch_to_code(0):
             model_output = self.forward(*args, **kwargs)
             return model_output
