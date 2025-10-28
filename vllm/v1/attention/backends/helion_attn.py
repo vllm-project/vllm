@@ -113,6 +113,7 @@ class HelionAttentionMetadataBuilder(AttentionMetadataBuilder[HelionAttentionMet
         slot_mapping = common_attn_metadata.slot_mapping
 
         use_cascade = common_prefix_len > 0
+        # print(f"actual seqlens: {len(common_attn_metadata.seq_lens_cpu)}")
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
@@ -144,6 +145,7 @@ class HelionAttentionMetadataBuilder(AttentionMetadataBuilder[HelionAttentionMet
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
+        # print(attn_metadata)
         return attn_metadata
 
 

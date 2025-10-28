@@ -6,8 +6,12 @@ import helion
 import helion.language as hl
 
 @helion.kernel(
-    config=helion.Config(block_sizes=[32, 2], indexing='pointer', 
-    l2_groupings=[1], num_stages=1, num_warps=8, pid_type='xyz',), 
+    config=helion.Config(
+        # block_sizes=[32, 2], 
+        block_sizes=[32, 1], 
+        indexing='pointer', 
+        l2_groupings=[1], num_stages=1, num_warps=8, pid_type='xyz',
+    ), 
     static_shapes=True,
     allow_warp_specialize=True,
     )
