@@ -447,6 +447,7 @@ def _support_torch_compile(
                     InliningInstructionTranslator, "inline_call_", patched_inline_call
                 ),
                 torch._dynamo.config.patch(**dynamo_config_patches),
+                set_current_vllm_config(self.vllm_config),
                 maybe_use_cudagraph_partition_wrapper(self.vllm_config),
                 _torch27_patch_tensor_subclasses(),
             ):
