@@ -6,6 +6,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
+from datetime import timedelta
 from threading import Thread
 from typing import TYPE_CHECKING, Any
 
@@ -884,12 +885,27 @@ def init_worker_distributed_environment(
     init_batch_invariance()
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
+    if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+        timeout = timedelta(
+            seconds=vllm_config.fault_tolerance_config.gloo_comm_timeout
+        )
+    else:
+        timeout = None
+
     init_distributed_environment(
-        parallel_config.world_size, rank, distributed_init_method, local_rank, backend
+        parallel_config.world_size,
+        rank,
+        distributed_init_method,
+        local_rank,
+        backend,
+        vllm_config.fault_tolerance_config.enable_fault_tolerance,
+        timeout,
     )
 
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size,
+        vllm_config.fault_tolerance_config.enable_fault_tolerance,
+        timeout,
     )
