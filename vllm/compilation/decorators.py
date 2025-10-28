@@ -551,22 +551,33 @@ def _support_torch_compile(
                     output = self.aot_compiled_fn(self, *args, **kwargs)
                     assert aot_compilation_path is not None
                     assert cache_dir is not None
-                    os.makedirs(cache_dir, exist_ok=True)
-                    self.aot_compiled_fn.save_compiled_function(aot_compilation_path)
-                    # Save AOT compiled function to cache for reuse
-                    # (only if cache is enabled and this is first compilation)
-                    if (
-                        not envs.VLLM_DISABLE_COMPILE_CACHE
-                        and not getattr(self, "_using_cached_compilation", False)
-                        and self._cache_entry is not None
-                    ):
-                        with _cache_lock:
-                            self._cache_entry.aot_compiled_fn = self.aot_compiled_fn
-                            self._cache_entry.compiled = True
-                            logger.debug(
-                                "Saved AOT compilation to cache for %s",
-                                self.__class__.__name__,
-                            )
+                    try:
+                        os.makedirs(cache_dir, exist_ok=True)
+                        self.aot_compiled_fn.save_compiled_function(
+                            aot_compilation_path
+                        )
+                        # Save AOT compiled function to cache for reuse
+                        # (only if cache is enabled and this is first compilation)
+                        if (
+                            not envs.VLLM_DISABLE_COMPILE_CACHE
+                            and not getattr(self, "_using_cached_compilation", False)
+                            and self._cache_entry is not None
+                        ):
+                            with _cache_lock:
+                                self._cache_entry.aot_compiled_fn = (
+                                    self.aot_compiled_fn
+                                )
+                                self._cache_entry.compiled = True
+                                logger.debug(
+                                    "Saved AOT compilation to cache for %s",
+                                    self.__class__.__name__,
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            "Cannot save aot compilation to path %s, error: %s",
+                            aot_compilation_path,
+                            str(e),
+                        )
                 else:
                     output = self.compiled_callable(*args, **kwargs)
                     # Save compiled_callable to cache for reuse
