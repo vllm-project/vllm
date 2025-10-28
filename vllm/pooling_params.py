@@ -56,9 +56,10 @@ class PoolingParams(
     task: PoolingTask | None = None
     requires_token_ids: bool = False
     extra_kwargs: dict[str, Any] | None = None
-    # use in AllPool
-    hidden_states_cache: list[torch.Tensor] = msgspec.field(default_factory=list)
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
+
+    # for chunked prefill with ALL pooling
+    hidden_states_cache: list[torch.Tensor] = msgspec.field(default_factory=list)
 
     @property
     def all_parameters(self) -> list[str]:
