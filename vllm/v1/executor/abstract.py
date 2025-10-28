@@ -79,6 +79,7 @@ class Executor(ABC):
             raise ValueError(
                 f"Unknown distributed executor backend: {distributed_executor_backend}"
             )
+        print(f'[debug] {executor_class=}')
         return executor_class
 
     def __init__(

@@ -638,7 +638,7 @@ def make_layers(
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
     """
-    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed import get_pp_group
     from vllm.distributed.utils import get_pp_indices
 
     start_layer, end_layer = get_pp_indices(
