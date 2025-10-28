@@ -815,24 +815,39 @@ def reorder_batch_to_split_decodes_and_prefills(
     is_prefill = (~is_decode) & (num_computed_tokens_np == num_scheduled_tokens_np)
 
     # Desired order: decode → extend → prefill
-    order_key = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
-    order_key[is_extend] = 1
-    order_key[is_prefill] = 2
+    req_regions = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
+    req_regions[is_extend] = 1
+    req_regions[is_prefill] = 2
 
-    # get a permutation of the indices that sorts the order_key, basically this means if
-    # we reordered the batch like request[perm] we'd be in the desired order
-    perm = np.argsort(order_key, kind="stable")
-    # old_idx -> new_pos
-    dest = np.empty_like(perm)
-    dest[perm] = np.arange(num_reqs)
+    num_decodes = int(is_decode.sum())
+    num_extends = int(is_extend.sum())
+
+    target_regions = np.zeros(num_reqs, dtype=np.int32)
+    target_regions[num_decodes : num_decodes + num_extends] = 1
+    target_regions[num_decodes + num_extends :] = 2
+
+    needs_swap = req_regions != target_regions
+
+    if not needs_swap.any():
+        return False
+
+    # Extract indices that need swapping and sort by target region
+    swap_indices = np.where(needs_swap)[0]
+    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
+    sorted_indices = swap_indices[sorted_order]
+
+    # Compute desination index for each request
+    dest = np.arange(num_reqs)
+    dest[swap_indices] = sorted_indices
 
     modified_batch = False
-    for i in range(num_reqs):
+    for i in swap_indices:
         while dest[i] != i:
             j = dest[i]  # destination index for the element currently at i
             input_batch.swap_states(i, j)
             dest[i], dest[j] = dest[j], dest[i]
             modified_batch = True
+
     return modified_batch
 
 

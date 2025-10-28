@@ -49,7 +49,7 @@ REORDER_TEST_CASES = {
     ),
     "mixed_interleaved": ReorderTestCase(
         requests=[(100, 100), (1, 10), (200, 200), (1, 20)],
-        expected_order=[1, 3, 0, 2],
+        expected_order=[3, 1, 2, 0],  # Only swap 0↔3, keep 1 and 2 in place
         expected_modified=True,
     ),
     "already_ordered": ReorderTestCase(
@@ -80,7 +80,7 @@ REORDER_TEST_CASES = {
     ),
     "extend_prefill_only": ReorderTestCase(
         requests=[(100, 100), (10, 50), (200, 200), (20, 75)],
-        expected_order=[1, 3, 0, 2],
+        expected_order=[3, 1, 2, 0],  # Only swap 0↔3, keep 1 and 2 in place
         expected_modified=True,
     ),
 }
