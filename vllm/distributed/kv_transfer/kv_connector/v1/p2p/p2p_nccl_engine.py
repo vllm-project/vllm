@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import logging
 import os
 import threading
@@ -108,12 +109,16 @@ class P2pNcclEngine:
             # the `http_port` must be consistent with the port of OpenAI.
             http_port = self.config.get_from_extra_config("http_port", None)
             if http_port is None:
+                example_cfg = {
+                    "kv_connector": "P2pNcclConnector",
+                    "kv_connector_extra_config": {"http_port": 8000},
+                }
+                example = (
+                    f"--port=8000 --kv-transfer-config='{json.dumps(example_cfg)}'"
+                )
                 raise ValueError(
                     "kv_connector_extra_config.http_port is required. "
-                    "Example: --port=8000 --kv-transfer-config='{"
-                    'kv_connector":"P2pNcclConnector",'
-                    'kv_connector_extra_config":{'
-                    "http_port\":8000}}'"
+                    f"Example: {example}"
                 )
             self.http_address = f"{self._hostname}:{http_port}"
 
