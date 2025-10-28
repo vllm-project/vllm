@@ -151,9 +151,14 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
 
-        # Attempt to set an appropriate block size based on what backend will be used.
+        # Attempt to set an appropriate block size based on what backend will
+        # be used.
         # TODO: per-layer block size configuration
-        if cache_config and model_config:
+        # Note: Hybrid models (models with both attention and mamba layers)
+        # have their block_size initialized in
+        # HybridAttentionMambaModelConfig.verify_and_update_config,
+        # which is called before this method. We should not override it here.
+        if cache_config and model_config and not model_config.is_hybrid:
             from vllm.attention.selector import get_attn_backend
 
             backend = get_attn_backend(
@@ -186,7 +191,7 @@ class CudaPlatformBase(Platform):
                 # user-specified block size is supported
                 pass
         else:
-            if cache_config.block_size is None:
+            if cache_config and cache_config.block_size is None:
                 cache_config.block_size = 16  # default block size
 
         # lazy import to avoid circular import
@@ -317,7 +322,7 @@ class CudaPlatformBase(Platform):
                     head_size,
                     dtype,
                     kv_cache_dtype,
-                    block_size,
+                    None,
                     use_mla,
                     has_sink,
                     use_sparse,
@@ -340,7 +345,7 @@ class CudaPlatformBase(Platform):
             head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
+            None,
             use_mla,
             has_sink,
             use_sparse,
