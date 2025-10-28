@@ -73,7 +73,7 @@ from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
-from vllm.ray.lazy_utils import is_ray_initialized
+from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import (
@@ -82,7 +82,6 @@ from vllm.transformers_utils.config import (
     maybe_override_with_speculators,
 )
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import is_in_ray_actor
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -536,6 +535,7 @@ class EngineArgs:
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
+    mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -893,6 +893,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
+        )
+        cache_group.add_argument(
+            "--mamba-block-size", **cache_kwargs["mamba_block_size"]
         )
 
         # Multimodal related configs
@@ -1391,6 +1394,7 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            mamba_block_size=self.mamba_block_size,
         )
 
         ray_runtime_env = None
@@ -1549,11 +1553,12 @@ class EngineArgs:
         )
 
         if self.async_scheduling and (
-            parallel_config.distributed_executor_backend not in ("mp", "uni")
+            parallel_config.distributed_executor_backend
+            not in ("mp", "uni", "external_launcher")
         ):
             raise ValueError(
-                "Currently, async scheduling only supports `mp` or `uni` "
-                "distributed executor backend, but you choose "
+                "Currently, async scheduling only supports `mp`, `uni` or "
+                "`external_launcher` distributed executor backend, but you choose "
                 f"`{parallel_config.distributed_executor_backend}`."
             )
 

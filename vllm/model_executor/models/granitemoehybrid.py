@@ -34,7 +34,14 @@ from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeMoE
 from .granitemoeshared import GraniteMoeSharedMLP
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsMambaPrefixCaching,
+    SupportsPP,
+    SupportsQuant,
+)
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -584,7 +591,13 @@ class GraniteMoeHybridModel(nn.Module):
 
 
 class GraniteMoeHybridForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
