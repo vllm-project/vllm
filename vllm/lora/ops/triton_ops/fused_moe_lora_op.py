@@ -109,7 +109,9 @@ def _fused_moe_lora_kernel(
     expert_id = tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
     if expert_id == -1:
         return
-
+    if USE_GDC and IS_PRIMARY:
+        # GDC launch dependents hints the runtime system to launch dependent kernels.
+        tl.extra.cuda.gdc_launch_dependents()
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
@@ -164,9 +166,7 @@ def _fused_moe_lora_kernel(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-    if USE_GDC and IS_PRIMARY:
-        # GDC launch dependents hints the runtime system to launch dependent kernels.
-        tl.extra.cuda.gdc_launch_dependents()
+   
     if SPLIT_K == 1:
         tl.store(c_ptrs, accumulator, mask=c_mask)
     else:

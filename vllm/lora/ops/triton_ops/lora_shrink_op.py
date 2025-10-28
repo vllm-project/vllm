@@ -68,10 +68,12 @@ def _lora_shrink_kernel(
     if cta_m_offset >= lora_m_size:
         # Early exit CTA.
         return
-
+        # GDC launch dependents hints the runtime system to launch dependent kernels.
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
     # num rows this CTA should process.
     cta_m_len = min(BLOCK_M, lora_m_size - cta_m_offset)
-
+    
     # Identify all rows that this CTA should process.
     lora_m_indices_start = tl.load(lora_token_start_loc + lora_idx)
     cta_lora_seq_indices = (
