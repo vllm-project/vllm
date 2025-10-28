@@ -1506,12 +1506,12 @@ class EngineArgs:
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP kind of speculative decodeing"
+                        "with EAGLE/MTP kind of speculative decoding"
                     )
                 elif self.speculative_config.get("disable_padded_drafter_batch"):
                     raise ValueError(
                         "async scheduling for EAGLE/MTP kind of speculative "
-                        "decodeing is enabled, but disable_padded_drafter_batch=True "
+                        "decoding is enabled, but disable_padded_drafter_batch=True "
                         "disable_padded_drafter_batch=True is not supported for "
                         "this situation now. please set "
                         "disable_padded_drafter_batch=Fasle"

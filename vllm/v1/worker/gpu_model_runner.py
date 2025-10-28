@@ -500,11 +500,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens  # noqa
         self.valid_sampled_token_count_event: torch.cuda.Event | None = None
-        self.device_valid_sampled_token_count_event: torch.cuda.Event | None = None
         self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
         if self.use_async_scheduling and self.num_spec_tokens:
             self.valid_sampled_token_count_event = torch.cuda.Event()
-            self.device_valid_sampled_token_count_event = torch.cuda.Event()
             self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
         self.transfer_event = torch.cuda.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -2982,15 +2980,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 if self.valid_sampled_token_count_event is not None:
                     default_stream = torch.cuda.current_stream()
-                    self.device_valid_sampled_token_count_event.record(default_stream)
-                    self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(  # noqa
-                        1
-                    )
                     # initialize a new stream to overlap the copy operation with
                     # prepare_input of draft model.
                     with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
-                        self.valid_sampled_token_count_copy_stream.wait_event(
-                            self.device_valid_sampled_token_count_event
+                        self.valid_sampled_token_count_copy_stream.wait_stream(
+                            default_stream
                         )
                         self.valid_sampled_token_count_cpu[
                             : valid_sampled_tokens_count.shape[0]
@@ -3002,6 +2996,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.valid_sampled_token_count_event.record(
                             self.valid_sampled_token_count_copy_stream
                         )
+
+                    self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(  # noqa
+                        1
+                    )
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
