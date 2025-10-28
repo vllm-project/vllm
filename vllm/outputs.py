@@ -4,7 +4,7 @@
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Any, Generic, Optional, Union
+from typing import Any, Generic
 
 import torch
 from typing_extensions import TypeVar
@@ -14,6 +14,7 @@ from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sequence import RequestMetrics
+from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
 
@@ -40,23 +41,25 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
-    cumulative_logprob: Optional[float]
-    logprobs: Optional[SampleLogprobs]
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    lora_request: Optional[LoRARequest] = None
+    cumulative_logprob: float | None
+    logprobs: SampleLogprobs | None
+    finish_reason: str | None = None
+    stop_reason: int | str | None = None
+    lora_request: LoRARequest | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
 
     def __repr__(self) -> str:
-        return (f"CompletionOutput(index={self.index}, "
-                f"text={self.text!r}, "
-                f"token_ids={self.token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob}, "
-                f"logprobs={self.logprobs}, "
-                f"finish_reason={self.finish_reason}, "
-                f"stop_reason={self.stop_reason})")
+        return (
+            f"CompletionOutput(index={self.index}, "
+            f"text={self.text!r}, "
+            f"token_ids={self.token_ids}, "
+            f"cumulative_logprob={self.cumulative_logprob}, "
+            f"logprobs={self.logprobs}, "
+            f"finish_reason={self.finish_reason}, "
+            f"stop_reason={self.stop_reason})"
+        )
 
 
 @dataclass
@@ -66,14 +69,16 @@ class PoolingOutput:
     Args:
         data: The extracted hidden states.
     """
+
     data: torch.Tensor
 
     def __repr__(self) -> str:
-        return (f"PoolingOutput(data={self.data})")
+        return f"PoolingOutput(data={self.data})"
 
     def __eq__(self, other: object) -> bool:
-        return (isinstance(other, self.__class__) and bool(
-            (self.data == other.data).all()))
+        return isinstance(other, self.__class__) and bool(
+            (self.data == other.data).all()
+        )
 
 
 class RequestOutput:
@@ -103,26 +108,27 @@ class RequestOutput:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[list[int]],
-        prompt_logprobs: Optional[PromptLogprobs],
+        prompt: str | None,
+        prompt_token_ids: list[int] | None,
+        prompt_logprobs: PromptLogprobs | None,
         outputs: list[CompletionOutput],
         finished: bool,
-        metrics: Optional[RequestMetrics] = None,
-        lora_request: Optional[LoRARequest] = None,
-        encoder_prompt: Optional[str] = None,
-        encoder_prompt_token_ids: Optional[list[int]] = None,
-        num_cached_tokens: Optional[int] = None,
+        metrics: RequestMetrics | RequestStateStats | None = None,
+        lora_request: LoRARequest | None = None,
+        encoder_prompt: str | None = None,
+        encoder_prompt_token_ids: list[int] | None = None,
+        num_cached_tokens: int | None = None,
         *,
-        multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
-        kv_transfer_params: Optional[dict[str, Any]] = None,
+        multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
     ) -> None:
         if kwargs:
-            logger.warning_once("RequestOutput: Ignoring extra arguments: %s",
-                                str(kwargs))
+            logger.warning_once(
+                "RequestOutput: Ignoring extra arguments: %s", str(kwargs)
+            )
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
@@ -149,16 +155,15 @@ class RequestOutput:
                     if aggregate:
                         # Merge outputs with same index
                         completion.text += next_completion.text
-                        if not isinstance(completion.token_ids,
-                                          MutableSequence):
+                        if not isinstance(completion.token_ids, MutableSequence):
                             completion.token_ids = list(completion.token_ids)
                         completion.token_ids.extend(next_completion.token_ids)
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
-                            completion.logprobs.extend(
-                                next_completion.logprobs)
+                            completion.logprobs.extend(next_completion.logprobs)
                         completion.cumulative_logprob = (
-                            next_completion.cumulative_logprob)
+                            next_completion.cumulative_logprob
+                        )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:
@@ -169,18 +174,20 @@ class RequestOutput:
                 self.outputs.append(next_completion)
 
     def __repr__(self) -> str:
-        return (f"RequestOutput(request_id={self.request_id}, "
-                f"prompt={self.prompt!r}, "
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"encoder_prompt={self.encoder_prompt!r}, "
-                f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
-                f"prompt_logprobs={self.prompt_logprobs}, "
-                f"outputs={self.outputs}, "
-                f"finished={self.finished}, "
-                f"metrics={self.metrics}, "
-                f"lora_request={self.lora_request}, "
-                f"num_cached_tokens={self.num_cached_tokens}, "
-                f"multi_modal_placeholders={self.multi_modal_placeholders})")
+        return (
+            f"RequestOutput(request_id={self.request_id}, "
+            f"prompt={self.prompt!r}, "
+            f"prompt_token_ids={self.prompt_token_ids}, "
+            f"encoder_prompt={self.encoder_prompt!r}, "
+            f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
+            f"prompt_logprobs={self.prompt_logprobs}, "
+            f"outputs={self.outputs}, "
+            f"finished={self.finished}, "
+            f"metrics={self.metrics}, "
+            f"lora_request={self.lora_request}, "
+            f"num_cached_tokens={self.num_cached_tokens}, "
+            f"multi_modal_placeholders={self.multi_modal_placeholders})"
+        )
 
 
 _O = TypeVar("_O", default=PoolingOutput)
@@ -194,21 +201,32 @@ class PoolingRequestOutput(Generic[_O]):
         request_id (str): A unique identifier for the pooling request.
         outputs (PoolingOutput): The pooling results for the given input.
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
+        num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self, request_id: str, outputs: _O,
-                 prompt_token_ids: list[int], finished: bool):
+    def __init__(
+        self,
+        request_id: str,
+        outputs: _O,
+        prompt_token_ids: list[int],
+        num_cached_tokens: int,
+        finished: bool,
+    ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
+        self.num_cached_tokens = num_cached_tokens
         self.finished = finished
         self.outputs = outputs
 
     def __repr__(self):
-        return (f"{type(self).__name__}(request_id={self.request_id!r}, "
-                f"outputs={self.outputs!r}, "
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"finished={self.finished})")
+        return (
+            f"{type(self).__name__}(request_id={self.request_id!r}, "
+            f"outputs={self.outputs!r}, "
+            f"prompt_token_ids={self.prompt_token_ids}, "
+            f"num_cached_tokens={self.num_cached_tokens}, "
+            f"finished={self.finished})"
+        )
 
 
 @dataclass
@@ -219,6 +237,7 @@ class EmbeddingOutput:
         embedding: The embedding vector, which is a list of floats.
             Its length depends on the hidden dimension of the model.
     """
+
     embedding: list[float]
 
     @staticmethod
@@ -238,13 +257,13 @@ class EmbeddingOutput:
 
 
 class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
-
     @staticmethod
     def from_base(request_output: PoolingRequestOutput):
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
             outputs=EmbeddingOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
 
@@ -257,6 +276,7 @@ class ClassificationOutput:
         probs: The probability vector, which is a list of floats.
             Its length depends on the number of classes.
     """
+
     probs: list[float]
 
     @staticmethod
@@ -277,13 +297,13 @@ class ClassificationOutput:
 
 
 class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
-
     @staticmethod
     def from_base(request_output: PoolingRequestOutput):
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
             outputs=ClassificationOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
 
@@ -295,6 +315,7 @@ class ScoringOutput:
     Args:
         score: The similarity score, which is a scalar value.
     """
+
     score: float
 
     @staticmethod
@@ -313,12 +334,12 @@ class ScoringOutput:
 
 
 class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
-
     @staticmethod
     def from_base(request_output: PoolingRequestOutput):
         return ScoringRequestOutput(
             request_id=request_output.request_id,
             outputs=ScoringOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )

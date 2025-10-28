@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 
 # Using the default value (240.0) from pytorch will cause accuracy
@@ -28,12 +26,12 @@ class QuantFP8(CustomOp):
     """
 
     def __init__(
-            self,
-            static: bool,
-            group_shape: GroupShape,
-            num_token_padding: Optional[int] = None,
-            column_major_scales: bool = False,
-            use_ue8m0: Optional[bool] = None,  # for Torch compile
+        self,
+        static: bool,
+        group_shape: GroupShape,
+        num_token_padding: int | None = None,
+        column_major_scales: bool = False,
+        use_ue8m0: bool | None = None,  # for Torch compile
     ):
         """
         :param static: static or dynamic quantization
@@ -57,51 +55,59 @@ class QuantFP8(CustomOp):
             self.group_size = group_shape.col
         else:
             assert group_shape in {GroupShape.PER_TOKEN, GroupShape.PER_TENSOR}
-            assert not static or group_shape == GroupShape.PER_TENSOR, \
+            assert not static or group_shape == GroupShape.PER_TENSOR, (
                 "Only per-tensor scales supported for static quantization."
+            )
             self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
 
     def forward_cuda(
         self,
         x: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        scale_ub: Optional[torch.Tensor] = None,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
             from vllm.model_executor.layers.quantization.utils import fp8_utils
+
             return fp8_utils.per_token_group_quant_fp8(
                 x,
                 group_size=self.group_size,
                 column_major_scales=self.column_major_scales,
                 dtype=_FP8_DTYPE,
-                use_ue8m0=self.use_ue8m0)
+                use_ue8m0=self.use_ue8m0,
+            )
 
         assert (scale is not None) == self.static
-        assert scale_ub is None or (not self.static and self.group_shape
-                                    == GroupShape.PER_TOKEN
-                                    and scale_ub.numel() == 1)
+        assert scale_ub is None or (
+            not self.static
+            and self.group_shape == GroupShape.PER_TOKEN
+            and scale_ub.numel() == 1
+        )
         return ops.scaled_fp8_quant(
             x,
             scale,
             num_token_padding=self.num_token_padding,
             scale_ub=scale_ub,
-            use_per_token_if_dynamic=self.use_per_token_if_dynamic)
+            use_per_token_if_dynamic=self.use_per_token_if_dynamic,
+        )
 
     def forward_native(
         self,
         x: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        scale_ub: Optional[torch.Tensor] = None,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
     ):
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
             return self._quantize_group_native(x)
 
         assert (scale is not None) == self.static
-        assert scale_ub is None or (not self.static and self.group_shape
-                                    == GroupShape.PER_TOKEN
-                                    and scale_ub.numel() == 1)
+        assert scale_ub is None or (
+            not self.static
+            and self.group_shape == GroupShape.PER_TOKEN
+            and scale_ub.numel() == 1
+        )
 
         if scale is None:
             if self.group_shape == GroupShape.PER_TOKEN:
@@ -130,7 +136,8 @@ class QuantFP8(CustomOp):
         return out, scale
 
     def _quantize_group_native(
-            self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         orig_shape = x.shape
         hidden_dim = x.shape[-1]
         num_groups = (hidden_dim + self.group_size - 1) // self.group_size
@@ -138,7 +145,7 @@ class QuantFP8(CustomOp):
 
         if padded_dim != hidden_dim:
             padding = padded_dim - hidden_dim
-            x = F.pad(x, (0, padding), mode='constant', value=0.0)
+            x = F.pad(x, (0, padding), mode="constant", value=0.0)
 
         x_grouped = x.view(-1, num_groups, self.group_size)
         absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
@@ -156,7 +163,7 @@ class QuantFP8(CustomOp):
         x_quant = x_quant.view(orig_shape)
 
         scales = scales.squeeze(-1)
-        scales = scales.reshape(orig_shape[:-1] + (num_groups, ))
+        scales = scales.reshape(orig_shape[:-1] + (num_groups,))
 
         if self.column_major_scales:
             scales = scales.transpose(-2, -1).contiguous().transpose(-1, -2)

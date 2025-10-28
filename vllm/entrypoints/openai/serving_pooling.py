@@ -2,87 +2,79 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
+import json
 import time
 from collections.abc import AsyncGenerator
-from typing import Final, Literal, Optional, Union, cast
+from typing import Final, cast
 
 import jinja2
-import numpy as np
-import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
-from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-# yapf: disable
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
-                                              IOProcessorRequest,
-                                              IOProcessorResponse,
-                                              PoolingChatRequest,
-                                              PoolingCompletionRequest,
-                                              PoolingRequest, PoolingResponse,
-                                              PoolingResponseData, UsageInfo)
-# yapf: enable
+from vllm.entrypoints.openai.protocol import (
+    ErrorResponse,
+    IOProcessorRequest,
+    IOProcessorResponse,
+    PoolingBytesResponse,
+    PoolingChatRequest,
+    PoolingCompletionRequest,
+    PoolingRequest,
+    PoolingResponse,
+    PoolingResponseData,
+    UsageInfo,
+)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
-from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.plugins.io_processors import get_io_processor
-from vllm.utils import merge_async_iterators
+from vllm.outputs import PoolingRequestOutput
+from vllm.tasks import PoolingTask, SupportedTask
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
+    encode_pooling_bytes,
+    encode_pooling_output,
+)
 
 logger = init_logger(__name__)
 
 
-def _get_data(
-    output: PoolingOutput,
-    encoding_format: Literal["float", "base64"],
-) -> Union[list[float], str]:
-    if encoding_format == "float":
-        return output.data.tolist()
-    elif encoding_format == "base64":
-        # Force to use float32 for base64 encoding
-        # to match the OpenAI python client behavior
-        pt_float32 = output.data.to(dtype=torch.float32)
-        pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
-        return base64.b64encode(pooling_bytes).decode("utf-8")
-
-    assert_never(encoding_format)
-
-
 class OpenAIServingPooling(OpenAIServing):
-
     def __init__(
         self,
         engine_client: EngineClient,
-        vllm_config: VllmConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
+        supported_tasks: tuple[SupportedTask, ...],
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
-        super().__init__(engine_client=engine_client,
-                         model_config=vllm_config.model_config,
-                         models=models,
-                         request_logger=request_logger,
-                         log_error_stack=log_error_stack)
+        super().__init__(
+            engine_client=engine_client,
+            models=models,
+            request_logger=request_logger,
+            log_error_stack=log_error_stack,
+        )
 
+        self.supported_tasks = supported_tasks
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
-        io_processor_plugin = self.model_config.io_processor_plugin
-        self.io_processor = get_io_processor(vllm_config, io_processor_plugin)
+        self.trust_request_chat_template = trust_request_chat_template
 
     async def create_pooling(
         self,
         request: PoolingRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[PoolingResponse, IOProcessorResponse, ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> PoolingResponse | IOProcessorResponse | PoolingBytesResponse | ErrorResponse:
         """
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
@@ -108,12 +100,13 @@ class OpenAIServingPooling(OpenAIServing):
 
             if getattr(request, "dimensions", None) is not None:
                 return self.create_error_response(
-                    "dimensions is currently not supported")
+                    "dimensions is currently not supported"
+                )
 
-            truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
-                                             None)
+            truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
             truncate_prompt_tokens = _validate_truncation_size(
-                self.max_model_len, truncate_prompt_tokens)
+                self.max_model_len, truncate_prompt_tokens
+            )
 
             if is_io_processor_request:
                 if self.io_processor is None:
@@ -121,14 +114,23 @@ class OpenAIServingPooling(OpenAIServing):
                         "No IOProcessor plugin installed. Please refer "
                         "to the documentation and to the "
                         "'prithvi_geospatial_mae_io_processor' "
-                        "offline inference example for more details.")
+                        "offline inference example for more details."
+                    )
 
                 validated_prompt = self.io_processor.parse_request(request)
 
                 engine_prompts = await self.io_processor.pre_process_async(
-                    prompt=validated_prompt, request_id=request_id)
+                    prompt=validated_prompt, request_id=request_id
+                )
 
             elif isinstance(request, PoolingChatRequest):
+                error_check_ret = self._validate_chat_template(
+                    request_chat_template=request.chat_template,
+                    chat_template_kwargs=request.chat_template_kwargs,
+                    trust_request_chat_template=self.trust_request_chat_template,
+                )
+                if error_check_ret is not None:
+                    return error_check_ret
                 (
                     _,
                     _,
@@ -138,8 +140,7 @@ class OpenAIServingPooling(OpenAIServing):
                     tokenizer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.
-                    chat_template_content_format,
+                    chat_template_content_format=self.chat_template_content_format,
                     # In pooling requests, we are not generating tokens,
                     # so there is no need to append extra tokens to the input
                     add_generation_prompt=False,
@@ -152,8 +153,7 @@ class OpenAIServingPooling(OpenAIServing):
                     config=self._build_render_config(request),
                 )
             else:
-                raise ValueError(
-                    f"Unsupported request of type {type(request)}")
+                raise ValueError(f"Unsupported request of type {type(request)}")
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -161,23 +161,46 @@ class OpenAIServingPooling(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            pooling_params = request.to_pooling_params()
+            if is_io_processor_request:
+                assert self.io_processor is not None and isinstance(
+                    request, IOProcessorRequest
+                )
+                pooling_params = self.io_processor.validate_or_generate_params()
+            else:
+                pooling_params = request.to_pooling_params()
+
+            pooling_task: PoolingTask
+            if "token_embed" in self.supported_tasks:
+                pooling_task = "token_embed"
+            elif "token_classify" in self.supported_tasks:
+                pooling_task = "token_classify"
+            elif "plugin" in self.supported_tasks:
+                pooling_task = "plugin"
+            else:
+                return self.create_error_response(
+                    f"pooling_task must be one of {self.supported_tasks}."
+                )
 
             try:
-                pooling_params.verify("encode", self.model_config)
+                pooling_params.verify(pooling_task, self.model_config)
             except ValueError as e:
                 return self.create_error_response(str(e))
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
-                self._log_inputs(request_id_item,
-                                 engine_prompt,
-                                 params=pooling_params,
-                                 lora_request=lora_request)
+                self._log_inputs(
+                    request_id_item,
+                    engine_prompt,
+                    params=pooling_params,
+                    lora_request=lora_request,
+                )
 
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
 
                 generator = self.engine_client.encode(
                     engine_prompt,
@@ -203,12 +226,11 @@ class OpenAIServingPooling(OpenAIServing):
             )
             return self.io_processor.output_to_response(output)
 
-        assert isinstance(request,
-                          (PoolingCompletionRequest, PoolingChatRequest))
+        assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: list[Optional[PoolingRequestOutput]]
+        final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -216,8 +238,7 @@ class OpenAIServingPooling(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(list[PoolingRequestOutput],
-                                           final_res_batch)
+            final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
 
             response = self.request_output_to_pooling_response(
                 final_res_batch_checked,
@@ -225,6 +246,8 @@ class OpenAIServingPooling(OpenAIServing):
                 created_time,
                 model_name,
                 request.encoding_format,
+                request.embed_dtype,
+                request.endianness,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -240,37 +263,71 @@ class OpenAIServingPooling(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        encoding_format: Literal["float", "base64"],
-    ) -> PoolingResponse:
-        items: list[PoolingResponseData] = []
-        num_prompt_tokens = 0
+        encoding_format: EncodingFormat,
+        embed_dtype: EmbedDType,
+        endianness: Endianness,
+    ) -> PoolingResponse | PoolingBytesResponse:
+        def encode_float_base64():
+            items: list[PoolingResponseData] = []
+            num_prompt_tokens = 0
 
-        for idx, final_res in enumerate(final_res_batch):
-            item = PoolingResponseData(
-                index=idx,
-                data=_get_data(final_res.outputs, encoding_format),
+            for idx, final_res in enumerate(final_res_batch):
+                item = PoolingResponseData(
+                    index=idx,
+                    data=encode_pooling_output(
+                        final_res,
+                        encoding_format=encoding_format,
+                        embed_dtype=embed_dtype,
+                        endianness=endianness,
+                    ),
+                )
+                prompt_token_ids = final_res.prompt_token_ids
+
+                items.append(item)
+                num_prompt_tokens += len(prompt_token_ids)
+
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                total_tokens=num_prompt_tokens,
             )
-            prompt_token_ids = final_res.prompt_token_ids
 
-            items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
+            return PoolingResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                data=items,
+                usage=usage,
+            )
 
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
+        def encode_bytes():
+            body, items, usage = encode_pooling_bytes(
+                pooling_outputs=final_res_batch,
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+            )
 
-        return PoolingResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            data=items,
-            usage=usage,
-        )
+            metadata = {
+                "id": request_id,
+                "created": created_time,
+                "model": model_name,
+                "data": items,
+                "usage": usage,
+            }
+            return PoolingBytesResponse(
+                body=body,
+                metadata=json.dumps(metadata),
+            )
 
-    def _build_render_config(
-            self, request: PoolingCompletionRequest) -> RenderConfig:
+        if encoding_format == "float" or encoding_format == "base64":
+            return encode_float_base64()
+        elif encoding_format == "bytes":
+            return encode_bytes()
+        else:
+            assert_never(encoding_format)
+
+    def _build_render_config(self, request: PoolingCompletionRequest) -> RenderConfig:
         return RenderConfig(
             max_length=self.max_model_len,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens)
+            add_special_tokens=request.add_special_tokens,
+        )

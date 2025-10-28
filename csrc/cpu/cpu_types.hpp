@@ -14,7 +14,8 @@
   // arm implementation
   #include "cpu_types_arm.hpp"
 #else
-  #warning "unsupported vLLM cpu implementation"
+  #warning "unsupported vLLM cpu implementation, vLLM will compile with scalar"
+  #include "cpu_types_scalar.hpp"
 #endif
 
 #ifdef _OPENMP

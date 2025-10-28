@@ -92,13 +92,18 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
-void poly_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-               torch::Tensor& bias, double epsilon);
-
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
                                  const torch::Tensor& output_mask,
                                  const torch::Tensor& repetition_penalties);
+
+void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,
+                   const torch::Tensor& rowEnds, torch::Tensor& indices,
+                   int64_t numRows, int64_t stride0, int64_t stride1);
+
+void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
+                          const torch::Tensor& seq_lens, torch::Tensor& indices,
+                          int64_t numRows, int64_t stride0, int64_t stride1);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
@@ -133,12 +138,12 @@ void silu_and_mul_nvfp4_quant(torch::Tensor& out,
                               torch::Tensor& input,
                               torch::Tensor& input_global_scale);
 #endif
-void silu_mul_fp8_quant_deep_gemm_cuda(
+void persistent_masked_m_silu_mul_quant(
     const at::Tensor& input,   // (E, T, 2*H)
     const at::Tensor& counts,  // (E)
     at::Tensor& y_q,           // (E, T, H) [OUT]
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens);
+    bool use_ue8m0);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
@@ -302,7 +307,7 @@ void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int64_t bit);
+                        bool use_exllama, bool use_v2_format, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
@@ -327,6 +332,12 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& cache_indices,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
+
+torch::Tensor dynamic_4bit_int_moe_cpu(
+    torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
+    torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,
+    int64_t I2, int64_t group_size, bool apply_router_weight_on_input,
+    int64_t activation_kind);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,

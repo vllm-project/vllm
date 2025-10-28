@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -19,7 +18,7 @@ class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
     PplxPrepareAndFinalize and BatchedPrepareAndFinalize. PplxPrepareAndFinalize
     does the weight-application + reduction as part of the pplx combine kernel.
     But the BatchedPrepareAndFinalize needs an implementation. To facilitate
-    this case, the BatchedTritonExperts could use TopKWeightAndReduceDelegate 
+    this case, the BatchedTritonExperts could use TopKWeightAndReduceDelegate
     so the PrepareAndFinalize implementations could choose how to
     weight + reduce.
     """
@@ -27,12 +26,18 @@ class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
     def __eq__(self, other):
         return isinstance(other, TopKWeightAndReduceDelegate)
 
-    def apply(self, output: Optional[torch.Tensor],
-              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
-              apply_router_weight_on_input: bool) -> torch.Tensor:
-        raise RuntimeError("The caller is expected to choose an appropriate "
-                           "TopKWeightAndReduce implementation.")
+    def apply(
+        self,
+        output: torch.Tensor | None,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
+        raise RuntimeError(
+            "The caller is expected to choose an appropriate "
+            "TopKWeightAndReduce implementation."
+        )
 
 
 class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
@@ -44,10 +49,14 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
     def __eq__(self, other):
         return isinstance(other, TopKWeightAndReduceNoOP)
 
-    def apply(self, output: Optional[torch.Tensor],
-              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
-              apply_router_weight_on_input: bool) -> torch.Tensor:
+    def apply(
+        self,
+        output: torch.Tensor | None,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
         # Weight application and reduction operations are already done.
         if output is None:
             return fused_expert_output
@@ -57,7 +66,8 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         assert output.size() == fused_expert_output.size(), (
             "output shape is expected to match the fused_expert_output shape. "
             f"But got output={output.size()}, "
-            f"used_expert_output={fused_expert_output.size()}")
+            f"used_expert_output={fused_expert_output.size()}"
+        )
         output.copy_(fused_expert_output, non_blocking=True)
         return output
 
@@ -71,11 +81,14 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
     def __eq__(self, other):
         return isinstance(other, TopKWeightAndReduceContiguous)
 
-    def apply(self, output: Optional[torch.Tensor],
-              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
-              apply_router_weight_on_input: bool) -> torch.Tensor:
-
+    def apply(
+        self,
+        output: torch.Tensor | None,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
         m, num_topk = topk_ids.size()
         k = fused_expert_output.size(-1)
         if fused_expert_output.ndim == 2:
@@ -83,17 +96,21 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
 
         assert fused_expert_output.size() == (m, num_topk, k), (
             f"Expected fused_expert_output size {(m, num_topk, k)}. But got "
-            f"{fused_expert_output.size()}")
+            f"{fused_expert_output.size()}"
+        )
 
         if not apply_router_weight_on_input:
             fused_expert_output.mul_(topk_weights.view(m, -1, 1))
 
         if output is None:
-            output = torch.empty((m, k),
-                                 device=fused_expert_output.device,
-                                 dtype=fused_expert_output.dtype)
+            output = torch.empty(
+                (m, k),
+                device=fused_expert_output.device,
+                dtype=fused_expert_output.dtype,
+            )
         assert output.size() == (m, k), (
-            f"Expected output size {(m, k)}. But got {output.size()}")
+            f"Expected output size {(m, k)}. But got {output.size()}"
+        )
 
         ops.moe_sum(fused_expert_output, output)
         return output
@@ -109,27 +126,35 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
         self.rank = rank
 
     def __eq__(self, other):
-        return (isinstance(other, TopKWeightAndReduceNaiveBatched)
-                and (other.rank == self.rank))
+        return isinstance(other, TopKWeightAndReduceNaiveBatched) and (
+            other.rank == self.rank
+        )
 
-    def apply(self, output: Optional[torch.Tensor],
-              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
-              apply_router_weight_on_input: bool) -> torch.Tensor:
+    def apply(
+        self,
+        output: torch.Tensor | None,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
         assert fused_expert_output.ndim == 3
         num_tokens = topk_ids.size(0)
         num_local_experts = fused_expert_output.size(0)
         K = fused_expert_output.size(-1)
 
         if output is None:
-            output = torch.zeros((num_tokens, K),
-                                 device=fused_expert_output.device,
-                                 dtype=fused_expert_output.dtype)
+            output = torch.zeros(
+                (num_tokens, K),
+                device=fused_expert_output.device,
+                dtype=fused_expert_output.dtype,
+            )
         else:
             output.fill_(0)
 
         assert output.size() == (num_tokens, K), (
-            f"Expected output size {(num_tokens, K)}, but got {output.size()}")
+            f"Expected output size {(num_tokens, K)}, but got {output.size()}"
+        )
 
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
