@@ -102,11 +102,11 @@ class EngineCore:
             self.profiler_start_iters, self.profiler_stop_iters = (
                 self._get_profiler_iteration_index_env_var("VLLM_PROFILE_START_STOP")
             )
-            self.print_profile_step_iteration_info = os.environ.get("VLLM_PROFILE_ITERATION_INFO", "").lower() == "true"
+            self.print_profile_step_iteration_info = os.environ.get("VLLM_PROFILE_ITERATION_INFO", "0") == "1"
             # The dict initially records each request's context token size. After processing, the size will decrease.
             # When this size <= 0, then it means this request is in generation phase. This helps to collect iteration
             # info.
-        self.schedule_requests: dict[str, int] = {}
+            self.schedule_requests: dict[str, int] = {}
 
         self.log_stats = log_stats
 
