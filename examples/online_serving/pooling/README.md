@@ -42,20 +42,20 @@ python examples/online_serving/pooling/multi_vector_retrieval_client.py
 python examples/online_serving/pooling/ner_client.py
 ```
 
-## Openai chat embedding for multimodal usage
+## OpenAI chat embedding for multimodal usage
 
 ```bash
 python examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py
 ```
 
-## Openai classification usage
+## OpenAI classification usage
 
 ```bash
 # vllm serve jason9693/Qwen2.5-1.5B-apeach
 python examples/online_serving/pooling/openai_classification_client.py
 ```
 
-## Openai cross_encoder score usage
+## OpenAI cross_encoder score usage
 
 ```bash
 # vllm serve BAAI/bge-reranker-v2-m3
@@ -69,21 +69,21 @@ python examples/online_serving/pooling/openai_cross_encoder_score.py
 python examples/online_serving/pooling/openai_cross_encoder_score_for_multimodal.py
 ```
 
-## Openai embedding usage
+## OpenAI embedding usage
 
 ```bash
 # vllm serve intfloat/e5-small
 python examples/online_serving/pooling/openai_embedding_client.py
 ```
 
-## Openai embedding matryoshka dimensions usage
+## OpenAI embedding matryoshka dimensions usage
 
 ```bash
 # vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
 python examples/online_serving/pooling/openai_embedding_matryoshka_fy.py
 ```
 
-## Openai pooling usage
+## OpenAI pooling usage
 
 ```bash
 # vllm serve internlm/internlm2-1_8b-reward --trust-remote-code
