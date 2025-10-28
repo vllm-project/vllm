@@ -35,9 +35,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         if use_native:
             logger.info("Initializing native LMCache connector")
             # lazy import
-            from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
-                vllm_v1_adapter as _adapter,
-            )
+            from vllm.distributed.kv_transfer.kv_connector.v1 import lmcache_integration
+
+            _adapter = lmcache_integration.vllm_v1_adapter
+
             cls = _adapter.LMCacheConnectorV1Impl
         else:
             logger.info("Initializing latest dev LMCache connector")
