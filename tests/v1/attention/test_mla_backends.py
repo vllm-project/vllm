@@ -255,6 +255,13 @@ class MockAttentionLayer:
         self._v_scale = torch.tensor(1.0, device=device)
 
 
+class MockMLAAttentionLayer:
+    """A mock MLA attention layer for populating static_forward_context."""
+
+    def __init__(self, impl):
+        self.impl = impl
+
+
 def run_attention_backend(
     backend: _Backend,
     kv_cache_spec: FullAttentionSpec,
@@ -279,13 +286,6 @@ def run_attention_backend(
     # Set the current vllm config so that get_current_vllm_config() works
     # in the backend implementations
     with set_current_vllm_config(vllm_config):
-        # Build metadata
-        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        attn_metadata = builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-        )
-
         # Instantiate MLA implementation
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
@@ -318,6 +318,19 @@ def run_attention_backend(
         # Process weights to create W_UK_T and W_UV attributes needed by MLA
         act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
         impl.process_weights_after_loading(act_dtype)
+
+        # Populate static_forward_context with mock attention layers
+        for layer_name in layer_names:
+            vllm_config.compilation_config.static_forward_context[layer_name] = (
+                MockMLAAttentionLayer(impl)
+            )
+
+        # Build metadata
+        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+        attn_metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
 
         # Create mock layer and output buffer
         mock_layer = MockAttentionLayer(device)
