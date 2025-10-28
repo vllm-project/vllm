@@ -205,7 +205,7 @@ if TYPE_CHECKING:
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
-    VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = False
+    VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = True
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
@@ -1362,7 +1362,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow DeepEP to use nvlink for internode_ll kernel, turn this on for
     # better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK": lambda: bool(
-        int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK", "0"))
+        int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK", "1"))
     ),
     # Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll kernel,
     # turn this for better latency on GB200 like system
