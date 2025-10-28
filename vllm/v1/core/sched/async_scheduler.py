@@ -61,9 +61,7 @@ class AsyncScheduler(Scheduler):
         return new_token_ids, stopped
 
     def _update_computed_tokens_after_speculation(
-        self,
-        request: Request,
-        num_rejected: int,
+        self, request: Request, num_rejected: int
     ):
         """Update the computed tokens for each request, which is necessary
         for spec decoding. In sync scheduler, we need to revert
@@ -81,7 +79,4 @@ class AsyncScheduler(Scheduler):
             # update num_output_placeholders here to reflect the actual number
             # of accepted output tokens.
             request.num_output_placeholders -= num_rejected
-        super()._update_computed_tokens_after_speculation(
-            request,
-            num_rejected,
-        )
+        super()._update_computed_tokens_after_speculation(request, num_rejected)

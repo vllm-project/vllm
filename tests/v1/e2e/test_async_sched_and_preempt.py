@@ -39,7 +39,6 @@ class TestPreemptAndAsyncScheduling:
         max_tokens=20,
     )
 
-    @dynamo_config.patch(cache_size_limit=16)
     def test_with_spec_decoding(self, monkeypatch: pytest.MonkeyPatch):
         """Test consistency of combos of async scheduling, preemption,
         uni/multiproc executor, and various sampling parameters."""
@@ -47,11 +46,10 @@ class TestPreemptAndAsyncScheduling:
         self.preempt_and_async_scheduling_e2e(
             monkeypatch,
             MTP_MODEL,
-            [{}],
+            self.sampling_param_tests,
             spec_config={"method": "mtp", "num_speculative_tokens": 1},
         )
 
-    @dynamo_config.patch(cache_size_limit=16)
     def test_without_spec_decoding(self, monkeypatch: pytest.MonkeyPatch):
         """Test consistency of combos of async scheduling, preemption,
         uni/multiproc executor with spec decoding."""
@@ -87,8 +85,8 @@ class TestPreemptAndAsyncScheduling:
                             else dict(gpu_memory_utilization=0.7)
                         )
                         test_config = (
-                            f"executor={executor}, preemption={test_preemption},"
-                            f" async_sched={async_scheduling}, "
+                            f"executor={executor}, preemption={test_preemption}, "
+                            f"async_sched={async_scheduling}, "
                             f"spec_decoding={spec_decoding}"
                         )
                         print("-" * 80)
@@ -141,22 +139,29 @@ class TestPreemptAndAsyncScheduling:
 
         baseline_config, baseline_tests = outputs[0]
 
+        failure = None
         for test_config, test_outputs in outputs[1:]:
             for (base_outs, base_logprobs), (test_outs, test_logprobs), params in zip(
                 baseline_tests, test_outputs, sampling_param_tests
             ):
-                check_outputs_equal(
-                    outputs_0_lst=base_outs,
-                    outputs_1_lst=test_outs,
-                    name_0=f"baseline=[{baseline_config}], params={params}",
-                    name_1=f"config=[{test_config}], params={params}",
-                )
-                # NOTE(Ronald1995): logprobs with speculative decoding need to
-                # be updated.
-                if not spec_decoding:
+                try:
+                    check_outputs_equal(
+                        outputs_0_lst=base_outs,
+                        outputs_1_lst=test_outs,
+                        name_0=f"baseline=[{baseline_config}], params={params}",
+                        name_1=f"config=[{test_config}], params={params}",
+                    )
+
                     assert _all_logprobs_match(base_logprobs, test_logprobs)
 
-                print(f"PASSED: config=[{test_config}], params={params}")
+                    print(f"PASSED: config=[{test_config}], params={params}")
+                except AssertionError as e:
+                    print(f"FAILED: config=[{test_config}], params={params}")
+                    if failure is None:
+                        failure = e
+
+        if failure is not None:
+            raise failure
 
 
 def _all_logprobs_match(req_a, req_b) -> bool:

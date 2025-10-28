@@ -962,10 +962,7 @@ class Scheduler(SchedulerInterface):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
                 num_rejected = num_draft_tokens - num_accepted
-                self._update_computed_tokens_after_speculation(
-                    request,
-                    num_rejected,
-                )
+                self._update_computed_tokens_after_speculation(request, num_rejected)
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -1101,9 +1098,7 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def _update_computed_tokens_after_speculation(
-        self,
-        request: Request,
-        num_rejected: int,
+        self, request: Request, num_rejected: int
     ):
         """Update the computed tokens for each request, which is necessary
         for spec decoding. In sync scheduler, we need to revert
