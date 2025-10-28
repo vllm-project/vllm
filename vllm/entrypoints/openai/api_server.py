@@ -107,6 +107,7 @@ from vllm.entrypoints.utils import (
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
 from vllm.utils.argparse_utils import FlexibleArgumentParser
