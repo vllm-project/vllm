@@ -2322,18 +2322,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
-            sampled_id_cnt: int = len(sampled_ids) if sampled_ids else 0
+            num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
 
             if cu_num_accepted_tokens is not None:
                 cu_num_accepted_tokens.append(
-                    cu_num_accepted_tokens[-1] + sampled_id_cnt
+                    cu_num_accepted_tokens[-1] + num_sampled_ids
                 )
 
             if not sampled_ids:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            end_idx = start_idx + sampled_id_cnt
+            end_idx = start_idx + num_sampled_ids
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
