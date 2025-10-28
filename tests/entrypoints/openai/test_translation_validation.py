@@ -48,25 +48,11 @@ async def test_non_asr_model(foscolo):
         assert err["message"] == "The model does not support Translations API"
 
 
-# NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
-@pytest.mark.asyncio
-async def test_basic_audio(foscolo, client_and_model):
-    client, model_name = client_and_model
-    translation = await client.audio.translations.create(
-        model=model_name,
-        file=foscolo,
-        response_format="text",
-        # TODO remove `language="it"` once language detection is implemented
-        extra_body=dict(language="it", to_language="en"),
-        temperature=0.0,
-    )
-    out = json.loads(translation)["text"].strip().lower()
-    assert "greek sea" in out
-
-
 @pytest.mark.asyncio
 async def test_basic_audio_with_lora(mary_had_lamb):
     """Ensure STT (translate) requests can pass LoRA through to generate."""
+    # NOTE - careful to call this test before the module scoped server
+    # fixture, otherwise it'll OOMkill the CI
     model_name = "ibm-granite/granite-speech-3.3-2b"
     lora_model_name = "speech"
     server_args = [
@@ -94,6 +80,22 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         )
     out = json.loads(translation)["text"].strip().lower()
     assert "mary tenía un pequeño cordero" in out
+
+
+# NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
+@pytest.mark.asyncio
+async def test_basic_audio(foscolo, client_and_model):
+    client, model_name = client_and_model
+    translation = await client.audio.translations.create(
+        model=model_name,
+        file=foscolo,
+        response_format="text",
+        # TODO remove `language="it"` once language detection is implemented
+        extra_body=dict(language="it", to_language="en"),
+        temperature=0.0,
+    )
+    out = json.loads(translation)["text"].strip().lower()
+    assert "greek sea" in out
 
 
 @pytest.mark.asyncio
