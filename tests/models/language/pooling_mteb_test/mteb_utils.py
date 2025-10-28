@@ -303,7 +303,6 @@ def mteb_test_embed_models(
 
 
 def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):
-    pytest.skip("Skipping test.")
     with tempfile.TemporaryDirectory() as prediction_folder:
         bm25s = mteb.get_model("bm25s")
         eval_splits = ["test"]
@@ -361,11 +360,9 @@ def mteb_test_rerank_models(
     model_info: RerankModelInfo,
     vllm_extra_kwargs=None,
     hf_model_callback=None,
-    vllm_mteb_encoder=VllmMtebEncoder,
+    vllm_mteb_encoder=VllmMtebCrossEncoder,
     atol=MTEB_RERANK_TOL,
 ):
-    pytest.skip("Skipping test.")
-
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
     with vllm_runner(
