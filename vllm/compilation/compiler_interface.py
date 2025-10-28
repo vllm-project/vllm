@@ -220,7 +220,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert key is not None
         path = os.path.join(self.cache_dir, key)
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            compiled_graph.save(path=path, format="unpacked")
+            compiled_graph.save(path=path, format=envs.VLLM_COMPILE_CACHE_SAVE_FORMAT)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
 
@@ -236,8 +236,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
         path = handle[1]
+        print("[DEBUG] Loading compiled artifact from %s", path)
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
-            path=path, format="unpacked"
+            path=path, format=envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
         )
         from torch._inductor.compile_fx import graph_returns_tuple
 
