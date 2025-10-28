@@ -221,7 +221,7 @@ steps:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
-  - TP_SIZE=2 DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py
+  - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: EPLB Algorithm Test # 5min
   timeout_in_minutes: 15
