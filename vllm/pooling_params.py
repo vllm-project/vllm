@@ -87,6 +87,11 @@ class PoolingParams(
             msg = f"You cannot overwrite {self.task=!r} with {task=!r}!"
             raise ValueError(msg)
 
+        # plugin task uses io_processor.parse_request to verify inputs,
+        # skipping PoolingParams verify
+        if self.task == "plugin":
+            return
+
         # NOTE: Task validation needs to done against the model instance,
         # which is not available in model config. So, it's not included
         # in this method

@@ -25,6 +25,10 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
         # `enable_chunked_prefill`: Set to `False` instead of `None` in VllmRunner
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
+        enforce_eager=True,
+        runner="pooling",
+        enable_chunked_prefill=False,
+        enable_prefix_caching=False,
     ) as vllm_model:
         pooling_outputs = vllm_model.llm.encode(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
@@ -36,3 +40,4 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
             # We should ensure that all pooling task output.num_cached_tokens == 0
             # even if prefix caching is enabled
             assert output.num_cached_tokens >= 0
+            assert output.num_cached_tokens == 0

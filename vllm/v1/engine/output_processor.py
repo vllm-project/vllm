@@ -230,6 +230,7 @@ class RequestState:
             return PoolingRequestOutput(
                 request_id=request_id,
                 outputs=first_output,
+                num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=self.prompt_token_ids,
                 num_cached_tokens=self.num_cached_tokens,
                 finished=finished,

@@ -87,7 +87,7 @@ is ineffective.
 
 While ongoing efforts like <https://github.com/vllm-project/vllm/issues/17419>
 address the long build time at its source, the current workaround is to set `VLLM_CI_BRANCH`
-to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
+to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/long_build`)
 when manually triggering a build on Buildkite. This branch accomplishes two things:
 
 1. Increase the timeout limit to 10 hours so that the build doesn't time out.
@@ -100,35 +100,17 @@ to warm it up so that future builds are faster.
 
 ## Update dependencies
 
-Several vLLM dependencies, such as FlashInfer, also depend on PyTorch and need
+Several vLLM dependencies like xFormers depend on PyTorch and need
 to be updated accordingly. Rather than waiting for all of them to publish new
 releases (which would take too much time), they can be built from
 source to unblock the update process.
 
-### FlashInfer
-
-Here is how to build and install it from source with `torch2.7.0+cu128` in vLLM [Dockerfile](https://github.com/vllm-project/vllm/blob/27bebcd89792d5c4b08af7a65095759526f2f9e1/docker/Dockerfile#L259-L271):
-
-```bash
-export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'
-export FLASHINFER_ENABLE_SM90=1
-uv pip install --system \
-    --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
-```
-
-One caveat is that building FlashInfer from source adds approximately 30
-minutes to the vLLM build time. Therefore, it's preferable to cache the wheel in a
-public location for immediate installation, such as [this FlashInfer wheel link](https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl). For future releases, contact the PyTorch release
-team if you want to get the package published there.
-
 ### xFormers
 
-Similar to FlashInfer, here is how to build and install xFormers from source:
-
 ```bash
-export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
+export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
 MAX_JOBS=16 uv pip install --system \
-    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
+    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32.post2"
 ```
 
 ## Update all the different vLLM platforms

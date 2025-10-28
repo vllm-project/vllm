@@ -19,7 +19,6 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -28,14 +27,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import (
-    decorate_logs,
-    set_process_title,
-)
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -60,7 +56,7 @@ from vllm.v1.engine.utils import (
     EngineZmqAddresses,
     get_device_indices,
 )
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -93,7 +89,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        if is_global_first_rank():
+        if vllm_config.parallel_config.data_parallel_rank == 0:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
                 VLLM_VERSION,
@@ -160,9 +156,7 @@ class EngineCore:
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(
-                self.scheduler.connector.get_finished_count()  # type: ignore
-            )
+            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
@@ -240,9 +234,10 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(
+        logger.info_once(
             ("init engine (profile, create kv cache, warmup model) took %.2f seconds"),
             elapsed,
+            scope="local",
         )
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
@@ -325,7 +320,6 @@ class EngineCore:
         with self.log_error_detail(scheduler_output):
             model_output = self.model_executor.execute_model(scheduler_output)
 
-        assert isinstance(model_output, ModelRunnerOutput)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -367,7 +361,7 @@ class EngineCore:
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
             future = self.model_executor.execute_model(scheduler_output, non_block=True)
-            batch_queue.appendleft((future, scheduler_output))  # type: ignore[arg-type]
+            batch_queue.appendleft((future, scheduler_output))
 
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
             if (
@@ -465,14 +459,6 @@ class EngineCore:
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
-
-    def save_tensorized_model(
-        self,
-        tensorizer_config,
-    ) -> None:
-        self.model_executor.save_tensorized_model(
-            tensorizer_config=tensorizer_config,
-        )
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
@@ -730,7 +716,7 @@ class EngineCoreProc(EngineCore):
         )
 
         # Receive initialization message.
-        logger.info("Waiting for init message from front-end.")
+        logger.debug("Waiting for init message from front-end.")
         if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
             raise RuntimeError(
                 "Did not receive response from front-end "

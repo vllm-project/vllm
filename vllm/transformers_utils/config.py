@@ -26,7 +26,10 @@ from huggingface_hub.utils import (
 )
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    MODEL_MAPPING_NAMES,
+)
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
@@ -616,6 +619,18 @@ def get_config(
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
+    # Architecture mapping for models without explicit architectures field
+    if not config.architectures:
+        if config.model_type not in MODEL_MAPPING_NAMES:
+            logger.warning(
+                "Model config does not have a top-level 'architectures' field: "
+                "expecting `hf_overrides={'architectures': ['...']}` to be passed "
+                "in engine args."
+            )
+        else:
+            model_type = MODEL_MAPPING_NAMES[config.model_type]
+            config.update({"architectures": [model_type]})
+
     # ModelOpt 0.31.0 and after saves the quantization config in the model
     # config file.
     quantization_config = config_dict.get("quantization_config", None)
@@ -943,7 +958,7 @@ def maybe_register_config_serialize_by_value() -> None:
             cloudpickle.register_pickle_by_value(transformers_modules)
 
             # ray vendors its own version of cloudpickle
-            from vllm.executor.ray_utils import ray
+            from vllm.v1.executor.ray_utils import ray
 
             if ray:
                 ray.cloudpickle.register_pickle_by_value(transformers_modules)
