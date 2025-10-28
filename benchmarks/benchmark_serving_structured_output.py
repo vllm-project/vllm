@@ -18,6 +18,13 @@ On the client side, run:
     when using tgi backend, add
         --endpoint /generate_stream
     to the end of the command above.
+
+    when using tensorrt-llm backend (OpenAI-compatible server), use
+        --endpoint /v1/chat/completions   # or /v1/completions
+    and optionally:
+        --api-key <token>                 # if the server requires auth
+        --debug                           # verbose request/response logging
+        --validate-schema                 # validate JSON outputs (requires jsonschema)
 """
 
 import argparse
