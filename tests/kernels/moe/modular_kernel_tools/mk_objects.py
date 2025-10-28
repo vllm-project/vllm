@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import torch
 
@@ -21,6 +22,10 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    BatchedMarlinExperts,
+    MarlinExperts,
+)
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEMethodBase, TritonExperts
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
@@ -39,13 +44,79 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
 
+QuantDtype: TypeAlias = torch.dtype | str | None
+
+
+@dataclass
+class TestMoEWeightQuantConfig:
+    quant_dtype: torch.dtype | str | None
+    per_out_ch_quant: bool
+    block_shape: list[int] | None
+
+
+@dataclass
+class TestMoEActivationQuantConfig:
+    quant_dtype: QuantDtype
+    per_act_token_quant: bool
+    block_shape: list[int] | None
+
 
 @dataclass
 class TestMoEQuantConfig:
-    quant_dtype: torch.dtype | str | None
-    per_out_ch_quant: bool
-    per_act_token_quant: bool
-    block_shape: list[int] | None
+    activation_quant: TestMoEActivationQuantConfig
+    weight_quant: TestMoEWeightQuantConfig
+
+    @property
+    def quant_dtype(self) -> QuantDtype:
+        return self.activation_quant.quant_dtype
+
+    @property
+    def per_act_token_quant(self) -> bool:
+        return self.activation_quant.per_act_token_quant
+
+    @property
+    def block_shape(self) -> list[int] | None:
+        # At the moment all of our test configurations are symmetric
+        # between activations and weights w.r.t. block_shape.
+        assert self.activation_quant.block_shape == self.weight_quant.block_shape
+        return self.activation_quant.block_shape
+
+    @property
+    def weight_quant_dtype(self) -> QuantDtype:
+        return self.weight_quant.quant_dtype
+
+    @property
+    def per_out_ch_quant(self) -> bool:
+        return self.weight_quant.per_out_ch_quant
+
+    @staticmethod
+    def make(
+        quant_dtype: QuantDtype,
+        per_act_token_quant: bool,
+        per_out_ch_quant: bool,
+        block_shape: list[int] | None,
+        weight_quant_dtype: QuantDtype | None = None,
+    ) -> "TestMoEQuantConfig":
+        """
+        When weight_quant_dtype is None, weight_quant_dtype defaults to
+        quant_dtype.
+        """
+        if weight_quant_dtype is None:
+            weight_quant_dtype = quant_dtype
+
+        act_quant = TestMoEActivationQuantConfig(
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
+
+        weight_quant = TestMoEWeightQuantConfig(
+            quant_dtype=weight_quant_dtype,
+            per_out_ch_quant=per_out_ch_quant,
+            block_shape=block_shape,
+        )
+
+        return TestMoEQuantConfig(activation_quant=act_quant, weight_quant=weight_quant)
 
 
 @dataclass
@@ -66,6 +137,7 @@ class ExpertInfo:
     supports_expert_map: bool
     needs_matching_quant: bool = False
     needs_deep_gemm: bool = False
+    is_marlin: bool = False
 
 
 PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize, PrepareFinalizeInfo] = {}
@@ -139,6 +211,7 @@ def register_experts(
         supports_expert_map,
         needs_matching_quant,
         needs_deep_gemm,
+        is_marlin=kind in [MarlinExperts, BatchedMarlinExperts],
     )
 
     MK_FUSED_EXPERT_TYPES.append(kind)
@@ -189,6 +262,25 @@ register_experts(
     batched_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
+    supports_chunking=False,
+    supports_expert_map=True,
+)
+
+# marling requirements : current_platform.get_device_capability()[0] < 9
+register_experts(
+    MarlinExperts,
+    standard_format,
+    [torch.bfloat16],
+    blocked_quantization_support=False,
+    supports_chunking=True,
+    supports_expert_map=True,
+)
+
+register_experts(
+    BatchedMarlinExperts,
+    batched_format,
+    [torch.bfloat16],
+    blocked_quantization_support=False,
     supports_chunking=False,
     supports_expert_map=True,
 )
@@ -342,39 +434,47 @@ if cutlass_fp4_supported():
 MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
     # per-channel / per-column weights and per-tensor activations
-    TestMoEQuantConfig(
+    TestMoEQuantConfig.make(
         quant_dtype=torch.float8_e4m3fn,
         per_out_ch_quant=True,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-channel / per-column weights and per-token activations
-    TestMoEQuantConfig(
+    TestMoEQuantConfig.make(
         quant_dtype=torch.float8_e4m3fn,
         per_out_ch_quant=True,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # per-tensor weights and per-tensor activations
-    TestMoEQuantConfig(
+    TestMoEQuantConfig.make(
         quant_dtype=torch.float8_e4m3fn,
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-tensor weights and per-token activations
-    TestMoEQuantConfig(
+    TestMoEQuantConfig.make(
         quant_dtype=torch.float8_e4m3fn,
         per_out_ch_quant=False,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # block-quantized weights and 128 block per-token activations
-    TestMoEQuantConfig(
+    TestMoEQuantConfig.make(
         quant_dtype=torch.float8_e4m3fn,
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=[128, 128],
+    ),
+    # mxfp4 w4a16 quant
+    TestMoEQuantConfig.make(
+        quant_dtype=None,
+        per_out_ch_quant=False,
+        per_act_token_quant=False,
+        block_shape=None,
+        weight_quant_dtype="mxfp4",
     ),
     # TODO (varun) : Should we test the following combinations ?
     # block-quantized weights and per-token activations
@@ -383,7 +483,7 @@ MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
 
 if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
     MK_QUANT_CONFIGS += [
-        TestMoEQuantConfig(
+        TestMoEQuantConfig.make(
             quant_dtype="nvfp4",
             per_out_ch_quant=False,
             per_act_token_quant=False,
@@ -475,6 +575,13 @@ def make_fused_experts(
         kwargs = batch_kwargs | quant_kwargs
         print(f"Making NaiveBatchedExperts {kwargs} ...")
         experts = NaiveBatchedExperts(**kwargs)
+    elif fused_experts_type == MarlinExperts:
+        print(f"Making MarlinExperts {quant_kwargs} ...")
+        experts = MarlinExperts(**quant_kwargs)
+    elif fused_experts_type == BatchedMarlinExperts:
+        kwargs = batch_kwargs | quant_kwargs
+        print(f"Making BatchedMarlinExperts {kwargs} ...")
+        experts = BatchedMarlinExperts(**kwargs)
     elif fused_experts_type == CutlassExpertsFp8:
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {

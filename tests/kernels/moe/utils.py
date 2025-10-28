@@ -234,7 +234,6 @@ def make_test_weight(
             w_l[idx], w_s_l[idx], w_gs_l[idx] = moe_quantize_weights(
                 w_16[idx], None, quant_dtype, per_out_ch_quant, block_shape
             )
-
         w = torch.stack(w_l)
         w_s = torch.stack(w_s_l)
         if e > 0 and w_gs_l[0] is not None:

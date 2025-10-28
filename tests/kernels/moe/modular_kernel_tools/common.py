@@ -7,6 +7,7 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.marlin_utils import make_marlin_moe_weights
 from tests.kernels.moe.utils import make_test_weights, per_token_cast_to_fp8
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
@@ -21,12 +22,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    mxfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .mk_objects import (
+    QuantDtype,
+    TestMoEActivationQuantConfig,
     TestMoEQuantConfig,
+    TestMoEWeightQuantConfig,
     expert_info,
     make_fused_experts,
     make_prepare_finalize,
@@ -62,7 +67,10 @@ class Config:
 
     def __post_init__(self):
         if self.quant_config is None:
-            self.quant_config = TestMoEQuantConfig(None, False, False, None)
+            self.quant_config = TestMoEQuantConfig(
+                TestMoEActivationQuantConfig(None, False, None),
+                TestMoEWeightQuantConfig(None, False, None),
+            )
 
     def describe(self) -> str:
         s = ""
@@ -93,9 +101,14 @@ class Config:
         return self.Ms
 
     @property
-    def quant_dtype(self) -> torch.dtype | str | None:
+    def quant_dtype(self) -> QuantDtype:
         assert self.quant_config is not None
         return self.quant_config.quant_dtype
+
+    @property
+    def weight_quant_dtype(self) -> QuantDtype:
+        assert self.quant_config is not None
+        return self.quant_config.weight_quant_dtype
 
     @property
     def is_per_act_token_quant(self) -> bool:
@@ -124,6 +137,14 @@ class Config:
     @property
     def num_local_experts(self) -> int:
         return self.E // self.world_size
+
+    @property
+    def is_mxfp4_w4a16(self) -> bool:
+        return (
+            self.quant_config is not None
+            and self.quant_config.quant_dtype is None
+            and self.quant_config.weight_quant_dtype == "mxfp4"
+        )
 
     def make_env_data(self) -> tuple[VllmConfig, dict[Any, Any]]:
         """
@@ -185,6 +206,10 @@ class Config:
     def supports_expert_map(self):
         info = expert_info(self.fused_experts_type)
         return info.supports_expert_map
+
+    def is_marlin_fe(self):
+        info = expert_info(self.fused_experts_type)
+        return info.is_marlin
 
     def supports_apply_weight_on_input(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -261,6 +286,10 @@ class Config:
         if is_block_quatized and not self.is_block_quant_supported():
             return False, "Mismatched block quantization support."
 
+        # Check Marlin support
+        if (self.is_mxfp4_w4a16 + self.is_marlin_fe()) != 2:
+            return False, "mxfp4_w4a16 is only compatible with Marlin"
+
         # deep_gemm only works with block-quantized
         if self.needs_deep_gemm() and not is_block_quatized:
             return False, "Needs DeepGEMM but not block quantized."
@@ -278,6 +307,10 @@ class Config:
 
 @dataclass
 class WeightTensors:
+    w1_dq: torch.Tensor
+    w2_dq: torch.Tensor
+    # Quantized weights. In case quantization isn't required, w1_dq and w2_dq is
+    # the same as w1 and w2.
     w1: torch.Tensor
     w2: torch.Tensor
     w1_scale: torch.Tensor | None
@@ -288,6 +321,8 @@ class WeightTensors:
     def describe(self):
         s = ""
         s += "== Weight Tensors: \n"
+        s += f" - {_describe_tensor(self.w1_dq, 'w1_dq')} \n"
+        s += f" - {_describe_tensor(self.w2_dq, 'w2_dq')} \n"
         s += f" - {_describe_tensor(self.w1, 'w1')} \n"
         s += f" - {_describe_tensor(self.w2, 'w2')} \n"
         s += f" - {_describe_tensor(self.w1_scale, 'w1_scale')} \n"
@@ -297,15 +332,12 @@ class WeightTensors:
         return s
 
     def is_quantized(self) -> bool:
-        # or w1_scale is not None?
-        return (
-            self.w1.dtype == torch.float8_e4m3fn
-            or self.w1.dtype == torch.uint8
-            or self.w1.dtype == torch.int8
-        )
+        return self.w1_scale is not None
 
     def to_current_device(self):
         device = torch.cuda.current_device()
+        self.w1_dq = self.w1_dq.to(device=device)
+        self.w2_dq = self.w2_dq.to(device=device)
         self.w1 = self.w1.to(device=device)
         self.w2 = self.w2.to(device=device)
 
@@ -322,6 +354,8 @@ class WeightTensors:
     def slice_weights(self, rank: int, num_local_experts: int) -> "WeightTensors":
         s = rank * num_local_experts
         e = s + num_local_experts
+        w1_dq = self.w1_dq[s:e, :, :]
+        w2_dq = self.w2_dq[s:e, :, :]
         w1 = self.w1[s:e, :, :]
         w2 = self.w2[s:e, :, :]
         w1_scale = self.w1_scale[s:e, :, :] if self.w1_scale is not None else None
@@ -329,23 +363,96 @@ class WeightTensors:
         w1_gs = self.w1_gs[s:e] if self.w1_gs is not None else None
         w2_gs = self.w2_gs[s:e] if self.w2_gs is not None else None
 
-        return WeightTensors(w1, w2, w1_scale, w2_scale, w1_gs, w2_gs)
+        return WeightTensors(w1_dq, w2_dq, w1, w2, w1_scale, w2_scale, w1_gs, w2_gs)
 
     @staticmethod
     def make(config: Config) -> "WeightTensors":
-        (_, w1, w1_scale, w1_gs), (_, w2, w2_scale, w2_gs) = make_test_weights(
-            e=config.E,
-            n=config.N,
-            k=config.K,
-            in_dtype=config.dtype,
-            quant_dtype=config.quant_dtype,
-            block_shape=config.quant_block_shape,
-            # or config.is_per_out_ch_quant
-            per_out_ch_quant=config.is_per_act_token_quant,
-        )
+        if config.is_mxfp4_w4a16:
+            assert config.is_marlin_fe(), "Support only Marlin for mxfp4_w4a16"
+            assert config.weight_quant_dtype == "mxfp4"
+            w1_data, w2_data = make_marlin_moe_weights(
+                e=config.E,
+                n=config.N,
+                k=config.K,
+                dtype=config.dtype,
+                quant_type=config.weight_quant_dtype,
+                group_size=32,
+            )
+            w1_dq, w1, w1_scale, w1_gs = (
+                w1_data.w_ref,
+                w1_data.qweight,
+                w1_data.scales,
+                None,
+            )
+            w2_dq, w2, w2_scale, w2_gs = (
+                w2_data.w_ref,
+                w2_data.qweight,
+                w2_data.scales,
+                None,
+            )
+        else:
+            (w1_dq, w1, w1_scale, w1_gs), (w2_dq, w2, w2_scale, w2_gs) = (
+                make_test_weights(
+                    e=config.E,
+                    n=config.N,
+                    k=config.K,
+                    in_dtype=config.dtype,
+                    quant_dtype=config.weight_quant_dtype,
+                    block_shape=config.quant_block_shape,
+                    per_out_ch_quant=config.is_per_out_ch_quant,
+                )
+            )
         return WeightTensors(
-            w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale, w1_gs=w1_gs, w2_gs=w2_gs
+            w1_dq=w1_dq,
+            w2_dq=w2_dq,
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_gs=w1_gs,
+            w2_gs=w2_gs,
         )
+
+    def dequantize_nvfp4_to_dtype(
+        self, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Dequanize nvfp4 weights to given dtype. This is used in testing.
+        """
+        quant_blocksize = 16
+        assert self.w1_gs is not None
+        assert self.w2_gs is not None
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
+        assert self.w1_scale.shape[1] % 128 == 0
+        assert self.w1_scale.shape[2] % 4 == 0
+        assert self.w2_scale.shape[1] % 128 == 0
+        assert self.w2_scale.shape[2] % 4 == 0
+
+        e = self.w1.shape[0]
+        n = self.w1.shape[1] // 2
+        k = self.w2.shape[1]
+
+        w1_dq = torch.zeros((e, 2 * n, k), device="cuda", dtype=dtype)
+        w2_dq = torch.zeros((e, k, n), device="cuda", dtype=dtype)
+        for idx in range(0, e):
+            w1_dq[idx] = dequantize_nvfp4_to_dtype(
+                self.w1[idx],
+                self.w1_scale[idx],
+                self.w1_gs[idx],
+                dtype=dtype,
+                device=self.w1.device,
+                block_size=quant_blocksize,
+            )
+            w2_dq[idx] = dequantize_nvfp4_to_dtype(
+                self.w2[idx],
+                self.w2_scale[idx],
+                self.w2_gs[idx],
+                dtype=dtype,
+                device=self.w2.device,
+                block_size=quant_blocksize,
+            )
+        return w1_dq, w2_dq
 
 
 @dataclass
@@ -435,39 +542,18 @@ class RankTensors:
             expert_map=expert_map,
         )
 
-
-def reference_moe_impl(
-    config: Config, weights: WeightTensors, rank_tensors: RankTensors
-) -> torch.Tensor:
-    if config.quant_dtype == "nvfp4":
+    def qdq_nvfp4_hidden_states(self, dtype: torch.dtype) -> torch.Tensor:
+        """
+        Quantize hidden-states to nvfp4 and dequantize them to dtype.
+        """
         quant_blocksize = 16
-        dtype = config.dtype
-
-        w1_q = weights.w1
-        w1_blockscale = weights.w1_scale
-        w1_gs = weights.w1_gs
-
-        w2_q = weights.w2
-        w2_blockscale = weights.w2_scale
-        w2_gs = weights.w2_gs
-
         a_global_scale = (
             (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX)
-            / torch.amax(rank_tensors.hidden_states.flatten(), dim=-1)
+            / torch.amax(self.hidden_states.flatten(), dim=-1)
         ).to(torch.float32)
 
-        assert w1_gs is not None
-        assert w2_gs is not None
-        assert w1_blockscale is not None
-        assert w2_blockscale is not None
-
-        assert w1_blockscale.shape[1] % 128 == 0
-        assert w1_blockscale.shape[2] % 4 == 0
-        assert w2_blockscale.shape[1] % 128 == 0
-        assert w2_blockscale.shape[2] % 4 == 0
-
         a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(
-            rank_tensors.hidden_states, a_global_scale
+            self.hidden_states, a_global_scale
         )
 
         a = dequantize_nvfp4_to_dtype(
@@ -478,37 +564,35 @@ def reference_moe_impl(
             device=a_fp4.device,
             block_size=quant_blocksize,
         )
+        return a
 
-        e = w1_q.shape[0]
-        n = w1_q.shape[1] // 2
-        k = w2_q.shape[1]
 
-        w1 = torch.zeros((e, 2 * n, k), device="cuda", dtype=dtype)
-        w2 = torch.zeros((e, k, n), device="cuda", dtype=dtype)
-
-        for idx in range(0, e):
-            w1[idx] = dequantize_nvfp4_to_dtype(
-                w1_q[idx],
-                w1_blockscale[idx],
-                w1_gs[idx],
-                dtype=dtype,
-                device=w1_q.device,
-                block_size=quant_blocksize,
-            )
-            w2[idx] = dequantize_nvfp4_to_dtype(
-                w2_q[idx],
-                w2_blockscale[idx],
-                w2_gs[idx],
-                dtype=dtype,
-                device=w2_q.device,
-                block_size=quant_blocksize,
-            )
-        a_scale = None
-        w1_scale = None
-        w2_scale = None
-        quant_dtype = None
-        per_act_token_quant = False
-        block_shape = None
+def reference_moe_impl(
+    config: Config, weights: WeightTensors, rank_tensors: RankTensors
+) -> torch.Tensor:
+    if (config.quant_dtype, config.weight_quant_dtype) == ("nvfp4", "nvfp4"):
+        a = rank_tensors.qdq_nvfp4_hidden_states(config.dtype)
+        w1, w2 = weights.dequantize_nvfp4_to_dtype(config.dtype)
+        a_scale, w1_scale, w2_scale, quant_dtype, block_shape, per_act_token_quant = (
+            None,
+            None,
+            None,
+            None,
+            None,
+            False,
+        )
+    elif config.is_mxfp4_w4a16:
+        a = rank_tensors.hidden_states
+        w1 = weights.w1_dq
+        w2 = weights.w2_dq
+        a_scale, w1_scale, w2_scale, quant_dtype, block_shape, per_act_token_quant = (
+            None,
+            None,
+            None,
+            None,
+            None,
+            False,
+        )
     else:
         a = rank_tensors.hidden_states
         a_scale = rank_tensors.hidden_states_scale
@@ -594,6 +678,34 @@ def make_modular_kernel(
     return modular_kernel
 
 
+def make_fused_moe_quant_config(
+    config: Config, inputs: RankTensors, weights: WeightTensors
+) -> FusedMoEQuantConfig:
+    if config.is_mxfp4_w4a16:
+        assert weights.w1_scale is not None
+        assert weights.w2_scale is not None
+        return mxfp4_w4a16_moe_quant_config(weights.w1_scale, weights.w2_scale)
+
+    if config.quant_dtype == "nvfp4":
+        gscale = _make_gscale(config.num_local_experts)
+    else:
+        gscale = None
+
+    return FusedMoEQuantConfig.make(
+        config.quant_dtype,
+        w1_scale=weights.w1_scale,
+        w2_scale=weights.w2_scale,
+        a1_scale=inputs.hidden_states_scale,
+        g1_alphas=(1 / weights.w1_gs) if weights.w1_gs is not None else None,
+        g2_alphas=(1 / weights.w2_gs) if weights.w2_gs is not None else None,
+        a1_gscale=gscale,
+        a2_gscale=gscale,
+        block_shape=config.quant_block_shape,
+        per_act_token_quant=config.is_per_act_token_quant,
+        per_out_ch_quant=config.is_per_out_ch_quant,
+    )
+
+
 def run_modular_kernel(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -607,24 +719,7 @@ def run_modular_kernel(
     # weights for rank
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
 
-    if config.quant_dtype == "nvfp4":
-        gscale = _make_gscale(config.num_local_experts)
-    else:
-        gscale = None
-
-    quant_config = FusedMoEQuantConfig.make(
-        config.quant_dtype,
-        w1_scale=rank_weights.w1_scale,
-        w2_scale=rank_weights.w2_scale,
-        a1_scale=rank_tensors.hidden_states_scale,
-        g1_alphas=(1 / rank_weights.w1_gs) if rank_weights.w1_gs is not None else None,
-        g2_alphas=(1 / rank_weights.w2_gs) if rank_weights.w2_gs is not None else None,
-        a1_gscale=gscale,
-        a2_gscale=gscale,
-        block_shape=config.quant_block_shape,
-        per_act_token_quant=config.is_per_act_token_quant,
-        per_out_ch_quant=config.is_per_out_ch_quant,
-    )
+    quant_config = make_fused_moe_quant_config(config, rank_tensors, weights)
 
     mk = make_modular_kernel(config, vllm_config, quant_config)
 
