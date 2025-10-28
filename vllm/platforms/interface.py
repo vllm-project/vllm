@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.models.registry import MAMBA_BACKEND_MAP
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
@@ -233,18 +234,11 @@ class Platform:
         mamba_type: str = "",
     ) -> str:
         """Get mamba attention backend class of a device."""
-        mamba_type_to_backend_map = {
-            "linear_attention": "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend",  # noqa
-            "mamba1": "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend",  # noqa
-            "mamba2": "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend",  # noqa
-            "short_conv": "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend",  # noqa
-            "gdn_attention": "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend",  # noqa
-        }
-        if mamba_type not in mamba_type_to_backend_map:
+        if mamba_type not in MAMBA_BACKEND_MAP:
             raise ValueError(
                 f"Invalid mamba type ({mamba_type}) for {cls.device_name}."
             )
-        return mamba_type_to_backend_map[mamba_type]
+        return MAMBA_BACKEND_MAP[mamba_type]
 
     @classmethod
     def get_device_capability(
