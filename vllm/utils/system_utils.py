@@ -8,8 +8,11 @@ import multiprocessing
 import os
 import signal
 import sys
+import threading
 from collections.abc import Callable, Iterator
+from multiprocessing.connection import Connection
 from pathlib import Path
+from threading import Thread
 from typing import TextIO
 
 import psutil
@@ -227,3 +230,84 @@ def set_ulimit(target_soft_limit: int = 65535):
                 current_soft,
                 e,
             )
+
+
+class DeathMonitor:
+    """
+    Monitors a pipe connection for closure/errors (indicating parent death)
+    and triggers a shutdown signal in the current process.
+    """
+
+    def __init__(
+        self, death_pipe: Connection, monitor_name: str = "ParentDeathMonitor"
+    ):
+        """
+        Args:
+            death_pipe: The reading end of the pipe created by the parent.
+            monitor_name: The name for the monitoring thread.
+        """
+        if death_pipe is None:
+            raise ValueError("death_pipe cannot be None")
+
+        self._death_pipe = death_pipe
+        self._shutdown_event = threading.Event()
+        self._monitor_thread = Thread(
+            target=self._monitor_parent_death,
+            daemon=True,
+            name=monitor_name,
+        )
+        self._started = False
+
+    def _monitor_parent_death(self):
+        """Target function for the monitoring thread."""
+        signal_sent = False
+        try:
+            # This will block until parent process exits (pipe closes)
+            self._death_pipe.recv()
+        except EOFError:
+            # Parent process has exited, terminate this worker
+            logger.info("Parent process exited, terminating worker")
+        except OSError as e:
+            # Pipe might be closed unexpectedly during shutdown or other errors
+            logger.warning("Death monitoring pipe error: %s. Assuming parent exit.", e)
+        except Exception as e:
+            logger.exception("Death monitoring error: %s", e)
+        finally:
+            # Ensure pipe is closed from this end
+            with contextlib.suppress(OSError):
+                self._death_pipe.close()
+
+            # Trigger shutdown by sending SIGTERM to self
+            pid = os.getpid()
+            logger.info(
+                "Sending SIGTERM to self (PID: %d) due to detected parent exit.", pid
+            )
+            try:
+                os.kill(pid, signal.SIGTERM)
+                signal_sent = True
+            except Exception as e:
+                logger.exception(
+                    "Failed to send SIGTERM to self (PID: %d): %s",
+                    pid,
+                    e,
+                )
+
+            # Set the event as a fallback or for alternative checks
+            self._shutdown_event.set()
+            if not signal_sent:
+                logger.critical(
+                    "Failed to send SIGTERM. Process may not terminate gracefully."
+                )
+
+    def start(self):
+        """Starts the monitoring thread idempotently."""
+        if not self._started:
+            self._monitor_thread.start()
+            self._started = True
+        else:
+            logger.warning("DeathMonitor thread already started.")
+
+    @property
+    def shutdown_event(self) -> threading.Event:
+        """Provides access to the shutdown event (primarily for testing)."""
+        return self._shutdown_event

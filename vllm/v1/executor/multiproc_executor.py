@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import multiprocessing
 import os
 import pickle
@@ -41,6 +42,7 @@ from vllm.utils.network_utils import (
     get_open_port,
 )
 from vllm.utils.system_utils import (
+    DeathMonitor,
     _maybe_force_spawn,
     decorate_logs,
     get_mp_context,
@@ -579,26 +581,24 @@ class WorkerProc:
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
-        shutdown_event = threading.Event()
+
         # Start death monitoring thread if death_pipe is provided
+        death_monitor: DeathMonitor | None = None
         if death_pipe is not None:
-
-            def monitor_parent_death():
-                try:
-                    # This will block until parent process exits (pipe closes)
-                    death_pipe.recv()
-                except EOFError:
-                    # Parent process has exited, terminate this worker
-                    logger.info("Parent process exited, terminating worker")
-                    # Send signal to self to trigger clean shutdown
-                    shutdown_event.set()
-                except Exception as e:
-                    logger.warning("Death monitoring error: %s", e)
-
-            death_monitor = Thread(
-                target=monitor_parent_death, daemon=True, name="WorkerDeathMonitor"
+            logger.debug("Starting parent death monitor.")
+            try:
+                death_monitor = DeathMonitor(death_pipe, "WorkerDeathMonitor")
+                death_monitor.start()
+            except Exception as e:
+                logger.exception("Failed to start DeathMonitor: %s", e)
+                # Close pipe if monitor failed to start
+                with contextlib.suppress(OSError):
+                    death_pipe.close()
+                death_pipe = None
+        else:
+            logger.warning(
+                "No death_pipe provided to WorkerProc.Parent death may not be detected."
             )
-            death_monitor.start()
 
         try:
             reader.close()
@@ -619,6 +619,7 @@ class WorkerProc:
             ready_writer.close()
             ready_writer = None
 
+            shutdown_event = death_monitor.shutdown_event if death_monitor else None
             worker.worker_busy_loop(cancel=shutdown_event)
 
         except Exception:
@@ -641,9 +642,8 @@ class WorkerProc:
 
         finally:
             if ready_writer is not None:
-                ready_writer.close()
-            if death_pipe is not None:
-                death_pipe.close()
+                with contextlib.suppress(OSError):
+                    ready_writer.close()
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
