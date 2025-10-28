@@ -10,14 +10,13 @@ logger = init_logger(__name__)
 
 
 class AsyncScheduler(Scheduler):
-
     def _get_num_output_placeholders(
         self,
         num_scheduled_tokens: dict[str, int],
     ) -> dict[str, int]:
         """
         Override to collect num_output_placeholders for async scheduling.
-        
+
         Returns the current placeholder count for each scheduled request.
         KV connectors (e.g., LMCache) use this to determine the actual
         computed token boundary for caching:

@@ -608,8 +608,9 @@ class Scheduler(SchedulerInterface):
         # For async scheduling: AsyncScheduler will override this method to
         # populate the dict with actual placeholder counts.
         num_output_placeholders = self._get_num_output_placeholders(
-            num_scheduled_tokens)
-        
+            num_scheduled_tokens
+        )
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(
@@ -680,14 +681,14 @@ class Scheduler(SchedulerInterface):
     ) -> dict[str, int]:
         """
         Get the number of output placeholders for each scheduled request.
-        
+
         For sync scheduling: returns empty dict (no placeholders).
         For async scheduling: AsyncScheduler overrides this to return actual
         placeholder counts.
-        
+
         Args:
             num_scheduled_tokens: dict mapping request_id to num_scheduled_tokens
-            
+
         Returns:
             dict mapping request_id to num_output_placeholders
         """
