@@ -34,15 +34,21 @@ else
 fi
 
 # Models to run
-MODELS=(
-    "Qwen/Qwen3-0.6B"
-)
+MODEL_NAMES=${MODEL_NAMES:-}
+if [[ -n "$MODEL_NAMES" ]]; then
+  MODELS=("$MODEL_NAMES")
+else
+  MODELS=(
+      "Qwen/Qwen3-0.6B"
+  )
+fi
 
 # Number of prefill and decode instances to create
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -130,7 +136,8 @@ run_tests_for_model() {
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
-    --gpu-memory-utilization 0.2 \
+    --disable-hybrid-kv-cache-manager \
+    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
 
@@ -171,9 +178,18 @@ run_tests_for_model() {
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
-    --gpu-memory-utilization 0.2 \
-    --tensor-parallel-size $DECODER_TP_SIZE \
+    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '$KV_CONFIG'"
+  
+  # DP-EP attention mode
+  if [[ -z "$DP_EP" ]]; then
+    BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
+  else
+    echo "DP-EP Attention enabled, deploying with dp=DECODER_TP_SIZE and tp=1"
+    BASE_CMD="${BASE_CMD} --data-parallel-size $DECODER_TP_SIZE \
+    --tensor-parallel-size 1 --enable-expert-parallel"
+  fi
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -200,7 +216,7 @@ run_tests_for_model() {
   done
 
   # Build the command for the proxy server with all the hosts and ports
-  PROXY_CMD="python ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
+  PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
 
   # Add all prefill hosts and ports
   PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[@]}"
@@ -219,7 +235,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  TEST_MODEL=$model_name python3 -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances

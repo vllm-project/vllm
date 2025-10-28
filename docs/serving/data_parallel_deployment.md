@@ -16,7 +16,7 @@ For MoE models, when any requests are in progress in any rank, we must ensure th
 
 In all cases, it is beneficial to load-balance requests between DP ranks. For online deployments, this balancing can be optimized by taking into account the state of each DP engine - in particular its currently scheduled and waiting (queued) requests, and KV cache state. Each DP engine has an independent KV cache, and the benefit of prefix caching can be maximized by directing prompts intelligently.
 
-This document focuses on online deployments (with the API server). DP + EP is also supported for offline usage (via the LLM class), for an example see <gh-file:examples/offline_inference/data_parallel.py>.
+This document focuses on online deployments (with the API server). DP + EP is also supported for offline usage (via the LLM class), for an example see [examples/offline_inference/data_parallel.py](../../examples/offline_inference/data_parallel.py).
 
 There are two distinct modes supported for online deployments - self-contained with internal load balancing, or externally per-rank process deployment and load balancing.
 
@@ -69,6 +69,7 @@ There are several notable differences when using Ray:
 - A single launch command (on any node) is needed to start all local and remote DP ranks, therefore it is more convenient compared to launching on each node
 - There is no need to specify `--data-parallel-address`, and the node where the command is run is used as `--data-parallel-address`
 - There is no need to specify `--data-parallel-rpc-port`
+- When a single DP group requires multiple nodes, *e.g.* in case a single model replica needs to run on at least two nodes, make sure to set `VLLM_RAY_DP_PACK_STRATEGY="span"` in which case `--data-parallel-size-local` is ignored and will be automatically determined
 - Remote DP ranks will be allocated based on node resources of the Ray cluster
 
 Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.

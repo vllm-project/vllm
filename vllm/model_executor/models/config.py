@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, round_up
+from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -258,21 +259,19 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         # Increase the max capture size from 512 to 992 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
         # from 67 to 81.
-        scheduler_config = vllm_config.scheduler_config
-        if len(scheduler_config.cuda_graph_sizes) == 1:
-            max_capture_size = scheduler_config.cuda_graph_sizes[0]
+        compilation_config = vllm_config.compilation_config
+        # Only override when the user has not set either of
+        # cudagraph_capture_sizes or max_cudagraph_capture_size.
+        if (
+            compilation_config.cudagraph_capture_sizes is None
+            and compilation_config.max_cudagraph_capture_size is None
+        ):
             # FIXME(woosuk): When using full cuda graph with FA3, the max
             # supported size is 992.
-            if max_capture_size < 992:
-                cuda_graph_sizes = [1, 2, 4]
-                # Step size 8 for small batch sizes
-                cuda_graph_sizes += [i for i in range(8, 256, 8)]
-                # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 993, 16)]
-                scheduler_config.cuda_graph_sizes = cuda_graph_sizes
-                logger.info(
-                    "Overriding max cuda graph capture size to %d for performance.", 992
-                )
+            compilation_config.max_cudagraph_capture_size = 992
+            logger.info(
+                "Overriding max cuda graph capture size to %d for performance.", 992
+            )
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):
@@ -480,12 +479,9 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 
-        # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
-        #   "auto")
+        # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
-            "fp8"
-        ):
+        if cache_config.cache_dtype.startswith("fp8"):
             cache_config.cache_dtype = "fp8_ds_mla"
             logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
         if cache_config.cache_dtype == "bfloat16":

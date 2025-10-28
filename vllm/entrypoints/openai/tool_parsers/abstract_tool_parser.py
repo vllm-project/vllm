@@ -10,9 +10,14 @@ from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
+from vllm.entrypoints.openai.tool_parsers.utils import get_json_schema_from_tools
 from vllm.logger import init_logger
+from vllm.sampling_params import (
+    StructuredOutputsParams,
+)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import import_from_path, is_list_of
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.import_utils import import_from_path
 
 logger = init_logger(__name__)
 
@@ -43,6 +48,18 @@ class ToolParser:
         """
         Static method that used to adjust the request parameters.
         """
+        if not request.tools:
+            return request
+        json_schema_from_tool = get_json_schema_from_tools(
+            tool_choice=request.tool_choice, tools=request.tools
+        )
+        # Set structured output params for tool calling
+        if json_schema_from_tool is not None:
+            if request.structured_outputs is None:
+                request.structured_outputs = StructuredOutputsParams()
+            # tool_choice: "Forced Function" or "required" will override
+            # structured output json settings to make tool calling work correctly
+            request.structured_outputs.json = json_schema_from_tool
         return request
 
     def extract_tool_calls(

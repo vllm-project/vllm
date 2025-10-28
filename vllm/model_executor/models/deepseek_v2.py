@@ -79,8 +79,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
     DeepseekV32IndexerMetadata,
@@ -227,6 +227,7 @@ class DeepseekV2MoE(nn.Module):
 
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
+            gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -264,12 +265,17 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-
-        fused_moe_out = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if self.experts.is_internal_router:
+            # In this case, the gate/router runs inside the FusedMoE class
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
         shared_output, final_hidden_states = fused_moe_out
         if self.shared_experts is None:
@@ -481,7 +487,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return MLAAttentionSpec(  # Only has one vector instead of K + V
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
@@ -574,25 +580,18 @@ def sparse_attn_indexer(
             )
             num_rows = logits.shape[0]
             assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
-            topk_indices = torch.empty(
-                num_rows, topk_tokens, dtype=torch.int32, device=logits.device
-            )
-            topk_values = torch.empty(
-                num_rows, topk_tokens, dtype=logits.dtype, device=logits.device
-            )
+            topk_indices = topk_indices_buffer[
+                chunk.token_start : chunk.token_end, :topk_tokens
+            ]
             torch.ops._C.top_k_per_row(
                 logits,
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
                 topk_indices,
-                topk_values,
                 num_rows,
                 logits.stride(0),
                 logits.stride(1),
             )
-            topk_indices_buffer[
-                chunk.token_start : chunk.token_end, : topk_indices.shape[-1]
-            ] = topk_indices.to(dtype=torch.int32)
 
     if has_decode:
         decode_metadata = attn_metadata.decode
@@ -626,31 +625,15 @@ def sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
         )
-        # padded query len
-        current_device = padded_q_fp8_decode_tokens.device
-        padded_num_tokens = batch_size * next_n
-        row_indices = torch.arange(padded_num_tokens, device=current_device) // next_n
-        next_n_offset = (
-            torch.arange(padded_num_tokens, device=padded_q_fp8_decode_tokens.device)
-            % next_n
-        )
-        index_end_pos = (
-            decode_metadata.seq_lens[row_indices] - next_n + next_n_offset + 1
-        ).unsqueeze(1)
         num_rows = logits.shape[0]
         assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
-        topk_indices = torch.empty(
-            num_rows, topk_tokens, dtype=torch.int32, device=logits.device
-        )
-        topk_values = torch.empty(
-            num_rows, topk_tokens, dtype=logits.dtype, device=logits.device
-        )
-        torch.ops._C.top_k_per_row(
+        topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
+
+        torch.ops._C.top_k_per_row_decode(
             logits,
-            torch.zeros(num_rows, dtype=torch.int32, device=logits.device),
-            index_end_pos.to(dtype=torch.int32, device=logits.device),
+            next_n,
+            decode_metadata.seq_lens,
             topk_indices,
-            topk_values,
             num_rows,
             logits.stride(0),
             logits.stride(1),
@@ -662,9 +645,9 @@ def sparse_attn_indexer(
                 topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
                 decode_lens,
             )
-        topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
-            topk_indices.to(dtype=torch.int32)
-        )
+            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
+                topk_indices
+            )
 
     return topk_indices_buffer
 
@@ -1312,6 +1295,17 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return SharedFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=0,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [

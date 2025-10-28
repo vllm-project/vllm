@@ -34,7 +34,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
 
 
 def run_vllm(
@@ -221,6 +221,7 @@ async def run_vllm_async(
                     detokenize=not disable_detokenize,
                 )
             )
+            prompts.append(prompt)
             lora_requests.append(request.lora_request)
 
         generators = []

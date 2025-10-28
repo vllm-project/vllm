@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata
 
@@ -412,6 +412,18 @@ class Pooler(nn.Module, ABC):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         raise NotImplementedError
+
+
+class DummyPooler(Pooler):
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"plugin", "score"}
+
+    def forward(
+        self,
+        hidden_states: list[torch.Tensor] | torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        return hidden_states
 
 
 class PoolerHead(nn.Module):

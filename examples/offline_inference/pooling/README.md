@@ -14,7 +14,7 @@ python examples/offline_inference/pooling/convert_model_to_seq_cls.py --model_na
 
 ## Embed jina_embeddings_v3 usage
 
-Only text matching task is supported for now. See <gh-pr:16120>
+Only text matching task is supported for now. See <https://github.com/vllm-project/vllm/pull/16120>
 
 ```bash
 python examples/offline_inference/pooling/embed_jina_embeddings_v3.py

@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
+from vllm.attention.backends.registry import _Backend
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -105,6 +106,7 @@ class VisualTokenizer(torch.nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
@@ -113,6 +115,7 @@ class VisualTokenizer(torch.nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.vit",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         # reserved tokens for INDICATOR_IDS
         head_dim = visual_vocab_size - len(INDICATOR_IDS)
@@ -132,6 +135,7 @@ class VisualTokenizer(torch.nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         model_type = config.model_type
         if model_type == "siglip2_navit":
@@ -140,6 +144,7 @@ class VisualTokenizer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 use_data_parallel=use_data_parallel,
+                attn_backend_override=attn_backend_override,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
@@ -457,6 +462,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
@@ -464,11 +470,17 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "llm"),
         )
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.visual_tokenizer = VisualTokenizer(
             config=config.vit_config,
             visual_vocab_size=config.visual_vocab_size,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
+            attn_backend_override=attn_backend_override,
         )
 
         self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)

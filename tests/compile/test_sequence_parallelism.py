@@ -29,7 +29,7 @@ from vllm.distributed.parallel_state import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 from ..utils import multi_gpu_test
 from .backend import TestBackend
@@ -291,7 +291,14 @@ def sequence_parallelism_pass_on_test_model(
         sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
         func_pass = FixFunctionalizationPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
-
+        assert (
+            sequence_parallelism_pass.compilation_config.splitting_ops
+            == vllm_config.compilation_config.splitting_ops
+        )
+        assert (
+            sequence_parallelism_pass.compilation_config.use_inductor_graph_partition
+            == vllm_config.compilation_config.use_inductor_graph_partition
+        )
         passes_for_backend: list[VllmInductorPass] = [
             noop_pass,
             sequence_parallelism_pass,

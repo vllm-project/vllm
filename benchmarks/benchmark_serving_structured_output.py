@@ -31,6 +31,7 @@ import time
 import uuid
 import warnings
 from collections.abc import AsyncGenerator
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import datasets
@@ -50,7 +51,7 @@ except ImportError:
     from backend_request_func import get_tokenizer
 
 try:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
@@ -501,15 +502,9 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else nullcontext()
 
     async def limited_request_func(request_func_input, pbar):
-        if semaphore is None:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
         async with semaphore:
             return await request_func(request_func_input=request_func_input, pbar=pbar)
 
