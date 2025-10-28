@@ -90,7 +90,7 @@ python examples/online_serving/pooling/openai_embedding_matryoshka_fy.py
 python examples/online_serving/pooling/openai_pooling_client.py
 ```
 
-## Online prithvi geospatial mae usage
+## Online Prithvi Geospatial MAE usage
 
 ```bash
 python examples/online_serving/pooling/prithvi_geospatial_mae.py
