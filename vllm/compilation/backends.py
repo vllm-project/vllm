@@ -225,7 +225,12 @@ class CompilerManager:
             # Let compile_fx generate a key for us
             maybe_key = None
         else:
-            maybe_key = f"artifact_compile_range_{compile_range}_subgraph_{graph_index}"
+            maybe_key = "artifact_compile_range_"
+            if compile_range is None:
+                maybe_key += "dynamic_shape"
+            else:
+                maybe_key += f"{compile_range[0]}_{compile_range[1]}"
+            maybe_key += f"_subgraph_{graph_index}"
         with self.compile_context(compile_range):
             compiled_graph, handle = self.compiler.compile(
                 graph,
