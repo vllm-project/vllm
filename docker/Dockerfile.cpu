@@ -79,7 +79,7 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
 
-ARG max_jobs=2
+ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
 ARG GIT_REPO_CHECK=0
