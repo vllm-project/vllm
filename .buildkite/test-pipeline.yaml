@@ -942,8 +942,7 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-gpt-oss.txt --tp-size=1
-  # New added tests, we don't block merge for now.
-  # branches: "gh-readonly-queue/*"
+  # newly added tests, running in nightly only
   branches: if: build.branch == "main" && env("BUILDKITE_PULL_REQUEST") == "false"
 
 - label: Blackwell Quantized MoE Test
