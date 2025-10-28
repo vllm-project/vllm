@@ -401,7 +401,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
 
-    block_size = 16
+    block_size = 32
     required_blocks = sum(
         (seq_len + block_size - 1) // block_size for seq_len in batch_spec.seq_lens
     )
