@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlexAttention."""
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -592,9 +593,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
-        self.q_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
-        self.kv_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
+        supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
+        self.direct_build: bool = supports_small_blocks
+        self.q_block_size: int = 16 if supports_small_blocks else 128
+        self.kv_block_size: int = self.block_size if supports_small_blocks else 128
 
     def build(
         self,
@@ -867,6 +869,22 @@ def get_kernel_options(
     kernel_options: dict[str, int | bool] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
+
+    def ensure_divisible(candidate: int, block_size: int) -> int:
+        """Pick a kernel block size that divides the logical block."""
+        if block_size <= 0:
+            return candidate
+        candidate = min(candidate, block_size)
+        if candidate <= 0:
+            return block_size
+        if block_size % candidate == 0:
+            return candidate
+
+        candidate = math.gcd(candidate, block_size)
+        if candidate <= 1:
+            return block_size
+        return candidate
+
     if vllm_is_batch_invariant():
         kernel_options["BLOCK_M"] = 16
         kernel_options["BLOCK_N"] = 16
@@ -877,17 +895,22 @@ def get_kernel_options(
         kernel_options["BLOCK_N"] = block_n
         return kernel_options
     else:
-        kernel_options["BLOCK_M"] = 64
-        kernel_options["BLOCK_N"] = 64
-        if query.dtype == torch.float32:
-            kernel_options["BLOCK_M"] = 32
-            kernel_options["BLOCK_N"] = 32
-        # if current_platform.is_cuda():
+        preferred_block = 32 if query.dtype == torch.float32 else 64
+        block_m_candidate = ensure_divisible(preferred_block, block_m)
+        block_n_candidate = ensure_divisible(preferred_block, block_n)
+
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties()
             max_shared_memory = device_props.shared_memory_per_block_optin
             if max_shared_memory < 144 * 1024:
-                kernel_options["BLOCK_M"] = kernel_options["BLOCK_M"] // 2
-                kernel_options["BLOCK_N"] = kernel_options["BLOCK_N"] // 2
+                block_m_candidate = ensure_divisible(
+                    max(1, block_m_candidate // 2), block_m
+                )
+                block_n_candidate = ensure_divisible(
+                    max(1, block_n_candidate // 2), block_n
+                )
+
+        kernel_options["BLOCK_M"] = block_m_candidate
+        kernel_options["BLOCK_N"] = block_n_candidate
 
     return kernel_options
