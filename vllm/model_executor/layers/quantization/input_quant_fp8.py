@@ -109,12 +109,9 @@ class QuantFP8(CustomOp):
         self.column_major_scales = column_major_scales
         self.use_ue8m0 = use_ue8m0
 
-        from vllm.platforms import on_gfx9
-
         self.use_aiter = (
             envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_LINEAR
-            and on_gfx9()
             and current_platform.is_rocm()
         )
 
