@@ -26,6 +26,7 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import (
     get_mp_context,
 )
+from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
     get_open_zmq_ipc_path,
     make_zmq_socket,
@@ -1230,7 +1231,7 @@ class FaultHandler:
         client_cmd_registry: list,
         engine_exception_q: asyncio.Queue[FaultInfo],
         engine_exception_q_lock: asyncio.Lock,
-        engine_status_dict: dict[int, str],
+        engine_status_dict: ThreadSafeDict[int, str],
     ) -> None:
         self.cmd_socket = cmd_socket
         self.client_cmd_registry = client_cmd_registry
@@ -1265,7 +1266,14 @@ class FaultHandler:
             client_cmd_registry_copy, instruction, timeout
         )
 
-        return await self.process_instruction_result(client_cmd_registry_copy, timeout)
+        execute_result = await self.process_instruction_result(
+            client_cmd_registry_copy, timeout
+        )
+
+        if instruction == "retry" and execute_result:
+            for engine_id in self.engine_status_dict:
+                self.engine_status_dict[int(engine_id)] = "Healthy"
+        return execute_result
 
     async def send_fault_tolerance_instruction(
         self, client_cmd_registry_copy, instruction, timeout

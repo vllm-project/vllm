@@ -28,6 +28,7 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.utils import run_method
 from vllm.utils.async_utils import in_loop
+from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
     close_sockets,
     get_open_port,
@@ -353,7 +354,7 @@ class ClientGuard:
         engine_exception_q: asyncio.Queue[FaultInfo],
         engine_exception_q_lock: asyncio.Lock,
         fault_pub_addr: str,
-        engine_status_dict: dict[int, str],
+        engine_status_dict: ThreadSafeDict[int, str],
     ):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
@@ -674,7 +675,7 @@ class MPClient(EngineCoreClient):
                     "addresses.fault_pub_socket_addr should not be None at"
                     "fault tolerance scenario"
                 )
-                self.engine_status_dict = {}
+                self.engine_status_dict = ThreadSafeDict()
                 for engine_id in range(vllm_config.parallel_config.data_parallel_size):
                     self.engine_status_dict[engine_id] = "Healthy"
                 self.client_guard = ClientGuard(
