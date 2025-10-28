@@ -1454,7 +1454,10 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
         self.dp_rank = dp_rank
-        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group(
+            vllm_config.fault_tolerance_config.enable_fault_tolerance,
+            vllm_config.fault_tolerance_config.gloo_comm_timeout,
+        )
 
     def shutdown(self):
         super().shutdown()
