@@ -361,7 +361,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
-            ) + (dcp_context_kv_lens_cpu % self.dcp_world_size == 0)
+            )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
 
@@ -446,7 +446,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
 
 class FlashAttentionImpl(AttentionImpl):
-    can_return_lse_for_decode: bool = True
+    # TODO(qcs): enable DCP when `flash_attn_varlen_func` supports ctxlen(seqused_k)=0
+    can_return_lse_for_decode: bool = False
 
     def __init__(
         self,
