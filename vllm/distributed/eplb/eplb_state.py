@@ -463,8 +463,9 @@ class EplbState:
 
                 if ep_group.rank() == 0:
                     logger.info(
-                        "EPLB step for model %s: avg_tokens=%.2f, "
+                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
                         "max_tokens=%d, balancedness=%.4f",
+                        self.expert_rearrangement_step,
                         eplb_model_state.model_name,
                         avg_tokens,
                         max_tokens,
@@ -506,14 +507,15 @@ class EplbState:
             is_profile (bool): If `True`, perform a dummy rearrangement.
             This is used in `profile_run` to reserve enough memory,
             no memory movement will be performed. Default is False.
-            execute_shuffle (bool): If `True`, execute the shuffle in eep.
+            execute_shuffle (bool): If `True`, execute the shuffle
+            in elastic expert parallel (EEP).
             Default is True.
             global_expert_loads (list[torch.Tensor] | None):
-            The global expert loads when scaling is done in eep.
+            The global expert loads when scaling is done in EEP.
             List of expert loads for the main and drafter
             (when spec decode is used) models.
             rank_mapping (dict[int, int] | None): The rank mapping when scaling
-            is done in eep.
+            is done in EEP.
         """
 
         ep_group = get_ep_group().device_group

@@ -223,6 +223,7 @@ steps:
   - tests/distributed/test_eplb_execute.py
   commands:
   - pytest -v -s distributed/test_eplb_execute.py
+  - pytest -v -s distributed/test_eplb_spec_decode.py
 
 - label: Metrics, Tracing Test # 12min
   timeout_in_minutes: 20
@@ -269,8 +270,8 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
-- label: V1 Test e2e + engine # 35min
-  timeout_in_minutes: 50
+- label: V1 Test e2e + engine # 30min
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
