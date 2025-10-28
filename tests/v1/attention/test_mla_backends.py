@@ -783,5 +783,13 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
     # Report all failures at once
     if failures:
-        failure_msg = "\n".join(failures)
-        pytest.fail(f"Backend correctness test failed:\n{failure_msg}")
+        # Create a summary for the single-line failure message
+        backend_names = []
+        for f in failures:
+            if "[_Backend." in f:
+                backend_name = f.split("[")[1].split("]")[0]
+                backend_names.append(backend_name)
+
+        summary = f"{len(failures)} backend(s) failed: {', '.join(backend_names)}"
+        detailed_msg = "\n".join(failures)
+        pytest.fail(f"{summary}\n{detailed_msg}")
