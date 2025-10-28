@@ -834,21 +834,20 @@ def reorder_batch_to_split_decodes_and_prefills(
     # Extract indices that need swapping and sort by target region
     swap_indices = np.where(needs_swap)[0]
     sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
-    sorted_indices = swap_indices[sorted_order]
+    dest_indices = swap_indices[sorted_order]
 
-    # Compute desination index for each request
-    dest = np.arange(num_reqs)
-    dest[swap_indices] = sorted_indices
+    src_dest_map = {int(src): int(dst) for src, dst in zip(swap_indices, dest_indices)}
 
-    modified_batch = False
-    for i in swap_indices:
-        while dest[i] != i:
-            j = dest[i]  # destination index for the element currently at i
-            input_batch.swap_states(i, j)
-            dest[i], dest[j] = dest[j], dest[i]
-            modified_batch = True
+    for src in src_dest_map:
+        dst = src_dest_map[src]
+        while src != dst:
+            input_batch.swap_states(src, dst)
+            # Mark dst as done by updating its destination to itself
+            next_dst = src_dest_map.get(dst, dst)
+            src_dest_map[dst] = dst
+            dst = next_dst
 
-    return modified_batch
+    return True
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
