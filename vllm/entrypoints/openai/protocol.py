@@ -47,6 +47,7 @@ from openai.types.responses import (
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm.utils.serial_utils import (
     EmbedDType,
@@ -383,10 +384,15 @@ class ResponsesRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Dictates whether or not to return messages as part of the "
-            "response object. Currently only supported for non-streaming "
+            "response object. Currently only supported for"
             "non-background and gpt-oss only. "
         ),
     )
+    # similar to input_messages / output_messages in ResponsesResponse
+    # we take in previous_input_messages (ie in harmony format)
+    # this cannot be used in conjunction with previous_response_id
+    # TODO: consider supporting non harmony messages as well
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
