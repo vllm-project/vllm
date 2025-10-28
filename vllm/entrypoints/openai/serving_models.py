@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.utils import AtomicCounter
+from vllm.utils.counter import AtomicCounter
 
 logger = init_logger(__name__)
 
