@@ -982,6 +982,7 @@ def maybe_roundup_hidden_size(
     act_dtype: torch.dtype,
     quant_config: QuantizationConfig | None,
     moe_parallel_config: FusedMoEParallelConfig,
+    is_lora_enabled: bool,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -992,6 +993,9 @@ def maybe_roundup_hidden_size(
         act_dtype: Data type of the layer activations.
         quant_config: Fused MoE quantization configuration.
         moe_parallel_config: Fused MoE parallelization strategy configuration.
+        is_lora_enabled: True if the engine is enabled with LoRA. This
+            is used in the case of mxfp4 quantization in selecting the
+            MxFP4Backend.
 
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
@@ -1015,7 +1019,7 @@ def maybe_roundup_hidden_size(
             get_mxfp4_backend,
         )
 
-        current_mxfp4_backend = get_mxfp4_backend()
+        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
@@ -1139,7 +1143,11 @@ class FusedMoE(CustomOp):
 
         # Round up hidden size if needed.
         hidden_size = maybe_roundup_hidden_size(
-            hidden_size, moe_in_dtype, quant_config, self.moe_parallel_config
+            hidden_size,
+            moe_in_dtype,
+            quant_config,
+            self.moe_parallel_config,
+            is_lora_enabled=self.vllm_config.lora_config is not None,
         )
 
         # For smuggling this layer into the fused moe custom op
@@ -1270,8 +1278,9 @@ class FusedMoE(CustomOp):
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
+            is_lora_enabled=vllm_config.lora_config is not None,
         )
-        self.moe_config = moe
+        self.moe_config: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 

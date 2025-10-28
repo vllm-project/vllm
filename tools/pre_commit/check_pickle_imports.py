@@ -39,7 +39,6 @@ ALLOWED_FILES = {
     "vllm/v1/executor/multiproc_executor.py",
     "vllm/v1/executor/ray_executor.py",
     "vllm/entrypoints/llm.py",
-    "vllm/utils/__init__.py",
     "tests/utils.py",
     # pickle and cloudpickle
     "vllm/v1/serial_utils.py",
