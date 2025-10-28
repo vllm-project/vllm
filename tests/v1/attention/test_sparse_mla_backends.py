@@ -113,7 +113,10 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "auto"])
-def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+def test_sparse_backend_decode_correctness(
+    dist_init, batch_name, kv_cache_dtype, tensor_parallel_size
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")
 
@@ -137,6 +140,7 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
 
     vllm_config = create_vllm_config(
         model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=tensor_parallel_size,
         max_model_len=max_seqlen,
         num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
         block_size=block_size,

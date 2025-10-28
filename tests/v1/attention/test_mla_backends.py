@@ -337,7 +337,10 @@ def run_attention_backend(
     ],
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2-Lite-Chat"])
-def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+def test_backend_correctness(
+    dist_init, batch_spec_name: str, model: str, tensor_parallel_size: int
+):
     """
     Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -368,6 +371,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
     vllm_config = create_vllm_config(
         model_name=model,
+        tensor_parallel_size=tensor_parallel_size,
         max_model_len=max(batch_spec.seq_lens),
         num_gpu_blocks=num_gpu_blocks,
         block_size=block_size,
