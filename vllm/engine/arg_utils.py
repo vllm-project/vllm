@@ -1806,7 +1806,7 @@ class EngineArgs:
             if self.enable_prefix_caching is None:
                 # Disable prefix caching default for hybrid models
                 # since the feature is still experimental.
-                if model_config.is_hybrid:
+                if model_config.is_hybrid or model_config.has_inner_state:
                     self.enable_prefix_caching = False
                 else:
                     self.enable_prefix_caching = True
