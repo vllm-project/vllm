@@ -63,6 +63,7 @@ def check_stop(
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
+
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens
