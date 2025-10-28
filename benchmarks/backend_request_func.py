@@ -136,6 +136,22 @@ async def async_request_trt_llm(
     request_func_input: RequestFuncInput,
     pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
+    """Send a request to a TensorRT-LLM server exposing OpenAI-style APIs.
+
+    This client targets `/v1/chat/completions` or `/v1/completions` and supports
+    structured output via `response_format`. It consumes SSE streams and is
+    tolerant to servers that emit role-only deltas (no token text). If no
+    textual content is observed while `response_format` is provided, it retries
+    once with `stream=false` to retrieve the full JSON response.
+
+    Behavior:
+    - Chat endpoint: extracts text from `choices[0].delta.content` and
+      gracefully falls back to `choices[0].message.content`.
+    - Completions endpoint: extracts text from `choices[0].text`, with a
+      secondary check for `choices[0].message.content` if needed.
+    - Authorization header is added only when `api_key` is provided.
+    - Verbose diagnostics are printed when `debug=True`.
+    """
     api_url = request_func_input.api_url
     assert api_url.endswith(("chat/completions", "completions", "profile")), (
         "TensorRT-LLM server must expose OpenAI-style endpoints: 'chat/completions' or 'completions'."
