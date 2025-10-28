@@ -163,7 +163,7 @@ class ModelConfig:
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
     allowed_media_domains: list[str] | None = None
-    """If set, only media URLs that belong to this domain can be used for 
+    """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
@@ -345,6 +345,7 @@ class ModelConfig:
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
         factors.append(self.video_pruning_rate)
+        factors.append(self.enable_prompt_embeds)
 
         # hf_config can control how the model looks!
         try:
@@ -1619,6 +1620,29 @@ class ModelConfig:
         return is_encoder_decoder(self.hf_config)
 
     @property
+    def uses_alibi(self) -> bool:
+        cfg = self.hf_text_config
+
+        return (
+            getattr(cfg, "alibi", False)  # Falcon
+            or "BloomForCausalLM" in self.architectures  # Bloom
+            or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
+            or (
+                hasattr(cfg, "attn_config")  # MPT
+                and (
+                    (
+                        isinstance(cfg.attn_config, dict)
+                        and cfg.attn_config.get("alibi", False)
+                    )
+                    or (
+                        not isinstance(cfg.attn_config, dict)
+                        and getattr(cfg.attn_config, "alibi", False)
+                    )
+                )
+            )
+        )
+
+    @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
 
@@ -1655,6 +1679,10 @@ class ModelConfig:
     @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
+
+    @property
+    def supports_mamba_prefix_caching(self) -> bool:
+        return self._model_info.supports_mamba_prefix_caching
 
     @property
     def use_mla(self) -> bool:
@@ -2115,8 +2143,18 @@ def _get_and_verify_max_len(
     # If the user didn't specify `max_model_len`, then use that derived from
     # the model config as a default value.
     if max_model_len is None:
-        max_model_len = int(derived_max_model_len)
+        # For LongRoPE, default to original_max_position_embeddings to avoid
+        # performance degradation for shorter sequences
+        if rope_scaling is not None and rope_scaling["rope_type"] == "longrope":
+            max_model_len = int(
+                getattr(
+                    hf_config, "original_max_position_embeddings", derived_max_model_len
+                )
+            )
+        else:
+            max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     elif max_model_len > derived_max_model_len:
