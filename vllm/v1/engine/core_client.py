@@ -50,7 +50,6 @@ from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
     FaultHandler,
-    get_queue_snapshot,
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
@@ -256,7 +255,7 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
-    async def handle_fault(self, instruction: str, timeout: int) -> None:
+    async def handle_fault(self, instruction: str, timeout: int) -> bool:
         raise NotImplementedError
 
     async def fault_reporter(self):
@@ -354,6 +353,7 @@ class ClientGuard:
         engine_exception_q: asyncio.Queue[FaultInfo],
         engine_exception_q_lock: asyncio.Lock,
         fault_pub_addr: str,
+        engine_status_dict: dict[int, str],
     ):
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
@@ -375,11 +375,14 @@ class ClientGuard:
 
         self.engine_exception_q_lock = engine_exception_q_lock
 
+        self.engine_status_dict = engine_status_dict
+
         self.fault_handler = FaultHandler(
             self.cmd_socket,
             self.engine_registry,
             self.engine_exception_q,
             self.engine_exception_q_lock,
+            self.engine_status_dict,
         )
 
         self.client_guard_dead = False
@@ -419,9 +422,12 @@ class ClientGuard:
                 "message should not be None at fault tolerance scenario"
             )
 
-            self.engine_exception_q.put_nowait(FaultInfo.from_json(message))
+            fault_info = FaultInfo.from_json(message)
+            self.engine_exception_q.put_nowait(fault_info)
+            engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
+            self.engine_status_dict[int(fault_info.engine_id)] = engine_status
             self.fault_pub_socket.send_string(
-                f"vllm_fault|{FaultInfo.from_json(message).serialize()}"
+                f"vllm_fault|{json.dumps(self.engine_status_dict)}, "
             )
             # TODO Asynchronous issuance of pause commands and design of engine
             #  core status
@@ -435,6 +441,7 @@ class ClientGuard:
         self.client_guard_dead = True
         self.fault_receiver_socket.close()
         self.cmd_socket.close()
+        self.fault_pub_socket.close()
         self.zmq_ctx.term()
 
 
@@ -667,6 +674,9 @@ class MPClient(EngineCoreClient):
                     "addresses.fault_pub_socket_addr should not be None at"
                     "fault tolerance scenario"
                 )
+                self.engine_status_dict = {}
+                for engine_id in range(vllm_config.parallel_config.data_parallel_size):
+                    self.engine_status_dict[engine_id] = "Healthy"
                 self.client_guard = ClientGuard(
                     addresses.fault_report_addr,
                     addresses.client_cmd_addr,
@@ -674,6 +684,7 @@ class MPClient(EngineCoreClient):
                     self.engine_exception_q,
                     self.engine_exception_q_lock,
                     addresses.fault_pub_socket_addr,
+                    self.engine_status_dict,
                 )
                 self.resources.client_guard = self.client_guard
             success = True
@@ -821,22 +832,12 @@ class MPClient(EngineCoreClient):
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
 
-    async def handle_fault(self, instruction: str, timeout: int) -> None:
+    async def handle_fault(self, instruction: str, timeout: int) -> bool:
         """handle fault of current instance by instruction"""
-        execute_result = await self.client_guard.handle_fault(instruction, timeout)
-        if not execute_result:
-            logger.error("execute fail tolerance instruction, shutdown vllm instance")
-            self.shutdown()
+        return await self.client_guard.handle_fault(instruction, timeout)
 
     async def fault_reporter(self):
-        engine_exception_dict = {}
-        exception_snapshot = await get_queue_snapshot(
-            self.engine_exception_q, self.engine_exception_q_lock
-        )
-
-        for fault_info in exception_snapshot:
-            engine_exception_dict[fault_info.engine_id] = "Unhealthy"
-        return json.dumps(engine_exception_dict).encode("utf-8")
+        return json.dumps(self.engine_status_dict)
 
 
 def _process_utility_output(

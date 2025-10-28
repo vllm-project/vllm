@@ -1198,12 +1198,23 @@ async def send_fault_tolerance_instruction(raw_request: Request):
             status_code=400, detail="fault_tolerance_timeout must be a positive integer"
         )
     try:
-        await client.handle_fault(fault_tolerance_instruction, fault_tolerance_timeout)
-        return JSONResponse(
-            {
-                "message": "instruction has been executed successfully",
-            }
+        execute_result = await client.handle_fault(
+            fault_tolerance_instruction, fault_tolerance_timeout
         )
+        if execute_result:
+            return JSONResponse(
+                {
+                    "message": "instruction has been executed successfully",
+                }
+            )
+        else:
+            logger.error("Instruction has been executed failed, close client actively.")
+            client.shutdown()
+            raise HTTPException(
+                status_code=400,
+                detail="Instruction has been executed failed, close client actively.",
+            )
+
     except Exception as e:
         logger.error("Handle fault failed: %s", e)
         raise HTTPException(
