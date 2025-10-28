@@ -155,7 +155,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         b_v = tl.dot(b_w, b_h1.to(b_w.dtype))
         if K > 64:
             p_w = tl.make_block_ptr(
-                w, (T, K), (stride_k, 1), (i_t * BT, 64), (BT, 64), (1, 0)
+                w, (T, K), (stride_w, 1), (i_t * BT, 64), (BT, 64), (1, 0)
             )
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_v += tl.dot(b_w, b_h2.to(b_w.dtype))
