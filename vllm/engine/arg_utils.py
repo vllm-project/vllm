@@ -57,7 +57,6 @@ from vllm.config import (
 from vllm.config.cache import (
     BlockSize,
     CacheDType,
-    MambaBlockSize,
     MambaDType,
     PrefixCachingHashAlgo,
 )
@@ -541,7 +540,6 @@ class EngineArgs:
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
-    mamba_block_size: MambaBlockSize | None = None
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -899,9 +897,6 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
-        )
-        cache_group.add_argument(
-            "--mamba-block-size", **cache_kwargs["mamba_block_size"]
         )
 
         # Multimodal related configs
@@ -1400,7 +1395,6 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
-            mamba_block_size=self.mamba_block_size,
         )
 
         ray_runtime_env = None
