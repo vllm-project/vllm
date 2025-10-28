@@ -21,7 +21,6 @@ from weight_shapes import WEIGHT_SHAPES
 
 from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.triton_utils import HAS_TRITON, triton
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (  ## added fused_moe_lora
@@ -621,12 +620,6 @@ class BenchmarkTensors:
             if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
             else self.lora_kernel_meta.token_lora_mapping.shape[0]
         )
-        ## TODO: test if this works
-        num_tokens = (
-            self.lora_kernel_meta.token_lora_mapping.shape[0] * ctx.top_k_num
-            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
-            else self.lora_kernel_meta.token_lora_mapping.shape[0]
-        )
         max_seq_len = torch.max(self.seq_lens).item()
         num_slices = len(self.lora_weights_lst)
         return num_seqs, num_tokens, max_seq_len, num_slices
@@ -723,7 +716,6 @@ class BenchmarkTensors:
         self.sanity_check(ctx, op_type)
         self.to_device(self.input.device)
 
-        _, num_tokens, _, num_slices = self.metadata(ctx, op_type)
         _, num_tokens, _, num_slices = self.metadata(ctx, op_type)
 
         # Sanity check matrix shapes.
@@ -958,13 +950,7 @@ class BenchmarkTensors:
 
         if op_type == OpType.LORA_SHRINK:
             return self.as_lora_shrink_kwargs(ctx, op_type)
-            return self.as_lora_shrink_kwargs(ctx, op_type)
         if op_type == OpType.LORA_EXPAND:
-            return self.as_lora_expand_kwargs(ctx, op_type, add_inputs)
-        if op_type.is_fused_moe_lora_shrink_fn():
-            return self.as_fused_moe_lora_shrink_kwargs(ctx, op_type)
-        if op_type.is_fused_moe_lora_expand_fn():
-            return self.as_fused_moe_lora_expand_kwargs(ctx, op_type)
             return self.as_lora_expand_kwargs(ctx, op_type, add_inputs)
         if op_type.is_fused_moe_lora_shrink_fn():
             return self.as_fused_moe_lora_shrink_kwargs(ctx, op_type)
@@ -1025,7 +1011,6 @@ def bench_optype(
     ]
     for bt in bench_tensors:
         bt.sanity_check(ctx, op_type)
-        bt.sanity_check(ctx, op_type)
 
     # Test correctness of our implementation.
     if test_correctness:
@@ -1042,7 +1027,6 @@ def bench_optype(
     # Clear LoRA optimization hash-maps.
     _LORA_A_PTR_DICT.clear()
     _LORA_B_PTR_DICT.clear()
-    _LORA_PTR_DICT.clear()
     _LORA_PTR_DICT.clear()
     # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are set up
     for kwargs in kwargs_list:
