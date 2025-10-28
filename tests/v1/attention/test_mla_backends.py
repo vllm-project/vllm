@@ -73,7 +73,7 @@ for backend in BACKENDS_TO_TEST:
         )
     else:
         block_size = 16
-    BACKEND_BLOCK_SIZES[backend.name] = block_size
+    BACKEND_BLOCK_SIZES[backend] = block_size
 
 torch.manual_seed(42)
 
