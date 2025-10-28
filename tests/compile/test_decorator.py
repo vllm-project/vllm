@@ -5,7 +5,11 @@ import torch
 from torch import nn
 
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
+from vllm.compilation.decorators import (
+    _compiled_code_cache,
+    ignore_torch_compile,
+    support_torch_compile,
+)
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -287,3 +291,61 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         # num_cudagraph_sizes * num cudagraphable graphs to capture
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
+
+
+def test_compilation_cache_reuse():
+    """
+    Test that identical modules reuse compiled code when cache is enabled.
+    This addresses Issue #27590.
+    """
+    # Clear cache and reset counter
+    _compiled_code_cache.clear()
+    initial_models_seen = compilation_counter.num_models_seen
+
+    # NOTE: Do NOT set VLLM_DISABLE_COMPILE_CACHE to enable caching
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_cudagraph=False,  # Simplify test
+        )
+    )
+
+    @support_torch_compile
+    class TestBlock(nn.Module):
+        def __init__(
+            self, hidden_size, *, vllm_config: VllmConfig, prefix: str = "", **kwargs
+        ):
+            super().__init__()
+            self.linear = nn.Linear(hidden_size, hidden_size)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.linear(x)
+
+    with set_current_vllm_config(vllm_config):
+        # Create 5 instances with same structure (128x128)
+        blocks_128 = []
+        for i in range(5):
+            block = TestBlock(128, vllm_config=vllm_config, prefix=f"block_{i}")
+            blocks_128.append(block)
+
+    # All 5 instances should share the same compiled code
+    # So num_models_seen should only increase by 1
+    models_seen_after_128 = compilation_counter.num_models_seen - initial_models_seen
+    assert models_seen_after_128 == 1, (
+        f"Expected 1 unique model (5 instances of 128x128), got {models_seen_after_128}"
+    )
+    assert len(_compiled_code_cache) >= 1, "Cache should have at least 1 entry"
+
+    with set_current_vllm_config(vllm_config):
+        # Create 3 instances with different structure (256x256)
+        blocks_256 = []
+        for i in range(3):
+            block = TestBlock(256, vllm_config=vllm_config, prefix=f"block_256_{i}")
+            blocks_256.append(block)
+
+    # Different structure should trigger new compilation
+    models_seen_after_256 = compilation_counter.num_models_seen - initial_models_seen
+    assert models_seen_after_256 == 2, (
+        f"Expected 2 unique models (128x128 and 256x256), got {models_seen_after_256}"
+    )
+    assert len(_compiled_code_cache) >= 2, "Cache should have at least 2 entries"
