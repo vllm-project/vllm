@@ -594,8 +594,8 @@ class InductorAdaptor(CompilerInterface):
 
 
 def set_inductor_config(config, compile_range):
-    if isinstance(compile_range, tuple):
-        # for a specific range of batchsizes, tuning triton kernel parameters
+    if isinstance(compile_range, tuple) and compile_range[0] == compile_range[1]:
+        # for a specific batch size, tuning triton kernel parameters
         # can be beneficial
         config["max_autotune"] = envs.VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE
         config["coordinate_descent_tuning"] = (
