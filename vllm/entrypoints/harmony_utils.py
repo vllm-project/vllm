@@ -342,12 +342,14 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         content = message.content[0]
         # We do not need to check the TOOL_CALL_JSON_PARSING_AUTOMATIC_RETRY
         # env variable since if it is not set, we are certain the json is valid
-        # The use of Actions will also be removed in the future entirely
+        # The use of Actions for web search will be removed entirely in
+        # the future, so this is only necessary temporarily
         try:
             browser_call = json.loads(content.text)
         except json.JSONDecodeError:
             # If the content is not valid JSON, then it was
-            # caught and retried by vLLM, which means
+            # caught and retried by vLLM, which means we
+            # need to make note of that so the user is aware
             json_retry_output_message = (
                 f"Invalid JSON args, caught and retried: {content.text}"
             )
