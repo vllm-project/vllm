@@ -108,9 +108,7 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.is_token_ids = torch.zeros(
-            (max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False
-        )
+        self.is_token_ids = np.zeros((max_num_reqs, max_model_len), dtype=bool)
         # Store prompt embeddings per request to avoid OOM from large upfront
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
