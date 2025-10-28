@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
@@ -55,6 +56,8 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         seq_lens = common_attn_metadata.seq_lens
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+            state_indices_tensor = state_indices_tensor.contiguous()
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(

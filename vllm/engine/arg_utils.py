@@ -1430,6 +1430,15 @@ class EngineArgs:
             f"dcp_size={self.decode_context_parallel_size}."
         )
 
+        if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            and self.enable_prefix_caching 
+            and model_config.is_hybrid
+        ):
+            assert envs.VLLM_USE_V1, (
+                "Prefix caching for hybrid models requires the V1 engine.")
+            assert self.enable_chunked_prefill, (
+                "Prefix caching for hybrid models requires chunked prefill.")
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
