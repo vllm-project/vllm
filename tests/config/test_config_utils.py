@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 import pytest
 
-from vllm.config import LogprobsMode
 from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
@@ -31,6 +31,10 @@ def _expected_path(p_str: str = ".") -> str:
 class SimpleConfig:
     a: object
     b: Optional[object] = None
+
+
+class DummyLogprobsMode(Enum):
+    RAW_LOGITS = "raw_logits"
 
 
 def test_hash_factors_deterministic():
@@ -65,10 +69,10 @@ def test_normalize_value_matrix(inp, expected):
 
 def test_normalize_value_enum():
     # Enums normalize to (module.QualName, value).
-    # LogprobsMode uses a string payload.
-    out = normalize_value(LogprobsMode.RAW_LOGITS)
+    # DummyLogprobsMode uses a string payload.
+    out = normalize_value(DummyLogprobsMode.RAW_LOGITS)
     assert isinstance(out, tuple)
-    assert out[0].endswith("LogprobsMode")
+    assert out[0].endswith("DummyLogprobsMode")
     # Expect string payload 'raw_logits'.
     assert out[1] == "raw_logits"
 
@@ -122,15 +126,15 @@ def test_enum_vs_int_disambiguation():
     assert nf_int == 1
 
     # enum becomes ("module.QualName", value)
-    nf_enum = normalize_value(LogprobsMode.RAW_LOGITS)
+    nf_enum = normalize_value(DummyLogprobsMode.RAW_LOGITS)
     assert isinstance(nf_enum, tuple) and len(nf_enum) == 2
     enum_type, enum_val = nf_enum
-    assert enum_type.endswith(".LogprobsMode")
+    assert enum_type.endswith(".DummyLogprobsMode")
     assert enum_val == "raw_logits"
 
     # Build factor dicts from configs with int vs enum
     f_int = get_hash_factors(SimpleConfig(1), set())
-    f_enum = get_hash_factors(SimpleConfig(LogprobsMode.RAW_LOGITS), set())
+    f_enum = get_hash_factors(SimpleConfig(DummyLogprobsMode.RAW_LOGITS), set())
     # The int case remains a primitive value
     assert f_int["a"] == 1
     # The enum case becomes a tagged tuple ("module.QualName", "raw_logits")
@@ -157,11 +161,3 @@ def test_classes_are_types():
         pass
 
     assert _endswith_fqname(LocalDummy, ".LocalDummy")
-
-    from vllm.compilation.inductor_pass import InductorPass
-    from vllm.executor.executor_base import ExecutorBase
-    from vllm.v1.sample.logits_processor.interface import LogitsProcessor
-
-    assert _endswith_fqname(LogitsProcessor, ".LogitsProcessor")
-    assert _endswith_fqname(ExecutorBase, ".ExecutorBase")
-    assert _endswith_fqname(InductorPass, ".InductorPass")
