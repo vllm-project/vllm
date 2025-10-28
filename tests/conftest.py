@@ -6,7 +6,8 @@ from copy import deepcopy
 
 from tblib import pickling_support
 
-from tests.v1.entrypoints.conftest import sample_json_schema as _sample_json_schema  # noqa
+# Import fixture
+from tests.v1.entrypoints.conftest import sample_json_schema  # noqa
 
 # ruff: noqa
 
@@ -79,8 +80,6 @@ _PromptMultiModalInput = list[_M] | list[list[_M]]
 PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
-
-sample_json_schema = _sample_json_schema
 
 
 def _read_prompts(filename: str) -> list[str]:
@@ -835,8 +834,9 @@ class VllmRunner:
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
+        return_logprobs: bool = False,
         **kwargs: Any,
-    ) -> list[tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]] | tuple[list, list]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
         req_outputs = self.llm.generate(
@@ -844,18 +844,23 @@ class VllmRunner:
         )
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
+        logprobs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
             req_sample_output_ids: list[list[int]] = []
             req_sample_output_strs: list[str] = []
+            req_logprobs = []
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append((prompt_str or "") + output_str)
+                if sample.logprobs:
+                    req_logprobs.extend(sample.logprobs)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
-        return outputs
+            logprobs.append(req_logprobs)
+        return outputs if not return_logprobs else (outputs, logprobs)
 
     @staticmethod
     def _final_steps_generate_w_logprobs(

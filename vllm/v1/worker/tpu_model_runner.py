@@ -53,7 +53,6 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import LayerBlockType
 from vllm.utils.math_utils import cdiv, prev_power_of_2
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (
@@ -212,7 +211,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention
+            parallel_config, "attention"
         )
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
