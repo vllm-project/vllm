@@ -163,7 +163,7 @@ class ModelConfig:
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
     allowed_media_domains: list[str] | None = None
-    """If set, only media URLs that belong to this domain can be used for 
+    """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
@@ -345,6 +345,7 @@ class ModelConfig:
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
         factors.append(self.video_pruning_rate)
+        factors.append(self.enable_prompt_embeds)
 
         # hf_config can control how the model looks!
         try:
@@ -2142,8 +2143,18 @@ def _get_and_verify_max_len(
     # If the user didn't specify `max_model_len`, then use that derived from
     # the model config as a default value.
     if max_model_len is None:
-        max_model_len = int(derived_max_model_len)
+        # For LongRoPE, default to original_max_position_embeddings to avoid
+        # performance degradation for shorter sequences
+        if rope_scaling is not None and rope_scaling["rope_type"] == "longrope":
+            max_model_len = int(
+                getattr(
+                    hf_config, "original_max_position_embeddings", derived_max_model_len
+                )
+            )
+        else:
+            max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     elif max_model_len > derived_max_model_len:
