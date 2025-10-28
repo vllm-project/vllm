@@ -784,9 +784,9 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=None,
             )
 
-    async def handle_fault(self, instruction: str, timeout: int = 300) -> None:
+    async def handle_fault(self, instruction: str, timeout: int = 300) -> bool:
         """send fault tolerance instruction to the engine"""
-        await self.engine_core.handle_fault(instruction, timeout)
+        return await self.engine_core.handle_fault(instruction, timeout)
 
     async def exception_reporter(self):
         """report exception in engine core"""
