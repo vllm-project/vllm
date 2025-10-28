@@ -1749,7 +1749,7 @@ async def init_app_state(
                 log_error_stack=args.log_error_stack,
             )
         )
-        if supported_tasks
+        if any(task in POOLING_TASKS for task in supported_tasks)
         else None
     )
     state.openai_serving_embedding = (
