@@ -62,11 +62,12 @@ class ARCOffloadingManager(OffloadingManager):
         self.b2: OrderedDict[BlockHash, None] = OrderedDict()
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
 
+        self.cache_capacity: int
         if hasattr(self.backend, "num_blocks"):
-            self.cache_capacity: int = self.backend.num_blocks
+            self.cache_capacity = self.backend.num_blocks
         else:
             # fallback: use current free blocks as a proxy
-            self.cache_capacity: int = self.backend.get_num_free_blocks()
+            self.cache_capacity = self.backend.get_num_free_blocks()
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         hit_count = 0
