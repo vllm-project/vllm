@@ -45,12 +45,14 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs:
 
-| Task             | APIs                                 |
-|------------------|--------------------------------------|
-| `token_classify` | `LLM.reward(...)`                    |
-| `embed`          | `LLM.embed(...)`, `LLM.score(...)`\* |
-| `classify`       | `LLM.classify(...)`                  |
-| `score`          | `LLM.score(...)`                     |
+| Task             | APIs                                                                          |
+|------------------|-------------------------------------------------------------------------------|
+| `embed`          | `LLM.embed(...)`, `LLM.score(...)`\*, `LLM.encode(..., pooling_task="embed")` |
+| `classify`       | `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")`               |
+| `score`          | `LLM.score(...)`                                                              |
+| `token_classify` | `LLM.reward(...)`, `LLM.encode(..., pooling_task="token_classify")`           |
+| `token_embed`    | `LLM.encode(..., pooling_task="token_embed")`                                 |
+| `plugin`         | `LLM.encode(..., pooling_task="plugin")`                                      |
 
 \* The `LLM.score(...)` API falls back to `embed` task if the model does not support `score` task.
 
