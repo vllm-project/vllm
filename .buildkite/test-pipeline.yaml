@@ -322,6 +322,15 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: V1 Test attention (B200) # 10min
+  timeout_in_minutes: 30
+  gpu: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention
+
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
     - vllm/
