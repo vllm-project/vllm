@@ -395,8 +395,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         last_useful_token = num_computed_tokens - self.sliding_window + 1
         last_useful_block = last_useful_token // self.block_size
         if last_useful_block <= 0:
-            # Early return if the last useful block is out of boundary
-            # (i.e. sliding window is not filled yet)
+            # Early return if tokens are not enough to fill the sliding window
             return
         blocks = self.req_to_blocks[request_id]
         if blocks[last_useful_block - 1] == self._null_block:
