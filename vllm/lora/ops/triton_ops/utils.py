@@ -199,6 +199,7 @@ def get_lora_op_configs(
             "split_k": 64 if batch < 128 else 8,
             "num_warps": 4,
             "num_ctas": 1,
+            "group_size_m": 8,
             "num_stages": 2,
             "max_nreg": None,
         }
