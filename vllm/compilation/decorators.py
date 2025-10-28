@@ -302,6 +302,7 @@ def _support_torch_compile(
                     start_monitoring_torch_compile(self.vllm_config)
                     loaded_fn = torch.compiler.load_compiled_function(f)
                 _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
+                loaded_fn.disable_guard_check()
                 self.aot_compiled_fn = loaded_fn
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
