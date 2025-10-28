@@ -24,6 +24,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import pytest
 from utils import _random_prompt, skip_unsupported
 
 
@@ -95,6 +96,19 @@ def _extract_tokens_and_logprobs(
         tokens = lp.get("token_ids") or lp.get("tokens") or []
         token_logprobs = lp.get("token_logprobs", None)
     return tokens, token_logprobs
+
+
+def _server_is_up(api_base: str, timeout: float = 2.0) -> tuple[bool, str]:
+    url = api_base.rstrip("/") + "/models"
+    try:
+        req = Request(url, method="GET")
+        with urlopen(req, timeout=timeout) as resp:
+            _ = resp.read()
+        return True, "OK"
+    except URLError as e:  # type: ignore[reportGeneralTypeIssues]
+        return False, f"URLError: {e}"
+    except Exception as e:  # pragma: no cover
+        return False, f"Error: {e}"
 
 
 def _compare_bs1_vs_bsn_single_process(
@@ -173,6 +187,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN_dp_http():
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
     api_base = os.getenv("VLLM_API_BASE", "http://127.0.0.1:9256/v1")
     model_name = os.getenv("VLLM_TEST_MODEL", "deepseek-ai/DeepSeek-R1")
+    up, reason = _server_is_up(api_base)
+    if not up:
+        pytest.skip(f"Server not reachable at {api_base}: {reason}")
     prompts_all = [_random_prompt(10, 50) for _ in range(32)]
 
     sp_kwargs: dict[str, Any] = {
