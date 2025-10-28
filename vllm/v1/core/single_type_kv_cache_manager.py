@@ -398,9 +398,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # Early return if tokens are not enough to fill the sliding window
             return
         blocks = self.req_to_blocks[request_id]
-        if blocks[last_useful_block - 1] == self._null_block:
-            # Early return if the last useful block is already
-            # a null block (i.e. no block to remove)
+        if not blocks or blocks[last_useful_block - 1] == self._null_block:
+            # Early return if there are no blocks to remove
             return
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
