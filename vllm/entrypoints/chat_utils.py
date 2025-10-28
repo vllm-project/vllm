@@ -1559,7 +1559,7 @@ def resolve_chat_template_kwargs(
     template_vars = _cached_resolve_chat_template_kwargs(chat_template)
 
     # Allow standard HF parameters even if tokenizer uses **kwargs to receive them
-    hf_base_params = _get_hf_base_chat_template_params() & chat_template_kwargs.keys()
+    hf_base_params = _get_hf_base_chat_template_params()
 
     accept_vars = (fn_kw | template_vars | hf_base_params) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
