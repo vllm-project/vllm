@@ -1414,7 +1414,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     Safe for multiple vllm serve processes accessing the same torch compile cache.
     # - "unpacked": saves as directory structure (for inspection/debugging)
     #     NOT multiprocess safe - race conditions may occur with multiple processes.
-    #     Allows viewing and setting breakpoints in Inductor's output_code files.
+    #     Allows viewing and setting breakpoints in Inductor's code output files.
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
