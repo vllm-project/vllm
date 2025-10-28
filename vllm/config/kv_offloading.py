@@ -89,10 +89,10 @@ class NativeOffloadingParser(KVOffloadingConfigParser):
 
 
 class LMCacheOffloadingParser(KVOffloadingConfigParser):
+    """Handler for LMCache CPU offloading backend"""
+
     def _get_lmcache_config_dict(self, offloading_gib: float):
         return {"local_cpu": True, "max_local_cpu_size": offloading_gib}
-
-    """Handler for LMCache CPU offloading backend"""
 
     def configure_kv_transfer(
         self,
