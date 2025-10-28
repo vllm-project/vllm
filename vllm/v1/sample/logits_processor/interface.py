@@ -64,6 +64,15 @@ class LogitsProcessor(ABC):
     ) -> None:
         raise NotImplementedError
 
+    @classmethod
+    @abstractmethod
+    def validate_params(cls, sampling_params: SamplingParams):
+        """Validate sampling params for this logits processor.
+
+        Raise ValueError for invalid ones.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply LogitsProcessor to batch logits tensor.

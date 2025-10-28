@@ -46,6 +46,12 @@ class MinPLogitsProcessor(LogitsProcessor):
         """Min-p never impacts greedy sampling"""
         return True
 
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams):
+        min_p = sampling_params.min_p
+        if min_p is not None and (min_p < 0.0 or min_p > 1.0):
+            raise ValueError("min_p should be in the range [0.0, 1.0]")
+
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
@@ -131,6 +137,10 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         outcome of argmax in greedy sampling."""
         return False
 
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams):
+        pass
+
     def update_state(self, batch_update: BatchUpdate | None):
         needs_update = process_dict_updates(
             self.biases, batch_update, lambda params, _, __: params.logit_bias or None
@@ -182,6 +192,10 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         """By censoring stop tokens, min-tokens can change the outcome
         of the argmax operation in greedy sampling."""
         return False
+
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams):
+        pass
 
     @staticmethod
     def add_request(
