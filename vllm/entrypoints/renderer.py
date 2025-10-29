@@ -321,7 +321,7 @@ class CompletionRenderer(BaseRenderer):
         # Using a sync tokenizer is faster than using an async_tokenizer.
         tokenizer = self.tokenizer
 
-        if self.tokenizer is None:
+        if tokenizer is None:
             raise ValueError("No tokenizer available for text input processing")
 
         # Handle encoder-specific preprocessing
