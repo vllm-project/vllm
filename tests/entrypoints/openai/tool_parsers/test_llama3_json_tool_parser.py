@@ -144,11 +144,7 @@ def test_extract_tool_calls_deeply_nested_json(parser):
         '"level3": {'
         '"level4": {'
         '"value": "deep"'
-        "}"
-        "}"
-        "}"
-        "}"
-        "}}"
+        "}}}}}}"
     )
     result = parser.extract_tool_calls(model_output, None)
 
