@@ -64,7 +64,10 @@ class CudagraphDispatcher:
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(
-        self, cudagraph_mode: CUDAGraphMode, uniform_decode_query_len: int
+        self,
+        cudagraph_mode: CUDAGraphMode,
+        uniform_decode_query_len: int,
+        draft_lengths: list[int] | None = None,
     ):
         # This should be called only after attention backend is initialized.
 
@@ -77,17 +80,29 @@ class CudagraphDispatcher:
         else:
             lora_cases = [False]
 
+        # Draft length cases for speculative decoding
+        # If draft_lengths is None or [0], use single case with draft_length=0
+        if draft_lengths is None or draft_lengths == [0]:
+            draft_cases = [0]
+        else:
+            draft_cases = draft_lengths
+
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-            for bs, has_lora in product(
-                self.compilation_config.cudagraph_capture_sizes, lora_cases
+            for bs, has_lora, draft_len in product(
+                self.compilation_config.cudagraph_capture_sizes,
+                lora_cases,
+                draft_cases,
             ):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
                     BatchDescriptor(
-                        num_tokens=bs, uniform_decode=False, has_lora=has_lora
+                        num_tokens=bs,
+                        uniform_decode=False,
+                        has_lora=has_lora,
+                        draft_length=draft_len,
                     ),
                 )
 
@@ -106,11 +121,16 @@ class CudagraphDispatcher:
                 for x in self.compilation_config.cudagraph_capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
-            for bs, has_lora in product(cudagraph_capture_sizes_for_decode, lora_cases):
+            for bs, has_lora, draft_len in product(
+                cudagraph_capture_sizes_for_decode, lora_cases, draft_cases
+            ):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
                     BatchDescriptor(
-                        num_tokens=bs, uniform_decode=True, has_lora=has_lora
+                        num_tokens=bs,
+                        uniform_decode=True,
+                        has_lora=has_lora,
+                        draft_length=draft_len,
                     ),
                 )
         self.keys_initialized = True
