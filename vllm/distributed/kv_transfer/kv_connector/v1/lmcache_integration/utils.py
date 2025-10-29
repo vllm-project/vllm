@@ -131,7 +131,7 @@ def create_lmcache_metadata(
     # First Party
     from lmcache.config import LMCacheEngineMetadata
 
-    from vllm.utils import get_kv_cache_torch_dtype
+    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
     config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters
