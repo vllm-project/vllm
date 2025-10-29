@@ -149,7 +149,6 @@ class ARCOffloadingManager(OffloadingManager):
 
                 if evict_from_t1:
                     # try to evict the least recently used (oldest) block from T1
-                    evicted = False
                     for block_hash, block in list(self.t1.items()):
                         if block.ref_cnt == 0:
                             del self.t1[block_hash]
@@ -160,15 +159,12 @@ class ARCOffloadingManager(OffloadingManager):
                             self.backend.free(block)
 
                             evicted_count += 1
-                            evicted = True
                             break
-
-                    if not evicted:
+                    else:
                         evict_from_t1 = False
 
                 if not evict_from_t1:
                     # try to evict the least recently used (oldest) block from T2
-                    evicted = False
                     for block_hash, block in list(self.t2.items()):
                         if block.ref_cnt == 0:
                             del self.t2[block_hash]
@@ -179,10 +175,8 @@ class ARCOffloadingManager(OffloadingManager):
                             self.backend.free(block)
 
                             evicted_count += 1
-                            evicted = True
                             break
-
-                    if not evicted:
+                    else:
                         # cannot evict enough blocks, cache is full of in-use items
                         return None
 
