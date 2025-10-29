@@ -4,11 +4,10 @@
 
 from collections.abc import Callable, Iterable
 from pathlib import PosixPath
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import numpy.typing as npt
 import torch
-from PIL import Image
 
 from vllm.multimodal.audio import AudioResampler
 from vllm.multimodal.image import rescale_image_size
@@ -255,7 +254,8 @@ def build_video_inputs_from_test_info(
         sample_frames_with_video_metadata(
             (asset.np_ndarrays, asset.metadata),
             num_frames,
-        ) for asset in video_assets
+        )
+        for asset in video_assets
     ]
 
     video_scaler = (
@@ -266,11 +266,15 @@ def build_video_inputs_from_test_info(
         PromptWithMultiModalInput(
             prompts=[prompt for _ in size_wrapper.data],
             video_data=[
-                (video_scaler(video, size) if not needs_video_metadata else
-                 (video_scaler(video, size), meta))
+                (
+                    video_scaler(video, size)
+                    if not needs_video_metadata
+                    else (video_scaler(video, size), meta)
+                )
                 for size in size_wrapper.data
             ],
-        ) for (video, meta), prompt in zip(sampled_vids, model_prompts)
+        )
+        for (video, meta), prompt in zip(sampled_vids, model_prompts)
     ]
 
 
