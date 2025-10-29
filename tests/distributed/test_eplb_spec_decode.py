@@ -65,33 +65,29 @@ def test_eplb_spec_decode(
     Test the correctness of EPLB speculative decoding with GSM8K dataset.
     Applicable to MoE models with mtp or eagle spec decode.
     """
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_MLA_DISABLE", "1")
+    method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
 
-        method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
+    TASK = "gsm8k"
+    FILTER = "exact_match,strict-match"
+    RTOL = 0.03
 
-        TASK = "gsm8k"
-        FILTER = "exact_match,strict-match"
-        RTOL = 0.03
+    model_args = get_model_args(
+        model_name=model_name,
+        spec_model_name=spec_model_name,
+        spec_method=method,
+        tp_size=tp_size,
+        model_max_len=4096,
+    )
 
-        model_args = get_model_args(
-            model_name=model_name,
-            spec_model_name=spec_model_name,
-            spec_method=method,
-            tp_size=tp_size,
-            model_max_len=4096,
-        )
-
-        results = lm_eval.simple_evaluate(
-            model="vllm",
-            model_args=model_args,
-            tasks=TASK,
-            batch_size=64,
-            num_fewshot=8,
-        )
-        measured_value = results["results"][TASK][FILTER]
-        assert (
-            measured_value - RTOL < expected_gsm8k_value
-            and measured_value + RTOL > expected_gsm8k_value
-        ), f"Expected: {expected_gsm8k_value} |  Measured: {measured_value}"
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=model_args,
+        tasks=TASK,
+        batch_size=64,
+        num_fewshot=8,
+    )
+    measured_value = results["results"][TASK][FILTER]
+    assert (
+        measured_value - RTOL < expected_gsm8k_value
+        and measured_value + RTOL > expected_gsm8k_value
+    ), f"Expected: {expected_gsm8k_value} |  Measured: {measured_value}"
