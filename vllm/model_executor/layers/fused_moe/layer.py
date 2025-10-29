@@ -2291,6 +2291,8 @@ class FusedMoE(CustomOp):
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
         assert self.batched_router_logits.size(-1) == full_router_logits.size(-1)
 
+        #print(f"CHUNKED {full_hidden_states.shape}")
+
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
@@ -2346,7 +2348,7 @@ class FusedMoE(CustomOp):
                     mode="constant",
                     value=0.0,
                 )
-                print(f"PADDING {num_tokens} {pad} {staged_hidden_states.shape}")
+                #print(f"PADDING {num_tokens} {pad} {staged_hidden_states.shape}")
 
             # If there are shared experts but we are not using a modular kernel,
             # the shared experts must be called here
@@ -2444,9 +2446,7 @@ class FusedMoE(CustomOp):
 
         num_tokens = full_hidden_states.size(0)
 
-        print(
-            f"MAX_TOKENS_ACROSS_DISPATCHERS = {num_tokens} {max_tokens_across_dispatchers}"
-        )
+        #print(f"MAX_TOKENS_ACROSS_DISPATCHERS = {num_tokens} {max_tokens_across_dispatchers}")
 
         if False and num_tokens < max_tokens_across_dispatchers:
             pad = max_tokens_across_dispatchers - num_tokens
@@ -2521,7 +2521,7 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        print("NON-CHUNKED")
+        #print("NON-CHUNKED")
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1 and not self.quant_method.using_modular_kernel
