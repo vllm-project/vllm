@@ -12,6 +12,7 @@ VLLM_ROCM_USE_AITER=1 \
 vllm serve $MODEL \
 --tensor-parallel-size 8 \
 --disable-log-requests \
+--no-enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
 --trust-remote-code \
 --block-size 1 \
