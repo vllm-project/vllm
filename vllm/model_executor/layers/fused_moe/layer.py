@@ -56,7 +56,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_pplx, has_hybrid_deep_ep
+from vllm.utils.import_utils import has_deep_ep, has_hybrid_deep_ep, has_pplx
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -376,7 +376,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logger.info_once(
                 "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
             )
-            from functools import partial
 
             from .flashinfer_cutlass_moe import flashinfer_cutlass_moe
 
@@ -2026,7 +2025,6 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
-    @functools.cache
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
             self.quant_method.moe_quant_config = (
@@ -2291,7 +2289,7 @@ class FusedMoE(CustomOp):
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
         assert self.batched_router_logits.size(-1) == full_router_logits.size(-1)
 
-        #print(f"CHUNKED {full_hidden_states.shape}")
+        # print(f"CHUNKED {full_hidden_states.shape}")
 
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
@@ -2348,7 +2346,7 @@ class FusedMoE(CustomOp):
                     mode="constant",
                     value=0.0,
                 )
-                #print(f"PADDING {num_tokens} {pad} {staged_hidden_states.shape}")
+                # print(f"PADDING {num_tokens} {pad} {staged_hidden_states.shape}")
 
             # If there are shared experts but we are not using a modular kernel,
             # the shared experts must be called here
@@ -2446,17 +2444,18 @@ class FusedMoE(CustomOp):
 
         num_tokens = full_hidden_states.size(0)
 
-        #print(f"MAX_TOKENS_ACROSS_DISPATCHERS = {num_tokens} {max_tokens_across_dispatchers}")
+        # print(f"MAX_TOKENS_ACROSS_DISPATCHERS = {num_tokens} "
+        #      f"{max_tokens_across_dispatchers}")
 
-        if False and num_tokens < max_tokens_across_dispatchers:
-            pad = max_tokens_across_dispatchers - num_tokens
-            full_hidden_states = F.pad(
-                full_hidden_states,
-                (0, pad),
-                mode="constant",
-                value=0.0,
-            )
-            print(f"PADDING {num_tokens} {pad}")
+        # if False and num_tokens < max_tokens_across_dispatchers:
+        #     pad = max_tokens_across_dispatchers - num_tokens
+        #     full_hidden_states = F.pad(
+        #         full_hidden_states,
+        #         (0, pad),
+        #         mode="constant",
+        #         value=0.0,
+        #     )
+        #     print(f"PADDING {num_tokens} {pad}")
 
         for chunk_idx, chunk_start_ in enumerate(
             range(0, max_tokens_across_dispatchers, moe_dp_chunk_size_per_rank)
@@ -2475,6 +2474,7 @@ class FusedMoE(CustomOp):
                     chunk_start,
                     chunk_end,
                     skip_result_store=chunk_start_ >= num_tokens,
+                    # TODO: add condition on this
                     max_tokens_across_dispatchers=max_tokens_across_dispatchers,
                 )
 
@@ -2521,7 +2521,7 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        #print("NON-CHUNKED")
+        # print("NON-CHUNKED")
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1 and not self.quant_method.using_modular_kernel
