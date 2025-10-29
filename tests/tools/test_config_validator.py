@@ -5,7 +5,7 @@ import ast
 
 import pytest
 
-from tools.validate_config import validate_ast
+from tools.pre_commit.validate_config import validate_ast
 
 _TestConfig1 = """
 @config
