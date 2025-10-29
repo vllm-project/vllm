@@ -1135,6 +1135,7 @@ class FusedMoE(CustomOp):
         )
 
         self.global_num_experts = num_experts + num_redundant_experts
+        self.logical_num_experts = num_experts
         self.zero_expert_num = zero_expert_num
         self.zero_expert_type = zero_expert_type
 
@@ -1998,13 +1999,12 @@ class FusedMoE(CustomOp):
 
         moe = self.moe_config
 
-        # Note here we use `num_experts` which is logical expert count
         if self.vllm_config.parallel_config.enable_dbo:
             states_shape = (2, moe.max_num_tokens, self.hidden_size)
-            logits_shape = (2, moe.max_num_tokens, moe.num_experts)
+            logits_shape = (2, moe.max_num_tokens, self.logical_num_experts)
         else:
             states_shape = (moe.max_num_tokens, self.hidden_size)
-            logits_shape = (moe.max_num_tokens, moe.num_experts)
+            logits_shape = (moe.max_num_tokens, self.logical_num_experts)
 
         self.batched_hidden_states = torch.zeros(
             states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
