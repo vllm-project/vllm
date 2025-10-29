@@ -284,9 +284,8 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     ir_node = node.node
     if isinstance(ir_node, ir.FallbackKernel):
         op = ir_node.op_overload
-        if (
-            op is not None
-            and op.name() in torch._inductor.config.custom_should_partition_ops
+        if op is not None and op.name() in getattr(
+            torch._inductor.config, "custom_should_partition_ops", []
         ):
             assert isinstance(op, torch._ops.OpOverload)
             return True
@@ -360,7 +359,7 @@ if is_torch_equal("2.9.0"):
     from torch._inductor.graph import GraphLowering
 
     if not hasattr(torch._inductor.config, "custom_should_partition_ops"):
-        torch._inductor.config.custom_should_partition_ops: list[str] = []
+        torch._inductor.config.custom_should_partition_ops = []
 
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
     GraphLowering._update_scheduler = _update_scheduler_patched

@@ -74,7 +74,7 @@ def inductor_partition_rule_context(splitting_ops: list[str]):
     # Save current state before registering
 
     saved_splitting_ops: list[str] = list(
-        torch._inductor.config.custom_should_partition_ops
+        getattr(torch._inductor.config, "custom_should_partition_ops", [])
     )
     torch._inductor.config.custom_should_partition_ops = splitting_ops
 
