@@ -877,6 +877,8 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
+        if self.worker_guard is not None:
+            self.worker_guard.shutdown()
 
 
 def init_worker_distributed_environment(
