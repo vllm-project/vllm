@@ -143,7 +143,7 @@ class CoreEngineProcManager:
                         data_parallel
                         and (
                             not current_platform.is_cuda_alike()
-                            or vllm_config.parallel_config.data_parallel_backend
+                            or vllm_config.parallel_config.distributed_executor_backend
                             in ["ray", "external_launcher"]
                         )
                     )
