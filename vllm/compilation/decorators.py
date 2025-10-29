@@ -248,7 +248,7 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_mode=vllm_config.compilation_config.mode
+            self, compilation_mode=vllm_config.compilation_config.mode, prefix=prefix
         )
 
     cls.__init__ = __init__

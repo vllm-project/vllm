@@ -2943,7 +2943,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             == CompilationMode.STOCK_TORCH_COMPILE
             and supports_dynamo()
         ):
-            backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
+            # Get the prefix from the model if it has one
+            prefix = getattr(self.model, "prefix", "")
+            backend = self.vllm_config.compilation_config.init_backend(
+                self.vllm_config, prefix
+            )
             compilation_counter.stock_torch_compile_count += 1
             self.model.compile(fullgraph=True, backend=backend)
             return

@@ -31,7 +31,7 @@ class TorchCompileWrapperWithCustomDispatcher:
     """
 
     def __init__(
-        self, compiled_callable: Callable | None = None, compilation_mode: int = 0
+        self, compiled_callable: Callable | None = None, compilation_mode: int = 0, prefix: str = ""
     ):
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
@@ -39,7 +39,9 @@ class TorchCompileWrapperWithCustomDispatcher:
             # default compilation settings
             # compiling the forward method
 
-            backend = vllm_config.compilation_config.init_backend(vllm_config)
+            # Get the prefix from self if it has one (subclasses might have it)
+            # prefix = getattr(self, "prefix", "")
+            backend = vllm_config.compilation_config.init_backend(vllm_config, prefix)
             options = None
             if isinstance(backend, str) and backend == "inductor":
                 options = (

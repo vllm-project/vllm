@@ -648,11 +648,12 @@ class CompilationConfig:
         if self.backend == "":
             self.backend = current_platform.simple_compile_backend
 
-    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+    def init_backend(self, vllm_config: "VllmConfig", prefix: str = "") -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
+            prefix: The prefix for the model being compiled (e.g., "language_model", "vision_model").
         Returns:
             The backend for the compilation config.
         """
@@ -684,7 +685,7 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
-        return VllmBackend(vllm_config)
+        return VllmBackend(vllm_config, prefix)
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related
