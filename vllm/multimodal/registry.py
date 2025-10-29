@@ -374,4 +374,4 @@ class ExtensionManager:
     def load(self, cls_name: str, *args, **kwargs) -> Any:
         cls = self.name2class.get(cls_name)
         assert cls is not None, f"Extension class {cls_name} not found"
-        return cls(args, kwargs)
+        return cls(*args, **kwargs)

@@ -812,6 +812,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=self._tracker._model_config.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     @property
@@ -897,6 +898,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=self._tracker._model_config.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     @property

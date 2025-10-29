@@ -56,9 +56,6 @@ def sample_frames_from_video(frames: npt.NDArray, num_frames: int) -> npt.NDArra
 
 
 class VideoLoader:
-    def __init__(self, *args, **kwargs) -> None:
-        pass
-
     @classmethod
     @abstractmethod
     def load_bytes(
