@@ -91,7 +91,7 @@ def rank_worker(
     exceptions = []
     count = 0
 
-    torch.set_printoptions(profile="full")
+    torch.set_printoptions(profile="full")  # debugging
 
     for m, topk in product(Ms, TOPKs):
         # override m and topk
@@ -147,7 +147,13 @@ def run(config: Config):
 
     vllm_config, env_dict = config.make_env_data()
     parallel_launch_with_config(
-        config.world_size, rank_worker, vllm_config, env_dict, config, weights, config.verbose,
+        config.world_size,
+        rank_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        config.verbose,
         config.exit_first,
     )
 
