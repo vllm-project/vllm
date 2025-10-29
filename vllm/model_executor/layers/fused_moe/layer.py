@@ -1922,8 +1922,10 @@ class FusedMoE(CustomOp):
                     chunk_start,
                     chunk_end,
                     skip_result_store=chunk_start_ >= num_tokens,
-                    # TODO: add condition on this
-                    max_tokens_across_dispatchers=max_tokens_across_dispatchers,
+                    # TODO: use isinstance condition on this?
+                    max_tokens_across_dispatchers=max_tokens_across_dispatchers
+                    if self.use_deepep_hybrid_kernels
+                    else 0,
                 )
 
         if self.shared_experts is None:

@@ -18,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceContiguous,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
@@ -34,7 +33,6 @@ from vllm.utils.deep_gemm import (
     m_grouped_fp8_gemm_nt_contiguous,
 )
 from vllm.utils.import_utils import has_deep_gemm
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -115,17 +113,12 @@ def _valid_deep_gemm(
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-        skip_permute_unpermute: bool = False,
-    ):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
         super().__init__(quant_config)
         assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
         assert quant_config.quant_dtype == torch.float8_e4m3fn
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
-        self.skip_permute_unpermute = skip_permute_unpermute
 
     @property
     def activation_formats(
@@ -279,24 +272,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        if self.skip_permute_unpermute:
-            TopKWeightAndReduceContiguous().apply(
-                output,
-                mm2_out,
-                topk_weights,
-                topk_ids,
-                apply_router_weight_on_input,
-            )
-        else:
-            # Perform unpermutation and reduction
-            deepgemm_unpermute_and_reduce(
-                a=mm2_out,
-                topk_ids=topk_ids,
-                topk_weights=topk_weights,
-                inv_perm=inv_perm,
-                expert_map=expert_map,
-                output=output,
-            )
+        deepgemm_unpermute_and_reduce(
+            a=mm2_out,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            inv_perm=inv_perm,
+            expert_map=expert_map,
+            output=output,
+        )
 
 
 def deep_gemm_moe_fp8(
