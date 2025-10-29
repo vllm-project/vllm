@@ -379,10 +379,9 @@ def get_kv_cache_layout():
     return cache_layout
 
 
-def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
+def set_kv_cache_layout(cache_layout: KVCacheLayoutType):
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    get_kv_cache_layout.cache_clear()
 
 
 @dataclass
