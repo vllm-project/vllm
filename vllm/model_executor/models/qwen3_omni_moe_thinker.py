@@ -1115,6 +1115,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.vllm_config = vllm_config # needed for torch compile forward context
         thinker_config: Qwen3OmniMoeThinkerConfig = (
             vllm_config.model_config.hf_config.thinker_config
         )
