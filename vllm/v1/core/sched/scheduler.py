@@ -1296,19 +1296,11 @@ class Scheduler(SchedulerInterface):
         self,
         request_ids: str | Iterable[str],
         finished_status: RequestStatus,
-    ) -> list[Request]:
+    ) -> None:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
         disconnects.
-
-        Args:
-            request_ids: Request IDs to finish.
-            finished_status: The finished status to set.
-
-        Returns:
-            List of freed requests. These are freed from the
-            scheduler PoV, but can be used to create outputs.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -1318,7 +1310,7 @@ class Scheduler(SchedulerInterface):
 
         running_requests_to_remove = set()
         waiting_requests_to_remove = []
-        freed_requests = []
+        valid_requests = []
 
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
@@ -1327,7 +1319,7 @@ class Scheduler(SchedulerInterface):
                 # Invalid request ID.
                 continue
 
-            freed_requests.append(request)
+            valid_requests.append(request)
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
             else:
@@ -1339,12 +1331,10 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
 
-        # Set status and free all valid requests
-        for request in freed_requests:
+        # Second pass: set status and free requests
+        for request in valid_requests:
             request.status = finished_status
             self._free_request(request)
-
-        return freed_requests
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
