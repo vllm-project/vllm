@@ -39,7 +39,7 @@ def mcp_enabled_server(monkeypatch_module: pytest.MonkeyPatch):
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
         m.setenv("PYTHON_EXECUTION_BACKEND", "dangerously_use_uv")
-        m.setenv("GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "code_interpreter,container")
+        m.setenv("VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "code_interpreter,container")
         # Helps the model follow instructions better
         m.setenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "1")
         with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

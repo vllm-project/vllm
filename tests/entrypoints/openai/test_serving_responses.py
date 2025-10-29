@@ -89,18 +89,18 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
             Mcp(type="mcp", server_label="web_search_preview", server_url=""),
         ]
     )
-    # When envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS is not set,
+    # When envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS is not set,
     # mcp tool types are all ignored.
     assert extract_tool_types(tools) == {"local_shell", "auto"}
 
     # container is allowed, it would be extracted
-    monkeypatch.setenv("GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "container")
+    monkeypatch.setenv("VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "container")
     assert extract_tool_types(tools) == {"local_shell", "auto", "container"}
 
     # code_interpreter and web_search_preview are allowed,
     # they would be extracted
     monkeypatch.setenv(
-        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "code_interpreter,web_search_preview"
+        "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "code_interpreter,web_search_preview"
     )
     assert extract_tool_types(tools) == {
         "local_shell",

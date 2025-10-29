@@ -116,8 +116,8 @@ def extract_tool_types(tools: list[Tool]) -> set[str]:
         if tool.type == "mcp":
             # Allow the MCP Tool type to enable built in tools if the
             # server_label is allowlisted in
-            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-            if tool.server_label in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
+            # envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS
+            if tool.server_label in envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
                 tool_types.add(tool.server_label)
         else:
             tool_types.add(tool.type)

@@ -198,6 +198,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
+    VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
@@ -208,7 +209,6 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
-    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -1345,6 +1345,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+    # Valid values are container,code_interpreter,web_search_preview
+    # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
+    # If the server_label of your mcp tool is not in this list it will
+    # be completely ignored.
+    "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_set_with_choices(
+        "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
+        default=[],
+        choices=["container", "code_interpreter", "web_search_preview"],
+    ),
     # Allows harmony instructions to be injected on system messages
     "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": lambda: bool(
         int(os.getenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "0"))
@@ -1390,15 +1399,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The number of SMs to allocate for communication kernels when running DBO
     # the rest of the SMs on the device will be allocated to compute
     "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
-    # Valid values are container,code_interpreter,web_search_preview
-    # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
-    # If the server_label of your mcp tool is not in this list it will
-    # be completely ignored.
-    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_set_with_choices(
-        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-        default=[],
-        choices=["container", "code_interpreter", "web_search_preview"],
-    ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
     # If set to 1, enable max_autotune; By default, this is enabled (1)
