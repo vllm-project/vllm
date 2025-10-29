@@ -45,14 +45,17 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # If deep gemm was requested but is not available (either due to
         # unsupported configuration or missing dependencies), check if
         # we should allow fallback to batched triton kernel
-        if deep_gemm_requested and self.batched_deep_gemm_experts is None:
-            if not envs.VLLM_ALLOW_BATCHED_TRITON_FALLBACK:
-                raise RuntimeError(
-                    "DeepGemm was requested but is not available. "
-                    "The batched triton kernel fallback is disabled by default. "
-                    "Set VLLM_ALLOW_BATCHED_TRITON_FALLBACK=1 to enable the fallback "
-                    "for debugging purposes."
-                )
+        if (
+            deep_gemm_requested
+            and self.batched_deep_gemm_experts is None
+            and not envs.VLLM_ALLOW_BATCHED_TRITON_FALLBACK
+        ):
+            raise RuntimeError(
+                "DeepGemm was requested but is not available. "
+                "The batched triton kernel fallback is disabled by default. "
+                "Set VLLM_ALLOW_BATCHED_TRITON_FALLBACK=1 to enable the fallback "
+                "for debugging purposes."
+            )
 
         self.batched_triton_experts = (
             BatchedTritonExperts(
