@@ -12,10 +12,11 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.executor.abstract import Executor, UniProcExecutor
+from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -24,9 +25,11 @@ from ...utils import create_new_process_for_each_test, multi_gpu_test
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
-PROMPT = "Hello my name is Robert and I love quantization kernels"
+# test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
+# Adjust prompt if changing model to maintain 12-token length.
+PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 

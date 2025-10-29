@@ -530,7 +530,7 @@ spec:
                     name: accelerators-thanos-querier-datasource
                   # Multiply by 100 so we can read it as a percentage without setting a unit (avoids CUE unit conflicts)
                   query: >
-                    100 * avg(vllm:gpu_cache_usage_perc)
+                    100 * avg(vllm:kv_cache_usage_perc)
 
     "18":
       kind: Panel

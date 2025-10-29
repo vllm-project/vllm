@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import hashlib
 import importlib.metadata
 import os
@@ -13,7 +15,7 @@ from diskcache import Cache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import outlines_core as oc
