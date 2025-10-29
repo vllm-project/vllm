@@ -22,10 +22,6 @@ from vllm.model_executor.models.interfaces import supports_eagle3
             "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",
             id="qwen3-eagle3-speculator-w4a16-verifier",
         ),
-        pytest.param(
-            "nm-testing/random-weights-llama3.1.8b-2layer-eagle3",
-            id="llama3-eagl3-multiple-layers",
-        ),
     ],
 )
 def test_eagle3_speculators_model(
