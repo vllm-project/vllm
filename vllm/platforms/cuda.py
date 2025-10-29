@@ -40,41 +40,52 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 
 @cache
 def _get_backend_priorities(
+    use_mla: bool,
     device_capability: DeviceCapability | None = None,
 ) -> dict[_Backend, int]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.attention.backends.registry import _Backend
 
-    if device_capability >= DeviceCapability(10, 0) and (
-        device_capability < DeviceCapability(11, 0)
-    ):
-        return {
-            # non-MLA backends
-            _Backend.FLASHINFER: 0,
-            _Backend.FLASH_ATTN: 1,
-            _Backend.TRITON_ATTN: 2,
-            _Backend.FLEX_ATTENTION: 3,
-            # MLA backends
-            _Backend.CUTLASS_MLA: 0,
-            _Backend.FLASHINFER_MLA: 1,
-            _Backend.FLASHMLA: 2,
-            _Backend.FLASH_ATTN_MLA: 3,
-            _Backend.TRITON_MLA: 4,
-            _Backend.FLASHMLA_SPARSE: 5,
-        }
+    if use_mla:
+        if (
+            device_capability
+            and device_capability >= DeviceCapability(10, 0)
+            and device_capability < DeviceCapability(11, 0)
+        ):
+            return {
+                _Backend.CUTLASS_MLA: 0,
+                _Backend.FLASHINFER_MLA: 1,
+                _Backend.FLASHMLA: 2,
+                _Backend.FLASH_ATTN_MLA: 3,
+                _Backend.TRITON_MLA: 4,
+                _Backend.FLASHMLA_SPARSE: 5,
+            }
+        else:
+            return {
+                _Backend.FLASHMLA: 0,
+                _Backend.FLASH_ATTN_MLA: 1,
+                _Backend.FLASHINFER_MLA: 2,
+                _Backend.TRITON_MLA: 3,
+            }
     else:
-        return {
-            # non-MLA backends
-            _Backend.FLASH_ATTN: 0,
-            _Backend.FLASHINFER: 1,
-            _Backend.TRITON_ATTN: 2,
-            _Backend.FLEX_ATTENTION: 3,
-            # MLA backends
-            _Backend.FLASHMLA: 0,
-            _Backend.FLASH_ATTN_MLA: 1,
-            _Backend.FLASHINFER_MLA: 2,
-            _Backend.TRITON_MLA: 3,
-        }
+        if (
+            device_capability
+            and device_capability >= DeviceCapability(10, 0)
+            and device_capability < DeviceCapability(11, 0)
+        ):
+            return {
+                _Backend.FLASHINFER: 0,
+                _Backend.FLASH_ATTN: 1,
+                _Backend.TRITON_ATTN: 2,
+                _Backend.FLEX_ATTENTION: 3,
+            }
+        else:
+            return {
+                _Backend.FLASH_ATTN: 0,
+                _Backend.FLASHINFER: 1,
+                _Backend.TRITON_ATTN: 2,
+                _Backend.FLEX_ATTENTION: 3,
+            }
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -264,7 +275,7 @@ class CudaPlatformBase(Platform):
         invalid_reasons = {}
         from vllm.attention.backends.registry import _Backend, backend_to_class
 
-        backend_priorities = _get_backend_priorities(device_capability)
+        backend_priorities = _get_backend_priorities(use_mla, device_capability)
         for backend in _Backend:
             if backend not in backend_priorities:
                 continue
