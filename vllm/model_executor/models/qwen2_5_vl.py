@@ -430,6 +430,8 @@ class Qwen2_5_VisionAttention(nn.Module):
             # Execute attention entry by entry for speed & less VRAM.
             from vllm.platforms import current_platform
 
+            # Never remove the next contiguous logic
+            # Without it, hallucinations occur with the backend
             if current_platform.is_rocm():
                 q = q.contiguous()
                 k = k.contiguous()
