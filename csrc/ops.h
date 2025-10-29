@@ -333,6 +333,15 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
+// Update path for causal conv1d (decode). Writes results in-place to x.
+void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
+                          const at::Tensor& weight,
+                          const std::optional<at::Tensor>& bias_,
+                          bool silu_activation,
+                          const std::optional<at::Tensor>& cache_seqlens_,
+                          const std::optional<at::Tensor>& conv_state_indices_,
+                          int64_t pad_slot_id);
+
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
     torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,

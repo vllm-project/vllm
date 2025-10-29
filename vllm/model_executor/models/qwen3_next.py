@@ -535,6 +535,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     : attn_metadata.num_decodes
                 ],
                 validate_data=True,
+                use_cuda=True,
             )
         else:
             mixed_qkv_non_spec = None
