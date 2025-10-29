@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union, cast
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import torch
@@ -292,6 +292,8 @@ class EngineCore:
                             group=self.dp_group)
             forced_mode = int(intent_tensor.item())  # 1=prefill, 0=decode
             self.dlog("after_intent_allreduce forced_mode=%d", forced_mode)
+            # Record forced_mode so it can be used by _execute_model_dp_gather.
+            self._dp_gather_forced_mode = forced_mode
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -1168,45 +1170,76 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dlog("enter_gather tokens=%d",
                       scheduler_output.total_num_scheduled_tokens)
 
-        # Build local dp model input (or None). Scheduler already enforces a
-        # single mode across ranks, so no further filtering is required here.
-        local_input = None
-        if scheduler_output is not None:
-            local_input_list = self.model_executor.collective_rpc(
-                "build_dp_model_input", args=(scheduler_output, ))
-            local_input = local_input_list[0]
+        # Detect decode vs prefill using forced_mode negotiated earlier.
+        # 0=decode, 1=prefill.
+        assert hasattr(self, "_dp_gather_forced_mode"), "forced_mode not set"
+        is_decode = self._dp_gather_forced_mode == 0
 
-        # Gather python-serializable inputs
-        gathered = [None for _ in range(world)]
-        dist.all_gather_object(gathered, local_input, group=group)
+        # Build local dp model input (or None).
+        local_input, local_max_blocks = self.model_executor.collective_rpc(
+            "build_dp_model_input", args=(scheduler_output, ))[0]
+        max_blocks_decode = None  # Only used for decode.
+
+        if is_decode:
+            # Gather max blocks from all ranks.
+            max_blocks_t = torch.tensor([local_max_blocks], dtype=torch.int32)
+            dist.all_reduce(max_blocks_t, op=dist.ReduceOp.MAX, group=group)
+            max_blocks_decode = int(max_blocks_t.item())
+
+            # Build tensorized gather input for decode.
+            local_input = self.model_executor.collective_rpc(
+                "build_dp_decode_gather_input",
+                args=(local_input, max_blocks_decode))[0]
+
+            # Decode: use all_gather_into_tensor with fixed-shape inputs.
+            int_local = local_input["int_inputs"]  # 1D int32
+            float_local = local_input["float_inputs"]  # 1D float32
+            int_out_1d = torch.empty(int_local.numel() * world,
+                                     dtype=int_local.dtype)
+            float_out_1d = torch.empty(float_local.numel() * world,
+                                       dtype=float_local.dtype)
+            # Stateless DP group doesn't support rooted collectives, otherwise
+            # this could be gather instead of all_gather.
+            dist.all_gather_into_tensor(int_out_1d, int_local, group=group)
+            dist.all_gather_into_tensor(float_out_1d, float_local, group=group)
+            if rank == 0:
+                gathered_inputs = {
+                    "int_inputs": int_out_1d.view(world, -1),
+                    "float_inputs": float_out_1d.view(world, -1),
+                }
+        else:
+            # Prefill: use object all_gather with variable sized inputs.
+            gathered_inputs = [None for _ in range(world)]  # type: ignore
+            dist.all_gather_object(gathered_inputs, local_input, group=group)
         self.dlog("after_inputs_gather")
 
-        # DP0: concat and execute once using worker hook
-        if rank == 0:
-            if any(x is not None for x in gathered):
-                per_rank = self.model_executor.collective_rpc(
-                    "concat_and_execute_dp", args=(gathered, ))[0]
-            else:
-                per_rank = [[] for _ in range(world)]
-            # per_rank[i] is a list[list[int]] containing sampled token ids
-            self.dlog("split_counts=%s",
-                      [len(per_rank[i]) for i in range(world)])
-            send_obj = {i: per_rank[i] for i in range(world)}
+        # Concatenate and execute DP inputs on rank 0.
+        if rank == 0 and (is_decode or any(x is not None
+                                           for x in gathered_inputs)):
+            send_tensor = self.model_executor.collective_rpc(
+                "concat_and_execute_dp",
+                args=(gathered_inputs, is_decode, max_blocks_decode))[0]
+            assert isinstance(send_tensor, torch.Tensor)
         else:
-            send_obj = {}
+            B = self.vllm_config.scheduler_config.max_num_seqs
+            # Currently only supporting 1 output token per request.
+            send_tensor = torch.zeros((world, B, 1), dtype=torch.int32)
 
-        # Share results via gather of dicts (avoid broadcast on stateless dp)
-        gathered = [None for _ in range(world)]
-        dist.all_gather_object(gathered, send_obj, group=group)
-        # Only rank 0 sends a non-empty dict; it's always at index 0.
-        merged = cast(dict[int, list[Any]], gathered[0] or {})
-        my_ids = merged.get(rank, [])
-        self.dlog("after_results_gather my_ids_len=%d", len(my_ids))
+        # Stateless DP group doesn't support rooted collectives, otherwise
+        # this could be scatter instead of all_reduce.
+        # Rank 0 contributes the full tensor; others contribute zeros.
+        input_tensor = send_tensor.contiguous()
+        dist.all_reduce(input_tensor, op=dist.ReduceOp.SUM, group=group)
+        my_ids = input_tensor[rank]
+        self.dlog("after_results_gather my_ids_shape=%s", tuple(my_ids.shape))
 
-        # Apply results locally and return output
-        output = self.model_executor.collective_rpc(
-            "apply_dp_execution_result", args=(my_ids, ))[0]
-        return output
+        # If rank had scheduled tokens, apply results locally and return output
+        if local_has:
+            output = self.model_executor.collective_rpc(
+                "apply_dp_execution_result", args=(my_ids, ))[0]
+            return output
+        else:
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
 
 class DPEngineCoreActor(DPEngineCoreProc):

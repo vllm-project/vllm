@@ -77,7 +77,8 @@ class InputBatch:
     ) -> None:
         if req_index is None:
             req_index = self.num_reqs
-        assert req_index < self.max_num_reqs
+        assert req_index < self.max_num_reqs, (
+            f"req_index={req_index} >= max_num_reqs={self.max_num_reqs}")
 
         req_id = request.req_id
         if req_index == len(self._req_ids):

@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
+
+import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -163,28 +165,68 @@ class TTWorker(WorkerBase):
     # ---- DP gather hooks called by DPEngineCoreProc in core.py ----
 
     def build_dp_model_input(
-            self,
-            scheduler_output: "SchedulerOutput") -> Optional[TTModelInput]:
-        """Called by each DP rank to build TTModelInput from scheduler output.
-        Returns None if there is no scheduled work in this step.
+        self, scheduler_output: Optional["SchedulerOutput"]
+    ) -> tuple[Optional[TTModelInput], int]:
+        """Called by each DP rank to build model input from scheduler output.
         """
-        return self.model_runner.build_model_input(scheduler_output)
+        model_input = None
+        if scheduler_output is not None:
+            model_input = self.model_runner.build_model_input(scheduler_output)
+        max_blocks = model_input.block_tables.shape[1] if model_input else 0
+        return model_input, max_blocks
+
+    def build_dp_decode_gather_input(
+            self, model_input: Optional[TTModelInput],
+            max_blocks_decode_batch: int) -> dict[str, torch.Tensor]:
+        return self.model_runner.build_dp_decode_gather_input(
+            model_input, max_blocks_decode_batch)
 
     def concat_and_execute_dp(
-            self,
-            inputs: list[Optional[TTModelInput]]) -> list[list[list[int]]]:
+            self, inputs: Union[list[Optional[TTModelInput]],
+                                dict[str, torch.Tensor]], is_decode: bool,
+            max_blocks_decode_batch: Optional[int]) -> torch.Tensor:
         """Called only by DP rank 0 to concatenate DP-sized inputs and execute.
-        Returns per-DP sampled ids."""
+        Returns a stacked tensor [world, max_num_seqs, 1] of sampled ids.
+        Each DP slice is right-padded with zeros to max_num_seqs; empty entries
+        are zeros. Same behavior for both prefill and decode."""
+
         assert self.vllm_config.parallel_config.data_parallel_rank == 0, \
             "concat_and_execute_dp must run on DP rank 0"
         assert self.is_driver_worker, "concat_and_execute_dp must run on driver"
-        merged = self.model_runner.concat_model_inputs(inputs)
-        return self.model_runner.execute_with_model_input(merged)
+        merged = self.model_runner.concat_dp_model_inputs(
+            inputs, is_decode, max_blocks_decode_batch)
+        sampled_token_ids_per_dp: list[
+            torch.Tensor] = self.model_runner.execute_with_model_input(merged)
+
+        # Pad each DP result to uniform shape for tensor all_gather.
+        world = self.vllm_config.parallel_config.data_parallel_size
+        assert len(sampled_token_ids_per_dp) == world
+        B = int(self.model_runner.scheduler_config.max_num_seqs)
+        for dp_rank in range(world):
+            token_ids = sampled_token_ids_per_dp[dp_rank].to(torch.int32)
+            if token_ids.numel() == 0:
+                token_ids = torch.zeros((B, 1), dtype=torch.int32)
+            else:
+                assert token_ids.dim() == 2 and token_ids.shape[1] == 1, (
+                    "Currently only supporting 1 output token per request")
+                pad_rows = B - token_ids.shape[0]
+                if pad_rows > 0:
+                    token_ids = torch.cat([
+                        token_ids,
+                        torch.zeros(
+                            (pad_rows, token_ids.shape[1]), dtype=torch.int32)
+                    ],
+                                          dim=0)
+            sampled_token_ids_per_dp[dp_rank] = token_ids
+        return torch.stack(sampled_token_ids_per_dp)  # [world, B, 1]
 
     def apply_dp_execution_result(
-            self, sampled_token_ids: list[list[int]]) -> ModelRunnerOutput:
+            self, sampled_token_ids: torch.Tensor) -> ModelRunnerOutput:
         """Called by each DP rank to apply sampled tokens to internal caches.
         """
+        # Trim to active local batch size to drop padding rows.
+        num_reqs = self.model_runner.input_batch.num_reqs
+        sampled_token_ids = sampled_token_ids[:num_reqs]
         return self.model_runner.generate_runner_output(sampled_token_ids)
 
     # ---- Destructor (used to close devices) ----
