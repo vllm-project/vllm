@@ -108,7 +108,8 @@
     --disable-log-requests \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
     --gpu_memory_utilization 0.9 \
-    --block-size 1
+    --block-size 1 \
+    --async-scheduling
     ```
 
 ## Curl request

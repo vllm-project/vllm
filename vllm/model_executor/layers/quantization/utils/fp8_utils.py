@@ -945,13 +945,12 @@ def requant_weight_ue8m0_inplace(
 
 
 def check_aiter_fp8_linear_support() -> bool:
-    """AITER is only supported on ROCm and only for FP8_FNUZ
-    and at the moment are MI300 series"""
+    """AITER is only supported on ROCm"""
     return (
         current_platform.is_rocm()
         and envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_LINEAR
-        and current_platform.is_fp8_fnuz()
+        and current_platform.supports_fp8()
     )
 
 
