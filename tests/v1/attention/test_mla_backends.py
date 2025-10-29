@@ -22,7 +22,8 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.config.vllm import set_current_vllm_config
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -154,7 +155,7 @@ def create_and_prepopulate_kv_cache(
         scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
     else:
         # Create MLA KV cache: (num_blocks, block_size, head_size)
-        kv_cache = torch.empty(
+        kv_cache = torch.zeros(
             num_blocks, block_size, head_size, dtype=dtype, device=device
         )
         kv_cache_flat = kv_cache.view(-1, head_size)
@@ -211,6 +212,7 @@ def create_and_prepopulate_kv_cache(
         start = start_block_idx
         end = start + num_blocks_for_seq
         block_table[i, :num_blocks_for_seq] = inv_perm[start:end]
+        block_table[i, num_blocks_for_seq:] = 0
         start_block_idx += num_blocks_for_seq
 
         # Create a realistic slot mapping that corresponds to the block table

@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, round_up
+from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -258,21 +259,19 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         # Increase the max capture size from 512 to 992 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
         # from 67 to 81.
-        scheduler_config = vllm_config.scheduler_config
-        if len(scheduler_config.cuda_graph_sizes) == 1:
-            max_capture_size = scheduler_config.cuda_graph_sizes[0]
+        compilation_config = vllm_config.compilation_config
+        # Only override when the user has not set either of
+        # cudagraph_capture_sizes or max_cudagraph_capture_size.
+        if (
+            compilation_config.cudagraph_capture_sizes is None
+            and compilation_config.max_cudagraph_capture_size is None
+        ):
             # FIXME(woosuk): When using full cuda graph with FA3, the max
             # supported size is 992.
-            if max_capture_size < 992:
-                cuda_graph_sizes = [1, 2, 4]
-                # Step size 8 for small batch sizes
-                cuda_graph_sizes += [i for i in range(8, 256, 8)]
-                # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 993, 16)]
-                scheduler_config.cuda_graph_sizes = cuda_graph_sizes
-                logger.info(
-                    "Overriding max cuda graph capture size to %d for performance.", 992
-                )
+            compilation_config.max_cudagraph_capture_size = 992
+            logger.info(
+                "Overriding max cuda graph capture size to %d for performance.", 992
+            )
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):
@@ -292,21 +291,11 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        # Set mamba block size to max_model_len (this may get
-        # override by prefix caching logic later)
-        cache_config.mamba_block_size = model_config.max_model_len
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
-        # TODO(@tdoublep) find a better way to do this than whitelist
-        MAMBA2_MODELS = [
-            "BambaForCausalLM",
-            "FalconH1ForCausalLM",
-            "GraniteMoeHybridForCausalLM",
-            "Mamba2ForCausalLM",
-            "NemotronHForCausalLM",
-            "Zamba2ForCausalLM",
-        ]
         if cache_config.enable_prefix_caching:
-            if model_config.architecture in MAMBA2_MODELS:
+            if model_config.supports_mamba_prefix_caching:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
                     "Its support for Mamba2 layers is experimental. "
@@ -343,6 +332,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if not envs.VLLM_USE_V1:
             return
 
+        # Save the user input before it gets modified by MambaModelConfig
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -396,7 +387,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
-            # mamba SSD kernel uses a chunk_size, e.g. 256
+            # Mamba2 SSD kernel uses a chunk_size, e.g. 256
             # Align the block to the kernel: use lowest multiple of chunk_size
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
@@ -414,7 +405,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             def lcm(a, b):
                 return a * b // gcd(a, b)
 
-            base_chunk_size = model_config.get_mamba_chunk_size()
+            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
+
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
@@ -480,12 +472,9 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 
-        # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
-        #   "auto")
+        # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
-            "fp8"
-        ):
+        if cache_config.cache_dtype.startswith("fp8"):
             cache_config.cache_dtype = "fp8_ds_mla"
             logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
         if cache_config.cache_dtype == "bfloat16":

@@ -134,10 +134,7 @@ def matmul_kernel_persistent(
             bias_ptrs = bias_ptr + offs_cn
             bias = tl.load(bias_ptrs, mask=offs_cn < N, other=0.0).to(tl.float32)
             accumulator += bias
-        if c_ptr.dtype.element_ty == tl.float8e4nv:
-            c = accumulator.to(tl.float8e4nv)
-        else:
-            c = accumulator.to(tl.float16)
+        c = accumulator.to(c_ptr.dtype.element_ty)
         tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -756,13 +753,13 @@ def override_envs_for_invariance():
     curr_attn_backend = envs.VLLM_ATTENTION_BACKEND
     supported_backends = [
         "FLASH_ATTN",  # best supported backend
-        "FLEX_ATTENTION",
         "FLASHINFER",
         "FLASH_ATTN_MLA",
+        "FLASHINFER_MLA",
         "TRITON_MLA",
         # Not yet supported MLA backends
         # "FLASHMLA",
-        # "FLASHINFER_MLA",
+        # "FLEX_ATTENTION", # IMA issue even if we disable batch invariance
     ]
     if curr_attn_backend not in supported_backends:
         warning = (

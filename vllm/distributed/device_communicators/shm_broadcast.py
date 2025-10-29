@@ -27,7 +27,7 @@ from zmq import (  # type: ignore
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
-from vllm.utils import (
+from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
     get_open_zmq_ipc_path,
@@ -236,7 +236,9 @@ class MessageQueue:
         n_reader,  # number of all readers
         n_local_reader,  # number of local readers through shared memory
         local_reader_ranks: list[int] | None = None,
-        max_chunk_bytes: int = 1024 * 1024 * 24,  # 24MiB
+        # Default of 24MiB chosen to be large enough to accommodate grammar
+        # bitmask tensors for large batches (1024 requests).
+        max_chunk_bytes: int = 1024 * 1024 * 24,
         max_chunks: int = 10,
         connect_ip: str | None = None,
     ):
@@ -310,7 +312,7 @@ class MessageQueue:
             remote_addr_ipv6=remote_addr_ipv6,
         )
 
-        logger.info("vLLM message queue communication handle: %s", self.handle)
+        logger.debug("vLLM message queue communication handle: %s", self.handle)
 
     def export_handle(self) -> Handle:
         return self.handle
@@ -538,6 +540,10 @@ class MessageQueue:
                     buf[0] = 1  # overflow
                 self.local_socket.send_multipart(all_buffers, copy=False)
             else:
+                # Byte 0: 0
+                # Bytes 1-2: Count of buffers
+                # Then each buffer follows, preceded by 4 bytes containing its length:
+                # [4 byte int L][L bytes of buffer content] ...
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 0  # not overflow
                     offset = 3

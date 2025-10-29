@@ -3,7 +3,9 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -26,7 +28,23 @@ logger = init_logger(__name__)
 class LMCacheConnectorV1(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+        assert vllm_config.kv_transfer_config is not None
+        use_native = vllm_config.kv_transfer_config.get_from_extra_config(
+            "use_native", False
+        )
+        if use_native:
+            logger.info("Initializing native LMCache connector")
+            # lazy import
+            from vllm.distributed.kv_transfer.kv_connector.v1 import lmcache_integration
+
+            _adapter = lmcache_integration.vllm_v1_adapter
+
+            cls = _adapter.LMCacheConnectorV1Impl
+        else:
+            logger.info("Initializing latest dev LMCache connector")
+            cls = LMCacheConnectorLatestImpl
+
+        self._lmcache_engine = cls(vllm_config, role, self)
 
     # ==============================
     # Worker-side methods
