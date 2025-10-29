@@ -810,7 +810,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
+            media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
@@ -896,7 +896,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
+            media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
