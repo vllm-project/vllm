@@ -247,10 +247,19 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     return bool(int(value))
 
 
+def disable_compile_cache() -> bool:
+    return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
+
+
 def use_aot_compile() -> bool:
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-    default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
+    default_value = (
+        "1"
+        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        else "0"
+    )
+
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
 
 
@@ -963,9 +972,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
-    "VLLM_DISABLE_COMPILE_CACHE": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))
-    ),
+    "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
