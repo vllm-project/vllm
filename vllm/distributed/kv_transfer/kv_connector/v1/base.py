@@ -38,8 +38,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 
@@ -127,17 +126,6 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     pass
 
 
-@dataclass(frozen=True)
-class _DummyKVConnectorMetadata(KVConnectorMetadata):
-    """Inert metadata used only during a dummy run"""
-
-
-# In a dummy run, the connector has no real metadata; this sentinel is bound to the
-# connector to preserve the invariant that the connector always has metadata bound
-# before model execution.
-DUMMY_CONNECTOR_METADATA: Final = _DummyKVConnectorMetadata()
-
-
 class KVConnectorBase_V1(ABC):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(
@@ -192,15 +180,6 @@ class KVConnectorBase_V1(ABC):
         # Should only be called while set to valid metadata.
         assert self._connector_metadata is not None
         return self._connector_metadata
-
-    def _is_dummy_run(self) -> bool:
-        """
-        Return True if this call is part of a dummy run.
-
-        In dummy runs, the connector is bound to dummy metadata instead of
-        real metadata.
-        """
-        return self._connector_metadata is DUMMY_CONNECTOR_METADATA
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """

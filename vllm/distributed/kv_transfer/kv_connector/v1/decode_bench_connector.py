@@ -146,8 +146,11 @@ class DecodeBenchConnector(KVConnectorBase_V1):
     def build_connector_meta(
         self, scheduler_output: "SchedulerOutput"
     ) -> KVConnectorMetadata:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.build_connector_meta(scheduler_output)
+        return (
+            self.connector_scheduler.build_connector_meta(scheduler_output)
+            if self.connector_scheduler is not None
+            else DecodeBenchConnectorMetadata(reqs_to_fill={})
+        )
 
     def request_finished(
         self,

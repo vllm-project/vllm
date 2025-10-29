@@ -207,8 +207,11 @@ class NixlConnector(KVConnectorBase_V1):
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.build_connector_meta(scheduler_output)
+        return (
+            self.connector_scheduler.build_connector_meta(scheduler_output)
+            if self.connector_scheduler is not None
+            else NixlConnectorMetadata()
+        )
 
     def request_finished(
         self,
@@ -255,9 +258,6 @@ class NixlConnector(KVConnectorBase_V1):
         )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
-        if self._is_dummy_run():
-            return
-
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -277,9 +277,6 @@ class NixlConnector(KVConnectorBase_V1):
         pass
 
     def wait_for_save(self):
-        if self._is_dummy_run():
-            return
-
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         if self.connector_worker.use_host_buffer and self.connector_worker.copy_blocks:

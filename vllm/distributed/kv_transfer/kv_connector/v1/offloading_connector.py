@@ -102,8 +102,11 @@ class OffloadingConnector(KVConnectorBase_V1):
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.build_connector_meta(scheduler_output)
+        return (
+            self.connector_scheduler.build_connector_meta(scheduler_output)
+            if self.connector_scheduler is not None
+            else OffloadingConnectorMetadata(reqs_to_load={}, reqs_to_store={})
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         assert self.connector_scheduler is not None

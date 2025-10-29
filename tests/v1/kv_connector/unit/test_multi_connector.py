@@ -162,18 +162,22 @@ def test_multi_shared_storage_connector_consistency():
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    register_kv_caches_event_index = events["storage1-WORKER"].index(
-        "register_kv_caches"
+    register_kv_caches_event_idx = events["storage1-WORKER"].index("register_kv_caches")
+    last_dummy_run_start_event_idx = find_last_index(
+        events["storage1-WORKER"], "build_connector_meta"
     )
-    bind_connector_metadata_event_index = events["storage1-WORKER"].index(
-        "bind_connector_metadata"
-    )
+    assert last_dummy_run_start_event_idx != -1
+    last_dummy_run_end_event_idx = last_dummy_run_start_event_idx + events[
+        "storage1-WORKER"
+    ][last_dummy_run_start_event_idx:].index("clear_connector_metadata")
+    first_run_start_event_idx = last_dummy_run_end_event_idx + events[
+        "storage1-WORKER"
+    ][last_dummy_run_end_event_idx:].index("bind_connector_metadata")
     assert (
-        events["storage1-WORKER"][register_kv_caches_event_index]
-        == "register_kv_caches"
+        events["storage1-WORKER"][register_kv_caches_event_idx] == "register_kv_caches"
     )
     assert events["storage1-WORKER"][
-        bind_connector_metadata_event_index : bind_connector_metadata_event_index + 4
+        first_run_start_event_idx : first_run_start_event_idx + 4
     ] == [
         "bind_connector_metadata",
         "start_load_kv",
@@ -186,11 +190,10 @@ def test_multi_shared_storage_connector_consistency():
         "build_connector_meta",
     ]
     assert (
-        events["storage2-WORKER"][register_kv_caches_event_index]
-        == "register_kv_caches"
+        events["storage2-WORKER"][register_kv_caches_event_idx] == "register_kv_caches"
     )
     assert events["storage2-WORKER"][
-        bind_connector_metadata_event_index : bind_connector_metadata_event_index + 4
+        first_run_start_event_idx : first_run_start_event_idx + 4
     ] == [
         "bind_connector_metadata",
         "start_load_kv",
@@ -268,6 +271,13 @@ def get_connector_events() -> dict[str, list[str]]:
             print(f"[ERROR] Could not read connector events for {name}: {e}")
 
     return connector_events
+
+
+def find_last_index(lst, query):
+    for i in range(len(lst) - 1, -1, -1):
+        if lst[i] == query:
+            return i
+    return -1
 
 
 def test_engine_id_conflict():

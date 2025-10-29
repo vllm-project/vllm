@@ -11,7 +11,6 @@ from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    DUMMY_CONNECTOR_METADATA,
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
@@ -118,11 +117,6 @@ class MultiConnector(KVConnectorBase_V1):
     # the metadata to each connector in the order of the connectors in the
     # MultiKVConnectorMetadata.
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
-        if connector_metadata is DUMMY_CONNECTOR_METADATA:
-            for c in self._connectors:
-                c.bind_connector_metadata(connector_metadata)
-            return
-
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
