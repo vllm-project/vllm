@@ -18,14 +18,13 @@ from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
 
 from .audio import AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoMediaIO
-
-_M = TypeVar("_M")
 
 if TYPE_CHECKING:
     from .inputs import (
@@ -38,10 +37,14 @@ else:
     MultiModalKwargsItem = Any
     MultiModalPlaceholderDict = Any
 
+logger = init_logger(__name__)
+
 global_thread_pool = ThreadPoolExecutor(
     max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT
 )
 atexit.register(global_thread_pool.shutdown)
+
+_M = TypeVar("_M")
 
 
 class MediaConnector:
@@ -413,14 +416,21 @@ def group_mm_kwargs_by_modality(
             "`merge_by_field_config` arg, please update your model runner "
             "according to https://github.com/vllm-project/vllm/pull/25676."
         )
+    if merge_by_field_config is False:
+        logger.warning_once(
+            "The legacy code for batching multi-modal kwargs is deprecated and "
+            "will be removed in v0.12. Please update your model with "
+            "`merge_by_field_config=True` to use the new code defined by "
+            "`MultiModalFieldConfig`. You can refer to "
+            "https://github.com/vllm-project/vllm/issues/26149 "
+            "for some examples on how to do this."
+        )
 
     from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
 
-        # TODO: Deprecate `merge_by_field_config` once
-        # we have migrated all in-tree models
         if merge_by_field_config:
             mm_kwargs_group: BatchedTensorInputs = dict(
                 MultiModalKwargsItems.from_seq(items_lst).get_data(
