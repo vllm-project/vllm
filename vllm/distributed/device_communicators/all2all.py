@@ -10,7 +10,7 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import has_flashinfer_all2all
-from vllm.utils.import_utils import has_deep_ep, has_pplx, has_hybrid_deep_ep
+from vllm.utils.import_utils import has_deep_ep, has_hybrid_deep_ep, has_pplx
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -332,9 +332,9 @@ class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
     def _make_all2all_kwargs(self, **kwargs) -> dict[Any, Any]:
         extra_kwargs = dict(
             group=self.cpu_group,
-            #num_sms_dispatch_api=32,
-            #num_sms_combine_api=32,
-            #num_sms_preprocessing_api=128,
+            # num_sms_dispatch_api=32,
+            # num_sms_combine_api=32,
+            # num_sms_preprocessing_api=128,
         )
         return {**kwargs, **extra_kwargs}
 
