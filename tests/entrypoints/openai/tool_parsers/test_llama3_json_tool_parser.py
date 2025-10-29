@@ -153,6 +153,7 @@ def test_extract_tool_calls_deeply_nested_json(parser):
     assert result.tool_calls[0].function.name == "complexTool"
     # Verify the nested structure is preserved in the arguments
     import json
+
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["level1"]["level2"]["level3"]["level4"]["value"] == "deep"
 
@@ -172,6 +173,7 @@ def test_extract_tool_calls_multiple_with_deep_nesting(parser):
     # Check first tool call
     assert result.tool_calls[0].function.name == "simpleTool"
     import json
+
     args0 = json.loads(result.tool_calls[0].function.arguments)
     assert args0["value"] == "test"
 
@@ -197,6 +199,7 @@ def test_extract_tool_calls_with_quotes_and_brackets_in_string(parser):
     assert result.tool_calls[0].function.name == "searchTool"
     # Verify the string values are preserved including brackets and quotes
     import json
+
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["query"] == "test {value} [complex]"
     assert args["nested"]["inner"] == "more {brackets}"
@@ -214,5 +217,6 @@ def test_extract_tool_calls_with_escaped_quotes_in_nested_json(parser):
     assert result.tool_calls[0].function.name == "parserTool"
     # Verify escaped quotes are preserved
     import json
+
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["text"] == 'He said "Hello {world}"'
