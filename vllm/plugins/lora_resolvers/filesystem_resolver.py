@@ -28,9 +28,8 @@ class FilesystemResolver(LoRAResolver):
         LoRA adapter and has a matching base_model_name.
         """
         if os.path.exists(lora_path):
-            adapter_config_path = os.path.join(
-                self.lora_cache_dir, lora_name, "adapter_config.json"
-            )
+            adapter_config_path = os.path.join(lora_path, "adapter_config.json")
+
             if os.path.exists(adapter_config_path):
                 with open(adapter_config_path) as file:
                     adapter_config = json.load(file)
