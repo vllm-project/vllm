@@ -862,24 +862,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
             kwargs_changes = dict[str, Any]()
 
             # Set structured output params for response format
-            if response_format is not None:
-                if response_format.type == "json_object":
-                    kwargs_changes["json_object"] = True
-                elif response_format.type == "json_schema":
-                    json_schema = response_format.json_schema
-                    assert json_schema is not None
-                    kwargs_changes["json"] = json_schema.json_schema
-                elif response_format.type == "structural_tag":
-                    structural_tag = response_format
-                    assert structural_tag is not None and isinstance(
-                        structural_tag,
-                        (
-                            LegacyStructuralTagResponseFormat,
-                            StructuralTagResponseFormat,
-                        ),
-                    )
-                    s_tag_obj = structural_tag.model_dump(by_alias=True)
-                    kwargs_changes["structural_tag"] = json.dumps(s_tag_obj)
+            if response_format.type == "json_object":
+                kwargs_changes["json_object"] = True
+            elif response_format.type == "json_schema":
+                json_schema = response_format.json_schema
+                assert json_schema is not None
+                kwargs_changes["json"] = json_schema.json_schema
+            elif response_format.type == "structural_tag":
+                structural_tag = response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag,
+                    (
+                        LegacyStructuralTagResponseFormat,
+                        StructuralTagResponseFormat,
+                    ),
+                )
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                kwargs_changes["structural_tag"] = json.dumps(s_tag_obj)
 
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
