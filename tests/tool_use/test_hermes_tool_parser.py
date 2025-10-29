@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from .utils import RemoteOpenAIServer
+from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 LORA_MODEL = "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci"
