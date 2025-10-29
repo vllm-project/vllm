@@ -178,6 +178,7 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        num_logprobs=20,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
