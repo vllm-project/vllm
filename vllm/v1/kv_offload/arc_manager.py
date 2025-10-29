@@ -149,7 +149,7 @@ class ARCOffloadingManager(OffloadingManager):
 
                 if evict_from_t1:
                     # try to evict the least recently used (oldest) block from T1
-                    for block_hash, block in list(self.t1.items()):
+                    for block_hash, block in self.t1.items():
                         if block.ref_cnt == 0:
                             del self.t1[block_hash]
                             to_evict.append(block_hash)
@@ -165,7 +165,7 @@ class ARCOffloadingManager(OffloadingManager):
 
                 if not evict_from_t1:
                     # try to evict the least recently used (oldest) block from T2
-                    for block_hash, block in list(self.t2.items()):
+                    for block_hash, block in self.t2.items():
                         if block.ref_cnt == 0:
                             del self.t2[block_hash]
                             to_evict.append(block_hash)
