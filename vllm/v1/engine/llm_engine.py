@@ -332,8 +332,14 @@ class LLMEngine:
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, level)
+
     def wake_up(self, tags: list[str] | None = None):
         self.engine_core.wake_up(tags)
+
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()

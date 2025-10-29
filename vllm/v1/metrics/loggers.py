@@ -9,6 +9,7 @@ from typing import TypeAlias
 
 from prometheus_client import Counter, Gauge, Histogram
 
+import vllm.envs as envs
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
 from vllm.logger import init_logger
@@ -54,6 +55,9 @@ class StatLoggerBase(ABC):
     def log_engine_initialized(self): ...
 
     def log(self):  # noqa
+        pass
+
+    def record_sleep_state(self, is_awake: int, level: int):  # noqa
         pass
 
 
@@ -384,8 +388,33 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_scheduler_waiting = make_per_engine(
             gauge_scheduler_waiting, engine_indexes, model_name
         )
+        if envs.VLLM_SERVER_DEV_MODE:
+            gauge_engine_sleep_state = self._gauge_cls(
+                name="vllm:engine_sleep_state",
+                documentation=(
+                    "Engine sleep state; awake = 0 means engine is sleeping; "
+                    "awake = 1 means engine is awake; "
+                    "weights_offloaded = 1 means sleep level 1; "
+                    "discard_all = 1 means sleep level 2."
+                ),
+                labelnames=labelnames + ["sleep_state"],
+                multiprocess_mode="mostrecent",
+            )
 
-        #
+            self.gauge_engine_sleep_state = {}
+            sleep_state = ["awake", "weights_offloaded", "discard_all"]
+
+            for s in sleep_state:
+                self.gauge_engine_sleep_state[s] = {
+                    idx: gauge_engine_sleep_state.labels(
+                        engine=idx, model_name=model_name, sleep_state=s
+                    )
+                    for idx in engine_indexes
+                }
+
+            # Setting default values
+            self.record_sleep_state()
+
         # GPU cache
         #
         # Deprecated in 0.9.2 - Renamed as vllm:kv_cache_usage_perc
@@ -1010,6 +1039,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             }
             self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
 
+    def record_sleep_state(self, sleep: int = 0, level: int = 0):
+        awake = 1
+        discard_all = 0
+        weights_offloaded = 0
+
+        if sleep == 1:
+            awake = 0
+            if level == 1:
+                weights_offloaded = 1
+            elif level == 2:
+                discard_all = 1
+
+        for engine_idx in self.engine_indexes:
+            self.gauge_engine_sleep_state["discard_all"][engine_idx].set(discard_all)
+            self.gauge_engine_sleep_state["weights_offloaded"][engine_idx].set(
+                weights_offloaded
+            )
+            self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
+
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
@@ -1130,6 +1178,10 @@ class StatLoggerManager:
                 mm_cache_stats=mm_cache_stats,
                 engine_idx=engine_idx,
             )
+
+    def record_sleep_state(self, sleep: int = 0, level: int = 0):
+        for logger in self.stat_loggers:
+            logger.record_sleep_state(sleep, level)
 
     def log(self):
         for logger in self.stat_loggers:
