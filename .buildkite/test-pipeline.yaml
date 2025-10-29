@@ -205,6 +205,24 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
+- label: Distributed Tests (8 GPUs) # 4min
+  timeout_in_minutes: 10
+  gpu: h100
+  num_gpus: 8
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - examples/offline_inference/torchrun_dp_example.py
+  - vllm/config/parallel.py
+  - vllm/distributed/
+  - vllm/v1/engine/llm_engine.py
+  - vllm/v1/executor/uniproc_executor.py
+  - vllm/v1/worker/gpu_worker.py
+  commands:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  # test with torchrun tp=2 and dp=4 with ep
+  - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+
 - label: EPLB Algorithm Test # 5min
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
@@ -401,7 +419,7 @@ steps:
       --ignore=lora/test_deepseekv2_tp.py \
       --ignore=lora/test_gptoss.py \
       --ignore=lora/test_qwen3moe_tp.py
-      
+
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests # 15min
@@ -1126,7 +1144,7 @@ steps:
   - tests/weight_loading
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
-  
+
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
