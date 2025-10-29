@@ -62,7 +62,7 @@ def inductor_partition_rule_context(splitting_ops: list[str]):
 
     Args:
         splitting_ops: List of operator names to partition on. The format should
-        be `namespace::op_name` (e.g., `silly::attention`).
+        be "namespace::op_name" (e.g., "silly::attention").
     """
     if not splitting_ops:
         logger.debug("No partition ops provided; skipping rule registration.")
