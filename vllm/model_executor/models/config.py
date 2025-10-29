@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv, next_power_of_2, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
@@ -426,6 +426,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # user has not set it or (b) the user has set it
         # too small.
         if cache_config.block_size is None or cache_config.block_size < attn_block_size:
+            attn_block_size = next_power_of_2(attn_block_size)
             cache_config.block_size = attn_block_size
             logger.info(
                 "Setting attention block size to %d tokens "
