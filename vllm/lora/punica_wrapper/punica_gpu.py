@@ -13,7 +13,7 @@ import torch
 
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (
@@ -341,6 +341,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             num_experts,
             block_size,
             max_loras,
+            max_num_tokens_padded,
+            max_num_m_blocks,
             sorted_ids,
             expert_ids,
             num_tokens_post_pad,
@@ -383,5 +385,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             config["BLOCK_SIZE_N"],
             config["BLOCK_SIZE_K"],
             config["GROUP_SIZE_M"],
+            config.get("SPLIT_K", 1),
             mul_routed_weight,
         )

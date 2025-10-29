@@ -136,6 +136,7 @@ run_tests_for_model() {
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
+    --disable-hybrid-kv-cache-manager \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
@@ -178,8 +179,17 @@ run_tests_for_model() {
     --port $PORT \
     --enforce-eager \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --tensor-parallel-size $DECODER_TP_SIZE \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '$KV_CONFIG'"
+  
+  # DP-EP attention mode
+  if [[ -z "$DP_EP" ]]; then
+    BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
+  else
+    echo "DP-EP Attention enabled, deploying with dp=DECODER_TP_SIZE and tp=1"
+    BASE_CMD="${BASE_CMD} --data-parallel-size $DECODER_TP_SIZE \
+    --tensor-parallel-size 1 --enable-expert-parallel"
+  fi
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"

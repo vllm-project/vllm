@@ -101,6 +101,10 @@ void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,
                    const torch::Tensor& rowEnds, torch::Tensor& indices,
                    int64_t numRows, int64_t stride0, int64_t stride1);
 
+void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
+                          const torch::Tensor& seq_lens, torch::Tensor& indices,
+                          int64_t numRows, int64_t stride0, int64_t stride1);
+
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
                                double epsilon);
@@ -303,7 +307,7 @@ void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int64_t bit);
+                        bool use_exllama, bool use_v2_format, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
