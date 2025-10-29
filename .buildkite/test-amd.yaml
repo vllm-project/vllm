@@ -286,7 +286,7 @@ steps:
 
 - label: Engine Test # 25min
   timeout_in_minutes: 40
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   #grade: Blocking
   source_file_dependencies:
@@ -561,7 +561,7 @@ steps:
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -789,8 +789,10 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
@@ -906,7 +908,7 @@ steps:
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
