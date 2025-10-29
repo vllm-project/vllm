@@ -3,7 +3,6 @@
 from functools import partial
 
 import pytest
-import torch
 
 from tests.models.language.pooling.embed_utils import (
     check_embeddings_close,
@@ -19,8 +18,6 @@ from tests.models.utils import (
 from vllm import PoolingParams
 
 from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
-
-torch.set_float32_matmul_precision("highest")
 
 EMBEDDING_MODELS = [
     CLSPoolingEmbedModelInfo(

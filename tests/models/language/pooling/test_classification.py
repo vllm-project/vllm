@@ -6,8 +6,6 @@ from transformers import AutoModelForSequenceClassification
 
 from vllm.platforms import current_platform
 
-torch.set_float32_matmul_precision("highest")
-
 
 @pytest.mark.parametrize(
     "model",
