@@ -77,7 +77,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         if self.tp_world > 1:
             variance = tensor_model_parallel_all_reduce(variance) / self.tp_world
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype) * self.weight
+        x = (x * self.weight).to(orig_dtype)
         return x
 
     def forward(
