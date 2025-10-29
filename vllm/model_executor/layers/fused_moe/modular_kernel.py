@@ -347,6 +347,20 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    def supports_packed_ue8m0_scales_dispatch(self) -> bool:
+        """
+        Return true if the implementation can dispatch activation scales in
+        packed ue8m0 format.
+        """
+        return False
+
+    def setup_packed_ue8m0_scales_dispatch(self) -> None:
+        """
+        Setup internal state of the implementation to dispatch activation scales
+        in packed ue8m0 format.
+        """
+        raise NotImplementedError
+
 
 # TODO: add supported activations method (return string)
 class FusedMoEPermuteExpertsUnpermute(ABC):
@@ -502,6 +516,13 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         A flag indicating whether or not this class supports expert maps
         """
         raise NotImplementedError
+
+    def supports_packed_ue8m0_act_scales(self) -> bool:
+        """
+        A flag indicating whether or not this class can process packed ue8m0
+        activation scales.
+        """
+        return False
 
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """
@@ -698,6 +719,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+
+        self._post_init_setup()
         assert (
             prepare_finalize.activation_format == fused_experts.activation_formats[0]
         ), (
@@ -706,6 +729,17 @@ class FusedMoEModularKernel(torch.nn.Module):
             f"{fused_experts.__class__.__name__}."
             f"{fused_experts.activation_formats[0]}"
         )
+
+    def _post_init_setup(self):
+        """
+        Resolve any leftover setup dependencies between self.prepare_finalize
+        and self.fused_experts here.
+        """
+        if (
+            self.fused_experts.supports_packed_ue8m0_act_scales()
+            and self.prepare_finalize.supports_packed_ue8m0_scales_dispatch()
+        ):
+            self.prepare_finalize.setup_packed_ue8m0_scales_dispatch()
 
     def supports_expert_map(self) -> bool:
         """
