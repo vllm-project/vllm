@@ -119,7 +119,7 @@ class CachedRequestData:
 
     @cached_property
     @deprecated("use resumed_req_ids field")
-    def resumed_from_preemption(self) -> list[int]:
+    def resumed_from_preemption(self) -> list[bool]:
         return [req_id in self.resumed_req_ids for req_id in self.req_ids]
 
     @cached_property
