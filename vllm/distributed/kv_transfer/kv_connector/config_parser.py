@@ -159,7 +159,7 @@ def get_connector_config_parser(
 
 def apply_extra_kv_connector_config(
     vllm_config: "VllmConfig",
-    kv_transfer_config: "KVTransferConfig" | None,
+    kv_transfer_config: KVTransferConfig | None,
 ) -> KVTransferConfig | None:
     """Apply KV offloading configuration to KVTransferConfig.
 
@@ -168,9 +168,8 @@ def apply_extra_kv_connector_config(
     backend handler.
 
     Args:
-        cache_config: The CacheConfig containing offloading settings.
+        vllm_config: The CacheConfig containing offloading settings.
         kv_transfer_config: The KVTransferConfig to modify.
-        parallel_config: The ParallelConfig containing parallelism settings.
 
     Returns:
         The modified KVTransferConfig with offloading settings applied.
