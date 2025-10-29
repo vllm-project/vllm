@@ -334,17 +334,11 @@ class CompletionRenderer(BaseRenderer):
         tokenization_kwargs: dict[str, Any] = {}
         if add_special_tokens is not None:
             tokenization_kwargs["add_special_tokens"] = add_special_tokens
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
-        # Tokenize texts
-        if truncate_prompt_tokens is None:
-            encoded = tokenizer(text, **tokenization_kwargs)
-        else:
-            encoded = tokenizer(
-                text,
-                truncation=True,
-                max_length=truncate_prompt_tokens,
-                **tokenization_kwargs,
-            )
+        encoded = tokenizer(text, **tokenization_kwargs)
 
         return self._create_tokens_prompt(
             encoded.input_ids, max_length, cache_salt, text
