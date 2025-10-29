@@ -11,7 +11,10 @@ from prometheus_client import Counter, Gauge, Histogram
 
 import vllm.envs as envs
 from vllm.config import SupportsMetricsInfo, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorLogging,
+    KVConnectorPrometheus,
+)
 from vllm.logger import init_logger
 from vllm.plugins import load_plugins_by_group
 from vllm.v1.engine import FinishReason
@@ -339,6 +342,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _counter_cls = Counter
     _histogram_cls = Histogram
     _spec_decoding_cls = SpecDecodingProm
+    _kv_connector_cls = KVConnectorPrometheus
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -358,12 +362,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        spec_decode_labelvalues: dict[int, list[str]] = {
+        per_engine_labelvalues: dict[int, list[str]] = {
             idx: [model_name, str(idx)] for idx in engine_indexes
         }
 
         self.spec_decoding_prom = self._spec_decoding_cls(
-            vllm_config.speculative_config, labelnames, spec_decode_labelvalues
+            vllm_config.speculative_config, labelnames, per_engine_labelvalues
+        )
+        self.kv_connector_prom = self._kv_connector_cls(
+            vllm_config, labelnames, per_engine_labelvalues
         )
 
         #
@@ -960,6 +967,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats, engine_idx
+                )
+
+            if scheduler_stats.kv_connector_stats is not None:
+                self.kv_connector_prom.observe(
+                    scheduler_stats.kv_connector_stats, engine_idx
                 )
 
         if mm_cache_stats is not None:
