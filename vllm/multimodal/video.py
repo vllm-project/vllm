@@ -14,6 +14,7 @@ from PIL import Image
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.multimodal.registry import ExtensionManager
 
 from .base import MediaIO
 from .image import ImageMediaIO
@@ -55,6 +56,9 @@ def sample_frames_from_video(frames: npt.NDArray, num_frames: int) -> npt.NDArra
 
 
 class VideoLoader:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
     @classmethod
     @abstractmethod
     def load_bytes(
@@ -63,25 +67,7 @@ class VideoLoader:
         raise NotImplementedError
 
 
-class VideoLoaderRegistry:
-    def __init__(self) -> None:
-        self.name2class: dict[str, type] = {}
-
-    def register(self, name: str):
-        def wrap(cls_to_register):
-            self.name2class[name] = cls_to_register
-            return cls_to_register
-
-        return wrap
-
-    @staticmethod
-    def load(cls_name: str) -> VideoLoader:
-        cls = VIDEO_LOADER_REGISTRY.name2class.get(cls_name)
-        assert cls is not None, f"VideoLoader class {cls_name} not found"
-        return cls()
-
-
-VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+VIDEO_LOADER_REGISTRY = ExtensionManager()
 
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
