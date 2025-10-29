@@ -486,7 +486,7 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-mteb==2.1.1
+mteb==2.1.2
     # via -r requirements/test.in
 multidict==6.1.0
     # via
