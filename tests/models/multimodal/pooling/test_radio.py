@@ -45,7 +45,8 @@ def run_radio_test(
     hf_model = AutoModel.from_pretrained(
         model_id,
         config=config,
-        dtype=torch_dtype,
+        args=dict(dtype=torch_dtype),  # RADIO does not respect
+        torch_dtype=torch_dtype,
         trust_remote_code=True,
     ).to("cuda")
     hf_model.eval()
@@ -85,7 +86,7 @@ def run_radio_test(
         "nvidia/C-RADIOv2-H",
     ],
 )
-@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+@pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 def test_radio(dist_init, image_assets, model_id, dtype: str) -> None:
     run_radio_test(
         image_assets,
