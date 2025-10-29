@@ -38,15 +38,15 @@ def _make_get_num_new_matched_tokens(
 
 
 @pytest.fixture
-def recompute_scheduler():
-    """scheduler with kv_load_failure_policy='recompute'"""
+def fail_scheduler():
+    """scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_load_failure_policy = "recompute"
+    vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
 
 
 def test_invalid_blocks_evicted_prevents_cache_pollution(
-    recompute_scheduler: Scheduler,
+    fail_scheduler: Scheduler,
 ):
     """
     verify invalid blocks are evicted to prevent future cache hits.
@@ -54,38 +54,38 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     scenario:
     1. request 1 loads externally-computed blocks (sync mode)
     2. some blocks fail to load and are marked invalid
-    3. invalid blocks should be evicted from prefix cache
-    4. request 2 with same prefix should NOT match the invalid blocks
+    3. with fail policy, invalid blocks should be evicted from prefix cache
+    4. request is marked as FINISHED_ERROR
     """
     num_prompt_blocks = 100
     num_external_computed_blocks = 99
     invalid_block_idx = 50
 
-    num_prompt_tokens = num_prompt_blocks * recompute_scheduler.block_size
+    num_prompt_tokens = num_prompt_blocks * fail_scheduler.block_size
     num_external_computed_tokens = (
-        num_external_computed_blocks * recompute_scheduler.block_size
+        num_external_computed_blocks * fail_scheduler.block_size
     )
 
     # request 1: will have invalid blocks
     request1 = create_request(num_tokens=num_prompt_tokens, request_id=1)
-    recompute_scheduler.add_request(request=request1)
+    fail_scheduler.add_request(request=request1)
 
     req_num_new_matched_tokens = {
         request1.request_id: num_external_computed_tokens,
     }
 
     # mock connector indicating sync load
-    recompute_scheduler.connector = Mock()
-    recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+    fail_scheduler.connector = Mock()
+    fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )
-    recompute_scheduler.connector.request_finished.return_value = (False, None)
-    recompute_scheduler.connector.take_events.return_value = ()
+    fail_scheduler.connector.request_finished.return_value = (False, None)
+    fail_scheduler.connector.take_events.return_value = ()
 
-    scheduler_output = recompute_scheduler.schedule()
+    scheduler_output = fail_scheduler.schedule()
 
     # request should be running with sync KV load
-    assert len(recompute_scheduler.running) == 1
+    assert len(fail_scheduler.running) == 1
     assert request1.status == RequestStatus.RUNNING
 
     # get allocated block IDs
@@ -94,13 +94,11 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     invalid_block_ids = {invalid_block_id}
 
     # get the block object to verify eviction later
-    block = recompute_scheduler.kv_cache_manager.block_pool.blocks[invalid_block_id]
+    block = fail_scheduler.kv_cache_manager.block_pool.blocks[invalid_block_id]
 
     # cache the blocks to simulate they've been computed and cached
     # (in real scenario blocks would be cached after compute)
-    recompute_scheduler.kv_cache_manager.cache_blocks(
-        request1, num_external_computed_tokens
-    )
+    fail_scheduler.kv_cache_manager.cache_blocks(request1, num_external_computed_tokens)
 
     # verify block has a hash (is cached) before reporting invalid blocks
     assert block.block_hash is not None, (
@@ -115,17 +113,17 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
         use_eos=False,
     )
 
-    recompute_scheduler.update_from_output(scheduler_output, model_runner_output)
+    fail_scheduler.update_from_output(scheduler_output, model_runner_output)
 
-    # verify request still running (recompute policy)
-    assert request1.status == RequestStatus.RUNNING
+    # verify request finished with error (fail policy)
+    assert request1.status == RequestStatus.FINISHED_ERROR
 
     # critical assertion: invalid block and all subsequent blocks should be evicted
     # all blocks from invalid_block_idx onwards become invalid since they were
     # computed based on the failed block
     for idx in range(invalid_block_idx, len(req_block_ids)):
         block_id = req_block_ids[idx]
-        block_obj = recompute_scheduler.kv_cache_manager.block_pool.blocks[block_id]
+        block_obj = fail_scheduler.kv_cache_manager.block_pool.blocks[block_id]
         assert block_obj.block_hash is None, (
             f"block {block_id} at index {idx} should have been evicted "
             f"(hash reset to None), but hash is {block_obj.block_hash}. "
@@ -139,7 +137,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     # valid blocks: all blocks before invalid_block_idx should be cached
     for idx in range(invalid_block_idx):
         block_id = req_block_ids[idx]
-        block_obj = recompute_scheduler.kv_cache_manager.block_pool.blocks[block_id]
+        block_obj = fail_scheduler.kv_cache_manager.block_pool.blocks[block_id]
         assert block_obj.block_hash is not None, (
             f"valid block {block_id} at index {idx} should still be cached "
             f"(have a hash), but hash is None. Only blocks from index "
@@ -148,7 +146,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
 
     # invalid blocks: verify they're not in the cached_block_hash_to_block map
     cached_blocks = (
-        recompute_scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
+        fail_scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
     )
     cached_block_ids = {
         b.block_id
