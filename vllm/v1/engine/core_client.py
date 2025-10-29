@@ -47,7 +47,7 @@ from vllm.v1.engine.utils import (
     CoreEngineProcManager,
     launch_core_engines,
 )
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
