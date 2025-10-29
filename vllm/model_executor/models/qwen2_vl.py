@@ -61,8 +61,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
+    apply_rotary_pos_emb_vision,
     dispatch_rotary_emb_function,
-    apply_rotary_pos_emb_vision
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -383,7 +383,9 @@ class Qwen2VisionAttention(nn.Module):
             _Backend.FLASH_ATTN,
             _Backend.ROCM_AITER_FA,
         }
-        self.rotary_embedding_function = dispatch_rotary_emb_function(default=apply_rotary_emb_torch)
+        self.rotary_embedding_function = dispatch_rotary_emb_function(
+            default=apply_rotary_emb_torch
+        )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
@@ -432,7 +434,9 @@ class Qwen2VisionAttention(nn.Module):
         if rotary_pos_emb is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb, self.rotary_embedding_function)
+            qk_rotated = apply_rotary_pos_emb_vision(
+                qk_concat, rotary_pos_emb, self.rotary_embedding_function
+            )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
