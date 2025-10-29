@@ -261,6 +261,21 @@ class CudaPlatformBase(Platform):
         from vllm.attention.backends.registry import _Backend
 
         if use_mla:
+            # explicitly reject non-MLA backends when MLA is enabled to avoid
+            # silently selecting an incompatible backend (e.g., FLASHINFER).
+            if selected_backend in {
+                _Backend.FLASHINFER,
+                _Backend.FLASH_ATTN,
+                _Backend.TRITON_ATTN,
+                _Backend.TREE_ATTN,
+                _Backend.XFORMERS,
+            }:
+                raise ValueError(
+                    f"Attention backend {selected_backend} incompatible with MLA. "
+                    "Please use one of the MLA backends: FLASHINFER_MLA, CUTLASS_MLA, "
+                    "FLASHMLA, FLASH_ATTN_MLA, or TRITON_MLA. Alternatively, set "
+                    "VLLM_MLA_DISABLE=1 to disable MLA for this model."
+                )
             if not use_v1:
                 raise RuntimeError(
                     "MLA attention backends require the V1 engine. "
