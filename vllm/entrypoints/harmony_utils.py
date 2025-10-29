@@ -61,15 +61,19 @@ _harmony_encoding = None
 # they are available and requested by the user.
 # Tool args are provided by MCP tool descriptions. Output
 # of the tools are stringified.
-BUILTIN_TOOLS = {
+MCP_BUILTIN_TOOLS: set[str] = {
     "web_search_preview",
     "code_interpreter",
     "container",
 }
 
 
-def has_custom_tools(tool_types: list[str]) -> bool:
-    return not set(tool_types).issubset(BUILTIN_TOOLS)
+def has_custom_tools(tool_types: set[str]) -> bool:
+    """
+    Checks if the given tool types are custom tools
+    (i.e. any tool other than MCP buildin tools)
+    """
+    return not tool_types.issubset(MCP_BUILTIN_TOOLS)
 
 
 def get_encoding():
