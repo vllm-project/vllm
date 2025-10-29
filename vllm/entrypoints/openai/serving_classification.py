@@ -173,7 +173,7 @@ class ClassificationMixin(OpenAIServing):
         return RenderConfig(
             max_length=self.max_model_len,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=getattr(request, "add_special_tokens", None),
+            add_special_tokens=request.add_special_tokens,
         )
 
 

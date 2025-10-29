@@ -820,7 +820,7 @@ class OpenAIServing:
         if not hasattr(request, "messages"):
             return message_types
 
-        messages = cast(Sequence[Any], getattr(request, "messages", None))
+        messages = cast(Sequence[Any], request.messages)
         if messages is None or isinstance(messages, (str, bytes)):
             return message_types
 
