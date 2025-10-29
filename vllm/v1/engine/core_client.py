@@ -428,7 +428,7 @@ class ClientGuard:
             engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
             self.engine_status_dict[int(fault_info.engine_id)] = engine_status
             self.fault_pub_socket.send_string(
-                f"vllm_fault|{json.dumps(self.engine_status_dict)}"
+                f"vllm_fault|{json.dumps(self.engine_status_dict.to_dict())}"
             )
             # TODO Asynchronous issuance of pause commands and design of engine
             #  core status
@@ -838,7 +838,7 @@ class MPClient(EngineCoreClient):
         return await self.client_guard.handle_fault(instruction, timeout)
 
     async def fault_reporter(self):
-        return json.dumps(self.engine_status_dict)
+        return self.engine_status_dict.to_dict()
 
 
 def _process_utility_output(
