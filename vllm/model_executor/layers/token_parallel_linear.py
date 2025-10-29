@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from typing import Optional, Tuple, Union, List
+from dataclasses import dataclass, fields
 
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.distributed.parallel_state import (
@@ -25,10 +26,11 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank
 )
 
+from vllm.forward_context import ForwardContext, get_forward_context
+
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
 
 class TokenParallelQKVLinear(QKVParallelLinear):
     """
@@ -57,6 +59,14 @@ class TokenParallelQKVLinear(QKVParallelLinear):
         self.tknp_rank = get_tknp_rank() if self.is_tknp_enabled else 0
         self.tknp_world_size = get_tknp_world_size() if self.is_tknp_enabled else 1
         self.is_root_rank = (self.tknp_rank == 0)
+        self.tknp_group = get_tknp_group() if self.is_tknp_enabled else None
+        self.pg = self.tknp_group.device_group if hasattr(self.tknp_group, 'device_group') else self.tknp_group
+        self.device = torch.device('cuda', torch.cuda.current_device()) if torch.cuda.is_available() else torch.device('cpu')
+
+        self.params_dtype = kwargs.get('params_dtype', None)
+        if self.params_dtype is None:
+            # Fallback to torch default or common model dtypes
+            self.params_dtype = torch.get_default_dtype()
 
         if self.is_root_rank:
             # Root rank initializes the full QKVParallelLinear layer with weights.
@@ -113,25 +123,34 @@ class TokenParallelQKVLinear(QKVParallelLinear):
         # === Token Parallelism is ENABLED ===
         
         # 1. Validate input shape for even distribution
-        num_tokens, _ = x.shape
-        assert num_tokens % self.tknp_world_size == 0, (
-            f"Number of tokens ({num_tokens}) must be divisible by "
+        # num_tokens, _ = x.shape
+        if get_forward_context().tknp_metadata._dummy_run:
+            num_reqs = get_forward_context().tknp_metadata.num_actual_tokens
+        else:
+            num_reqs = get_forward_context().tknp_metadata.num_reqs
+            
+        # TODO: we need to figure out if we are in prefill or decode 
+        # if prefill, we send the all qkv data to respective ranks using their seq lens
+        # if decode, we send only 1 token per rank to respective ranks
+        
+        assert num_reqs % self.tknp_world_size == 0, (
+            f"Number of requests ({num_reqs}) must be divisible by "
             f"token parallel world size ({self.tknp_world_size})."
         )
         
         # 2. Prepare tensors for the scatter operation
         if self.is_root_rank:
             # Root rank computes the full QKV projection and chunks it.
-            qkv_full = super().forward(x)
+            qkv_full, bias = super().forward(x)
             qkv_chunks = list(torch.chunk(qkv_full, self.tknp_world_size, dim=0))
             qkv_local = qkv_chunks[0]
         else:
             # Non-root ranks prepare an empty tensor to receive their partition.
-            local_num_tokens = num_tokens // self.tknp_world_size
+            local_num_tokens = num_reqs // self.tknp_world_size
             qkv_local = torch.empty(
                 (local_num_tokens, self.qkv_size_per_partition),
-                dtype=x.dtype,
-                device=x.device,
+                dtype=self.params_dtype,
+                device=self.device,
             )
             # The scatter_list is only needed on the source rank.
             qkv_chunks = None
@@ -141,10 +160,10 @@ class TokenParallelQKVLinear(QKVParallelLinear):
             tensor=qkv_local,
             scatter_list=qkv_chunks,
             src=0,  # Root rank (0) in the token parallel group
-            group=get_tknp_group(),
+            group=self.pg,
         )
 
-        return qkv_local
+        return qkv_local, None
 
     def extra_repr(self) -> str:
         """String representation for debugging."""
@@ -181,6 +200,9 @@ class TokenParallelRowLinear(RowParallelLinear):
         self.tknp_rank = get_tknp_rank() if self.is_tknp_enabled else 0
         self.tknp_world_size = get_tknp_world_size() if self.is_tknp_enabled else 1
         self.is_root_rank = (self.tknp_rank == 0)
+        self.tknp_group = get_tknp_group() if self.is_tknp_enabled else None
+        self.pg = self.tknp_group.device_group if hasattr(self.tknp_group, 'device_group') else self.tknp_group
+
 
         if self.is_root_rank:
             # Root rank initializes the full RowParallelLinear layer with weights.
@@ -230,7 +252,7 @@ class TokenParallelRowLinear(RowParallelLinear):
             tensor=x,
             gather_list=gather_list,
             dst=0,  # Destination is the root rank (0) in the token parallel group
-            group=get_tknp_group(),
+            group=self.pg,
         )
 
         # 3. Compute and return the result on the root rank.
@@ -245,7 +267,7 @@ class TokenParallelRowLinear(RowParallelLinear):
             return output
         else:
             # Non-root ranks have sent their data and are done. They return None.
-            return None
+            return None, None
     
     def extra_repr(self) -> str:
         """String representation for debugging."""
@@ -322,7 +344,7 @@ def init_tknp_layer(cls_to_wrap: type) -> type:
     on non-root ranks when token parallelism is enabled.
     """
 
-    class RankZeroWrapper(nn.Module):
+    class TokenParallelWrapper(nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__()
 
@@ -331,21 +353,87 @@ def init_tknp_layer(cls_to_wrap: type) -> type:
             self.tknp_rank = get_tknp_rank() if self.is_tknp_enabled else 0
             self.tknp_world_size = get_tknp_world_size() if self.is_tknp_enabled else 1
             self.is_root_rank = (self.tknp_rank == 0)
+            # self.hidden_size 
 
             # 2. If self.is_root_rank is True, setup the regular class.
             if self.is_root_rank:
                 # Instantiate the actual module we are wrapping (e.g., LlamaMLP)
                 # and pass all arguments to it.
                 self.module = cls_to_wrap(*args, **kwargs)
+                # self.weight = self.module.weight if hasattr(self.module, 'weight') else None
+                # self.bias = self.module.bias if hasattr(self.module, 'bias') else None
             # 3. If we are not the root rank, setup an identity function.
             else:
                 # On non-root ranks, we just need a placeholder that
                 # passes tensors through without any computation.
                 self.module = nn.Identity()
 
+            self.embedding_dim = kwargs.get('embedding_dim', args[1] if len(args) > 1 else None)
+            self._return_tuple = None  # Cache to remember if forward returns tuple or single value
+            if "RMSNorm" in cls_to_wrap.__name__ or "LayerNorm" in cls_to_wrap.__name__:
+                self._return_tuple = True
+            else:
+                self._return_tuple = False
+            # if self.embedding_dim:
+            #     logger.info(f"TKNP RANK {self.tknp_rank}: Initialized TokenParallelWrapper for {cls_to_wrap.__name__} with embedding_dim={self.embedding_dim}")
+
+
         def forward(self, *args, **kwargs):
             # Delegate the forward call to the instantiated module.
             # This will be either the real module's forward or nn.Identity's forward.
+            
+            # Special handling for embedding layers on non-root ranks
+            if self.embedding_dim and not self.is_root_rank:
+                # On non-root ranks, if this is an embedding layer,
+                # create a zero tensor with the correct shape.
+                input_tensor = args[0] if args else kwargs.get('input_', None)
+                if input_tensor is not None and input_tensor.dim() == 1:
+                    # input_tensor has shape [num_tokens], need [num_tokens, embedding_dim]
+                    batch_size = input_tensor.shape[0]
+                    return torch.zeros(batch_size, self.embedding_dim,
+                                    dtype=torch.bfloat16, # We might need to update this to use the same dtype as the model
+                                    device=input_tensor.device)
+            
+            if not self.is_root_rank:
+                # For other layers on non-root ranks, match return type to input args
+                input_tensor = args[0] if args else kwargs.get('input_', None)
+                
+                # Return format based on number of arguments
+                if len(args) == 1:
+                    # Single argument -> return single tensor
+                    return input_tensor
+                elif len(args) == 2:
+                    # Two arguments -> return tuple
+                    return (input_tensor, args[1])
+                else:
+                    # Default: return single value for other cases
+                    return input_tensor
+            
             return self.module(*args, **kwargs)
 
-    return RankZeroWrapper
+        def __getattr__(self, name):
+            # Forward attribute access to the wrapped module
+            # This is called only when the attribute is not found in the wrapper itself
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                # Forward to the wrapped module
+                return getattr(self.module, name)
+            
+        def named_parameters(self, *args, **kwargs):
+            """Forward named_parameters to the wrapped module."""
+            return self.module.named_parameters(*args, **kwargs)
+        
+        def parameters(self, *args, **kwargs):
+            """Forward parameters to the wrapped module."""
+            return self.module.parameters(*args, **kwargs)
+        
+        def named_modules(self, *args, **kwargs):
+            """Forward named_modules to the wrapped module."""
+            return self.module.named_modules(*args, **kwargs)
+        
+        def named_buffers(self, *args, **kwargs):
+            """Forward named_buffers to the wrapped module."""
+            return self.module.named_buffers(*args, **kwargs)
+
+    return TokenParallelWrapper

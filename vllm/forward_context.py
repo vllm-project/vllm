@@ -25,6 +25,16 @@ forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
 
+@dataclass
+class TokenParallelMetadata:
+    """
+    Metadata for layers using Token Parallelism.
+    """
+    num_reqs: int  # Number of requests (tokens) being processed in the current forward pass.
+    _dummy_run: bool = False  # Internal flag for dummy runs.
+    num_actual_tokens: Optional[int] = None  # Actual number of tokens (if different from num_reqs).
+    stage: str = "prefill"  # Current stage: "prefill" or "decode".
+
 
 @dataclass
 class DPMetadata:
@@ -95,6 +105,10 @@ class ForwardContext:
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
+    
+    # TKNP
+    tknp_metadata: Optional[TokenParallelMetadata] = None
+    
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -116,6 +130,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_cuda_graphs: bool = False,
+    tknp_metadata: Optional[TokenParallelMetadata] = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -141,6 +156,7 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
+        tknp_metadata=tknp_metadata,
     )
 
     try:

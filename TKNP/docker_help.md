@@ -9,6 +9,12 @@ dzdo docker run --gpus all -it --rm   --name vllm-dev   --ipc=host   --shm-size=
 
 ```
 
+## Restart docker if you cannot see images 
+
+```bash
+dzdo systemctl status docker
+```
+
 # To install new packages interactively 
 
 ```bash
@@ -30,14 +36,20 @@ dzdo docker commit 595878e9b149 susavlsh10/vllm-tknp:v1
 dzdo docker run --gpus all -it --rm   --name vllm-dev   --ipc=host   --shm-size=20g   --ulimit memlock=-1    -v "$HOME:/workspace" -w /workspace -p 8000:8000 susavlsh10/vllm-tknp:v0  bash
 ```
 
+  -v "$HOME/Documents/MLSystems/vllm-distributed:/workspace" \
+  -w /workspace \
+
+
 ```bash
 dzdo docker run --gpus all -it --rm \
   --name vllm-run \
   --ipc=host --shm-size=20g --ulimit memlock=-1 \
   -p 8001:8001 \
-  -v "$HOME/Documents/MLSystems/vllm-distributed:/workspace" \
   -v "$HOME:$HOME" \
+  -v "$HOME/Documents/MLSystems/vllm-distributed:/workspace" \
+  -v /mnt/nvme/hf_cache:/mnt/nvme/hf_cache \
   -w /workspace \
+  -e HF_HOME=/mnt/nvme/hf_cache \
   --entrypoint bash \
   susavlsh10/vllm-tknp:v1
 

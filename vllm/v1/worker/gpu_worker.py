@@ -37,6 +37,12 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 
+from vllm.distributed.parallel_state import (
+    get_tknp_rank, 
+    get_tknp_world_size, 
+    get_tknp_group, 
+    is_tknp_initialized
+)
 
 def _print_worker_rank_info(rank: int) -> None:
     """Print rank information for this worker process."""
@@ -76,42 +82,6 @@ def _print_worker_rank_info(rank: int) -> None:
     except (AssertionError, AttributeError):
         print(f"Rank {global_rank}: Token Parallel: Not initialized")
 
-# def _print_worker_rank_info(rank: int) -> None:
-#     """Print rank information for this worker process."""
-#     import os
-#     import sys
-#     import time
-#     from vllm.distributed.parallel_state import (
-#         get_tp_group, get_pp_group, get_dp_group
-#     )
-    
-#     # Use stderr to avoid Ray's stdout deduplication and add timestamp for uniqueness
-#     timestamp = time.time()
-#     print(f"[{timestamp:.3f}] Worker Rank {rank} (PID: {os.getpid()}) - Parallel Groups:", file=sys.stderr)
-    
-#     # Print tensor parallel group ranks
-#     try:
-#         tp_group = get_tp_group()
-#         print(f"[{timestamp:.3f}] Rank {rank}: Tensor Parallel: {sorted(tp_group.ranks)}", file=sys.stderr)
-#     except (AssertionError, AttributeError):
-#         print(f"[{timestamp:.3f}] Rank {rank}: Tensor Parallel: Not initialized", file=sys.stderr)
-    
-#     # Print pipeline parallel group ranks
-#     try:
-#         pp_group = get_pp_group()
-#         print(f"[{timestamp:.3f}] Rank {rank}: Pipeline Parallel: {sorted(pp_group.ranks)}", file=sys.stderr)
-#     except (AssertionError, AttributeError):
-#         print(f"[{timestamp:.3f}] Rank {rank}: Pipeline Parallel: Not initialized", file=sys.stderr)
-    
-#     # Print data parallel group ranks
-#     try:
-#         dp_group = get_dp_group()
-#         print(f"[{timestamp:.3f}] Rank {rank}: Data Parallel: {sorted(dp_group.ranks)}", file=sys.stderr)
-#     except (AssertionError, AttributeError):
-#         print(f"[{timestamp:.3f}] Rank {rank}: Data Parallel: Not initialized", file=sys.stderr)
-    
-#     # Flush stderr to ensure immediate output
-#     sys.stderr.flush()
 
 class Worker(WorkerBase):
 
@@ -154,6 +124,12 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+            
+        # TKNP
+        if not is_tknp_initialized():
+            self.root_rank = True
+        else:
+            self.root_rank = get_tknp_rank() == 0
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -370,11 +346,12 @@ class Worker(WorkerBase):
                     num_tokens=max_num_reqs,
                     skip_eplb=True,
                 )
-            if self.model_runner.is_pooling_model:
-                self.model_runner._dummy_pooler_run(hidden_states)
-            else:
-                self.model_runner._dummy_sampler_run(
-                    hidden_states=last_hidden_states)
+            if self.root_rank:
+                if self.model_runner.is_pooling_model:
+                    self.model_runner._dummy_pooler_run(hidden_states)
+                else:
+                    self.model_runner._dummy_sampler_run(
+                        hidden_states=last_hidden_states)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

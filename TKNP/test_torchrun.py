@@ -72,6 +72,7 @@ def main():
     # Prepare LLM kwargs - only include token parallel args if enabled
     llm_kwargs = {
         "model": args.model,
+        "dtype": "bfloat16",
         "tensor_parallel_size": args.tensor_parallel_size,
         "pipeline_parallel_size": args.pipeline_parallel_size,
         "data_parallel_size": args.data_parallel_size,

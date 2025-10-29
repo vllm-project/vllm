@@ -81,6 +81,15 @@ class NewRequestData:
 
 
 @dataclass
+class TokenParallelAllocation:
+    """Assignment of scheduled tokens to token-parallel ranks."""
+
+    req_id: str
+    token_parallel_rank: int
+    num_scheduled_tokens: int
+
+
+@dataclass
 class CachedRequestData:
 
     req_ids: list[str]
@@ -155,3 +164,6 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+    # TKNP-BEGIN: token parallel metadata emitted by scheduler
+    token_parallel_allocations: Optional[list[TokenParallelAllocation]] = None
+    # TKNP-END

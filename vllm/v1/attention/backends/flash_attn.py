@@ -114,6 +114,7 @@ class FlashAttentionMetadata:
     max_query_len: int
     query_start_loc: torch.Tensor
     max_seq_len: int
+    num_reqs: int
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
@@ -359,6 +360,7 @@ class FlashAttentionMetadataBuilder(
             max_num_splits = self.max_num_splits
 
         attn_metadata = FlashAttentionMetadata(
+            num_reqs=num_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,

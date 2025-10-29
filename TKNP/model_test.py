@@ -27,7 +27,7 @@ from vllm.config import VllmConfig, ParallelConfig, set_current_vllm_config, get
 
 from transformers import LlamaConfig
 from vllm.config import ModelConfig, CacheConfig
-from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.llama_vllm import LlamaForCausalLM
 
 from vllm.distributed import (
     init_distributed_environment,

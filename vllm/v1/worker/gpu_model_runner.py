@@ -71,6 +71,16 @@ from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
+from vllm.distributed.parallel_state import (
+    get_tknp_rank, 
+    get_tknp_world_size, 
+    get_tknp_group, 
+    is_tknp_initialized
+)
+
+import torch.distributed as dist
+from vllm.forward_context import TokenParallelMetadata
+
 if TYPE_CHECKING:
     import xgrammar as xgr
     import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
@@ -315,6 +325,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+        
+        # TKNP
+        if not is_tknp_initialized():
+            self.root_rank = True
+        else:
+            self.root_rank = get_tknp_rank() == 0
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -1283,7 +1299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Return empty ModelRunnerOutput if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-
+        
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata,
@@ -1366,6 +1382,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
+
+            # TKNP DEBUG START
+            # print(f"Attention metadata: {attn_metadata}")
+            attn_metadata_keys = list(attn_metadata.keys())
+            # print all the keys 
+            # print(f"Attention metadata keys: {attn_metadata_keys}")
+            print(f"[gpu_model_runner.py] Scheduler output: {scheduler_output}")
+            print(f"[gpu_model_runner.py] Attention metadata [{attn_metadata_keys[0]}]: {attn_metadata[attn_metadata_keys[0]]}")
+            # logger.info(f"Input ids shape: {input_ids.shape if input_ids is not None else 'N/A'}")
+            # logger.info(f"Positions shape: {positions.shape if positions is not None else 'N/A'}")
+            # TKNP DEBUG END
+
 
             model_output = self.model(
                 input_ids=input_ids,
@@ -1957,6 +1985,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         attn_metadata: Optional[dict[str, Any]] = None
+        
         if capture_attn_cudagraph:
             attn_metadata = {}
 
@@ -1998,6 +2027,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions = self.mrope_positions[:, :num_tokens]
             else:
                 positions = self.positions[:num_tokens]
+                
+            # DEBUG TKNP START
+            if is_tknp_initialized():
+                tknp_world_size = get_tknp_world_size()
+                tknp_rank = get_tknp_rank()
+                
+                # Calculate tokens per rank
+                tokens_per_rank = num_tokens // tknp_world_size
+                start_idx = tknp_rank * tokens_per_rank
+                end_idx = start_idx + tokens_per_rank
+                
+                # Handle remainder tokens in the last rank
+                if tknp_rank == tknp_world_size - 1:
+                    end_idx = num_tokens
+                
+                # Slice positions and input_ids/inputs_embeds
+                if self.uses_mrope:
+                    positions = self.mrope_positions[:, start_idx:end_idx]
+                else:
+                    positions = self.positions[start_idx:end_idx]
+                    
+                tknp_metadata = TokenParallelMetadata(
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_tokens,
+                    _dummy_run=True,
+                )
+            # DEBUG TKNP END
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -2016,7 +2072,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp):
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    tknp_metadata=tknp_metadata if is_tknp_initialized() else None,
+                    ):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2043,6 +2101,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
+
         return hidden_states, hidden_states[logit_indices]
 
     @torch.inference_mode()
@@ -2237,7 +2296,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states \
             = self._dummy_run(self.max_num_tokens, is_profile=True)
-        if get_pp_group().is_last_rank:
+        
+        # TKNP
+        
+        if get_pp_group().is_last_rank and self.root_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
             else:
@@ -2534,6 +2596,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
                                                    kv_cache_raw_tensors)
+
+        # -- TKNP DEBUG, remove later  --
+        # print(f"KV cache allocated and reshaped")
+        # for layer_name, tensor in kv_caches.items():
+        #     print(f"Layer: {layer_name}, Tensor shape: {tensor.shape}, dtype: {tensor.dtype} ")
+        # -- TKNP DEBUG, remove later  --
 
         # Setup `kv_cache_config` and `kv_caches` for models
         # with cross-layer KV sharing

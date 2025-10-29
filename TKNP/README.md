@@ -133,6 +133,21 @@ Key components that might require changes:
 + Different requests will be assigned to each TKNP rank; These requests should utilize the KV cache efficiently (should utilize all request)
 + allocate_slots reserves blocks; block_table maps requests to block ids. Needs work.
 
+
+## Limitations
++ vllm/model_executor/layers/token_parallel_linear.py: TokenParallelQKVLinear
+    * Number of tokens must be divisible by tknp world size, need to update this in the future with scheduler data
+
+## End to end generation 
+
+```bash
+# 2 GPUs with tensor parallel
+torchrun --nproc-per-node=2 TKNP/test_torchrun.py --tensor-parallel-size 2
+
+# 2 GPUs with token parallel enabled
+torchrun --nproc-per-node=2 TKNP/test_torchrun.py --tensor-parallel-size 1 --enable-token-parallel --token-parallel-size 2
+```
+
 # Key things TODO:
 
 1. In token parallel attention ranks, we need to make sure that we are allocating more memory KV cache as we have more memory available compared to the root nodes with the model weights.
@@ -149,8 +164,13 @@ Key components that might require changes:
     + The scheduler decides which ranks is responsible for which requests. 
     + Each rank should only be responsible for its own set of requests. 
 
-4. Attention & End to end system
+4. Update input batch with scheduler output (gpu_model_runner.py : _prepare_inputs)
+    + The order of the input tokens need to be updated with scheduler output, check GPUModelRunner (_may_reorder_batch)
+    + [---- Root Node Tokens -----][---- Attn Node 1 Tokens ----][----Attn Node 2 Tokens ----][ ....... ]
+    + We also need to update the positions tensor to only include the position data for local tokens.
+
+
+5. Attention & End to end system
     + With the changes made, the attention computation needs to be accurate. 
     + The default mode is to use the FlashAttn backend. The KV cache is stitched using the bind_kv_cahce function in gpu_model_runner.py.
-    + 
     + The end to end system should work to serve LLM requests. 

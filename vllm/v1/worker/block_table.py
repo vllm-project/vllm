@@ -48,6 +48,12 @@ class BlockTable:
         self.slot_mapping = torch.zeros(self.max_num_batched_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
+        
+        # TKNP DEBUG
+        print(f"BlockTable initialized with shape {self.block_table.shape} on device {self.device}")
+        print(f"Max num reqs: {self.max_num_reqs}, Max num blocks per req: {self.max_num_blocks_per_req}, Max num batched tokens: {self.max_num_batched_tokens}")
+        print(f"Pin memory: {self.pin_memory}")
+        # TKNP DEBUG END
 
     def append_row(
         self,

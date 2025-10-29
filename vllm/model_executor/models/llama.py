@@ -22,7 +22,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights."""
+"""Inference-only LLaMA model compatible with HuggingFace weights. Token Parallel Experiments"""
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -33,12 +33,14 @@ from transformers import LlamaConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -48,6 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.logger import init_logger
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
@@ -56,6 +59,33 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     maybe_prefix)
 
 
+logger = init_logger(__name__)
+
+
+'''
+Summary of changes: 
+1. RMSNorm, VocabParallelEmbedding, ParallelLMHead are updated with init_tknp_layer decorator
+2. QKVLinear and RowLinear in Attention are replaced with TokenParallelQKVLinear and TokenParallelRowLinear
+3. The MLP class is decorated with init_tknp_layer
+4. The load_weights function in LlamaForCausalLM is updated to handle token parallelism loading
+'''
+
+
+# Token parallel imports
+from vllm.model_executor.layers.token_parallel_linear import TokenParallelQKVLinear, TokenParallelRowLinear, init_tknp_layer
+
+from vllm.distributed.parallel_state import (
+    get_tknp_rank, 
+    get_tknp_world_size, 
+    get_tknp_group, 
+    is_tknp_initialized
+)
+
+RMSNorm = init_tknp_layer(RMSNorm)
+VocabParallelEmbedding = init_tknp_layer(VocabParallelEmbedding)
+ParallelLMHead = init_tknp_layer(ParallelLMHead)
+
+@init_tknp_layer
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -95,7 +125,6 @@ class LlamaMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
-
 class LlamaAttention(nn.Module):
 
     def __init__(
@@ -115,9 +144,10 @@ class LlamaAttention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
-        layer_idx = extract_layer_index(prefix)
+        self.layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -145,7 +175,7 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = QKVParallelLinear(
+        self.qkv_proj = TokenParallelQKVLinear(
             hidden_size=hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
@@ -155,7 +185,7 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        self.o_proj = RowParallelLinear(
+        self.o_proj = TokenParallelRowLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias_o_proj,
@@ -172,7 +202,7 @@ class LlamaAttention(nn.Module):
             if isinstance(interleaved_sliding_window, int):
                 sliding_window = interleaved_sliding_window
             elif isinstance(interleaved_sliding_window, list):
-                sw_idx = layer_idx % len(interleaved_sliding_window)
+                sw_idx = self.layer_idx % len(interleaved_sliding_window)
                 sliding_window = interleaved_sliding_window[sw_idx]
             else:
                 raise ValueError(
@@ -197,8 +227,13 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if is_tknp_initialized() and self.layer_idx == 0 and self.tp_rank == 0:
+            # print("hidden_states shape:", hidden_states.shape)
+            logger.info("TKNP RANK %d hidden_states shape: %s", get_tknp_rank(), hidden_states.shape)
+
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # logger.info(f"TKNP RANK {get_tknp_rank()}: LlamaAttention forward q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}, positions shape: {positions.shape}")
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -333,6 +368,7 @@ class LlamaModel(nn.Module):
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
+        self.hidden_size = config.hidden_size
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
             self.embed_tokens = VocabParallelEmbedding(
@@ -383,7 +419,11 @@ class LlamaModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
+        
+        # TKNP
+        _num_tokens, _ = hidden_states.shape
+        dtype, device = hidden_states.dtype, hidden_states.device
+        
         aux_hidden_states = []
         for idx, layer in enumerate(
                 self.layers[self.start_layer:self.end_layer]):
@@ -401,6 +441,12 @@ class LlamaModel(nn.Module):
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
+        
+        # TKNP
+        if is_tknp_initialized() and get_tknp_rank() != 0:
+            # hidden_states needs to be of the shape [batch_size, seq_len, hidden_dim] in all ranks
+            hidden_states = torch.zeros(_num_tokens, self.hidden_size, dtype=dtype, device=device)
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -524,6 +570,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.model = self._init_model(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"),
                                       layer_type=layer_type)
+        # print(self.model)
+        print(f"vllm/model_executor/models/llama.py: model : {self.model}")
+        # logger.info("Llama model initialized.", self.model)
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -596,6 +645,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        # Early return for non-root ranks in token parallel groups
+        if is_tknp_initialized() and get_tknp_rank() != 0:
+            return set()
+    
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
