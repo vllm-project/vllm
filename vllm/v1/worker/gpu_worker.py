@@ -177,6 +177,7 @@ class Worker(WorkerBase):
                 and self.parallel_config.data_parallel_size_local > 0
                 and self.parallel_config.distributed_executor_backend
                 not in ["ray", "external_launcher"]
+                and self.vllm_config.parallel_config.data_parallel_backend != "ray"
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
