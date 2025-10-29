@@ -263,23 +263,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
 
-        # TODO: support MTP
-        attn_window_size = getattr(config, "attn_window_size", None)
-        if attn_window_size is not None:
-            if isinstance(attn_window_size, list):
-                attn_window_size = attn_window_size[layer_idx]
-            elif isinstance(attn_window_size, int):
-                attn_window_size = attn_window_size
-            else:
-                raise ValueError(f"Invalid attn_window_size: {attn_window_size}")
-            attn_window_size = None if attn_window_size <= 0 else attn_window_size
-
-        # different rope theta for full layer and swa layer
-        swa_rope_theta = getattr(config, "swa_rope_theta", -1)
-        # default to full rope theta
-        swa_rope_theta = rope_theta if swa_rope_theta <= 0 else swa_rope_theta
-        rope_theta = swa_rope_theta if attn_window_size is not None else rope_theta
-
         self.layer_idx = layer_idx
         self.self_attn = MiniMaxM2Attention(
             hidden_size=self.hidden_size,
@@ -288,7 +271,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
             rotary_dim=config.rotary_dim,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
-            attn_window_size=attn_window_size,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
