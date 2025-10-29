@@ -273,13 +273,10 @@ class CudaPlatformBase(Platform):
     ) -> tuple[list[tuple["_Backend", int]], dict["_Backend", list[str]]]:
         valid_backends_priorities = []
         invalid_reasons = {}
-        from vllm.attention.backends.registry import _Backend, backend_to_class
+        from vllm.attention.backends.registry import backend_to_class
 
         backend_priorities = _get_backend_priorities(use_mla, device_capability)
-        for backend in _Backend:
-            if backend not in backend_priorities:
-                continue
-            priority = backend_priorities[backend]
+        for backend, priority in backend_priorities.items():
             try:
                 backend_class = backend_to_class(backend)
                 invalid_reasons_i = backend_class.validate_configuration(
