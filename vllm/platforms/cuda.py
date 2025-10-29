@@ -14,6 +14,7 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml, resolve_obj_by_qualname
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -155,56 +156,85 @@ class CudaPlatformBase(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
+        model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         cache_config = vllm_config.cache_config
-        model_config = vllm_config.model_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
 
-        # Attempt to set an appropriate block size based on what backend will
-        # be used.
-        # TODO: per-layer block size configuration
-        # Note: Hybrid models (models with both attention and mamba layers)
-        # have their block_size initialized in
-        # HybridAttentionMambaModelConfig.verify_and_update_config,
-        # which is called before this method. We should not override it here.
-        if cache_config and model_config and not model_config.is_hybrid:
-            from vllm.attention.selector import get_attn_backend
+        # TODO(lucas): handle this more gracefully
+        # Note: model_config may be None during testing
+        # Note: block_size is initialized in
+        # HybridAttentionMambaModelConfig.verify_and_update_config
+        # for models with both attention and mamba,
+        # and doesn't need to be reinitialized here
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and cache_config.block_size is not None
+        ):
+            use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
+            # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
+            # then we default to FlashMLA backend for non-blackwell GPUs,
+            # else we default to CutlassMLA. For each case, we force the
+            # required block_size.
+            use_flashmla = False
+            use_cutlass_mla = False
+            use_flashinfer_mla = False
 
-            backend = get_attn_backend(
-                head_size=model_config.get_head_size(),
-                dtype=model_config.dtype,
-                kv_cache_dtype=cache_config.cache_dtype,
-                block_size=None,
-                use_mla=model_config.use_mla,
-                has_sink=False,  # Model isn't loaded yet, can't determine this
-                use_sparse=hasattr(model_config.hf_config, "index_topk"),
-            )
-            backend_default = backend.get_default_block_size()
-
-            if cache_config.block_size is None:
-                cache_config.block_size = backend_default
-                logger.info(
-                    "Setting KV cache block size to %d for %s backend.",
-                    backend_default,
-                    backend.get_name(),
-                )
-            elif not backend.supports_block_size(cache_config.block_size):
-                logger.info(
-                    "Adjusting KV cache block size from %d to %d for %s backend.",
-                    cache_config.block_size,
-                    backend_default,
-                    backend.get_name(),
-                )
-                cache_config.block_size = backend_default
+            if envs.VLLM_ATTENTION_BACKEND is None:
+                # Default case
+                if cls.is_device_capability(100):
+                    # Blackwell => Force CutlassMLA.
+                    use_cutlass_mla = True
+                    # TODO: This does not work, because the
+                    # global_force_attn_backend_context_manager is not set.
+                    # See vllm/attention/selector.py:_cached_get_attn_backend
+                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
+                else:
+                    # Not Blackwell
+                    use_flashmla = True
             else:
-                # user-specified block size is supported
-                pass
-        else:
-            if cache_config and cache_config.block_size is None:
-                cache_config.block_size = 16  # default block size
+                # Forced case
+                use_flashmla = envs.VLLM_ATTENTION_BACKEND == "FLASHMLA"
+                use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
+                use_flashinfer_mla = envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA"
 
+            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+
+            if (
+                use_flashmla
+                and is_flashmla_dense_supported()[0]
+                and cache_config.block_size % 64 != 0
+            ):
+                cache_config.block_size = 64
+                logger.info("Forcing kv cache block size to 64 for FlashMLA backend.")
+
+            if use_cutlass_mla and cache_config.block_size % 128 != 0:
+                cache_config.block_size = 128
+                logger.info(
+                    "Forcing kv cache block size to 128 for CUTLASS_MLA backend."
+                )
+
+            if (
+                use_flashinfer_mla
+                and cache_config.block_size != 32
+                and cache_config.block_size % 64 != 0
+            ):
+                cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size to 64 for FlashInferMLA backend."
+                )
+
+            # TODO(Chen): remove this hacky code
+            if use_sparse and cache_config.block_size != 64:
+                cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size to 64 for FlashMLASparse backend."
+                )
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
