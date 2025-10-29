@@ -32,6 +32,7 @@ def flashinfer_autotune_supported(vllm_config: VllmConfig) -> bool:
     """
     return not (
         vllm_config.parallel_config.data_parallel_size > 1
+        and envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
         and (
             envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
             or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
