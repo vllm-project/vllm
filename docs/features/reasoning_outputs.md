@@ -4,6 +4,9 @@ vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.
 
 Reasoning models return an additional `reasoning` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
 
+!!! warning
+    `reasoning` used to be called `reasoning_content`. For now, `reasoning_content` will continue to work. However, we encourage you to migrate to `reasoning` in case `reasoning_content` is removed in future.
+
 ## Supported Models
 
 vLLM currently supports the following reasoning models:
