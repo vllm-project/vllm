@@ -684,6 +684,8 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
+        # TODO[@lucaskabela]: See if we can forward prefix
+        # https://github.com/vllm-project/vllm/issues/27045
         return VllmBackend(vllm_config)
 
     def post_init_cudagraph_sizes(self) -> None:
