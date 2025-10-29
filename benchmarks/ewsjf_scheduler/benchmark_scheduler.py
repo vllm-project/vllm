@@ -4,7 +4,7 @@ import os
 import time
 import asyncio
 import pandas as pd
-
+from datasets import load_dataset
 from vllm import SamplingParams
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -46,12 +46,10 @@ async def send_requests_with_rate_limit(engine, prompts, sampling_params, reques
 async def main_ewsjf(queues_config):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=100, min_tokens=1)
 
-    current_dir = os.path.dirname(__file__)
-    csv_path = os.path.join(current_dir, 'data_30000_100_2000.csv')
-    dataset = pd.read_csv(csv_path)
-    prompts = dataset['input'].tolist()
+    dataset = load_dataset("ChayaLevi/data-100-2000")
+    prompts = list(dataset['train']['input'])
 
-    rates = [1000, 500, 100, 60, 40, 20, 10]
+    rates = [100]#[1000, 500, 100, 60, 40, 20, 10]
 
     external_parameters = {"queues_config": queues_config, "step_size": 1500}
     engine_args = AsyncEngineArgs(
@@ -69,12 +67,10 @@ async def main_ewsjf(queues_config):
 async def main_fcfs():
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=100, min_tokens=1)
 
-    current_dir = os.path.dirname(__file__)
-    csv_path = os.path.join(current_dir, 'data_30000_100_2000.csv')
-    dataset = pd.read_csv(csv_path)
-    prompts = dataset['input'].tolist()
+    dataset = load_dataset("ChayaLevi/data-100-2000")
+    prompts = list(dataset['train']['input'])
 
-    rates = [1000, 500, 100, 60, 40, 20, 10]
+    rates = [100]#[1000, 500, 100, 60, 40, 20, 10]
     engine_args = AsyncEngineArgs(
         model="meta-llama/Meta-Llama-3-8B",
         # tensor_parallel_size=2
@@ -180,6 +176,6 @@ if __name__ == "__main__":
                  {'boundaries': (1865, 1927)},
                  {'boundaries': (1928, 2000)}]
 
-    asyncio.run(main_ewsjf(queues_30_100_2000))
+    # asyncio.run(main_ewsjf(queues_30_100_2000))
     # asyncio.run(main_fcfs())
-    # asyncio.run(main(queues_30_1000_7500))
+    asyncio.run(main(queues_30_100_2000))
