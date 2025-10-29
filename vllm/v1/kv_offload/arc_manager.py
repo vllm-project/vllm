@@ -137,51 +137,38 @@ class ARCOffloadingManager(OffloadingManager):
         )
 
         to_evict = []
-        if num_blocks_to_evict > 0:
-            evicted_count = 0
-
-            while evicted_count < num_blocks_to_evict:
-                t1_size = len(self.t1)
-                t2_size = len(self.t2)
-                evict_from_t1 = t1_size > 0 and (
-                    t2_size == 0 or t1_size >= self.target_t1_size
-                )
-
-                block_to_evict = None
-                if evict_from_t1:
-                    # try to evict the least recently used (oldest) block from T1
-                    for block_hash, block in self.t1.items():
-                        if block.ref_cnt == 0:
-                            block_to_evict = (block_hash, block)
-                            break
-                else:
-                    # try to evict the least recently used (oldest) block from T2
-                    for block_hash, block in self.t2.items():
-                        if block.ref_cnt == 0:
-                            block_to_evict = (block_hash, block)
-                            break
-
-                if block_to_evict:
-                    block_hash, block = block_to_evict
-                    if evict_from_t1:
-                        del self.t1[block_hash]
-                        self.b1[block_hash] = None
-                    else:
-                        del self.t2[block_hash]
-                        self.b2[block_hash] = None
-
-                    to_evict.append(block_hash)
-                    self.backend.free(block)
-                    evicted_count += 1
+        while num_blocks_to_evict > 0:
+            block_to_evict = None
+            if len(self.t1) >= self.target_t1_size:
+                # try to evict the least recently used (oldest) block from T1
+                for block_hash, block in self.t1.items():
+                    if block.ref_cnt == 0:
+                        block_to_evict = (block_hash, block)
+                        eviction_t = self.t1
+                        eviction_b = self.b1
+                        break
+            if not block_to_evict:
+                # try to evict the least recently used (oldest) block from T2
+                for block_hash, block in self.t2.items():
+                    if block.ref_cnt == 0:
+                        block_to_evict = (block_hash, block)
+                        eviction_t = self.t2
+                        eviction_b = self.b2
+                        break
                 else:
                     # cannot evict enough blocks, cache is full of in-use items
                     return None
-
-                while len(self.b1) > self.cache_capacity:
-                    self.b1.popitem(last=False)
-
-                while len(self.b2) > self.cache_capacity:
-                    self.b2.popitem(last=False)
+        
+            block_hash, block = block_to_evict
+            del eviction_t[block_hash]
+            eviction_b[block_hash] = None
+            to_evict.append(block_hash)
+            self.backend.free(block)
+            num_blocks_to_evict -= 1
+        
+        for b in [self.b1, self.b2]:
+            for i in range(len(b) - self.cache_capacity):
+                b.popitem(last=False)
 
         if to_evict and self.events is not None:
             self.events.append(
