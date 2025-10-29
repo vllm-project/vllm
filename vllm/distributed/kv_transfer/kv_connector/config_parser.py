@@ -160,7 +160,7 @@ def get_connector_config_parser(
 def apply_extra_kv_connector_config(
     vllm_config: "VllmConfig",
     kv_transfer_config: "KVTransferConfig" | None,
-) -> KVTransferConfig:
+) -> KVTransferConfig | None:
     """Apply KV offloading configuration to KVTransferConfig.
 
     This function reads the offloading settings from CacheConfig and
@@ -181,9 +181,10 @@ def apply_extra_kv_connector_config(
     """
     config_parser = get_connector_config_parser(vllm_config)
     if config_parser is None:
-        # No connector is configured
-        return
+        # No connector is configured, return the original
+        return kv_transfer_config
 
+    # Initialize KVTransferConfig if not provided
     if kv_transfer_config is None:
         kv_transfer_config = KVTransferConfig()
 
