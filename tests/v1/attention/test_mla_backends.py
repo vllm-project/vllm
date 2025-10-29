@@ -155,7 +155,7 @@ def create_and_prepopulate_kv_cache(
         scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
     else:
         # Create MLA KV cache: (num_blocks, block_size, head_size)
-        kv_cache = torch.empty(
+        kv_cache = torch.zeros(
             num_blocks, block_size, head_size, dtype=dtype, device=device
         )
         kv_cache_flat = kv_cache.view(-1, head_size)
@@ -212,6 +212,7 @@ def create_and_prepopulate_kv_cache(
         start = start_block_idx
         end = start + num_blocks_for_seq
         block_table[i, :num_blocks_for_seq] = inv_perm[start:end]
+        block_table[i, num_blocks_for_seq:] = 0
         start_block_idx += num_blocks_for_seq
 
         # Create a realistic slot mapping that corresponds to the block table
