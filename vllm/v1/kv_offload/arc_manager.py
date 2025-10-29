@@ -147,38 +147,35 @@ class ARCOffloadingManager(OffloadingManager):
                     t2_size == 0 or t1_size >= self.target_t1_size
                 )
 
+                block_to_evict = None
                 if evict_from_t1:
                     # try to evict the least recently used (oldest) block from T1
                     for block_hash, block in self.t1.items():
                         if block.ref_cnt == 0:
-                            del self.t1[block_hash]
-                            to_evict.append(block_hash)
-
-                            self.b1[block_hash] = None
-
-                            self.backend.free(block)
-
-                            evicted_count += 1
+                            block_to_evict = (block_hash, block)
                             break
-                    else:
-                        evict_from_t1 = False
-
-                if not evict_from_t1:
+                else:
                     # try to evict the least recently used (oldest) block from T2
                     for block_hash, block in self.t2.items():
                         if block.ref_cnt == 0:
-                            del self.t2[block_hash]
-                            to_evict.append(block_hash)
-
-                            self.b2[block_hash] = None
-
-                            self.backend.free(block)
-
-                            evicted_count += 1
+                            block_to_evict = (block_hash, block)
                             break
+
+                if block_to_evict:
+                    block_hash, block = block_to_evict
+                    if evict_from_t1:
+                        del self.t1[block_hash]
+                        self.b1[block_hash] = None
                     else:
-                        # cannot evict enough blocks, cache is full of in-use items
-                        return None
+                        del self.t2[block_hash]
+                        self.b2[block_hash] = None
+
+                    to_evict.append(block_hash)
+                    self.backend.free(block)
+                    evicted_count += 1
+                else:
+                    # cannot evict enough blocks, cache is full of in-use items
+                    return None
 
                 while len(self.b1) > self.cache_capacity:
                     self.b1.popitem(last=False)
