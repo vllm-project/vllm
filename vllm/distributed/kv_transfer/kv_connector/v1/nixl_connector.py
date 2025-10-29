@@ -1732,7 +1732,6 @@ class NixlConnectorWorker:
 
         # Get descs ids.
         local_block_descs_ids: np.ndarray
-
         remote_block_descs_ids: np.ndarray
         if not self.block_window_per_layer:
             # Default case: assume global attention
