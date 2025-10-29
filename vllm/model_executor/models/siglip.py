@@ -756,12 +756,13 @@ class SiglipVisionTransformer(nn.Module):
             inputs_embeds=hidden_states,
             return_all_hidden_states=select_layers is not None,
         )
-
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)
 
-        if self.use_head:
-            encoder_outputs = self.head(encoder_outputs)
+        # TODO: add this back when pooled_output is used in inference.
+        # See https://github.com/vllm-project/vllm/pull/10813
+        # if self.use_head:
+        #     encoder_outputs = self.head(encoder_outputs)
 
         # stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
@@ -917,7 +918,8 @@ class SiglipVisionModel(nn.Module):
         return loaded_params
 
 
-# Adapted from: https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200
+# Adapted from:
+# https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200
 class SiglipTextEmbeddings(nn.Module):
     def __init__(self, config: SiglipTextConfig):
         super().__init__()

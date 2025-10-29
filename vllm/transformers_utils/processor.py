@@ -113,6 +113,11 @@ def get_processor(
     """Load a processor for the given model name via HuggingFace."""
     if revision is None:
         revision = "main"
+
+    # Extract image_processor override if provided (for GGUF models).
+    # Pop before passing to AutoProcessor to avoid duplicate argument error.
+    image_processor_override = kwargs.pop("image_processor", None)
+
     try:
         processor_name = convert_model_repo_to_path(processor_name)
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
@@ -156,6 +161,10 @@ def get_processor(
             f"Expected type: {processor_cls}, but "
             f"found type: {type(processor)}"
         )
+
+    # Apply image_processor override before caching (for GGUF models)
+    if image_processor_override is not None and hasattr(processor, "image_processor"):
+        processor.image_processor = image_processor_override
 
     return processor
 
@@ -236,12 +245,50 @@ def cached_processor_from_config(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
+    # GGUF models: load processor from tokenizer path since model path
+    # points to .gguf file, not HF model directory
+    if model_config.model.endswith(".gguf"):
+        from vllm.logger import init_logger
+
+        logger = init_logger(__name__)
+        processor_name = model_config.tokenizer
+        logger.info(
+            f"GGUF model detected: loading processor from tokenizer path "
+            f'"{processor_name}" instead of "{model_config.model}"'
+        )
+    else:
+        processor_name = model_config.model
+
+    # GGUF Gemma3: pre-configure image_processor with 896x896 to match
+    # mmproj.gguf dimensions before processor creation/caching
+    image_processor_override = None
+    if (
+        processor_name != model_config.model
+        and model_config.model.endswith(".gguf")
+        and "gemma-3" in processor_name.lower()
+    ):
+        from transformers import Gemma3ImageProcessor
+
+        image_processor_override = Gemma3ImageProcessor(
+            size={"height": 896, "width": 896}
+        )
+        logger.info(
+            "GGUF Gemma3: Pre-configuring image_processor with 896x896 "
+            f"(loading processor from {processor_name})"
+        )
+
+    # Merge kwargs and add image_processor override if present
+    merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
+    if image_processor_override is not None:
+        # Extract and modify before caching to avoid cache mismatch
+        merged_kwargs["image_processor"] = image_processor_override
+
     return cached_get_processor_without_dynamic_kwargs(
-        model_config.model,
+        processor_name,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
+        **merged_kwargs,
     )
 
 
