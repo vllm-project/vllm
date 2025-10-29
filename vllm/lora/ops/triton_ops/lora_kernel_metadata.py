@@ -7,6 +7,11 @@ LoRA kernels metadata preparation utilities.
 from dataclasses import dataclass
 
 import torch
+import triton
+import triton.language as tl
+
+triton.languae()
+tl.load()
 
 
 @dataclass
