@@ -454,7 +454,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
             # with torch compile.
-            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+            # See:
+            # https://github.com/vllm-project/vllm/pull/12128
+            # #discussion_r1926431923
 
             # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
             # the modality of inputs. For text-only inputs, each dimension has
@@ -2160,7 +2162,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 is_multimodal=is_mm_embed,
             )
 
-            # TODO(woosuk): Avoid the copy. Optimize.
+            # Copy the embeddings to the input buffer.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
 
             input_ids = None
@@ -2169,6 +2171,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
+
+            # GEMMA3 MULTIMODAL: Generate attention masks.
+            # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
+            # Check mm_features (mm_embeds is empty during decode).
+            has_mm_features = any(
+                req_state.mm_features for req_state in self.requests.values()
+            )
+            if hasattr(self.model, "generate_attention_masks") and has_mm_features:
+                mask_kwargs = self.model.generate_attention_masks(
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    self.positions.gpu[:num_scheduled_tokens],
+                    mask_dtype=self.model.dtype,
+                )
+                model_kwargs.update(mask_kwargs)
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -2883,7 +2899,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_hidden_states = hidden_states[token_indices]
 
             if self.supports_mm_inputs:
-                mm_embed_inputs = self._gather_mm_embeddings(
+                mm_embed_inputs, _ = self._gather_mm_embeddings(
                     scheduler_output,
                     shift_computed_tokens=1,
                 )
@@ -3405,9 +3421,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
                     seq_lens=self.seq_lens.gpu[:num_reqs],
                     seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                        :num_reqs
-                    ],
+                    num_computed_tokens_cpu=(
+                        self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+                    ),
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
                     max_query_len=max_query_len,
@@ -3584,7 +3600,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 
-        dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)
+        def dummy_tensors(v):
+            return torch.full((num_reqs,), v, device=self.device)
 
         dummy_metadata = SamplingMetadata(
             temperature=dummy_tensors(0.5),
@@ -4324,7 +4341,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
+                logitsprocs_need_output_token_ids=(
+                    self.input_batch.logitsprocs_need_output_token_ids
+                ),
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens

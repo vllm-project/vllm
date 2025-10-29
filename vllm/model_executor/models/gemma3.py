@@ -371,6 +371,7 @@ class Gemma3Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            org_num_embeddings=config.vocab_size,
             quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
@@ -442,15 +443,6 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # Revert +1 during llama.cpp conversion
-            # see: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
-            if (
-                self.quant_config
-                and self.quant_config.get_name() == "gguf"
-                and name.endswith("norm.weight")
-            ):
-                loaded_weight -= 1
-
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
@@ -500,7 +492,32 @@ class Gemma3Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
-                param = params_dict[name]
+
+                # GGUF multimodal weight naming: strip outer "language_model." prefix
+                # GGUF loader yields: "language_model.model.embed_tokens.qweight"
+                # but params_dict has: "model.embed_tokens.qweight"
+                if name.startswith("language_model.model."):
+                    param_lookup_name = name.replace("language_model.", "", 1)
+                elif f"model.{name}" in params_dict:
+                    param_lookup_name = f"model.{name}"
+                elif name.startswith("norm.") and name in params_dict:
+                    param_lookup_name = name
+                else:
+                    param_lookup_name = name
+
+                # GGUF quantized weights: try .qweight fallback if .weight lookup fails
+                # (GGUF stores as .qweight but some code may request .weight)
+                try:
+                    param = params_dict[param_lookup_name]
+                except KeyError:
+                    if param_lookup_name.endswith(".weight"):
+                        qweight_name = param_lookup_name.replace(".weight", ".qweight")
+                        if qweight_name in params_dict:
+                            param = params_dict[qweight_name]
+                        else:
+                            raise
+                    else:
+                        raise
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)

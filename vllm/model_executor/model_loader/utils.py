@@ -42,7 +42,99 @@ def initialize_model(
     if model_config is None:
         model_config = vllm_config.model_config
     if model_class is None:
-        model_class, _ = get_model_architecture(model_config)
+        # Detect Gemma3 GGUF multimodal models by checking for mmproj.gguf
+        # Only check at top-level (prefix="") to prevent recursion
+        is_multimodal_gguf = False
+        if not prefix:
+            try:
+                from pathlib import Path
+
+                model_path_str = getattr(model_config, "model", "")
+                if model_path_str and isinstance(model_path_str, (str, Path)):
+                    model_path = Path(model_path_str)
+                    if model_path.suffix.lower() == ".gguf":
+                        model_dir = model_path.parent
+                        mmproj_patterns = [
+                            "mmproj.gguf",
+                            "mmproj-*.gguf",
+                            "*mmproj*.gguf",
+                        ]
+                        for pattern in mmproj_patterns:
+                            if list(model_dir.glob(pattern)):
+                                is_multimodal_gguf = True
+                                break
+            except Exception as e:
+                logger.debug(f"GGUF multimodal detection failed: {e}")
+
+        if is_multimodal_gguf:
+            # Only force multimodal for Gemma3 models
+            try:
+                architectures = getattr(model_config.hf_config, "architectures", [])
+                is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
+
+                if is_gemma3:
+                    import vllm.model_executor.models.gemma3_mm as gemma3_mm
+
+                    model_class = gemma3_mm.Gemma3ForConditionalGeneration
+                    logger.info(
+                        "Loaded Gemma3ForConditionalGeneration for multimodal GGUF"
+                    )
+
+                    # Update architectures for subprocess consistency
+                    model_config.hf_config.architectures = [
+                        "Gemma3ForConditionalGeneration"
+                    ]
+
+                    # Override vision_config for GGUF
+                    # (896x896 vs HF's 576x576)
+                    if (
+                        not hasattr(model_config.hf_config, "vision_config")
+                        or model_config.hf_config.vision_config is None
+                    ):
+                        from transformers import SiglipVisionConfig
+
+                        model_config.hf_config.vision_config = SiglipVisionConfig(
+                            hidden_size=1152,
+                            intermediate_size=4304,
+                            num_hidden_layers=27,
+                            num_attention_heads=16,
+                            num_channels=3,
+                            image_size=896,
+                            patch_size=14,
+                            layer_norm_eps=1e-6,
+                            attention_dropout=0.0,
+                            num_image_tokens=256,
+                        )
+                        model_config.hf_config.mm_tokens_per_image = 256
+                        model_config.hf_config.image_token_index = 262144
+                        logger.info(
+                            "Created vision_config for GGUF: "
+                            "image_size=896, patch_size=14"
+                        )
+                    else:
+                        model_config.hf_config.vision_config.image_size = 896
+                        model_config.hf_config.vision_config.patch_size = 14
+                        logger.info(
+                            "Overrode vision_config for GGUF: "
+                            "image_size=896, patch_size=14"
+                        )
+
+                    # Ensure multimodal_config is set
+                    if model_config.multimodal_config is None:
+                        from vllm.config.multimodal import MultiModalConfig
+
+                        model_config.multimodal_config = MultiModalConfig()
+                        logger.debug("Initialized multimodal_config for GGUF model")
+                else:
+                    # Non-Gemma3: use standard path
+                    logger.debug("Multimodal GGUF detected for non-Gemma3 model")
+                    model_class, _ = get_model_architecture(model_config)
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"Failed to load Gemma3ForConditionalGeneration: {e}")
+                model_class, _ = get_model_architecture(model_config)
+        else:
+            # Standard path
+            model_class, _ = get_model_architecture(model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
