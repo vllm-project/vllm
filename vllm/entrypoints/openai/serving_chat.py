@@ -51,7 +51,11 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
@@ -1110,13 +1114,9 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         # check for error finish reason and abort streaming
                         # finish_reason='error' indicates a retryable error
-                        error_data = self._handle_streaming_error_finish_reason(
+                        self._handle_error_finish_reason(
                             output.finish_reason, request_id
                         )
-                        if error_data:
-                            yield f"data: {error_data}\n\n"
-                            yield "data: [DONE]\n\n"
-                            return
 
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
@@ -1284,6 +1284,9 @@ class OpenAIServingChat(OpenAIServing):
                         delta=False,
                     )
 
+        except GenerationError as e:
+            logger.exception("Error in chat completion stream generator.")
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in chat completion stream generator.")
@@ -1318,12 +1321,11 @@ class OpenAIServingChat(OpenAIServing):
 
         # Check for error finish reason and return 500 error
         # finish_reason='error' indicates a retryable request-level internal error
-        for output in final_res.outputs:
-            error_response = self._handle_error_finish_reason(
-                output.finish_reason, request_id
-            )
-            if error_response:
-                return error_response
+        try:
+            for output in final_res.outputs:
+                self._handle_error_finish_reason(output.finish_reason, request_id)
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
