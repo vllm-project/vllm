@@ -10,14 +10,10 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from packaging.version import Version
 from transformers import (
     AutoModel,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
-)
-from transformers import (
-    __version__ as TRANSFORMERS_VERSION,
 )
 
 from vllm.platforms import current_platform
@@ -41,8 +37,6 @@ from .vlm_utils.types import (
     VLMTestInfo,
     VLMTestType,
 )
-
-TRANSFORMERS_BASE_VERSION = Version(TRANSFORMERS_VERSION).base_version
 
 # This hack is needed for phi3v & paligemma models
 # ROCm Triton FA can run into shared memory issues with these models,
@@ -185,10 +179,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[
             pytest.mark.core_model,
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_BASE_VERSION) < Version("4.57.0"),
-                reason="Qwen3-VL only available after Transformers v4.57",
-            ),
         ],
     ),
     "ultravox": VLMTestInfo(
