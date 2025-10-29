@@ -3927,9 +3927,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         remove_lora=False,
                         activate_lora=activate_lora,
                     )
-                logger.info(
-                    "MAKING GRAPH FOR SHAPE %s %s", allow_microbatching, num_tokens
-                )
                 self._dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
