@@ -88,6 +88,9 @@ def get_moe_quant_method(
         # the layer that this quant config instance applies to.
         cloned_config._layer_prefix = prefix  # type: ignore[attr-defined]
 
+        if prefix:
+            override_config(cloned_config, prefix=prefix)
+
         return moe_method_cls(cloned_config, layer.moe_config)
     return None
 
@@ -490,9 +493,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
     def _initialize_quant_metadata(self) -> None:
         """Resolve the effective quantization metadata for this MoE layer."""
-        if self.layer_prefix:
-            override_config(self.quant_config, prefix=self.layer_prefix)
-
         bits = self.quant_config.quant_type.size_bits
         if bits not in self._supported_quant_types:
             raise ValueError(
