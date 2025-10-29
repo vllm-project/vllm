@@ -811,8 +811,8 @@ def reorder_batch_to_split_decodes_and_prefills(
     num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
     is_decode = num_scheduled_tokens_np <= decode_threshold
-    is_extend = (~is_decode) & (num_computed_tokens_np > num_scheduled_tokens_np)
-    is_prefill = (~is_decode) & (num_computed_tokens_np == num_scheduled_tokens_np)
+    is_extend = (~is_decode) & (num_computed_tokens_np > 0)
+    is_prefill = (~is_decode) & (num_computed_tokens_np == 0)
 
     # Desired order: decode → extend → prefill
     req_regions = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
@@ -832,11 +832,11 @@ def reorder_batch_to_split_decodes_and_prefills(
         return False
 
     # Extract indices that need swapping and sort by target region
-    swap_indices = np.where(needs_swap)[0]
+    orig_indices = np.where(needs_swap)[0]
     sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
-    dest_indices = swap_indices[sorted_order]
+    src_indices = orig_indices[sorted_order]
 
-    src_dest_map = {int(src): int(dst) for src, dst in zip(swap_indices, dest_indices)}
+    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
 
     for src in src_dest_map:
         dst = src_dest_map[src]
