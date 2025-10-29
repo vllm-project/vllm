@@ -100,6 +100,9 @@ def get_parametrized_options(
         # num_frames is video only
         if test_type == VLMTestType.VIDEO:
             iter_kwargs["num_video_frames"] = ensure_wrapped(test_info.num_video_frames)
+            iter_kwargs["needs_video_metadata"] = ensure_wrapped(
+                test_info.needs_video_metadata
+            )
 
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type not in (VLMTestType.CUSTOM_INPUTS, VLMTestType.AUDIO):
