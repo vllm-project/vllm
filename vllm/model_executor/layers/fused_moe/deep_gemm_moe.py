@@ -271,10 +271,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 expert_tokens_meta=expert_tokens_meta,
             )
         else:
-            M_sum = round_up(a1q.shape[0], deep_gemm_block_shape()[0])
+            M_sum = round_up(a1q.shape[0], get_mk_alignment_for_contiguous_layout()[0])
 
         print(
-            f"STUFF {topk_ids.shape} {local_num_experts, deep_gemm_block_shape(), expert_tokens_meta} {M_sum}"
+            f"STUFF {topk_ids.shape} {local_num_experts, expert_tokens_meta} {M_sum}"
         )
 
         a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M_sum, K))
