@@ -4,23 +4,15 @@
 
 import json
 import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
-import torch
 import yaml
 from transformers import AutoTokenizer
 
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
 
-from vllm.utils import (
-    FlexibleArgumentParser,
-    bind_kv_cache,
-)
-from ..utils import create_new_process_for_each_test, flat_product
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from ..utils import flat_product
 
 
 # Tests for FlexibleArgumentParser
@@ -254,87 +246,6 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
     assert "-O.mode" in caplog_vllm.text
-
-
-def test_bind_kv_cache():
-    from vllm.attention import Attention
-
-    ctx = {
-        "layers.0.self_attn": Attention(32, 128, 0.1),
-        "layers.1.self_attn": Attention(32, 128, 0.1),
-        "layers.2.self_attn": Attention(32, 128, 0.1),
-        "layers.3.self_attn": Attention(32, 128, 0.1),
-    }
-    kv_cache = [
-        torch.zeros((1,)),
-        torch.zeros((1,)),
-        torch.zeros((1,)),
-        torch.zeros((1,)),
-    ]
-    bind_kv_cache(ctx, [kv_cache])
-    assert ctx["layers.0.self_attn"].kv_cache[0] is kv_cache[0]
-    assert ctx["layers.1.self_attn"].kv_cache[0] is kv_cache[1]
-    assert ctx["layers.2.self_attn"].kv_cache[0] is kv_cache[2]
-    assert ctx["layers.3.self_attn"].kv_cache[0] is kv_cache[3]
-
-
-def test_bind_kv_cache_kv_sharing():
-    from vllm.attention import Attention
-
-    ctx = {
-        "layers.0.self_attn": Attention(32, 128, 0.1),
-        "layers.1.self_attn": Attention(32, 128, 0.1),
-        "layers.2.self_attn": Attention(32, 128, 0.1),
-        "layers.3.self_attn": Attention(32, 128, 0.1),
-    }
-    kv_cache = [
-        torch.zeros((1,)),
-        torch.zeros((1,)),
-        torch.zeros((1,)),
-        torch.zeros((1,)),
-    ]
-    shared_kv_cache_layers = {
-        "layers.2.self_attn": "layers.1.self_attn",
-        "layers.3.self_attn": "layers.0.self_attn",
-    }
-    bind_kv_cache(ctx, [kv_cache], shared_kv_cache_layers)
-    assert ctx["layers.0.self_attn"].kv_cache[0] is kv_cache[0]
-    assert ctx["layers.1.self_attn"].kv_cache[0] is kv_cache[1]
-    assert ctx["layers.2.self_attn"].kv_cache[0] is kv_cache[1]
-    assert ctx["layers.3.self_attn"].kv_cache[0] is kv_cache[0]
-
-
-def test_bind_kv_cache_non_attention():
-    from vllm.attention import Attention
-
-    # example from Jamba PP=2
-    ctx = {
-        "model.layers.20.attn": Attention(32, 128, 0.1),
-        "model.layers.28.attn": Attention(32, 128, 0.1),
-    }
-    kv_cache = [
-        torch.zeros((1,)),
-        torch.zeros((1,)),
-    ]
-    bind_kv_cache(ctx, [kv_cache])
-    assert ctx["model.layers.20.attn"].kv_cache[0] is kv_cache[0]
-    assert ctx["model.layers.28.attn"].kv_cache[0] is kv_cache[1]
-
-
-def test_bind_kv_cache_pp():
-    with patch("vllm.utils.torch_utils.cuda_device_count_stateless", lambda: 2):
-        # this test runs with 1 GPU, but we simulate 2 GPUs
-        cfg = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=2))
-    with set_current_vllm_config(cfg):
-        from vllm.attention import Attention
-
-        ctx = {
-            "layers.0.self_attn": Attention(32, 128, 0.1),
-        }
-        kv_cache = [[torch.zeros((1,))], [torch.zeros((1,))]]
-        bind_kv_cache(ctx, kv_cache)
-        assert ctx["layers.0.self_attn"].kv_cache[0] is kv_cache[0][0]
-        assert ctx["layers.0.self_attn"].kv_cache[1] is kv_cache[1][0]
 
 
 def test_model_specification(
