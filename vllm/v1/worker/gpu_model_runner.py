@@ -4127,8 +4127,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
+        draft_lengths = (
+            self.speculative_config.draft_length_options
+            if self.speculative_config
+            else None
+        )
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
-            self.compilation_config.cudagraph_mode, self.uniform_decode_query_len
+            self.compilation_config.cudagraph_mode,
+            self.uniform_decode_query_len,
+            draft_lengths,
         )
 
     def calculate_reorder_batch_threshold(self) -> None:
