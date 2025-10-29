@@ -94,6 +94,7 @@ class BatchedMMTensors:
         return BatchedMMTensors(A, B, C, num_expert_tokens)
 
 
+# float8_e4m3fn not supported on cuda arch < 89s, skipped inside the function
 @pytest.mark.parametrize("num_experts", [8, 32])
 @pytest.mark.parametrize("max_tokens_per_expert", [32, 224, 512])
 @pytest.mark.parametrize("K", [128, 1024])
@@ -114,7 +115,6 @@ def test_batched_mm(
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
-    # float8_e4m3fn not supported on cuda arch < 89s
     if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
         89
     ):
@@ -227,6 +227,7 @@ def test_batched_mm(
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
+# float8_e4m3fn not supported on cuda arch < 89s, skipped inside the function
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -249,7 +250,6 @@ def test_fused_moe_batched_experts(
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
-    # float8_e4m3fn not supported on cuda arch < 89s
     if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
         89
     ):
