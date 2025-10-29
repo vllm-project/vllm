@@ -2800,7 +2800,7 @@ class GPUModelRunner(
             # decoder.
             allow_dp_padding = (
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                or envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid"
+                or self.parallel_config.all2all_backend == "deepep_hybrid"
             )
 
             ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(

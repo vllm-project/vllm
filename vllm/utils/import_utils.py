@@ -429,6 +429,7 @@ def has_hybrid_deep_ep() -> bool:
     mod = importlib.util.find_spec("deep_ep")
     return mod is not None and hasattr(mod, "HybridEpBuffer") is not None
 
+
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
     return _has_module("deep_gemm")
